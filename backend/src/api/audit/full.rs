@@ -367,6 +367,55 @@ pub async fn full_audit(
         });
         yield Event::default().event("start").data(start.to_string());
 
+        // 0.8.7 STEP 0 — anti-hallu canonical section maintenance.
+        // Runs once at the start of every audit BEFORE the numbered
+        // steps. Deterministic Rust function (no LLM call, no token
+        // cost). Writes/refreshes the `<!-- kronn:section name=
+        // "anti-hallu" -->` block at the top of `docs/AGENTS.md`. The
+        // doctrine then lives in the file every subsequent step + every
+        // future agent reading the project sees. Idempotent — silently
+        // no-op when the file already carries the section at today's
+        // date. Cross-cuts resume : even if `resume_from > 0`, we still
+        // run STEP 0 because it's cheap and may correct a section that
+        // drifted since the interrupted run.
+        match super::anti_hallu_step::apply(&project_path) {
+            Ok(super::anti_hallu_step::AntiHalluApplyResult::Inserted) => {
+                let ev = serde_json::json!({
+                    "step": "anti-hallu",
+                    "result": "inserted",
+                    "file": "docs/AGENTS.md",
+                });
+                yield Event::default().event("anti_hallu_step").data(ev.to_string());
+            }
+            Ok(super::anti_hallu_step::AntiHalluApplyResult::Refreshed) => {
+                let ev = serde_json::json!({
+                    "step": "anti-hallu",
+                    "result": "refreshed",
+                    "file": "docs/AGENTS.md",
+                });
+                yield Event::default().event("anti_hallu_step").data(ev.to_string());
+            }
+            Ok(super::anti_hallu_step::AntiHalluApplyResult::NoOp)
+            | Ok(super::anti_hallu_step::AntiHalluApplyResult::FileMissing) => {
+                // FileMissing happens on a fresh-bootstrap audit where the
+                // template hasn't been copied yet at this call site —
+                // unusual but not fatal. Step 1 will create AGENTS.md
+                // from the template (which already contains the section).
+            }
+            Err(e) => {
+                // STEP 0 failures are non-fatal — log a warning event and
+                // let the audit continue. The subsequent steps still run,
+                // they just don't get a fresh section.
+                tracing::warn!("STEP 0 anti-hallu apply failed: {e}");
+                let ev = serde_json::json!({
+                    "step": "anti-hallu",
+                    "result": "error",
+                    "error": e.to_string(),
+                });
+                yield Event::default().event("anti_hallu_step").data(ev.to_string());
+            }
+        }
+
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
@@ -882,6 +931,7 @@ pub async fn full_audit(
         let now = Utc::now();
         let discussion_id = Uuid::new_v4().to_string();
         let initial_message = DiscussionMessage {
+            lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
             content: validation_prompt,
@@ -910,7 +960,7 @@ pub async fn full_audit(
             language: language.clone(),
             participants: vec![agent_type.clone()],
             messages: vec![initial_message.clone()],
-            message_count: 1,
+            message_count: 1, non_system_message_count: 1,
             skill_ids: skill_ids_for_disc.clone(),
             profile_ids: vec![
                 "architect".into(),
@@ -1887,6 +1937,195 @@ mod cluster_tests {
         let recs = compute_cluster_recommendations(dir.path());
         assert!(recs.is_empty(),
             "only 1 real docker TD after filter, below threshold");
+    }
+
+    // ── Extra coverage on category-line + slug classification ──────────
+
+    #[test]
+    fn classify_explicit_category_database() {
+        let body = "# X\n- **Category**: database\n- **Severity**: High\n";
+        assert_eq!(classify_td_cluster("TD-X.md", body), Some("Database"));
+    }
+
+    #[test]
+    fn classify_explicit_category_api() {
+        let body = "# X\n- **Category**: api\n";
+        assert_eq!(classify_td_cluster("TD-X.md", body), Some("ApiDesign"));
+    }
+
+    #[test]
+    fn classify_explicit_category_performance() {
+        let body = "- **Category**: performance\n";
+        assert_eq!(classify_td_cluster("TD-X.md", body), Some("Performance"));
+    }
+
+    #[test]
+    fn classify_explicit_category_accessibility() {
+        let body = "- **Category**: accessibility\n";
+        assert_eq!(classify_td_cluster("TD-X.md", body), Some("Accessibility"));
+    }
+
+    #[test]
+    fn classify_explicit_category_unknown_yields_none() {
+        // Explicit category that's not in the canonical set → None.
+        let body = "- **Category**: refactoring\n";
+        assert_eq!(classify_td_cluster("TD-X.md", body), None);
+    }
+
+    #[test]
+    fn classify_slug_database_keywords() {
+        for slug in &[
+            "TD-20260528-migration-missing-rollback.md",
+            "TD-20260528-orm-n1.md",
+            "TD-20260528-schema-drift.md",
+            "TD-20260528-missing-fk-cascade.md",
+            "TD-20260528-foreign-key-stale.md",
+        ] {
+            assert_eq!(classify_td_cluster(slug, ""), Some("Database"),
+                "slug {slug} should be Database");
+        }
+    }
+
+    #[test]
+    fn classify_slug_api_design_keywords() {
+        for slug in &[
+            "TD-X-openapi-spec-missing.md",
+            "TD-X-swagger-out-of-sync.md",
+            "TD-X-endpoint-shape-mismatch.md",
+            "TD-X-rest-handler-untyped.md",
+            "TD-X-pagination-leak.md",
+        ] {
+            assert_eq!(classify_td_cluster(slug, ""), Some("ApiDesign"),
+                "slug {slug} should be ApiDesign");
+        }
+    }
+
+    #[test]
+    fn classify_slug_security_keywords_comprehensive() {
+        for slug in &[
+            "TD-X-secret-leak.md",
+            "TD-X-credential-in-yml.md",
+            "TD-X-csrf-bypass.md",
+            "TD-X-xss-in-template.md",
+            "TD-X-sql-injection-orm.md",
+            "TD-X-cors-wildcard.md",
+            "TD-X-csp-missing.md",
+            "TD-X-jwt-no-expiry.md",
+            "TD-X-rce-eval.md",
+            "TD-X-host-key-hardcoded.md",
+            "TD-X-strict-host-disabled.md",
+            "TD-X-apikey-in-template.md",
+            "TD-X-api-key-frontend.md",
+            "TD-X-hardcoded-key-prod.md",
+            "TD-X-leaked-key-git.md",
+        ] {
+            assert_eq!(classify_td_cluster(slug, ""), Some("Security"),
+                "slug {slug} should be Security");
+        }
+    }
+
+    #[test]
+    fn classify_slug_perf_keywords_comprehensive() {
+        for slug in &[
+            "TD-X-perf-hotspot.md",
+            "TD-X-n-plus-one-orders.md",
+            "TD-X-cache-stampede.md",
+            "TD-X-bundle-size-blow.md",
+            "TD-X-slow-query-orders.md",
+            "TD-X-memory-leak-loop.md",
+        ] {
+            assert_eq!(classify_td_cluster(slug, ""), Some("Performance"),
+                "slug {slug} should be Performance");
+        }
+    }
+
+    #[test]
+    fn classify_slug_a11y_keywords_comprehensive() {
+        for slug in &[
+            "TD-X-a11y-form.md",
+            "TD-X-aria-missing-role.md",
+            "TD-X-contrast-warn-too-low.md",
+            "TD-X-keyboard-trap.md",
+            "TD-X-missing-alt.md",
+            "TD-X-wcag-violation.md",
+        ] {
+            assert_eq!(classify_td_cluster(slug, ""), Some("Accessibility"),
+                "slug {slug} should be Accessibility");
+        }
+    }
+
+    #[test]
+    fn classify_explicit_category_overrides_slug() {
+        // Slug says docker but explicit Category says security → security wins.
+        let body = "- **Category**: security\n";
+        assert_eq!(classify_td_cluster("TD-20260528-docker-image-no-scan.md", body), Some("Security"));
+    }
+
+    #[test]
+    fn classify_unknown_slug_returns_none() {
+        // No keyword match → None (not a cluster candidate).
+        assert!(classify_td_cluster("TD-X-random-naming-issue.md", "").is_none());
+        assert!(classify_td_cluster("TD-X-misc.md", "").is_none());
+    }
+
+    #[test]
+    fn cluster_recommendations_skip_underscore_files() {
+        let dir = tempdir().unwrap();
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("_internal-{i}.md")), "").unwrap();
+        }
+        let recs = compute_cluster_recommendations(dir.path());
+        assert!(recs.is_empty(), "underscore-prefixed files must all be skipped");
+    }
+
+    #[test]
+    fn cluster_recommendations_skip_template_aliases() {
+        let dir = tempdir().unwrap();
+        for name in &["README.md", "TEMPLATE.md", "_template.md"] {
+            fs::write(dir.path().join(name), "TD-like body").unwrap();
+        }
+        let recs = compute_cluster_recommendations(dir.path());
+        assert!(recs.is_empty(), "scaffolding aliases must be excluded");
+    }
+
+    #[test]
+    fn cluster_recommendations_skip_non_md_files() {
+        let dir = tempdir().unwrap();
+        // 5 docker findings but in .txt — must not count.
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("TD-docker-{i}.txt")), "").unwrap();
+        }
+        let recs = compute_cluster_recommendations(dir.path());
+        assert!(recs.is_empty(), "non-.md files should be ignored");
+    }
+
+    #[test]
+    fn cluster_recommendations_secondary_sort_is_alphabetical_on_tie() {
+        // 3 docker + 3 security → both pass threshold, sorted by name when
+        // cluster_size matches.
+        let dir = tempdir().unwrap();
+        for i in 0..3 {
+            fs::write(dir.path().join(format!("TD-X-docker-{i}.md")), "").unwrap();
+            fs::write(dir.path().join(format!("TD-Y-secret-{i}.md")), "").unwrap();
+        }
+        let recs = compute_cluster_recommendations(dir.path());
+        assert_eq!(recs.len(), 2);
+        // Both have cluster_size=3 → alphabetical: Docker < Security.
+        assert_eq!(recs[0].kind, "Docker");
+        assert_eq!(recs[1].kind, "Security");
+    }
+
+    #[test]
+    fn cluster_recommendations_empty_dir_returns_empty() {
+        let dir = tempdir().unwrap();
+        let recs = compute_cluster_recommendations(dir.path());
+        assert!(recs.is_empty());
+    }
+
+    #[test]
+    fn cluster_recommendations_missing_dir_returns_empty() {
+        let recs = compute_cluster_recommendations(std::path::Path::new("/does/not/exist"));
+        assert!(recs.is_empty());
     }
 }
 

@@ -860,6 +860,23 @@ pub(crate) async fn make_agent_stream(
                     }
                 });
 
+                // 0.8.7 anti-hallucination P2 — lint the finalized reply:
+                // niveau 0 heuristic + niveau 1 mechanical [src:] verification
+                // against the project's host filesystem (the tree the agent
+                // saw). Skipped when the mode is off ; non-blocking either way.
+                // Computed BEFORE `full_response` is moved into the message.
+                let lint_report = if crate::core::anti_halluc::current_mode().is_active() {
+                    let root = if project_path.is_empty() {
+                        None
+                    } else {
+                        Some(crate::core::scanner::resolve_host_path(&project_path))
+                    };
+                    let report = crate::core::anti_halluc::analyze(&full_response, root.as_deref());
+                    if report.is_empty() { None } else { Some(report) }
+                } else {
+                    None
+                };
+
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -879,6 +896,7 @@ pub(crate) async fn make_agent_stream(
                     // QP-metrics aggregator to compute avg first-reply
                     // duration per QP version.
                     duration_ms: Some(run_started_at.elapsed().as_millis() as u64),
+                    lint_report,
                 };
 
                 let did = disc_id.clone();
@@ -909,6 +927,7 @@ pub(crate) async fn make_agent_stream(
                     let resolutions = super::slash_markers::resolve_markers(&state, &disc_id, &markers).await;
                     for body in resolutions {
                         let sys_msg = DiscussionMessage {
+                            lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::System,
                             content: body,
@@ -948,6 +967,7 @@ pub(crate) async fn make_agent_stream(
                 if !kronn_tool_calls.is_empty() {
                     for body in kronn_tool_calls.iter() {
                         let sys_msg = DiscussionMessage {
+                            lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::System,
                             content: body.clone(),
@@ -984,6 +1004,7 @@ pub(crate) async fn make_agent_stream(
                 if !native_tool_calls.is_empty() {
                     for body in native_tool_calls.iter() {
                         let sys_msg = DiscussionMessage {
+                            lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::System,
                             content: body.clone(),
@@ -1158,6 +1179,7 @@ pub(crate) async fn make_agent_stream(
                 tracing::error!("Agent start failed: {}", e);
 
                 let err_msg = DiscussionMessage {
+                    lint_report: None,
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::System,
                     content: format!("Erreur: {}", e),

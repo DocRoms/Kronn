@@ -822,3 +822,7 @@ Before emitting `KRONN:WORKFLOW_READY`:
 - Collection Agent steps have `on_result` with NO_RESULTS → Stop
 - The JSON is valid and matches the schema above
 - The user has explicitly confirmed the design **AND** the cost split (you've shown them where each step lands on the cheap/expensive scale)
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: MCP tool / `api_plugin_slug` / `skill_ids` / step-type claims → call `mcp_list` and the relevant list endpoints FIRST ; never invent an id, the runtime fails opaquely.

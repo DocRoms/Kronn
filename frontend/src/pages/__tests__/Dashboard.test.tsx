@@ -16,6 +16,9 @@ vi.mock('../../lib/api', () => ({
     auditStatus: vi.fn().mockResolvedValue(null),
     auditResumable: vi.fn().mockResolvedValue(null),
     auditStatusAll: vi.fn().mockResolvedValue([]),
+    // 0.8.7 — ProjectCard polls antiHalluStatus at mount.
+    antiHalluStatus: vi.fn().mockResolvedValue({ present: false, file_exists: false }),
+    injectAntiHallu: vi.fn().mockResolvedValue({ status: 'ok', result: 'noop' }),
   },
   mcps: {
     registry: vi.fn().mockResolvedValue([]),
@@ -90,7 +93,7 @@ const makeDiscussion = (id: string, msgCount: number): Discussion => ({
   language: 'fr',
   participants: ['ClaudeCode'],
   messages: [],
-  message_count: msgCount,
+  message_count: msgCount, non_system_message_count: msgCount,
   archived: false, pinned: false,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',

@@ -461,6 +461,7 @@ fn handle_incoming_chat_message(
     let ts = chrono::DateTime::from_timestamp_millis(timestamp)
         .unwrap_or_else(Utc::now);
     let msg = crate::models::DiscussionMessage {
+        lint_report: None,
         id: message_id.to_string(),
         role: crate::models::MessageRole::User,
         content: content.to_string(),
@@ -502,7 +503,7 @@ fn handle_discussion_invite(
         language: "fr".into(),
         participants: vec![],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],

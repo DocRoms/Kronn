@@ -32,3 +32,7 @@ builtin: true
 
 ✓ `GET /v1/users?cursor=abc` → `{ "data": [...], "next_cursor": "def" }`
 ✗ `GET /users` → raw array, no pagination, no version, no envelope.
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: endpoint / status-code / payload-shape claims → cite the routes file, OpenAPI schema, or the RFC URL ; never invent a header semantic.

@@ -161,6 +161,30 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     </button>
   );
 
+  // 0.8.7 anti-hallucination — pill state + derived severity.
+  const [showLint, setShowLint] = useState(false);
+  const lint = msg.lint_report ?? null;
+  // Three-state pill, in priority order :
+  //   - 'fabricated' (red)   — at least one [src:] did not verify
+  //   - 'unsourced'  (amber) — niveau-0 heuristic flagged a claim
+  //   - 'verified'   (green) — every cited source verified mechanically
+  //                            (or is honestly tagged unchecked: url/user/
+  //                            inferred/etc.) AND no unsourced claim. Only
+  //                            shown when at least ONE source has status
+  //                            'verified' so a reply with only `unchecked`
+  //                            citations doesn't earn a green chip for free.
+  //   - null                  — nothing to surface (no sources, no flags).
+  const verifiedCount = lint?.sources?.filter(s => s.status === 'verified').length ?? 0;
+  const lintSeverity: 'fabricated' | 'unsourced' | 'verified' | null = lint
+    ? (lint.fabricated_count > 0
+        ? 'fabricated'
+        : lint.unsourced_count > 0
+          ? 'unsourced'
+          : verifiedCount > 0
+            ? 'verified'
+            : null)
+    : null;
+
   // Duration calculation (O(1) — prevUserTs is pre-computed)
   const durationLabel = useMemo(() => {
     if (msg.role !== 'Agent' || !prevUserTs) return null;
@@ -385,6 +409,25 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {msg.tokens_used > 0 && <span className="disc-msg-token-count">{msg.tokens_used.toLocaleString()} tok</span>}
             {msg.auth_mode && <span className="disc-msg-auth-mode" data-mode={msg.auth_mode === 'override' ? 'override' : 'local'}>{msg.auth_mode === 'override' ? 'API key' : 'auth locale'}</span>}
             {durationLabel && <span className="disc-msg-duration"><Clock size={8} /> {durationLabel}</span>}
+            {msg.role === 'Agent' && lintSeverity && lint && (
+              <button
+                type="button"
+                className="disc-msg-lint-pill"
+                data-severity={lintSeverity}
+                onClick={() => setShowLint(v => !v)}
+                aria-expanded={showLint}
+                aria-controls={`lint-detail-${msg.id}`}
+                title={t(lintSeverity === 'verified' ? 'disc.lintPillHintVerified' : 'disc.lintPillHint')}
+                data-testid="lint-pill"
+              >
+                {lintSeverity === 'verified' ? <Check size={8} /> : <AlertTriangle size={8} />}{' '}
+                {lintSeverity === 'fabricated'
+                  ? <>{lint.fabricated_count} {t('disc.lintFabricated')}</>
+                  : lintSeverity === 'unsourced'
+                    ? <>{lint.unsourced_count} {t('disc.lintUnsourced')}</>
+                    : <>{verifiedCount} {t('disc.lintVerified')}</>}
+              </button>
+            )}
           </div>
           <div className="disc-msg-footer-right">
             {msg.role === 'Agent' && copyBtn(9, true)}
@@ -414,6 +457,47 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             )}
           </div>
         </div>
+        {showLint && lint && (
+          <div className="disc-msg-lint-detail" id={`lint-detail-${msg.id}`} data-testid="lint-detail">
+            {lint.sources.some(s => s.status !== 'verified' && s.status !== 'unchecked') && (
+              <div className="disc-lint-group">
+                <div className="disc-lint-group-title">{t('disc.lintSourcesTitle')}</div>
+                {lint.sources
+                  .filter(s => s.status !== 'verified' && s.status !== 'unchecked')
+                  .map((s, i) => (
+                    <div key={`src-${i}`} className="disc-lint-item" data-status={s.status}>
+                      <code>{s.raw}</code> — {s.detail}
+                    </div>
+                  ))}
+              </div>
+            )}
+            {/* When severity is 'verified', open the panel onto the positive
+                list (otherwise clicking the green pill would show an empty
+                detail — bad UX). Lists every source that resolved on disk
+                so the user can audit *what* was actually verified. */}
+            {lintSeverity === 'verified' && verifiedCount > 0 && (
+              <div className="disc-lint-group" data-testid="lint-verified-group">
+                <div className="disc-lint-group-title">{t('disc.lintVerifiedTitle')}</div>
+                {lint.sources
+                  .filter(s => s.status === 'verified')
+                  .map((s, i) => (
+                    <div key={`vsrc-${i}`} className="disc-lint-item" data-status="verified">
+                      <code>{s.raw}</code> — {s.detail}
+                    </div>
+                  ))}
+              </div>
+            )}
+            {lint.flagged_spans.length > 0 && (
+              <div className="disc-lint-group">
+                <div className="disc-lint-group-title">{t('disc.lintUnsourcedTitle')}</div>
+                {lint.flagged_spans.map((sp, i) => (
+                  <div key={`span-${i}`} className="disc-lint-item">“{sp.text}”</div>
+                ))}
+              </div>
+            )}
+            <div className="disc-lint-caveat">{t('disc.lintCaveat')}</div>
+          </div>
+        )}
       </div>
     </div>
   );

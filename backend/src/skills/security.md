@@ -33,3 +33,7 @@ builtin: true
 
 ✓ `db.query("SELECT * FROM users WHERE id = $1", [id])`
 ✗ `db.query("SELECT * FROM users WHERE id = " + id)`
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: version / CVE claims → cite the lockfile line + the upstream advisory URL ; never paraphrase a CVE from memory.

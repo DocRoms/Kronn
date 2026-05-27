@@ -58,7 +58,7 @@ const mkDisc = (id: string, title: string): Discussion => ({
   language: 'fr',
   participants: ['ClaudeCode'],
   messages: [],
-  message_count: 0,
+  message_count: 0, non_system_message_count: 0,
   archived: false,
   pinned: false,
   workspace_mode: 'Direct',

@@ -17,6 +17,11 @@ pub async fn discover_repos(
 ) -> Json<ApiResponse<DiscoverReposResponse>> {
     let mut all_repos: Vec<RemoteRepo> = vec![];
     let mut used_sources: Vec<String> = vec![];
+    // 0.8.7 — accumulate per-source failures so the UI can surface them
+    // instead of leaving the user to wonder why a configured provider
+    // returned zero repos. Pre-fix this was only `tracing::warn!` and the
+    // user had no signal at all (the GitLab silent-fail case).
+    let mut errors: Vec<crate::models::DiscoverSourceError> = vec![];
 
     // Get existing projects to check "already_cloned"
     let existing = state.db.with_conn(crate::db::projects::list_projects).await.unwrap_or_default();
@@ -78,7 +83,14 @@ pub async fn discover_repos(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("GitHub repo discovery failed for {}: {}", source.label, e);
+                        let msg = e.to_string();
+                        tracing::warn!("GitHub repo discovery failed for {}: {}", source.label, msg);
+                        errors.push(crate::models::DiscoverSourceError {
+                            source_id: source.id.clone(),
+                            source_label: source.label.clone(),
+                            provider: "github".into(),
+                            message: msg,
+                        });
                     }
                 }
             }
@@ -102,7 +114,14 @@ pub async fn discover_repos(
                         }
                     }
                     Err(e) => {
-                        tracing::warn!("GitLab repo discovery failed for {}: {}", source.label, e);
+                        let msg = e.to_string();
+                        tracing::warn!("GitLab repo discovery failed for {}: {}", source.label, msg);
+                        errors.push(crate::models::DiscoverSourceError {
+                            source_id: source.id.clone(),
+                            source_label: source.label.clone(),
+                            provider: "gitlab".into(),
+                            message: msg,
+                        });
                     }
                 }
             }
@@ -116,7 +135,7 @@ pub async fn discover_repos(
             .then(b.updated_at.cmp(&a.updated_at))
     });
 
-    Json(ApiResponse::ok(DiscoverReposResponse { repos: all_repos, sources: used_sources, available_sources }))
+    Json(ApiResponse::ok(DiscoverReposResponse { repos: all_repos, sources: used_sources, available_sources, errors }))
 }
 
 /// Find all available token sources from MCP configs and env vars.
@@ -422,5 +441,161 @@ fn parse_gitlab_repo(r: &serde_json::Value) -> RemoteRepo {
         updated_at: r["last_activity_at"].as_str().unwrap_or("").to_string(),
         source: "gitlab".into(),
         already_cloned: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_repo_url_strips_https_github_prefix() {
+        assert_eq!(
+            normalize_repo_url("https://github.com/Org/Repo"),
+            "github:org/repo"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_url_strips_trailing_slash_and_dot_git() {
+        assert_eq!(
+            normalize_repo_url("https://github.com/Org/Repo.git/"),
+            "github:org/repo"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_url_strips_ssh_github_prefix() {
+        assert_eq!(
+            normalize_repo_url("git@github.com:Org/Repo.git"),
+            "github:org/repo"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_url_handles_gitlab_https() {
+        assert_eq!(
+            normalize_repo_url("https://gitlab.com/Group/Project"),
+            "gitlab:group/project"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_url_handles_gitlab_ssh() {
+        assert_eq!(
+            normalize_repo_url("git@gitlab.com:Group/Project.git"),
+            "gitlab:group/project"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_url_passes_through_unknown_hosts() {
+        // Self-hosted bitbucket etc. — host stays as-is.
+        let out = normalize_repo_url("https://bitbucket.example.com/Foo/Bar.git");
+        assert!(out.contains("bitbucket.example.com"));
+        assert!(!out.ends_with(".git"));
+    }
+
+    #[test]
+    fn parse_github_repo_extracts_all_fields() {
+        let v = serde_json::json!({
+            "name": "kronn",
+            "full_name": "docroms/kronn",
+            "clone_url": "https://github.com/docroms/kronn.git",
+            "ssh_url": "git@github.com:docroms/kronn.git",
+            "description": "An agent orchestration tool",
+            "language": "Rust",
+            "stargazers_count": 42,
+            "updated_at": "2026-05-28T10:00:00Z",
+        });
+        let parsed = parse_github_repo(&v);
+        assert_eq!(parsed.name, "kronn");
+        assert_eq!(parsed.full_name, "docroms/kronn");
+        assert_eq!(parsed.clone_url, "https://github.com/docroms/kronn.git");
+        assert_eq!(parsed.ssh_url, "git@github.com:docroms/kronn.git");
+        assert_eq!(parsed.description.as_deref(), Some("An agent orchestration tool"));
+        assert_eq!(parsed.language.as_deref(), Some("Rust"));
+        assert_eq!(parsed.stargazers_count, 42);
+        assert_eq!(parsed.updated_at, "2026-05-28T10:00:00Z");
+        assert_eq!(parsed.source, "github");
+        assert!(!parsed.already_cloned);
+    }
+
+    #[test]
+    fn parse_github_repo_tolerates_missing_optional_fields() {
+        // null description and missing language must not panic.
+        let v = serde_json::json!({
+            "name": "x",
+            "full_name": "u/x",
+            "clone_url": "",
+            "ssh_url": "",
+            "description": null,
+            "language": null,
+            "stargazers_count": 0,
+            "updated_at": "",
+        });
+        let parsed = parse_github_repo(&v);
+        assert_eq!(parsed.name, "x");
+        assert!(parsed.description.is_none());
+        assert!(parsed.language.is_none());
+        assert_eq!(parsed.stargazers_count, 0);
+    }
+
+    #[test]
+    fn parse_github_repo_handles_empty_object() {
+        let v = serde_json::json!({});
+        let parsed = parse_github_repo(&v);
+        assert_eq!(parsed.name, "");
+        assert_eq!(parsed.stargazers_count, 0);
+        assert!(parsed.description.is_none());
+    }
+
+    #[test]
+    fn parse_gitlab_repo_uses_path_with_namespace() {
+        let v = serde_json::json!({
+            "name": "infra",
+            "path_with_namespace": "group/sub/infra",
+            "http_url_to_repo": "https://gitlab.com/group/sub/infra.git",
+            "ssh_url_to_repo": "git@gitlab.com:group/sub/infra.git",
+            "description": "Terraform modules",
+            "star_count": 7,
+            "last_activity_at": "2026-05-27T12:00:00Z",
+        });
+        let parsed = parse_gitlab_repo(&v);
+        assert_eq!(parsed.name, "infra");
+        assert_eq!(parsed.full_name, "group/sub/infra");
+        assert_eq!(parsed.clone_url, "https://gitlab.com/group/sub/infra.git");
+        assert_eq!(parsed.ssh_url, "git@gitlab.com:group/sub/infra.git");
+        assert_eq!(parsed.description.as_deref(), Some("Terraform modules"));
+        // GitLab list endpoint never includes language.
+        assert!(parsed.language.is_none());
+        assert_eq!(parsed.stargazers_count, 7);
+        assert_eq!(parsed.source, "gitlab");
+    }
+
+    #[test]
+    fn parse_gitlab_repo_empty_description_filtered_to_none() {
+        // GitLab returns "" for missing description ; we want None, not Some("").
+        let v = serde_json::json!({
+            "name": "y",
+            "path_with_namespace": "g/y",
+            "http_url_to_repo": "",
+            "ssh_url_to_repo": "",
+            "description": "",
+            "star_count": 0,
+            "last_activity_at": "",
+        });
+        let parsed = parse_gitlab_repo(&v);
+        assert!(parsed.description.is_none(), "empty string must be filtered to None");
+    }
+
+    #[test]
+    fn parse_gitlab_repo_tolerates_missing_fields() {
+        let v = serde_json::json!({});
+        let parsed = parse_gitlab_repo(&v);
+        assert_eq!(parsed.name, "");
+        assert_eq!(parsed.full_name, "");
+        assert_eq!(parsed.source, "gitlab");
+        assert!(parsed.language.is_none());
     }
 }

@@ -89,6 +89,7 @@ pub async fn start_briefing(
     let agent_type = req.agent;
 
     let initial_message = DiscussionMessage {
+        lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
         content: briefing_prompt,
@@ -113,7 +114,7 @@ pub async fn start_briefing(
         language: language.clone(),
         participants: vec![agent_type],
         messages: vec![initial_message.clone()],
-        message_count: 1,
+        message_count: 1, non_system_message_count: 1,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],

@@ -1,394 +1,329 @@
-import { useState } from 'react';
-import { stats as statsApi } from '../../lib/api';
-import { useApi } from '../../hooks/useApi';
+// 0.8.7 — Agent usage & cost, presented as an RTK-style "eco mode" card.
+//
+// Data comes from `ccusage` (via GET /api/usage) — the REAL token + cache
+// breakdown of the detected CLIs (Claude / Codex / Gemini …), read from
+// their local logs. Replaces the old `estimate_cost`-based section, which
+// only counted tokens passing THROUGH Kronn and ignored prompt caching
+// (over-estimating ~6×). Global view (all sessions, CLI + Kronn); per-disc
+// attribution is a deliberate follow-up.
+
+import { useState, useEffect, useCallback } from 'react';
+import { BarChart3, ExternalLink, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, RefreshCw } from 'lucide-react';
+import { usage as usageApi } from '../../lib/api';
 import { useT } from '../../lib/I18nContext';
-import type { TokenUsageSummary, DailyUsage } from '../../types/generated';
-import {
-  TrendingUp, RefreshCw, ChevronRight, DollarSign, Hash,
-} from 'lucide-react';
+import type { UsageReport } from '../../types/generated';
 import '../../pages/SettingsPage.css';
 
-/* ── Formatters ── */
+const CCUSAGE_GITHUB_URL = 'https://github.com/ryoppippi/ccusage';
 
-function fmtCost(usd: number | null | undefined): string {
-  if (usd == null || usd === 0) return '$0.00';
+type Period = 'daily' | 'weekly' | 'monthly';
+
+/* ── Formatters ── */
+function fmtCost(usd: number): string {
+  if (usd === 0) return '$0.00';
   if (usd < 0.01) return '< $0.01';
   return `$${usd.toFixed(2)}`;
 }
-
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
   return String(n);
 }
 
-function fmtDate(iso: string): string {
-  const d = new Date(iso + 'T00:00:00');
-  return `${d.getDate()}/${d.getMonth() + 1}`;
+/* ── Period label ──
+ * ccusage stamps only the *start* of each bucket: a `YYYY-MM-DD` Monday for
+ * weekly, `YYYY-MM` for monthly. Daily is already a full date. We expand
+ * weekly into a `start → end` range and localise the month name. */
+function addDaysISO(iso: string, days: number): string {
+  const d = new Date(`${iso}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return iso;
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+export function formatPeriod(kind: string, period: string, locale: string): string {
+  if (kind === 'weekly') {
+    const end = addDaysISO(period, 6);
+    return end === period ? period : `${period} → ${end}`;
+  }
+  if (kind === 'monthly') {
+    const [y, m] = period.split('-').map(Number);
+    if (y && m) {
+      return new Date(Date.UTC(y, m - 1, 1)).toLocaleDateString(locale, {
+        month: 'short', year: 'numeric', timeZone: 'UTC',
+      });
+    }
+  }
+  return period;
 }
 
-/* ── Constants ── */
+/* Rows per page, tuned per bucket so a page is a meaningful span:
+ * ~a month of days, a quarter+ of weeks, a year of months. */
+const ROWS_PER_PAGE: Record<string, number> = { daily: 30, weekly: 15, monthly: 12 };
+export function rowsPerPage(kind: string): number {
+  return ROWS_PER_PAGE[kind] ?? 30;
+}
 
-const PROVIDER_COLORS: Record<string, string> = {
-  Anthropic: '#d4a574',
-  OpenAI: '#74b9a5',
-  Google: '#8fa9d4',
-  Mistral: '#d48f74',
-  Amazon: '#c4a3d4',
-  GitHub: '#238636',
+/* ── Model name → agent rollup ── */
+const AGENT_COLORS: Record<string, string> = {
+  claude: '#d4a574',
+  codex: '#74b9a5',
+  gemini: '#8fa9d4',
+  other: 'var(--kr-text-muted)',
+};
+const AGENT_LABEL: Record<string, string> = {
+  claude: 'Claude', codex: 'Codex', gemini: 'Gemini', other: 'Other',
 };
 
-const PROVIDER_FIELDS: { key: keyof DailyUsage; provider: string }[] = [
-  { key: 'anthropic', provider: 'Anthropic' },
-  { key: 'openai', provider: 'OpenAI' },
-  { key: 'google', provider: 'Google' },
-  { key: 'mistral', provider: 'Mistral' },
-  { key: 'amazon', provider: 'Amazon' },
-  { key: 'github', provider: 'GitHub' },
-];
+function agentForModel(model: string): string {
+  const m = model.toLowerCase();
+  if (m.includes('claude') || m.includes('opus') || m.includes('sonnet') || m.includes('haiku')) return 'claude';
+  if (m.includes('gpt') || m.includes('codex') || /^o[134]/.test(m)) return 'codex';
+  if (m.includes('gemini')) return 'gemini';
+  return 'other';
+}
 
-type ViewMode = 'tokens' | 'cost';
-type FilterMode = 'all' | 'discussions' | 'workflows';
+interface AgentTotal { agent: string; cost: number; tokens: number; }
+
+function rollupByAgent(report: UsageReport): AgentTotal[] {
+  const acc = new Map<string, AgentTotal>();
+  for (const row of report.rows) {
+    for (const mb of row.model_breakdowns) {
+      const a = agentForModel(mb.model_name);
+      const cur = acc.get(a) ?? { agent: a, cost: 0, tokens: 0 };
+      cur.cost += mb.cost;
+      cur.tokens += mb.total_tokens;
+      acc.set(a, cur);
+    }
+  }
+  return [...acc.values()].sort((x, y) => y.cost - x.cost);
+}
 
 interface UsageSectionProps {
+  // Kept for call-site compatibility; unused (ccusage is global, not per-disc).
   onNavigateDiscussion?: (discussionId: string) => void;
 }
 
-export function UsageSection({ onNavigateDiscussion }: UsageSectionProps) {
-  const { t } = useT();
-  const { data, loading, refetch } = useApi<TokenUsageSummary>(() => statsApi.tokenUsage(), []);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [viewMode, setViewMode] = useState<ViewMode>('cost');
-  const [filter, setFilter] = useState<FilterMode>('all');
+export function UsageSection(_props: UsageSectionProps) {
+  const { t, locale } = useT();
+  const [period, setPeriod] = useState<Period>('daily');
+  const [report, setReport] = useState<UsageReport | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [showDetails, setShowDetails] = useState(false);
+  const [page, setPage] = useState(0);
 
-  const toggleExpand = (key: string) => setExpanded(expanded === key ? null : key);
+  const refresh = useCallback(async (p: Period) => {
+    setLoading(true);
+    setError(null);
+    try {
+      setReport(await usageApi.get(p));
+    } catch (e) {
+      setError(String(e));
+      setReport(null);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { setPage(0); refresh(period); }, [period, refresh]);
+
+  const byAgent = report ? rollupByAgent(report) : [];
+  const totalAgentCost = byAgent.reduce((s, a) => s + a.cost, 0);
+  const periods: Period[] = ['daily', 'weekly', 'monthly'];
 
   return (
-    <div id="settings-usage" data-tour-id="usage-section" className="set-card">
-      <div className="set-section">
-        {/* ── Header with controls ── */}
-        <div className="flex-row gap-4 set-section-header-lg" data-tour-id="usage-header" style={{ flexWrap: 'wrap' }}>
-          <TrendingUp size={14} className="text-accent" />
-          <span className="font-semibold text-lg">{t('config.usage')}</span>
-
-          <div className="flex-row gap-3" style={{ marginLeft: 'auto' }}>
-            {/* View mode toggle: tokens / cost */}
-            <div className="set-usage-toggle-group">
+    <div className="set-compression set-compression-state-ok" data-testid="usage-section">
+      {/* ── Head : icon + title + period toggle (always visible) ── */}
+      <div className="set-compression-head">
+        <div className="set-compression-icon">
+          <BarChart3 size={16} />
+        </div>
+        <div className="flex-1">
+          <div className="flex-row gap-2" style={{ alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className="font-semibold text-base">{t('usage.title')}</span>
+            <div className="flex-row gap-3" style={{ marginLeft: 'auto', alignItems: 'center' }}>
+              <div className="set-usage-toggle-group" role="tablist" aria-label={t('usage.period')}>
+                {periods.map(p => (
+                  <button
+                    key={p}
+                    role="tab"
+                    aria-selected={period === p}
+                    className="set-usage-toggle-btn"
+                    data-active={period === p}
+                    onClick={() => setPeriod(p)}
+                    data-testid={`usage-period-${p}`}
+                  >
+                    {t(`usage.period.${p}`)}
+                  </button>
+                ))}
+              </div>
               <button
-                className="set-usage-toggle-btn"
-                data-active={viewMode === 'tokens'}
-                onClick={() => setViewMode('tokens')}
-                title="Tokens"
+                className="set-action-btn"
+                onClick={() => refresh(period)}
+                disabled={loading}
+                style={{ padding: '3px 8px' }}
+                aria-label={t('usage.refresh')}
+                data-testid="usage-refresh"
               >
-                <Hash size={11} />
-              </button>
-              <button
-                className="set-usage-toggle-btn"
-                data-active={viewMode === 'cost'}
-                onClick={() => setViewMode('cost')}
-                title="Cost"
-              >
-                <DollarSign size={11} />
+                <RefreshCw size={11} className={loading ? 'set-spin' : ''} />
               </button>
             </div>
+          </div>
+          <p className="set-compression-explainer">{t('usage.intro')}</p>
+        </div>
+      </div>
 
-            {/* Filter: all / discussions / workflows */}
-            <div className="set-usage-toggle-group">
-              {(['all', 'discussions', 'workflows'] as FilterMode[]).map(f => (
-                <button
-                  key={f}
-                  className="set-usage-toggle-btn"
-                  data-active={filter === f}
-                  onClick={() => setFilter(f)}
-                >
-                  {f === 'all' ? t('config.usageFilterAll') : f === 'discussions' ? t('config.usageFilterDisc') : t('config.usageFilterWf')}
-                </button>
-              ))}
-            </div>
-
+      {/* ── Status line : total + tokens + agent chips + details toggle ── */}
+      {error ? (
+        <div className="set-compression-warning" data-testid="usage-error">
+          {t('usage.unavailable')} — {error}
+        </div>
+      ) : report ? (
+        <>
+          <div className="set-compression-status">
+            <span className="set-compression-dot" aria-hidden="true" />
+            <span className="set-compression-status-text" data-testid="usage-total-cost">
+              {fmtCost(report.totals.total_cost)}
+            </span>
+            <span className="set-compression-savings">
+              · {fmtTokens(report.totals.total_tokens)} {t('usage.tokensTotal')}
+            </span>
+            {report.agents_detected.length > 0 && (
+              <span className="flex-row gap-2" style={{ marginLeft: 8, flexWrap: 'wrap' }}>
+                {report.agents_detected.map(a => (
+                  <span key={a} className="set-usage-legend" data-testid={`usage-agent-${a}`}>
+                    <span className="set-usage-dot" style={{ background: AGENT_COLORS[a] ?? AGENT_COLORS.other }} />
+                    <span className="text-sm">{AGENT_LABEL[a] ?? a}</span>
+                  </span>
+                ))}
+              </span>
+            )}
             <button
-              className="set-action-btn"
-              onClick={refetch}
-              disabled={loading}
-              style={{ padding: '3px 8px' }}
-              aria-label={t('config.refresh')}
+              type="button"
+              className="set-compression-details-toggle"
+              onClick={() => setShowDetails(v => !v)}
+              aria-expanded={showDetails}
+              data-testid="usage-details-toggle"
             >
-              <RefreshCw size={11} className={loading ? 'set-spin' : ''} />
+              {t('usage.detailsToggle')}
+              {showDetails ? <ChevronUp size={10} /> : <ChevronDown size={10} />}
             </button>
           </div>
-        </div>
 
-        {!data && !loading && (
-          <p className="text-muted text-sm">{t('config.usageEmpty')}</p>
-        )}
-
-        {data && (
-          <>
-            {/* ── Summary cards ── */}
-            <div className="set-usage-cards">
-              <SummaryCard
-                label={t('config.usageTotalTokens')}
-                value={fmtTokens(
-                  filter === 'workflows' ? data.workflow_tokens
-                    : filter === 'discussions' ? data.discussion_tokens
-                    : data.total_tokens
-                )}
-                sub={viewMode === 'cost' ? fmtCost(data.total_cost_usd) : undefined}
-                accent
-              />
-              {filter !== 'workflows' && (
-                <SummaryCard
-                  label={t('config.usageDiscussions')}
-                  value={viewMode === 'cost' ? fmtCost(
-                    data.by_provider.reduce((s, p) => s + (p.cost_usd ?? 0), 0) * (data.discussion_tokens / Math.max(data.total_tokens, 1))
-                  ) : fmtTokens(data.discussion_tokens)}
-                />
-              )}
-              {filter !== 'discussions' && (
-                <SummaryCard
-                  label={t('config.usageWorkflows')}
-                  value={viewMode === 'cost' ? fmtCost(
-                    data.by_provider.reduce((s, p) => s + (p.cost_usd ?? 0), 0) * (data.workflow_tokens / Math.max(data.total_tokens, 1))
-                  ) : fmtTokens(data.workflow_tokens)}
-                />
-              )}
-              {data.by_provider.length > 0 && data.by_provider
-                .filter(p => p.tokens_used > 0)
-                .sort((a, b) => b.tokens_used - a.tokens_used)
-                .slice(0, 3)
-                .map(p => (
-                  <SummaryCard
-                    key={p.provider}
-                    label={p.provider}
-                    value={viewMode === 'cost' ? fmtCost(p.cost_usd) : fmtTokens(p.tokens_used)}
-                    color={PROVIDER_COLORS[p.provider]}
-                  />
-                ))
-              }
-            </div>
-
-            {/* ── Daily history chart ── */}
-            {data.daily_history.length > 0 && (
-              <div className="mb-8">
-                <div className="set-usage-subtitle">{t('config.usageDaily')}</div>
-                <DailyChart
-                  days={data.daily_history}
-                  viewMode={viewMode}
-                />
-              </div>
-            )}
-
-            {/* ── Provider bar ── */}
-            {data.by_provider.length > 0 && (
-              <div className="mb-8">
-                <div className="set-usage-subtitle">{t('config.usageByProvider')}</div>
-                <div className="set-usage-bar-container">
-                  {data.by_provider
-                    .filter(p => p.tokens_used > 0)
-                    .sort((a, b) => b.tokens_used - a.tokens_used)
-                    .map(p => {
-                      const total = viewMode === 'cost'
-                        ? data.by_provider.reduce((s, x) => s + (x.cost_usd ?? 0), 0)
-                        : data.total_tokens;
-                      const val = viewMode === 'cost' ? (p.cost_usd ?? 0) : p.tokens_used;
-                      const pct = total > 0 ? Math.max(2, (val / total) * 100) : 0;
-                      return (
-                        <div
-                          key={p.provider}
-                          className="set-usage-bar-segment"
-                          style={{ width: `${pct}%`, background: PROVIDER_COLORS[p.provider] ?? 'var(--kr-text-muted)' }}
-                          title={`${p.provider}: ${fmtTokens(p.tokens_used)} — ${fmtCost(p.cost_usd)}`}
-                        />
-                      );
-                    })}
-                </div>
-                <div className="flex-wrap gap-6 mt-3">
-                  {data.by_provider
-                    .filter(p => p.tokens_used > 0)
-                    .sort((a, b) => b.tokens_used - a.tokens_used)
-                    .map(p => (
-                      <div key={p.provider} className="set-usage-legend">
-                        <span className="set-usage-dot" style={{ background: PROVIDER_COLORS[p.provider] ?? 'var(--kr-text-muted)' }} />
-                        <span className="text-sm text-primary">{p.provider}</span>
-                        <span className="text-sm text-muted">
-                          {viewMode === 'cost' ? fmtCost(p.cost_usd) : fmtTokens(p.tokens_used)}
-                        </span>
+          {showDetails && (
+            <div className="set-compression-details" style={{ display: 'block' }}>
+              {/* Per-agent breakdown bar + legend */}
+              {byAgent.length > 0 && totalAgentCost > 0 && (
+                <div className="mb-8">
+                  <div className="set-usage-subtitle">{t('usage.byAgent')}</div>
+                  <div className="set-usage-bar-container">
+                    {byAgent.filter(a => a.cost > 0).map(a => (
+                      <div
+                        key={a.agent}
+                        className="set-usage-bar-segment"
+                        style={{ width: `${Math.max(2, (a.cost / totalAgentCost) * 100)}%`, background: AGENT_COLORS[a.agent] ?? AGENT_COLORS.other }}
+                        title={`${AGENT_LABEL[a.agent] ?? a.agent}: ${fmtCost(a.cost)} — ${fmtTokens(a.tokens)}`}
+                      />
+                    ))}
+                  </div>
+                  <div className="flex-wrap gap-6 mt-3">
+                    {byAgent.filter(a => a.cost > 0).map(a => (
+                      <div key={a.agent} className="set-usage-legend">
+                        <span className="set-usage-dot" style={{ background: AGENT_COLORS[a.agent] ?? AGENT_COLORS.other }} />
+                        <span className="text-sm text-primary">{AGENT_LABEL[a.agent] ?? a.agent}</span>
+                        <span className="text-sm text-muted">{fmtCost(a.cost)}</span>
                       </div>
                     ))}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {/* ── By project ── */}
-            {data.by_project.length > 0 && (
-              <div className="mb-8">
-                <div className="set-usage-subtitle">{t('config.usageByProject')}</div>
-                {(() => {
-                  const maxVal = Math.max(...data.by_project.map(p => viewMode === 'cost' ? p.cost_usd : p.tokens_used));
-                  return data.by_project.slice(0, 8).map(p => {
-                    const val = viewMode === 'cost' ? p.cost_usd : p.tokens_used;
-                    const pct = maxVal > 0 ? (val / maxVal) * 100 : 0;
-                    return (
-                      <div key={p.project_id} className="set-usage-project-row">
-                        <div className="set-usage-project-label">
-                          <span className="text-sm text-primary">{p.project_name}</span>
-                          <span className="text-sm text-dim">
-                            {viewMode === 'cost' ? fmtCost(p.cost_usd) : fmtTokens(p.tokens_used)}
-                          </span>
-                        </div>
-                        <div className="set-usage-project-bar-bg">
-                          <div
-                            className="set-usage-project-bar-fill"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
+              {/* Recent rows (most-recent first, paginated) */}
+              {report.rows.length === 0 ? (
+                <p className="text-muted text-sm" data-testid="usage-empty">{t('usage.empty')}</p>
+              ) : (() => {
+                const ordered = [...report.rows].reverse();
+                const perPage = rowsPerPage(report.period_kind);
+                const pageCount = Math.max(1, Math.ceil(ordered.length / perPage));
+                const safePage = Math.min(page, pageCount - 1);
+                const pageRows = ordered.slice(safePage * perPage, safePage * perPage + perPage);
+                return (
+                  <>
+                    <table className="usage-table" data-testid="usage-table">
+                      <thead>
+                        <tr>
+                          <th style={{ textAlign: 'left' }}>{t('usage.col.period')}</th>
+                          <th style={{ textAlign: 'right' }}>{t('usage.col.input')}</th>
+                          <th style={{ textAlign: 'right' }}>{t('usage.col.output')}</th>
+                          <th style={{ textAlign: 'right' }}>{t('usage.col.cache')}</th>
+                          <th style={{ textAlign: 'right' }}>{t('usage.col.total')}</th>
+                          <th style={{ textAlign: 'right' }}>{t('usage.col.cost')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pageRows.map((r, i) => (
+                          <tr key={`${r.period}-${i}`}>
+                            <td>{formatPeriod(report.period_kind, r.period, locale)}</td>
+                            <td style={{ textAlign: 'right' }}>{fmtTokens(r.input_tokens)}</td>
+                            <td style={{ textAlign: 'right' }}>{fmtTokens(r.output_tokens)}</td>
+                            <td style={{ textAlign: 'right' }} title={t('usage.cacheTooltip')}>
+                              {fmtTokens(r.cache_creation_tokens + r.cache_read_tokens)}
+                            </td>
+                            <td style={{ textAlign: 'right' }}>{fmtTokens(r.total_tokens)}</td>
+                            <td style={{ textAlign: 'right', fontWeight: 600 }}>{fmtCost(r.total_cost)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    {pageCount > 1 && (
+                      <div className="usage-pager" data-testid="usage-pager">
+                        <button
+                          type="button"
+                          className="set-action-btn"
+                          onClick={() => setPage(p => Math.max(0, p - 1))}
+                          disabled={safePage === 0}
+                          aria-label={t('usage.prevPage')}
+                          data-testid="usage-prev-page"
+                        >
+                          <ChevronLeft size={12} />
+                        </button>
+                        <span className="usage-pager-label" data-testid="usage-page-indicator">
+                          {t('usage.pageOf', safePage + 1, pageCount)}
+                        </span>
+                        <button
+                          type="button"
+                          className="set-action-btn"
+                          onClick={() => setPage(p => Math.min(pageCount - 1, p + 1))}
+                          disabled={safePage >= pageCount - 1}
+                          aria-label={t('usage.nextPage')}
+                          data-testid="usage-next-page"
+                        >
+                          <ChevronRight size={12} />
+                        </button>
                       </div>
-                    );
-                  });
-                })()}
-              </div>
-            )}
-
-            {/* ── Top discussions ── */}
-            {filter !== 'workflows' && data.top_discussions.length > 0 && (
-              <div className="mb-8">
-                <button
-                  className="set-usage-subtitle set-usage-collapse-btn"
-                  onClick={() => toggleExpand('disc')}
-                >
-                  <ChevronRight
-                    size={12}
-                    style={{
-                      transform: expanded === 'disc' ? 'rotate(90deg)' : 'none',
-                      transition: 'transform 0.15s',
-                    }}
-                  />
-                  {t('config.usageTopDiscussions')}
-                  <span className="set-usage-count">{data.top_discussions.length}</span>
-                </button>
-                {expanded === 'disc' && data.top_discussions.map(d => (
-                  <div key={d.id} className="set-usage-row">
-                    {onNavigateDiscussion ? (
-                      <button
-                        className="set-usage-row-link"
-                        onClick={() => onNavigateDiscussion(d.id)}
-                        title={d.name}
-                      >
-                        {d.name}
-                      </button>
-                    ) : (
-                      <span className="text-sm text-primary set-usage-row-name">{d.name}</span>
                     )}
-                    <span className="text-sm text-muted">{fmtTokens(d.tokens_used)}</span>
-                    <span className="text-sm text-dim" style={{ minWidth: 60, textAlign: 'right' }}>
-                      {fmtCost(d.cost_usd)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* ── Top workflows ── */}
-            {filter !== 'discussions' && data.top_workflows.length > 0 && (
-              <div className="mb-8">
-                <button
-                  className="set-usage-subtitle set-usage-collapse-btn"
-                  onClick={() => toggleExpand('wf')}
-                >
-                  <ChevronRight
-                    size={12}
-                    style={{
-                      transform: expanded === 'wf' ? 'rotate(90deg)' : 'none',
-                      transition: 'transform 0.15s',
-                    }}
-                  />
-                  {t('config.usageTopWorkflows')}
-                  <span className="set-usage-count">{data.top_workflows.length}</span>
-                </button>
-                {expanded === 'wf' && data.top_workflows.map(w => (
-                  <div key={w.id} className="set-usage-row">
-                    <span className="text-sm text-primary set-usage-row-name">{w.name}</span>
-                    <span className="text-sm text-muted">{fmtTokens(w.tokens_used)}</span>
-                    <span className="text-sm text-dim" style={{ minWidth: 60, textAlign: 'right' }}>
-                      {fmtCost(w.cost_usd)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ── Summary card sub-component ── */
-
-function SummaryCard({ label, value, sub, accent, color }: {
-  label: string;
-  value: string;
-  sub?: string;
-  accent?: boolean;
-  color?: string;
-}) {
-  return (
-    <div className="set-usage-card" style={color ? { borderTopColor: color } : undefined}>
-      <div
-        className="set-usage-card-value"
-        style={accent ? { color: 'var(--kr-accent)' } : color ? { color } : undefined}
-      >
-        {value}
-      </div>
-      <div className="set-usage-card-label">{label}</div>
-      {sub && <div className="set-usage-card-sub">{sub}</div>}
-    </div>
-  );
-}
-
-/* ── Daily bar chart (pure CSS) ── */
-
-function DailyChart({ days, viewMode }: { days: DailyUsage[]; viewMode: ViewMode }) {
-  const maxVal = Math.max(...days.map(d => viewMode === 'cost' ? d.cost_usd : d.tokens));
-  if (maxVal === 0) return null;
-
-  return (
-    <div className="set-usage-chart">
-      {days.map(day => {
-        const total = viewMode === 'cost' ? day.cost_usd : day.tokens;
-        const heightPct = (total / maxVal) * 100;
-
-        // Build stacked segments per provider
-        const segments: { color: string; pct: number }[] = [];
-        if (total > 0) {
-          for (const { key, provider } of PROVIDER_FIELDS) {
-            const v = day[key] as number;
-            if (v > 0) {
-              // For cost view, approximate provider share from token ratio
-              const share = viewMode === 'cost' ? (v / day.tokens) * day.cost_usd : v;
-              segments.push({
-                color: PROVIDER_COLORS[provider] ?? 'var(--kr-text-muted)',
-                pct: (share / total) * 100,
-              });
-            }
-          }
-        }
-
-        return (
-          <div key={day.date} className="set-usage-chart-col" title={`${day.date}: ${viewMode === 'cost' ? fmtCost(day.cost_usd) : fmtTokens(day.tokens)}`}>
-            <div className="set-usage-chart-bar" style={{ height: `${Math.max(heightPct, 2)}%` }}>
-              {segments.map((seg, i) => (
-                <div
-                  key={i}
-                  className="set-usage-chart-seg"
-                  style={{ height: `${seg.pct}%`, background: seg.color }}
-                />
-              ))}
+                  </>
+                );
+              })()}
             </div>
-            <div className="set-usage-chart-label">{fmtDate(day.date)}</div>
-          </div>
-        );
-      })}
+          )}
+        </>
+      ) : (
+        <div className="set-compression-status">
+          <span className="set-compression-status-text" data-testid="usage-loading">{t('usage.loading')}</span>
+        </div>
+      )}
+
+      {/* ── Footer : powered by ccusage ── */}
+      <div className="set-compression-actions">
+        <span className="set-compression-attrib">
+          {t('usage.poweredBy')}{' '}
+          <a href={CCUSAGE_GITHUB_URL} target="_blank" rel="noreferrer" className="set-compression-link">
+            ccusage <ExternalLink size={10} />
+          </a>
+          {' '}({t('usage.openSource')})
+        </span>
+      </div>
     </div>
   );
 }

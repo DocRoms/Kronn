@@ -32,7 +32,7 @@ function makeDiscussion(over: Partial<Discussion> = {}): Discussion {
     language: 'en',
     participants: ['ClaudeCode' as any],
     messages: [],
-    message_count: 0,
+    message_count: 0, non_system_message_count: 0,
     archived: false,
     pinned: false,
     workspace_mode: 'Direct',

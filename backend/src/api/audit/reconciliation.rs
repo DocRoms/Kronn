@@ -684,4 +684,203 @@ also not interesting (this `path/that:1` should be ignored)
         assert!(report.contains("TD-mis"));
         assert!(report.contains("TD-upd"));
     }
+
+    // ── parse_pointers edge cases ───────────────────────────────────────
+
+    #[test]
+    fn parse_pointers_extracts_multiple_pointers_in_where_section() {
+        // Real-world TD: 2-3 pointers per file is the norm. The parser must
+        // emit one Pointer per `- ` line, not stop at the first.
+        let content = r#"# TD title
+
+## Where
+
+- `src/foo.rs:42` — first hit
+- `src/bar.rs:99` — second hit
+- `tests/baz.rs:7` — third hit
+
+## Other
+- `not/a/pointer.rs:1` — should be ignored
+"#;
+        let ptrs = parse_pointers(content);
+        assert_eq!(ptrs.len(), 3, "should pick exactly the 3 pointers under Where");
+        assert_eq!(ptrs[0].file, "src/foo.rs");
+        assert_eq!(ptrs[0].line, Some(42));
+        assert_eq!(ptrs[1].file, "src/bar.rs");
+        assert_eq!(ptrs[1].line, Some(99));
+        assert_eq!(ptrs[2].file, "tests/baz.rs");
+        assert_eq!(ptrs[2].line, Some(7));
+    }
+
+    #[test]
+    fn parse_pointers_handles_pointer_without_line_number() {
+        let content = "## Where\n- `src/foo.rs` — file-level finding\n";
+        let ptrs = parse_pointers(content);
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].file, "src/foo.rs");
+        assert_eq!(ptrs[0].line, None);
+    }
+
+    #[test]
+    fn parse_pointers_handles_line_range_takes_start() {
+        // Audit emits `7-15` for multi-line spans. Reconciliation only
+        // needs the START line to grep around — verify we don't drop the
+        // pointer or take the END.
+        let content = "## Where\n- `src/big.rs:7-15` — broad span\n";
+        let ptrs = parse_pointers(content);
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].file, "src/big.rs");
+        assert_eq!(ptrs[0].line, Some(7), "ranges should yield the start line, not the end");
+    }
+
+    #[test]
+    fn parse_pointers_extracts_snippet_when_present() {
+        let content = "## Where\n- `src/foo.rs:10` — `fn doomed() { panic!() }` — danger\n";
+        let ptrs = parse_pointers(content);
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].file, "src/foo.rs");
+        assert_eq!(ptrs[0].line, Some(10));
+        assert!(ptrs[0].snippet.as_ref().is_some_and(|s| s.contains("doomed")));
+    }
+
+    #[test]
+    fn parse_pointers_drops_snippet_when_too_short_or_too_long() {
+        // 7-char snippet: rejected (< 8 char floor).
+        let short = "## Where\n- `src/foo.rs:10` — `tiny` — too short\n";
+        let pshort = parse_pointers(short);
+        assert!(pshort[0].snippet.is_none(), "<8-char snippet must be discarded");
+
+        // > 200-char snippet : rejected.
+        let long_snip = "x".repeat(250);
+        let long = format!("## Where\n- `src/foo.rs:10` — `{}` — too long\n", long_snip);
+        let plong = parse_pointers(&long);
+        assert!(plong[0].snippet.is_none(), ">200-char snippet must be discarded");
+    }
+
+    #[test]
+    fn parse_pointers_ignores_lines_outside_where_section() {
+        let content = r#"## Description
+- `src/wrong.rs:1` — not under Where
+
+## Repro
+- `src/wrong2.rs:5` — also not Where
+
+## Where
+- `src/right.rs:42` — only this counts
+"#;
+        let ptrs = parse_pointers(content);
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].file, "src/right.rs");
+    }
+
+    #[test]
+    fn parse_pointers_picks_where_section_case_insensitive() {
+        // Audit emits various headings depending on locale / formatter.
+        for header in ["## Where", "## WHERE", "## Where (pointers)", "## Where to look"] {
+            let content = format!("{}\n- `src/foo.rs:1` — match\n", header);
+            let ptrs = parse_pointers(&content);
+            assert_eq!(ptrs.len(), 1, "header {header:?} should be Where");
+        }
+    }
+
+    #[test]
+    fn parse_pointers_empty_content_returns_empty() {
+        assert!(parse_pointers("").is_empty());
+        assert!(parse_pointers("just a body\nno headers no pointers").is_empty());
+    }
+
+    #[test]
+    fn parse_pointers_skips_non_bullet_lines_under_where() {
+        // Paragraph text under Where (no `- `) must not be parsed as a pointer.
+        let content = "## Where\nSome prose with `path/foo.rs:1` mention\n- `real/pointer.rs:5`\n";
+        let ptrs = parse_pointers(content);
+        assert_eq!(ptrs.len(), 1);
+        assert_eq!(ptrs[0].file, "real/pointer.rs");
+    }
+
+    #[test]
+    fn split_file_line_handles_no_colon() {
+        let (file, line) = split_file_line("src/foo.rs");
+        assert_eq!(file, "src/foo.rs");
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn split_file_line_handles_trailing_colon_as_non_line() {
+        // `foo:` has empty line part → not a line number.
+        let (file, line) = split_file_line("src/foo.rs:");
+        assert_eq!(file, "src/foo.rs:", "trailing colon without digits keeps colon in path");
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn split_file_line_extracts_simple_line_number() {
+        let (file, line) = split_file_line("src/foo.rs:42");
+        assert_eq!(file, "src/foo.rs");
+        assert_eq!(line, Some(42));
+    }
+
+    #[test]
+    fn split_file_line_handles_range_takes_start() {
+        let (file, line) = split_file_line("src/foo.rs:7-15");
+        assert_eq!(file, "src/foo.rs");
+        assert_eq!(line, Some(7));
+    }
+
+    #[test]
+    fn split_file_line_non_numeric_part_keeps_colon_in_path() {
+        // Edge case : path with a colon followed by non-numeric (unlikely on
+        // Unix but defensive). Should fall back to "no line number" + keep
+        // the colon as part of the path.
+        let (file, line) = split_file_line("src/foo.rs:abc");
+        assert_eq!(file, "src/foo.rs:abc");
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn snapshot_returns_empty_for_missing_dir() {
+        // Reconciliation must never panic on a fresh project without
+        // tech-debt/ — that's the normal greenfield case.
+        let tmp = tempfile::tempdir().unwrap();
+        let snaps = snapshot_tech_debt_dir(tmp.path());
+        assert!(snaps.is_empty());
+    }
+
+    #[test]
+    fn snapshot_returns_empty_for_dir_with_only_scaffolding() {
+        // README.md / TEMPLATE.md / _reconciliation-* are ignored.
+        let tmp = tempfile::tempdir().unwrap();
+        let td = tmp.path().join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("README.md"), "x").unwrap();
+        std::fs::write(td.join("TEMPLATE.md"), "x").unwrap();
+        std::fs::write(td.join("_reconciliation-20260528.md"), "x").unwrap();
+        let snaps = snapshot_tech_debt_dir(tmp.path());
+        assert!(snaps.is_empty(), "scaffolding files must not be in the snapshot");
+    }
+
+    #[test]
+    fn snapshot_skips_non_md_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let td = tmp.path().join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("TD-real.md"), "body").unwrap();
+        std::fs::write(td.join("notes.txt"), "ignored").unwrap();
+        std::fs::write(td.join("data.json"), "{}").unwrap();
+        let snaps = snapshot_tech_debt_dir(tmp.path());
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].id, "TD-real");
+    }
+
+    #[test]
+    fn snapshot_hashes_content_so_identical_files_share_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let td = tmp.path().join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("TD-1.md"), "identical body").unwrap();
+        std::fs::write(td.join("TD-2.md"), "identical body").unwrap();
+        let snaps = snapshot_tech_debt_dir(tmp.path());
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].content_hash, snaps[1].content_hash);
+    }
 }

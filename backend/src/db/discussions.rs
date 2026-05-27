@@ -102,6 +102,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
         let msg = DiscussionMessage {
+            lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::Agent,
             content,
@@ -143,13 +144,9 @@ pub fn has_pending_partial(conn: &Connection, disc_id: &str) -> Result<bool> {
     Ok(count > 0)
 }
 
-pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
-    list_discussions_paginated(conn, None, None)
-}
-
-pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Discussion>> {
-    let sql = format!(
-        "SELECT d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
+/// Column list shared by every `SELECT ... FROM discussions d` that maps rows
+/// via [`map_discussion_row`]. Keep the order in sync with the indices read there.
+const DISC_SELECT_COLS: &str = "d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
                 d.message_count,
                 d.profile_ids_json, d.directive_ids_json,
@@ -160,8 +157,80 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
                 d.pinned,
                 d.test_mode_restore_branch, d.test_mode_stash_ref,
                 d.summary_strategy, d.introspection_call_count,
-                d.source_agent, d.source_session_id, d.imported_at, d.diverged_at
-         FROM discussions d ORDER BY d.updated_at DESC{}",
+                d.source_agent, d.source_session_id, d.imported_at, d.diverged_at,
+                (SELECT COUNT(*) FROM messages m
+                   WHERE m.discussion_id = d.id AND m.role != 'System') AS non_system_count";
+
+/// Map one `discussions` row (selected via [`DISC_SELECT_COLS`]) into a
+/// [`Discussion`] without its messages (those are loaded separately).
+fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
+    let agent_str: String = row.get(3)?;
+    let participants_str: String = row.get(5)?;
+    let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
+    let profile_ids_str: String = row.get::<_, String>(11).unwrap_or_else(|_| "[]".into());
+    let directive_ids_str: String = row.get::<_, String>(12).unwrap_or_else(|_| "[]".into());
+
+    Ok(Discussion {
+        id: row.get(0)?,
+        project_id: row.get(1)?,
+        title: row.get(2)?,
+        agent: parse_agent_type(&agent_str),
+        language: row.get(4)?,
+        participants: serde_json::from_str(&participants_str).unwrap_or_default(),
+        messages: vec![],
+        message_count: row.get::<_, u32>(10).unwrap_or(0),
+        // Index 32 — trailing computed col from DISC_SELECT_COLS (subquery
+        // counting non-System messages). Used by the unread badge so tool
+        // breadcrumbs don't inflate the "messages à lire" counter.
+        non_system_message_count: row.get::<_, u32>(32).unwrap_or(0),
+        skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+        profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
+        directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
+        archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+        pinned: row.get::<_, i32>(23).unwrap_or(0) != 0,
+        workspace_mode: row.get::<_, String>(13).unwrap_or_else(|_| "Direct".into()),
+        workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
+        worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
+        tier: parse_model_tier(&row.get::<_, String>(18).unwrap_or_else(|_| "default".into())),
+        pin_first_message: row.get::<_, i32>(19).unwrap_or(0) != 0,
+        summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
+        summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
+        shared_id: row.get::<_, Option<String>>(20).unwrap_or(None),
+        shared_with: serde_json::from_str(&row.get::<_, String>(21).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
+        workflow_run_id: row.get::<_, Option<String>>(22).unwrap_or(None),
+        test_mode_restore_branch: row.get::<_, Option<String>>(24).unwrap_or(None),
+        test_mode_stash_ref: row.get::<_, Option<String>>(25).unwrap_or(None),
+        summary_strategy: parse_summary_strategy(row.get::<_, String>(26).unwrap_or_else(|_| "Auto".into()).as_str()),
+        introspection_call_count: row.get::<_, u32>(27).unwrap_or(0),
+        created_at: parse_dt(row.get::<_, String>(6)?),
+        updated_at: parse_dt(row.get::<_, String>(7)?),
+    })
+}
+
+pub fn list_discussions(conn: &Connection) -> Result<Vec<Discussion>> {
+    list_discussions_paginated(conn, None, None)
+}
+
+/// Discussions spawned by a batch / workflow run (linked via `workflow_run_id`).
+/// Ordered oldest-first so MCP callers see them in creation order. Messages
+/// are not loaded (use `get_discussion` for a single disc's body).
+pub fn list_discussions_by_run(conn: &Connection, run_id: &str) -> Result<Vec<Discussion>> {
+    let sql = format!(
+        "SELECT {} FROM discussions d WHERE d.workflow_run_id = ?1 ORDER BY d.created_at ASC",
+        DISC_SELECT_COLS
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let discussions: Vec<Discussion> = stmt
+        .query_map(params![run_id], map_discussion_row)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(discussions)
+}
+
+pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Discussion>> {
+    let sql = format!(
+        "SELECT {} FROM discussions d ORDER BY d.updated_at DESC{}",
+        DISC_SELECT_COLS,
         match (limit, offset) {
             (Some(l), Some(o)) => format!(" LIMIT {} OFFSET {}", l, o),
             (Some(l), None) => format!(" LIMIT {}", l),
@@ -170,46 +239,10 @@ pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset:
     );
     let mut stmt = conn.prepare(&sql)?;
 
-    let discussions: Vec<Discussion> = stmt.query_map([], |row| {
-        let agent_str: String = row.get(3)?;
-        let participants_str: String = row.get(5)?;
-        let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
-        let profile_ids_str: String = row.get::<_, String>(11).unwrap_or_else(|_| "[]".into());
-        let directive_ids_str: String = row.get::<_, String>(12).unwrap_or_else(|_| "[]".into());
-
-        Ok(Discussion {
-            id: row.get(0)?,
-            project_id: row.get(1)?,
-            title: row.get(2)?,
-            agent: parse_agent_type(&agent_str),
-            language: row.get(4)?,
-            participants: serde_json::from_str(&participants_str).unwrap_or_default(),
-            messages: vec![],
-            message_count: row.get::<_, u32>(10).unwrap_or(0),
-            skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
-            profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
-            directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
-            archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
-            pinned: row.get::<_, i32>(23).unwrap_or(0) != 0,
-            workspace_mode: row.get::<_, String>(13).unwrap_or_else(|_| "Direct".into()),
-            workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
-            worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
-            tier: parse_model_tier(&row.get::<_, String>(18).unwrap_or_else(|_| "default".into())),
-            pin_first_message: row.get::<_, i32>(19).unwrap_or(0) != 0,
-            summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
-            summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
-            shared_id: row.get::<_, Option<String>>(20).unwrap_or(None),
-            shared_with: serde_json::from_str(&row.get::<_, String>(21).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
-            workflow_run_id: row.get::<_, Option<String>>(22).unwrap_or(None),
-            test_mode_restore_branch: row.get::<_, Option<String>>(24).unwrap_or(None),
-            test_mode_stash_ref: row.get::<_, Option<String>>(25).unwrap_or(None),
-            summary_strategy: parse_summary_strategy(row.get::<_, String>(26).unwrap_or_else(|_| "Auto".into()).as_str()),
-            introspection_call_count: row.get::<_, u32>(27).unwrap_or(0),
-            created_at: parse_dt(row.get::<_, String>(6)?),
-            updated_at: parse_dt(row.get::<_, String>(7)?),
-        })
-    })?.filter_map(|r| r.ok())
-    .collect();
+    let discussions: Vec<Discussion> = stmt
+        .query_map([], map_discussion_row)?
+        .filter_map(|r| r.ok())
+        .collect();
 
     // Don't load messages for the list view — messages are only loaded
     // for individual discussions via get_discussion(). With 200+ discussions
@@ -228,6 +261,11 @@ pub fn list_discussions_with_messages(conn: &Connection) -> Result<Vec<Discussio
         if let Some(msgs) = all_messages.get(&disc.id) {
             disc.messages = msgs.clone();
             disc.message_count = disc.messages.len() as u32;
+            disc.non_system_message_count = disc
+                .messages
+                .iter()
+                .filter(|m| !matches!(m.role, crate::models::MessageRole::System))
+                .count() as u32;
         }
     }
 
@@ -262,7 +300,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             language: row.get(4)?,
             participants: serde_json::from_str(&participants_str).unwrap_or_default(),
             messages: vec![],
-            message_count: 0,
+            message_count: 0, non_system_message_count: 0,
             skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
             profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
             directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
@@ -290,6 +328,11 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
     if let Some(mut d) = disc {
         d.messages = list_messages(conn, &d.id)?;
         d.message_count = d.messages.len() as u32;
+        d.non_system_message_count = d
+            .messages
+            .iter()
+            .filter(|m| !matches!(m.role, crate::models::MessageRole::System))
+            .count() as u32;
         Ok(Some(d))
     } else {
         Ok(None)
@@ -476,7 +519,7 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
 fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms
+        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -499,6 +542,8 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
             author_pseudo: None,
             author_avatar_email: None, source_msg_id: None,
             duration_ms: row.get::<_, Option<i64>>(10).unwrap_or(None).map(|d| d as u64),
+            lint_report: row.get::<_, Option<String>>(11).unwrap_or(None)
+                .and_then(|s| serde_json::from_str(&s).ok()),
         }))
     })?;
 
@@ -511,7 +556,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -534,6 +579,8 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             author_avatar_email: row.get::<_, Option<String>>(10).unwrap_or(None),
             source_msg_id: row.get::<_, Option<String>>(11).unwrap_or(None),
             duration_ms: row.get::<_, Option<i64>>(12).unwrap_or(None).map(|d| d as u64),
+            lint_report: row.get::<_, Option<String>>(13).unwrap_or(None)
+                .and_then(|s| serde_json::from_str(&s).ok()),
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -548,9 +595,14 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
         |row| row.get(0),
     )?;
 
+    let lint_report_json = msg
+        .lint_report
+        .as_ref()
+        .and_then(|r| serde_json::to_string(r).ok());
+
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             msg.id,
             discussion_id,
@@ -567,6 +619,7 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.author_avatar_email,
             msg.source_msg_id,
             msg.duration_ms.map(|d| d as i64),
+            lint_report_json,
         ],
     )?;
 

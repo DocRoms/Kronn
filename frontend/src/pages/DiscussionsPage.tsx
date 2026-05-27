@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo, useDeferredValue } from 'react';
 import './DiscussionsPage.css';
 import { MessageBubble, MarkdownContent } from '../components/MessageBubble';
+import { unseenBasis } from '../components/SwipeableDiscItem';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { ChatInput } from '../components/ChatInput';
@@ -517,19 +518,17 @@ export function DiscussionsPage({
     if (activeDiscussionId && activeDiscussion) {
       // 0.8.3 (#277) — guard against the off-by-N+ bug where the
       // list endpoint returns `messages: []` (empty by design,
-      // populated only by `discussions.get`). The first render of a
-      // freshly-opened discussion has `activeDiscussion` resolved
-      // from `allDiscussions.find(...)` → `messages.length = 0`,
-      // so we'd mark "0 seen" and the unread counter would stay
-      // at message_count until the get() resolves the next tick.
-      // Use the max of both signals so the seed never under-counts.
-      const total = Math.max(
-        activeDiscussion.messages.length,
-        activeDiscussion.message_count ?? 0,
-      );
+      // populated only by `discussions.get`). 0.8.7 — the badge
+      // counts USER+AGENT messages only (System rows = tool / summary
+      // breadcrumbs would inflate it), so we seed `lastSeen` with
+      // the same basis used by `unseenBasis` — and take the max with
+      // a filtered messages count to defend against the empty-array
+      // first-render race from #277.
+      const filtered = activeDiscussion.messages.filter(m => m.role !== 'System').length;
+      const total = Math.max(filtered, unseenBasis(activeDiscussion));
       markDiscussionSeen(activeDiscussionId, total);
     }
-  }, [activeDiscussionId, activeDiscussion?.messages.length, activeDiscussion?.message_count, markDiscussionSeen]);
+  }, [activeDiscussionId, activeDiscussion?.messages.length, activeDiscussion?.non_system_message_count, markDiscussionSeen]);
 
   // Timer for agent activity duration — uses lifted startMap to survive page switches
   useEffect(() => {
@@ -719,6 +718,7 @@ export function DiscussionsPage({
               auth_mode: null,
             }],
             message_count: disc.message_count + 1,
+            non_system_message_count: disc.non_system_message_count + 1,
           },
         };
       });
@@ -1000,6 +1000,7 @@ export function DiscussionsPage({
             auth_mode: null,
           }],
           message_count: disc.message_count + 1,
+          non_system_message_count: disc.non_system_message_count + 1,
         },
       };
     });
@@ -1053,7 +1054,10 @@ export function DiscussionsPage({
       () => {
         refetchDiscussions();
         setSendingMap(prev => ({ ...prev, [discId]: true }));
-        markDiscussionSeen(discId, (activeDiscussion?.messages.length ?? 0) + 1);
+        // The optimistic update above bumped both counts by 1 (the freshly
+        // queued User message); seed lastSeen with the matching non-System
+        // basis so the badge resolves to 0 without waiting on the next tick.
+        markDiscussionSeen(discId, activeDiscussion ? unseenBasis(activeDiscussion) + 1 : 1);
       },
       onAgentLog,
     );

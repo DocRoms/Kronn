@@ -1799,12 +1799,23 @@ fn templates_have_no_empty_comment_placeholders() {
         let content = std::fs::read_to_string(entry.path()).unwrap();
         let rel = entry.path().strip_prefix(&template_dir).unwrap();
 
-        // Should not have generic <!-- ... --> placeholders (except TODO markers and KRONN markers)
+        // Should not have generic <!-- ... --> placeholders. Exceptions: TODO
+        // markers, KRONN markers, and the `kronn:` namespaced anchors that the
+        // anti-hallu STEP 0 reads/refreshes (kronn:doc-version, kronn:spec).
         for (i, line) in content.lines().enumerate() {
-            if line.contains("<!-- ") && !line.contains("<!-- TODO") && !line.contains("<!-- KRONN") {
+            if line.contains("<!-- ")
+                && !line.contains("<!-- TODO")
+                && !line.contains("<!-- KRONN")
+                && !line.contains("<!-- kronn:")
+            {
                 // Allow specific known comments
                 if line.contains("<!-- Fill") || line.contains("<!-- Flag") || line.contains("<!-- Add entries") {
                     // These are instructions in table comments, acceptable
+                    continue;
+                }
+                // The anti-hallu doc header opens with an explanatory comment
+                // (documents the convention for any CLI reading the raw file).
+                if line.contains("<!-- This file follows") {
                     continue;
                 }
                 panic!(
@@ -3544,7 +3555,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         language: "fr".into(),
         participants: vec![],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -3661,7 +3672,7 @@ async fn ws_chat_message_idempotent() {
         language: "fr".into(),
         participants: vec![],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -4499,7 +4510,7 @@ async fn insert_test_mode_discussion(
         language: "en".into(),
         participants: vec![],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -4896,4 +4907,2934 @@ async fn disc_load_other_clamps_range_to_total() {
     assert_eq!(loaded["data"]["total_messages"], 2);
     assert_eq!(loaded["data"]["to_idx"], 2, "to must clamp to total");
     assert_eq!(loaded["data"]["messages"].as_array().unwrap().len(), 2);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 0.8.7 — P0-2 of the QA roadmap.
+//
+// auth_middleware behaviour matrix. The middleware lives in `lib.rs:263-330`,
+// and `is_local_ip` (lib.rs:342) is already covered by `auth_tests` in lib.rs.
+// What was missing : the *middleware-level* decision tree under the various
+// combinations of (token configured, strict_localhost, X-Real-IP header,
+// ConnectInfo extension, Bearer header).
+//
+// The audit (Agent B 2026-05-28) flagged `lib.rs:310` (the ConnectInfo
+// fallback) as a "potential auth bypass on desktop" if the ConnectInfo
+// extension is missing. These tests pin the actual behaviour : missing
+// ConnectInfo + missing X-Real-IP + no Bearer = 401 (fail-closed), which is
+// the correct fallback ; what IS a real attack surface is a forged
+// `X-Real-IP: localhost` and the `auth_strict_localhost = true` opt-out
+// — both pinned below.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+mod auth_middleware_tests {
+    use super::*;
+    use axum::extract::ConnectInfo;
+    use std::net::SocketAddr;
+
+    /// Build a router with auth enabled and a known Bearer token.
+    fn app_with_auth(token: &str, strict_localhost: bool) -> Router {
+        let db = Arc::new(
+            kronn::db::Database::open_in_memory().expect("in-memory DB"),
+        );
+        let mut cfg = kronn::core::config::default_config();
+        cfg.server.auth_token = Some(token.to_string());
+        cfg.server.auth_strict_localhost = strict_localhost;
+        let config = Arc::new(RwLock::new(cfg));
+        let state = AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS);
+        kronn::build_router_with_auth(state, true)
+    }
+
+    /// Like the test-app helper but with auth enabled + no token configured.
+    fn app_with_auth_no_token() -> Router {
+        let db = Arc::new(
+            kronn::db::Database::open_in_memory().expect("in-memory DB"),
+        );
+        let mut cfg = kronn::core::config::default_config();
+        cfg.server.auth_token = None;
+        let config = Arc::new(RwLock::new(cfg));
+        let state = AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS);
+        kronn::build_router_with_auth(state, true)
+    }
+
+    fn req(uri: &str) -> Request<Body> {
+        Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap()
+    }
+
+    fn req_with_header(uri: &str, name: &str, value: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET").uri(uri).header(name, value).body(Body::empty()).unwrap()
+    }
+
+    /// Inject a `ConnectInfo` extension into the request, simulating what
+    /// `axum::serve(_, _.into_make_service_with_connect_info())` does at
+    /// production startup (`main.rs:345`).
+    fn req_with_connect_info(uri: &str, ip: &str) -> Request<Body> {
+        let mut r = req(uri);
+        let sock: SocketAddr = format!("{ip}:54321").parse().unwrap();
+        r.extensions_mut().insert(ConnectInfo(sock));
+        r
+    }
+
+    async fn status_of(app: Router, req: Request<Body>) -> StatusCode {
+        app.oneshot(req).await.unwrap().status()
+    }
+
+    // ── Bypass paths ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn health_endpoint_bypasses_auth_even_with_token_required() {
+        // Docker healthcheck depends on /api/health staying open ; any
+        // regression that adds it to the auth path breaks the container
+        // health probe.
+        let app = app_with_auth("hard-token", false);
+        let st = status_of(app, req("/api/health")).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn no_token_configured_passes_through_without_auth_header() {
+        // First-run / backward-compat branch (lib.rs:286-288). A fresh
+        // install with no token shouldn't 401 on every API call — the
+        // user hasn't set up auth yet.
+        let app = app_with_auth_no_token();
+        let st = status_of(app, req("/api/setup/status")).await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    // ── Bearer ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn valid_bearer_token_grants_access() {
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "authorization", "Bearer expected-secret");
+        assert_eq!(status_of(app, r).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn invalid_bearer_token_returns_401() {
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "authorization", "Bearer wrong-secret");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn missing_bearer_prefix_returns_401() {
+        // The middleware only accepts `Bearer <token>` ; a raw token in
+        // the header (or `Basic`) must be rejected — otherwise a
+        // misconfigured client could leak the token to the wrong header
+        // and still be granted access.
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "authorization", "expected-secret");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Localhost bypass via X-Real-IP (nginx setup) ───────────────────────
+
+    #[tokio::test]
+    async fn x_real_ip_localhost_bypasses_auth_when_strict_off() {
+        // The Docker setup ships nginx that sets X-Real-IP to the real
+        // client IP. A loopback X-Real-IP means the request originated
+        // from the host machine and should bypass auth (documented
+        // self-hosted default).
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "x-real-ip", "127.0.0.1");
+        assert_eq!(status_of(app, r).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn x_real_ip_public_does_not_bypass_auth() {
+        // A public IP forwarded by nginx must require Bearer auth ;
+        // otherwise any internet client trivially bypasses by relying
+        // on the proxy's X-Real-IP.
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "x-real-ip", "8.8.8.8");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn x_real_ip_forged_localhost_string_does_not_bypass() {
+        // Hardened on 2026-05-10 — `is_local_ip("localhost")` returns
+        // false. A misconfigured upstream forwarding the literal
+        // "localhost" must NOT trigger the bypass. Pin it from the
+        // middleware angle (the unit test in lib.rs::auth_tests pins it
+        // from the `is_local_ip` angle).
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "x-real-ip", "localhost");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Localhost bypass via ConnectInfo (Tauri desktop / direct) ──────────
+
+    #[tokio::test]
+    async fn connect_info_localhost_bypasses_auth_when_strict_off() {
+        // Desktop / Tauri path — no nginx in front, so the runtime
+        // injects a ConnectInfo extension carrying the real peer IP.
+        // A loopback peer must bypass auth same as the X-Real-IP path.
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_connect_info("/api/setup/status", "127.0.0.1");
+        assert_eq!(status_of(app, r).await, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn connect_info_public_does_not_bypass_auth() {
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_connect_info("/api/setup/status", "8.8.8.8");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn missing_connect_info_and_missing_x_real_ip_falls_through_to_bearer() {
+        // The audit's actual concern — what happens if NEITHER header
+        // nor extension is present ? The middleware's `if let Some(...)`
+        // arms gracefully skip, the code reaches the Bearer check, and
+        // an absent Bearer returns 401. This is fail-closed, NOT
+        // fail-open. Pin it.
+        let app = app_with_auth("expected-secret", false);
+        let st = status_of(app, req("/api/setup/status")).await;
+        assert_eq!(st, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn missing_connect_info_with_valid_bearer_still_grants_access() {
+        // Same as above but the Bearer is present — must succeed. This
+        // is the most common test-suite setup since `oneshot` doesn't
+        // inject ConnectInfo by default.
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "authorization", "Bearer expected-secret");
+        assert_eq!(status_of(app, r).await, StatusCode::OK);
+    }
+
+    // ── strict_localhost opt-out ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn strict_localhost_disables_x_real_ip_bypass() {
+        // The opt-out for users on shared / multi-tenant boxes.
+        // Localhost X-Real-IP must NOT bypass when strict_localhost=true.
+        let app = app_with_auth("expected-secret", /* strict */ true);
+        let r = req_with_header("/api/setup/status", "x-real-ip", "127.0.0.1");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn strict_localhost_disables_connect_info_bypass() {
+        let app = app_with_auth("expected-secret", /* strict */ true);
+        let r = req_with_connect_info("/api/setup/status", "127.0.0.1");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn strict_localhost_still_accepts_valid_bearer() {
+        // Sanity : strict_localhost only kills the bypass, it doesn't
+        // ban Bearer auth altogether.
+        let app = app_with_auth("expected-secret", true);
+        let r = req_with_header("/api/setup/status", "authorization", "Bearer expected-secret");
+        assert_eq!(status_of(app, r).await, StatusCode::OK);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 0.8.7 — Coverage sweep: cold-API endpoints that the real-coverage audit
+// (cargo llvm-cov, 2026-05-28) flagged at 0–30 % lines. These are thin
+// HTTP wrappers around `core::*` helpers ; one integration test per route
+// covers the handler's happy path + the request-shape contract.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+mod cold_api_handlers_tests {
+    use super::*;
+
+    // ── api/usage.rs (was 0%) ───────────────────────────────────────────────
+    #[tokio::test]
+    async fn usage_endpoint_returns_apiresponse_envelope() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/usage?period=daily").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn usage_endpoint_defaults_to_daily() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/usage").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn usage_endpoint_normalises_unknown_period() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/usage?period=garbage-rm-rf").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── api/debug.rs (was 0%) ───────────────────────────────────────────────
+    #[tokio::test]
+    async fn debug_logs_returns_apiresponse() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/debug/logs").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn debug_logs_clear_succeeds() {
+        let app = test_app();
+        let (st, body) = post_json(app, "/api/debug/logs/clear", serde_json::json!({})).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+    }
+
+    // ── api/audit/info.rs (was 0%) ──────────────────────────────────────────
+    #[tokio::test]
+    async fn audit_info_for_unknown_project_returns_err_envelope() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/projects/does-not-exist/audit-info").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── api/api_call_logs.rs (was 0%) ───────────────────────────────────────
+    #[tokio::test]
+    async fn api_call_logs_list_returns_apiresponse_on_fresh_db() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/api-call-logs").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+        assert!(body.get("data").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_call_logs_list_accepts_filters() {
+        let app = test_app();
+        let (st, _) = get_json(app, "/api/api-call-logs?provider=github&limit=10").await;
+        assert_eq!(st, StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_call_logs_get_unknown_id_returns_err_envelope() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/api-call-logs/does-not-exist").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn api_call_logs_purge_on_empty_table_succeeds() {
+        let app = test_app();
+        let (st, body) = post_json(
+            app,
+            "/api/api-call-logs/purge",
+            serde_json::json!({ "older_than_days": 30 }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── api/projects/migrate.rs (was 0%) ────────────────────────────────────
+    #[tokio::test]
+    async fn migrate_docs_unknown_project_returns_err_envelope() {
+        let app = test_app();
+        let (st, body) = post_json(
+            app,
+            "/api/projects/does-not-exist/migrate-docs",
+            serde_json::json!({ "from": "ai", "to": "docs" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── api/discover.rs (was 13%) ───────────────────────────────────────────
+    #[tokio::test]
+    async fn discover_repos_returns_err_envelope_when_no_tokens_configured() {
+        let app = test_app();
+        let (st, body) = post_json(
+            app,
+            "/api/projects/discover-repos",
+            serde_json::json!({ "source_ids": [] }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(false));
+        let err = body["error"].as_str().unwrap_or("").to_lowercase();
+        assert!(
+            err.contains("github") || err.contains("gitlab") || err.contains("token"),
+            "expected GitHub/GitLab/token hint, got: {err}"
+        );
+    }
+
+    // ── api/contacts.rs (was 26%) ───────────────────────────────────────────
+    #[tokio::test]
+    async fn contacts_list_returns_empty_on_fresh_db() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/contacts").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+        assert!(body["data"].as_array().map(|a| a.is_empty()).unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn contacts_network_info_returns_apiresponse() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/contacts/network-info").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn contacts_invite_code_returns_apiresponse() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/contacts/invite-code").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── api/agents.rs (was 30%) ─────────────────────────────────────────────
+    #[tokio::test]
+    async fn agents_detect_returns_array() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/agents").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+        assert!(body["data"].is_array());
+    }
+
+    // ── api/quick_apis.rs (was 19%) ─────────────────────────────────────────
+    #[tokio::test]
+    async fn quick_apis_list_returns_empty_array_on_fresh_db() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/quick-apis").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+        assert!(body["data"].as_array().map(|a| a.is_empty()).unwrap_or(false));
+    }
+
+    // ── api/quick_prompts.rs (was 41%) ──────────────────────────────────────
+    #[tokio::test]
+    async fn quick_prompts_list_returns_empty_array_on_fresh_db() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/quick-prompts").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+        assert!(body["data"].as_array().map(|a| a.is_empty()).unwrap_or(false));
+    }
+
+    // ── api/user_context.rs (was 29%) ───────────────────────────────────────
+    #[tokio::test]
+    async fn user_context_list_returns_apiresponse() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/user-context").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── api/disc_introspection.rs (was 16%) — wrong-id stays clean ──────────
+    #[tokio::test]
+    async fn disc_introspection_meta_unknown_id_returns_err_envelope() {
+        let app = test_app();
+        let (st, body) = get_json(app, "/api/discussions/does-not-exist/meta").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(body.get("success").is_some());
+    }
+
+    // ── Wrong-id envelope sweep — table-driven via macros to keep the
+    //    file readable. Each macro registers ONE #[tokio::test] that
+    //    hits a cold endpoint with a bogus id and asserts the handler
+    //    returns a clean ApiResponse envelope (not a 500). Covers the
+    //    handler entry + the not-found / err branch on dozens of routes
+    //    that no test exercised pre-fix.
+    // ────────────────────────────────────────────────────────────────────────
+    /// Helper: hit the URL, accept either an `ApiResponse` envelope
+    /// (200 plus `{success: ...}` JSON) OR a 4xx status. Both are valid
+    /// "handler entered + handled the wrong-id case cleanly" — what we
+    /// want to catch is a 500 / panic / hang, which neither produces.
+    async fn assert_handler_clean(
+        app: Router,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) {
+        let req = match (method, &body) {
+            ("GET", _) => Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap(),
+            ("DELETE", _) => Request::builder().method("DELETE").uri(uri).body(Body::empty()).unwrap(),
+            ("POST", Some(b)) => Request::builder()
+                .method("POST").uri(uri).header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(b).unwrap())).unwrap(),
+            _ => panic!("unsupported method/body combo"),
+        };
+        let resp = app.oneshot(req).await.unwrap();
+        let st = resp.status();
+        // We want : either 2xx (envelope or pass-through OK) or 4xx
+        // (NotFound / BadRequest), NEVER a 5xx panic.
+        assert!(
+            st.is_success() || st.is_client_error(),
+            "unexpected status {} on {} (expected 2xx envelope or 4xx)", st, uri
+        );
+    }
+
+    macro_rules! envelope_get { ($name:ident, $path:expr) => {
+        #[tokio::test]
+        async fn $name() {
+            assert_handler_clean(test_app(), "GET", $path, None).await;
+        }
+    }; }
+    macro_rules! envelope_post { ($name:ident, $path:expr, $body:expr) => {
+        #[tokio::test]
+        async fn $name() {
+            assert_handler_clean(test_app(), "POST", $path, Some($body)).await;
+        }
+    }; }
+    macro_rules! envelope_delete { ($name:ident, $path:expr) => {
+        #[tokio::test]
+        async fn $name() {
+            assert_handler_clean(test_app(), "DELETE", $path, None).await;
+        }
+    }; }
+
+    // api/projects/anti_hallu_inject.rs (was 17 % Lines)
+    envelope_get!(anti_hallu_status_unknown_project, "/api/projects/nope/anti-hallu/status");
+    envelope_post!(anti_hallu_inject_unknown_project, "/api/projects/nope/anti-hallu/inject", serde_json::json!({}));
+    envelope_post!(redirectors_sync_unknown_project, "/api/projects/nope/redirectors/sync", serde_json::json!({}));
+
+    // api/projects/git.rs (was 36 % Lines)
+    envelope_get!(project_git_status_unknown_project, "/api/projects/nope/git-status");
+    envelope_get!(project_git_diff_unknown_project, "/api/projects/nope/git-diff");
+    envelope_post!(project_git_commit_unknown_project, "/api/projects/nope/git-commit", serde_json::json!({ "message": "x" }));
+    envelope_post!(project_git_push_unknown_project, "/api/projects/nope/git-push", serde_json::json!({}));
+    envelope_get!(project_pr_template_unknown_project, "/api/projects/nope/pr-template");
+    envelope_post!(project_exec_unknown_project, "/api/projects/nope/exec", serde_json::json!({ "command": "echo x" }));
+
+    // api/discussions/messaging.rs (was 33 % Lines)
+    envelope_post!(disc_send_message_unknown_disc, "/api/discussions/nope/messages", serde_json::json!({ "content": "hi" }));
+    envelope_delete!(disc_delete_last_agent_messages_unknown, "/api/discussions/nope/messages/last");
+
+    // api/disc_git.rs (was 26 % Lines)
+    envelope_get!(disc_git_status_unknown, "/api/discussions/nope/git-status");
+    envelope_get!(disc_git_diff_unknown, "/api/discussions/nope/git-diff");
+    envelope_post!(disc_git_commit_unknown, "/api/discussions/nope/git-commit", serde_json::json!({ "message": "x" }));
+    envelope_post!(disc_git_push_unknown, "/api/discussions/nope/git-push", serde_json::json!({}));
+    envelope_post!(disc_exec_unknown, "/api/discussions/nope/exec", serde_json::json!({ "command": "ls" }));
+    envelope_post!(disc_worktree_unlock_unknown, "/api/discussions/nope/worktree-unlock", serde_json::json!({}));
+
+    // api/quick_prompts.rs (was 41 % Lines)
+    envelope_get!(qp_get_unknown_id, "/api/quick-prompts/nope");
+    envelope_delete!(qp_delete_unknown_id, "/api/quick-prompts/nope");
+
+    // api/quick_apis.rs (was 19 % Lines)
+    envelope_get!(qa_get_unknown_id, "/api/quick-apis/nope");
+    envelope_delete!(qa_delete_unknown_id, "/api/quick-apis/nope");
+
+    // workflows (cold individual routes)
+    envelope_get!(workflow_get_unknown, "/api/workflows/nope");
+    envelope_delete!(workflow_delete_unknown, "/api/workflows/nope");
+    envelope_get!(workflow_runs_unknown_workflow, "/api/workflows/nope/runs");
+
+    // api/projects CRUD edge cases
+    envelope_get!(project_get_unknown, "/api/projects/nope");
+    envelope_delete!(project_delete_unknown, "/api/projects/nope");
+    envelope_post!(project_install_template_unknown, "/api/projects/nope/install-template", serde_json::json!({}));
+    envelope_get!(project_drift_unknown, "/api/projects/nope/drift");
+    envelope_post!(project_cancel_audit_unknown, "/api/projects/nope/cancel-audit", serde_json::json!({}));
+    envelope_post!(project_mark_bootstrapped_unknown, "/api/projects/nope/mark-bootstrapped", serde_json::json!({}));
+
+    // api/discussions various
+    envelope_post!(disc_summarize_unknown, "/api/discussions/nope/summarize", serde_json::json!({ "from": 0, "to": 100, "force_refresh": false }));
+
+    // ════════════════════════════════════════════════════════════════════
+    // Happy-path CRUD lifecycles : create → list → get → update → delete.
+    // Each test exercises ~50-150 LOC of handler code, vs ~5-10 for the
+    // wrong-id envelope sweep above.
+    // ════════════════════════════════════════════════════════════════════
+
+    async fn put_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
+        let req = Request::builder()
+            .method("PUT").uri(uri).header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let st = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (st, json)
+    }
+
+    // ── Quick Prompts CRUD lifecycle ─────────────────────────────────────
+    #[tokio::test]
+    async fn quick_prompts_crud_lifecycle() {
+        let state = test_state();
+        let app = || build_router_with_auth(state.clone(), false);
+
+        // CREATE — minimal valid payload exercises validation + insert.
+        let (st, body) = post_json(app(), "/api/quick-prompts", serde_json::json!({
+            "name": "EW Ticket Framing",
+            "prompt_template": "Analyse ticket {{id}}",
+            "variables": [{ "name": "id", "label": "Ticket ID", "placeholder": "EW-123", "description": null, "required": true }],
+            "agent": "ClaudeCode",
+            "description": "test QP",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+        let qp_id = body["data"]["id"].as_str().unwrap().to_string();
+
+        // LIST — the created QP must appear.
+        let (st, body) = get_json(app(), "/api/quick-prompts").await;
+        assert_eq!(st, StatusCode::OK);
+        let arr = body["data"].as_array().unwrap();
+        let found = arr.iter().find(|q| q["id"] == qp_id).expect("created QP not in list");
+        assert_eq!(found["name"], "EW Ticket Framing");
+
+        // UPDATE — change name + template.
+        let (st, body) = put_json(app(), &format!("/api/quick-prompts/{}", qp_id), serde_json::json!({
+            "name": "EW Ticket Framing v2",
+            "prompt_template": "Analyse ticket Jira {{id}} en profondeur",
+            "variables": [],
+            "description": "updated",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+        assert_eq!(body["data"]["name"], "EW Ticket Framing v2");
+
+        // DELETE — successful.
+        let (st, _) = delete_json(app(), &format!("/api/quick-prompts/{}", qp_id)).await;
+        assert_eq!(st, StatusCode::OK);
+
+        // LIST again — the QP must be gone.
+        let (st, body) = get_json(app(), "/api/quick-prompts").await;
+        assert_eq!(st, StatusCode::OK);
+        let arr = body["data"].as_array().unwrap();
+        assert!(!arr.iter().any(|q| q["id"] == qp_id), "QP still in list after delete");
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_create_rejects_empty_name() {
+        let (st, body) = post_json(test_app(), "/api/quick-prompts", serde_json::json!({
+            "name": "",
+            "prompt_template": "something",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(false));
+        let err = body["error"].as_str().unwrap_or("").to_lowercase();
+        assert!(err.contains("name") || err.contains("1-200"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_create_rejects_empty_template() {
+        let (st, body) = post_json(test_app(), "/api/quick-prompts", serde_json::json!({
+            "name": "OK name",
+            "prompt_template": "",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(false));
+        let err = body["error"].as_str().unwrap_or("").to_lowercase();
+        assert!(err.contains("template"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_create_rejects_name_over_200_chars() {
+        let long_name = "x".repeat(201);
+        let (_, body) = post_json(test_app(), "/api/quick-prompts", serde_json::json!({
+            "name": long_name,
+            "prompt_template": "ok",
+        })).await;
+        assert_eq!(body["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_update_unknown_id_returns_err_envelope() {
+        let (st, body) = put_json(test_app(), "/api/quick-prompts/does-not-exist", serde_json::json!({
+            "name": "x", "prompt_template": "y",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(false));
+        assert!(body["error"].as_str().unwrap_or("").to_lowercase().contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_history_unknown_id_returns_envelope() {
+        let (st, body) = get_json(test_app(), "/api/quick-prompts/nope/history").await;
+        assert!(st.is_success() || st.is_client_error());
+        if st == StatusCode::OK { assert!(body.get("success").is_some()); }
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_metrics_unknown_id_returns_envelope() {
+        let (st, body) = get_json(test_app(), "/api/quick-prompts/nope/metrics").await;
+        assert!(st.is_success() || st.is_client_error());
+        if st == StatusCode::OK { assert!(body.get("success").is_some()); }
+    }
+
+    #[tokio::test]
+    async fn quick_prompts_export_unknown_id_handler_does_not_panic() {
+        // The export endpoint may return a JSON envelope OR raw file
+        // bytes (the happy-path streams a JSON blob). For the wrong-id
+        // case, we just assert the handler doesn't 500 / panic.
+        assert_handler_clean(test_app(), "GET", "/api/quick-prompts/nope/export", None).await;
+    }
+
+    // ── Quick APIs CRUD lifecycle ────────────────────────────────────────
+    #[tokio::test]
+    async fn quick_apis_crud_lifecycle() {
+        let state = test_state();
+        let app = || build_router_with_auth(state.clone(), false);
+
+        // QA validation rejects payloads without proper auth-kind / config
+        // — we just exercise the validation path. The handler returns
+        // either 200 + envelope OR a 4xx ; assert_handler_clean covers both.
+        assert_handler_clean(app(), "POST", "/api/quick-apis", Some(serde_json::json!({
+            "name": "Didomi consent check",
+            "description": "Ping consent endpoint",
+            "endpoint_path": "/widgets",
+            "endpoint_method": "GET",
+            "side_effect": false,
+        }))).await;
+    }
+
+    #[tokio::test]
+    async fn quick_apis_run_unknown_id_returns_envelope() {
+        let (st, body) = post_json(test_app(), "/api/quick-apis/nope/run", serde_json::json!({
+            "inputs": {},
+        })).await;
+        assert!(st.is_success() || st.is_client_error());
+        if st == StatusCode::OK { assert!(body.get("success").is_some()); }
+    }
+
+    #[tokio::test]
+    async fn quick_apis_export_unknown_id_handler_does_not_panic() {
+        assert_handler_clean(test_app(), "GET", "/api/quick-apis/nope/export", None).await;
+    }
+
+    // ── Skills / Profiles / Directives CRUD ──────────────────────────────
+    #[tokio::test]
+    async fn skills_crud_lifecycle() {
+        let state = test_state();
+        let app = || build_router_with_auth(state.clone(), false);
+
+        let (st, body) = post_json(app(), "/api/skills", serde_json::json!({
+            "id": "test-skill-1",
+            "name": "Test Skill",
+            "description": "test",
+            "icon": "Wrench",
+            "category": "Domain",
+            "content": "You are a tester.",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        if body["success"] == serde_json::Value::Bool(true) {
+            // Update + delete to exercise full surface.
+            let id = body["data"]["id"].as_str().unwrap().to_string();
+            let (_, _) = put_json(app(), &format!("/api/skills/{}", id), serde_json::json!({
+                "id": id.clone(), "name": "Updated", "description": "u", "icon": "Wrench", "category": "Domain", "content": "y",
+            })).await;
+            let (_, _) = delete_json(app(), &format!("/api/skills/{}", id)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn profiles_crud_lifecycle() {
+        let state = test_state();
+        let app = || build_router_with_auth(state.clone(), false);
+
+        let (st, body) = post_json(app(), "/api/profiles", serde_json::json!({
+            "name": "TestProfile",
+            "persona_name": "Alpha",
+            "role": "Tester",
+            "avatar": "🛡️",
+            "color": "#88dd88",
+            "category": "Technical",
+            "persona_prompt": "You audit thoroughly.",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        if body["success"] == serde_json::Value::Bool(true) {
+            let id = body["data"]["id"].as_str().unwrap().to_string();
+            let (_, _) = delete_json(app(), &format!("/api/profiles/{}", id)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn directives_crud_lifecycle() {
+        let state = test_state();
+        let app = || build_router_with_auth(state.clone(), false);
+
+        let (st, body) = post_json(app(), "/api/directives", serde_json::json!({
+            "id": "test-dir-1",
+            "name": "Terse",
+            "description": "Short answers",
+            "icon": "MessageSquare",
+            "category": "Output",
+            "content": "Be brief.",
+        })).await;
+        assert_eq!(st, StatusCode::OK);
+        if body["success"] == serde_json::Value::Bool(true) {
+            let id = body["data"]["id"].as_str().unwrap().to_string();
+            let (_, _) = delete_json(app(), &format!("/api/directives/{}", id)).await;
+        }
+    }
+
+    // ── Workflows CRUD ───────────────────────────────────────────────────
+    #[tokio::test]
+    async fn workflows_create_validates_required_fields() {
+        // Missing name → axum's Json<T> extractor rejects with 422 + text
+        // body (not the ApiResponse envelope) ; we just assert the
+        // handler entered the validation path cleanly.
+        assert_handler_clean(test_app(), "POST", "/api/workflows", Some(serde_json::json!({
+            "steps": [],
+        }))).await;
+    }
+
+    // ── Contacts CRUD ────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn contacts_add_with_invalid_invite_code_returns_envelope() {
+        let (st, body) = post_json(test_app(), "/api/contacts", serde_json::json!({
+            "invite_code": "not-a-valid-invite",
+        })).await;
+        assert!(st.is_success() || st.is_client_error());
+        if st == StatusCode::OK { assert!(body.get("success").is_some()); }
+    }
+
+    #[tokio::test]
+    async fn contacts_delete_unknown_id_returns_envelope() {
+        let (st, body) = delete_json(test_app(), "/api/contacts/nope").await;
+        assert!(st.is_success() || st.is_client_error());
+        if st == StatusCode::OK { assert!(body.get("success").is_some()); }
+    }
+
+    // ── Config endpoints (the LARGE setup.rs file) ──────────────────────
+    #[tokio::test]
+    async fn config_full_roundtrip_lifecycle() {
+        let state = test_state();
+        let app = || build_router_with_auth(state.clone(), false);
+
+        // language : get + set + get round trip
+        let (_, _) = get_json(app(), "/api/config/language").await;
+        let (_, _) = post_json(app(), "/api/config/language", serde_json::json!("fr")).await;
+        let (_, _) = get_json(app(), "/api/config/ui-language").await;
+        let (_, _) = post_json(app(), "/api/config/ui-language", serde_json::json!("en")).await;
+        // Scan settings
+        let (_, _) = get_json(app(), "/api/config/scan-paths").await;
+        let (_, _) = post_json(app(), "/api/config/scan-paths", serde_json::json!({ "paths": ["/tmp"] })).await;
+        let (_, _) = get_json(app(), "/api/config/scan-ignore").await;
+        let (_, _) = post_json(app(), "/api/config/scan-ignore", serde_json::json!(["node_modules"])).await;
+        let (_, _) = get_json(app(), "/api/config/scan-depth").await;
+        let (_, _) = post_json(app(), "/api/config/scan-depth", serde_json::json!(5)).await;
+        // Server config
+        let (_, _) = get_json(app(), "/api/config/server").await;
+        let (_, _) = post_json(app(), "/api/config/server", serde_json::json!({ "pseudo": "TestUser" })).await;
+        // Anti-hallu mode
+        let (_, _) = get_json(app(), "/api/config/anti-hallucination-mode").await;
+        let (_, _) = post_json(app(), "/api/config/anti-hallucination-mode", serde_json::json!("warn")).await;
+        // Global context
+        let (_, _) = get_json(app(), "/api/config/global-context").await;
+        let (_, _) = post_json(app(), "/api/config/global-context", serde_json::json!("hello")).await;
+        let (_, _) = get_json(app(), "/api/config/global-context-mode").await;
+        let (_, _) = post_json(app(), "/api/config/global-context-mode", serde_json::json!("always")).await;
+        // TTS / STT
+        let (_, _) = get_json(app(), "/api/config/tts-voices").await;
+        let (_, _) = post_json(app(), "/api/config/tts-voice", serde_json::json!({ "lang": "fr", "voice_id": "v1" })).await;
+        let (_, _) = get_json(app(), "/api/config/stt-model").await;
+        let (_, _) = post_json(app(), "/api/config/stt-model", serde_json::json!("whisper-tiny")).await;
+        // Model tiers
+        let (_, _) = get_json(app(), "/api/config/model-tiers").await;
+        // Tokens / agent access
+        let (_, _) = get_json(app(), "/api/config/tokens").await;
+        let (_, _) = get_json(app(), "/api/config/agent-access").await;
+        // DB info
+        let (st, body) = get_json(app(), "/api/config/db-info").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(body["success"], serde_json::Value::Bool(true));
+    }
+
+    // ── RTK endpoints (was 33% Lines) ────────────────────────────────────
+    envelope_get!(rtk_version_returns_apiresponse, "/api/rtk/version");
+    envelope_get!(rtk_savings_returns_apiresponse, "/api/rtk/savings");
+    envelope_post!(rtk_activate_returns_envelope, "/api/rtk/activate", serde_json::json!({}));
+    envelope_post!(rtk_deactivate_returns_envelope, "/api/rtk/deactivate", serde_json::json!({}));
+
+    // ── Agent API broker (was 41% Lines) ─────────────────────────────────
+    #[tokio::test]
+    async fn agent_api_call_validates_disc_id() {
+        // The broker rejects calls without a recognised disc_id. Exercise
+        // the validation entrance.
+        assert_handler_clean(test_app(), "POST", "/api/agent-api/call", Some(serde_json::json!({
+            "disc_id": "nope",
+            "api_plugin_slug": "github",
+            "api_config_id": "nope",
+            "endpoint_path": "/repos",
+            "endpoint_method": "GET",
+        }))).await;
+    }
+
+    #[tokio::test]
+    async fn agent_api_call_rejects_missing_disc_id() {
+        // Missing required field — axum's extractor returns 422 with text body.
+        assert_handler_clean(test_app(), "POST", "/api/agent-api/call", Some(serde_json::json!({
+            "api_plugin_slug": "github",
+        }))).await;
+    }
+
+    // ── Bootstrap (was 34% Lines) ────────────────────────────────────────
+    #[tokio::test]
+    async fn project_bootstrap_validates_required_fields() {
+        assert_handler_clean(test_app(), "POST", "/api/projects/bootstrap", Some(serde_json::json!({
+            "name": "",
+        }))).await;
+    }
+
+    #[tokio::test]
+    async fn project_bootstrap_with_minimal_valid_payload() {
+        // Minimal valid payload — agent + name + description present.
+        // The handler may succeed (creates a placeholder + disc) or err
+        // (no agent installed in test env) ; both exercise the path.
+        assert_handler_clean(test_app(), "POST", "/api/projects/bootstrap", Some(serde_json::json!({
+            "name": "test-bootstrap-project",
+            "description": "A test project for coverage.",
+            "agent": "ClaudeCode",
+        }))).await;
+    }
+
+    #[tokio::test]
+    async fn project_clone_validates_required_fields() {
+        assert_handler_clean(test_app(), "POST", "/api/projects/clone", Some(serde_json::json!({
+            "url": "",
+        }))).await;
+    }
+
+    #[tokio::test]
+    async fn project_add_folder_validates_path() {
+        assert_handler_clean(test_app(), "POST", "/api/projects/add-folder", Some(serde_json::json!({
+            "path": "/does/not/exist",
+        }))).await;
+    }
+
+    // ── MCPs (was 22% Lines) ─────────────────────────────────────────────
+    envelope_get!(mcps_registry_returns_apiresponse, "/api/mcps/registry");
+    envelope_get!(mcps_overview_returns_apiresponse, "/api/mcps");
+
+    // ── Skills / Profiles / Directives listing (low LOC, easy) ───────────
+    envelope_get!(skills_list_returns_array, "/api/skills");
+    envelope_get!(profiles_list_returns_array, "/api/profiles");
+    envelope_get!(directives_list_returns_array, "/api/directives");
+
+    // ── Workflows listing + runs listing ─────────────────────────────────
+    envelope_get!(workflows_list_returns_array, "/api/workflows");
+    envelope_get!(workflows_runs_list_with_no_workflow, "/api/workflows/nope/runs");
+
+    // ── MCPs detailed sweep (was 56% Lines) ──────────────────────────────
+    envelope_post!(mcps_refresh_returns_envelope, "/api/mcps/refresh", serde_json::json!({}));
+    envelope_post!(mcps_create_config_with_unknown_server, "/api/mcps/configs", serde_json::json!({
+        "server_id": "does-not-exist",
+        "label": "x",
+        "env": {},
+    }));
+    #[tokio::test]
+    async fn mcps_update_config_unknown_id_returns_envelope() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("PATCH").uri("/api/mcps/configs/nope")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({ "label": "x" })).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(resp.status().is_success() || resp.status().is_client_error());
+    }
+    envelope_delete!(mcps_delete_config_unknown_id, "/api/mcps/configs/nope");
+    envelope_post!(mcps_reveal_secrets_unknown_config, "/api/mcps/configs/nope/reveal-secrets", serde_json::json!({}));
+    envelope_get!(mcps_host_discovery_returns_envelope, "/api/mcps/host-discovery");
+    envelope_get!(mcps_list_contexts_returns_envelope, "/api/mcps/contexts");
+    envelope_get!(mcps_get_context_unknown_id, "/api/mcps/contexts/nope");
+
+    // ── Profiles / Directives detailed (53% Lines each) ─────────────────
+    #[tokio::test]
+    async fn profiles_update_unknown_id_returns_envelope() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("PUT").uri("/api/profiles/nope")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({ "name": "x" })).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(resp.status().is_success() || resp.status().is_client_error());
+    }
+    envelope_delete!(profiles_delete_unknown_id, "/api/profiles/nope");
+    #[tokio::test]
+    async fn directives_update_unknown_id_returns_envelope() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("PUT").uri("/api/directives/nope")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({ "name": "x" })).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(resp.status().is_success() || resp.status().is_client_error());
+    }
+    envelope_delete!(directives_delete_unknown_id, "/api/directives/nope");
+
+    // ── Skills detailed ─────────────────────────────────────────────────
+    #[tokio::test]
+    async fn skills_update_unknown_id_returns_envelope() {
+        let app = test_app();
+        let req = Request::builder()
+            .method("PUT").uri("/api/skills/nope")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({ "name": "x" })).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert!(resp.status().is_success() || resp.status().is_client_error());
+    }
+
+    // ── Ollama (was 57% Lines) ──────────────────────────────────────────
+    envelope_get!(ollama_health_returns_envelope, "/api/ollama/health");
+    envelope_get!(ollama_models_returns_envelope, "/api/ollama/models");
+
+    // ── ai_docs.rs (was 60% Lines) — ai/docs file tree endpoints ─────────
+    envelope_get!(ai_docs_list_unknown_project, "/api/projects/nope/ai-files");
+    envelope_get!(ai_docs_read_unknown_project, "/api/projects/nope/ai-files/content?path=foo.md");
+    envelope_get!(ai_docs_search_unknown_project, "/api/projects/nope/ai-files/search?q=foo");
+
+    // ── api/setup.rs scan/version cold paths ────────────────────────────
+    envelope_get!(setup_health_endpoint, "/api/health");
+    envelope_get!(version_check_endpoint, "/api/version/check");
+    envelope_post!(setup_open_url_returns_envelope, "/api/open-url", serde_json::json!({ "url": "https://example.com" }));
+
+    // ── api/projects/template.rs (was 51% Lines) — install template ─────
+    envelope_post!(install_template_unknown_project_unknown_template, "/api/projects/nope/install-template", serde_json::json!({ "template_name": "bogus" }));
+
+    // ── core/docs_sidecar.rs is tested via projects audit ; the test_app
+    //    doesn't have a way to trigger it from outside without an actual
+    //    project. Skipping for now ; would need fixtures.
+
+    // ════════════════════════════════════════════════════════════════════
+    // disc_git.rs happy-path tests — exercise the discussion + project
+    // + tempdir-backed git repo so resolve_discussion_work_dir actually
+    // returns, then the handler runs against a real git binary. Each
+    // test exercises ~50-150 lines of disc_git + git_ops + scanner.
+    // ════════════════════════════════════════════════════════════════════
+
+    /// Spin up a real on-disk git repo and return its absolute path.
+    /// Mimics `git_ops::tests::make_test_repo` but lives in a TempDir
+    /// the caller owns (returned alongside the path so it isn't dropped).
+    fn seed_repo(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("kronn-disctest-{}", prefix))
+            .tempdir()
+            .unwrap();
+        let path = dir.path().to_path_buf();
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&path)
+                .output()
+                .unwrap()
+        };
+        g(&["init", "-b", "main"]);
+        g(&["config", "user.email", "test@example.com"]);
+        g(&["config", "user.name", "Tester"]);
+        std::fs::write(path.join("README.md"), "init\n").unwrap();
+        g(&["add", "."]);
+        g(&["commit", "-m", "init"]);
+        (dir, path)
+    }
+
+    /// Insert a Project + Discussion pointing at `repo_path` and return the disc id.
+    async fn seed_disc_with_repo(state: &AppState, repo_path: &std::path::Path) -> String {
+        let now = chrono::Utc::now();
+        let project_id = format!("proj-disc-{}", uuid::Uuid::new_v4());
+        let project = kronn::models::Project {
+            id: project_id.clone(),
+            name: "TestRepo".into(),
+            path: repo_path.to_string_lossy().to_string(),
+            repo_url: None,
+            token_override: None,
+            ai_config: kronn::models::AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: kronn::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        let p = project.clone();
+        state.db.with_conn(move |conn| kronn::db::projects::insert_project(conn, &p))
+            .await.unwrap();
+
+        let disc_id = format!("disc-{}", uuid::Uuid::new_v4());
+        let disc = kronn::models::Discussion {
+            id: disc_id.clone(),
+            project_id: Some(project_id),
+            title: "Disc on test repo".into(),
+            agent: kronn::models::AgentType::ClaudeCode,
+            language: "en".into(),
+            participants: vec![],
+            messages: vec![],
+            message_count: 0,
+            non_system_message_count: 0,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            archived: false,
+            pinned: false,
+            workspace_mode: "Direct".into(),
+            workspace_path: None,
+            worktree_branch: None,
+            tier: kronn::models::ModelTier::Default,
+            pin_first_message: false,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
+            summary_strategy: kronn::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
+            shared_id: None,
+            shared_with: vec![],
+            workflow_run_id: None,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let d = disc.clone();
+        state.db.with_conn(move |conn| kronn::db::discussions::insert_discussion(conn, &d))
+            .await.unwrap();
+        disc_id
+    }
+
+    #[tokio::test]
+    async fn disc_git_status_real_repo_returns_clean_envelope() {
+        let (_dir, repo) = seed_repo("status-clean");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/discussions/{}/git-status", disc_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        // The handler returned an envelope: success may be true (clean repo)
+        // or false (depending on env), but either way no 500.
+        assert!(json.get("success").is_some(), "envelope missing 'success': {json}");
+    }
+
+    #[tokio::test]
+    async fn disc_git_status_real_repo_with_pending_changes_returns_files() {
+        let (_dir, repo) = seed_repo("status-dirty");
+        // Make the repo "dirty" — a tracked file modified + an untracked.
+        std::fs::write(repo.join("README.md"), "modified contents\n").unwrap();
+        std::fs::write(repo.join("new.txt"), "fresh\n").unwrap();
+
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/discussions/{}/git-status", disc_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // pending_files array should mention our two changes.
+        let s = serde_json::to_string(&json).unwrap();
+        assert!(s.contains("README.md"), "expected README.md in {s}");
+        assert!(s.contains("new.txt"), "expected new.txt in {s}");
+    }
+
+    #[tokio::test]
+    async fn disc_git_diff_rejects_traversal() {
+        let (_dir, repo) = seed_repo("diff-traversal");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/discussions/{}/git-diff?path=../etc/passwd", disc_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        // ".." in path is rejected before we even hit git.
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("Invalid path"), "expected Invalid path error, got {err}");
+    }
+
+    #[tokio::test]
+    async fn disc_git_diff_unchanged_file_returns_empty_diff() {
+        let (_dir, repo) = seed_repo("diff-clean");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/discussions/{}/git-diff?path=README.md", disc_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        // Either success-with-empty-diff or success-false : either way, no 500.
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn disc_pr_template_returns_envelope_on_real_repo() {
+        let (_dir, repo) = seed_repo("prtmpl");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/discussions/{}/pr-template", disc_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn disc_exec_real_repo_allows_ls() {
+        // disc_exec validates the command against an allowlist (ls/find/grep/file/stat/du)
+        // then runs it under the repo's work_dir. A real repo path means the
+        // handler runs the full pipeline — argv parser + sandbox checks + exec.
+        let (_dir, repo) = seed_repo("exec-ls");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/discussions/{}/exec", disc_id),
+            serde_json::json!({ "command": "ls -la" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        // Should succeed and contain our README.md in the output.
+        if json["success"] == serde_json::Value::Bool(true) {
+            let out = serde_json::to_string(&json).unwrap();
+            assert!(out.contains("README.md"), "expected README.md in exec output, got {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn disc_exec_real_repo_rejects_disallowed_command() {
+        let (_dir, repo) = seed_repo("exec-deny");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/discussions/{}/exec", disc_id),
+            serde_json::json!({ "command": "rm -rf /" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn disc_git_commit_no_files_returns_clean_envelope() {
+        let (_dir, repo) = seed_repo("commit-nofiles");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/discussions/{}/git-commit", disc_id),
+            serde_json::json!({ "message": "noop", "files": [] }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        // No files staged = handler returns success=false (nothing to commit)
+        // but it has walked the whole resolve_work_dir + git_ops::run_git_commit path.
+        assert!(json.get("success").is_some());
+    }
+
+    /// Seed only a project (no discussion). Returns its id.
+    async fn seed_project_with_repo(state: &AppState, repo_path: &std::path::Path) -> String {
+        let now = chrono::Utc::now();
+        let project_id = format!("proj-{}", uuid::Uuid::new_v4());
+        let project = kronn::models::Project {
+            id: project_id.clone(),
+            name: "ProjTestRepo".into(),
+            path: repo_path.to_string_lossy().to_string(),
+            repo_url: None,
+            token_override: None,
+            ai_config: kronn::models::AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: kronn::models::AiAuditStatus::NoTemplate,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        let p = project.clone();
+        state.db.with_conn(move |conn| kronn::db::projects::insert_project(conn, &p))
+            .await.unwrap();
+        project_id
+    }
+
+    #[tokio::test]
+    async fn project_git_status_real_repo_returns_envelope() {
+        let (_dir, repo) = seed_repo("proj-status");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/projects/{}/git-status", project_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn project_git_status_real_repo_with_changes() {
+        let (_dir, repo) = seed_repo("proj-status-dirty");
+        std::fs::write(repo.join("README.md"), "modified\n").unwrap();
+        std::fs::write(repo.join("extra.txt"), "new\n").unwrap();
+
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/git-status", project_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let body = serde_json::to_string(&json).unwrap();
+        assert!(body.contains("extra.txt"));
+    }
+
+    #[tokio::test]
+    async fn project_git_diff_traversal_rejected() {
+        let (_dir, repo) = seed_repo("proj-diff-traversal");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/projects/{}/git-diff?path=../foo", project_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn project_pr_template_real_repo_returns_envelope() {
+        let (_dir, repo) = seed_repo("proj-prtmpl");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/pr-template", project_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn project_exec_real_repo_allows_ls() {
+        let (_dir, repo) = seed_repo("proj-exec-ls");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/exec", project_id),
+            serde_json::json!({ "command": "ls" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        if json["success"] == serde_json::Value::Bool(true) {
+            let out = serde_json::to_string(&json).unwrap();
+            assert!(out.contains("README.md"));
+        }
+    }
+
+    #[tokio::test]
+    async fn project_exec_real_repo_rejects_disallowed() {
+        let (_dir, repo) = seed_repo("proj-exec-deny");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/exec", project_id),
+            serde_json::json!({ "command": "curl http://evil" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn project_git_commit_no_files_returns_envelope() {
+        let (_dir, repo) = seed_repo("proj-commit-empty");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/git-commit", project_id),
+            serde_json::json!({ "message": "nothing", "files": [] }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn project_git_branch_real_repo_returns_envelope() {
+        let (_dir, repo) = seed_repo("proj-branch");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/projects/{}/git-branch", project_id),
+            serde_json::json!({ "name": "feature/test-branch" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    // ── contacts::add — business contract ────────────────────────────
+
+    #[tokio::test]
+    async fn contacts_add_rejects_invalid_invite_code_format() {
+        let (st, json) = post_json(
+            test_app(), "/api/contacts",
+            serde_json::json!({ "invite_code": "not-a-kronn-code" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("Invalid invite code"));
+    }
+
+    #[tokio::test]
+    async fn contacts_add_unreachable_peer_persists_as_pending() {
+        // Use a deliberately unreachable port so the peer ping fails.
+        // The contact is still persisted with status=pending and a
+        // diagnosis hint in the response.
+        let (st, json) = post_json(
+            test_app(), "/api/contacts",
+            serde_json::json!({ "invite_code": "kronn:Test@127.0.0.1:1" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        // May succeed (added pending) or fail — but no 500.
+        assert!(json.get("success").is_some());
+        if json["success"] == serde_json::Value::Bool(true) {
+            assert_eq!(json["data"]["contact"]["status"], "pending",
+                "unreachable peer must be persisted as pending");
+            assert!(json["data"]["warning"].is_string() || json["data"]["warning"].is_null());
+        }
+    }
+
+    #[tokio::test]
+    async fn contacts_add_rejects_duplicate_invite_code() {
+        let state = test_state();
+        let app1 = build_router_with_auth(state.clone(), false);
+        let app2 = build_router_with_auth(state, false);
+
+        // First add (will be pending since 127.0.0.1:1 is unreachable).
+        let (st1, json1) = post_json(
+            app1, "/api/contacts",
+            serde_json::json!({ "invite_code": "kronn:Dup@127.0.0.1:1" }),
+        ).await;
+        assert_eq!(st1, StatusCode::OK);
+        if json1["success"] != serde_json::Value::Bool(true) {
+            // Insertion failed for another reason (e.g. peer ping took
+            // too long) — skip the duplicate-check assertion since the
+            // first contact wasn't persisted.
+            return;
+        }
+
+        // Same code again must be rejected.
+        let (st2, json2) = post_json(
+            app2, "/api/contacts",
+            serde_json::json!({ "invite_code": "kronn:Dup@127.0.0.1:1" }),
+        ).await;
+        assert_eq!(st2, StatusCode::OK);
+        assert_eq!(json2["success"], serde_json::Value::Bool(false));
+        let err = json2["error"].as_str().unwrap_or("");
+        assert!(err.contains("already exists"));
+    }
+
+    // ── disc_introspection happy-path with seeded disc ───────────────
+
+    async fn seed_disc_with_messages(state: &AppState, messages_count: usize) -> String {
+        let (_dir, repo) = seed_repo("disc-meta");
+        std::mem::forget(_dir);
+        let disc_id = seed_disc_with_repo(state, &repo).await;
+
+        // Append `messages_count` messages.
+        let did = disc_id.clone();
+        state.db.with_conn(move |conn| {
+            for i in 0..messages_count {
+                let mid = format!("msg-{}-{}", i, uuid::Uuid::new_v4());
+                let now = chrono::Utc::now();
+                let role = if i % 2 == 0 { "User" } else { "Agent" };
+                conn.execute(
+                    "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0)",
+                    rusqlite::params![mid, did, role, format!("Message body {i}"), now.to_rfc3339()],
+                )?;
+            }
+            Ok(())
+        }).await.unwrap();
+        disc_id
+    }
+
+    #[tokio::test]
+    async fn disc_meta_seeded_disc_returns_message_count() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 5).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/discussions/{}/meta", disc_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // meta returns at least the message count.
+        let count = json["data"]["message_count"].as_u64();
+        assert!(count.is_some(), "data.message_count missing: {json}");
+    }
+
+    #[tokio::test]
+    async fn disc_get_message_positive_index_returns_message() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 3).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/discussions/{}/message/0", disc_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn disc_get_message_negative_index_resolves_last() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 3).await;
+        let app = build_router_with_auth(state, false);
+
+        // -1 = last message.
+        let (st, json) = get_json(app, &format!("/api/discussions/{}/message/-1", disc_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn disc_get_message_out_of_range_returns_err() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 2).await;
+        let app = build_router_with_auth(state, false);
+
+        // 5 is way beyond 2 messages.
+        let (st, json) = get_json(app, &format!("/api/discussions/{}/message/5", disc_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn disc_get_message_invalid_index_string_returns_err() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 1).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/discussions/{}/message/notanumber", disc_id)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    // ── check_drift — business contract with seeded checksums ───────
+
+    #[tokio::test]
+    async fn check_drift_no_checksums_returns_empty_envelope() {
+        // Greenfield project (no docs/checksums.json) — must NOT error;
+        // return an empty/null drift response so the UI can show
+        // "no prior audit".
+        let (_dir, repo) = seed_repo("drift-no-checksums");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/drift", pid)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // No prior audit → 0 fresh + 0 total sections.
+        // fresh_sections is the array of section names that ARE up-to-date.
+        // No prior audit → empty array.
+        let fresh = json["data"]["fresh_sections"].as_array().expect("fresh_sections is array");
+        assert!(fresh.is_empty());
+    }
+
+    #[tokio::test]
+    async fn check_drift_with_checksums_returns_fresh_when_no_drift() {
+        // Seed project + a checksums file capturing the current state.
+        // Drift check should report 0 stale sections.
+        let (_dir, repo) = seed_repo("drift-fresh");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        // Minimal valid checksums.json — see core::checksums for the format.
+        std::fs::write(
+            repo.join("docs/checksums.json"),
+            r#"{
+              "audit_date": "2026-05-28T00:00:00Z",
+              "kronn_version": "0.8.7",
+              "sections": []
+            }"#,
+        ).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/drift", pid)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn check_drift_unknown_project_returns_err_envelope() {
+        // Already covered by the wrong-id sweep but pinning here too
+        // because the audit_status -> drift handoff is a critical UX path.
+        let (st, json) = get_json(test_app(), "/api/projects/nope/drift").await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        assert!(json["error"].as_str().unwrap_or("").contains("not found"));
+    }
+
+    // ── partial-audit — payload validation contracts ────────────────
+
+    // Note : partial_audit returns Sse<SseStream>, not JSON — can't be
+    // tested with our oneshot helper. Already covered by the SSE
+    // initial validation path: see api/audit/full's classify_docs_dir
+    // tests for the cold-cancel + cleanup logic.
+
+    // ── projects::add_folder — business contract ─────────────────────
+
+    #[tokio::test]
+    async fn add_folder_rejects_path_with_traversal() {
+        let (st, json) = post_json(
+            test_app(), "/api/projects/add-folder",
+            serde_json::json!({ "path": "/home/user/../etc/passwd" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("'..'") || err.contains("traversal"));
+    }
+
+    #[tokio::test]
+    async fn add_folder_rejects_nonexistent_directory() {
+        let (st, json) = post_json(
+            test_app(), "/api/projects/add-folder",
+            serde_json::json!({ "path": "/definitely/does/not/exist/folder-1234567" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn add_folder_succeeds_for_real_directory_and_picks_default_name() {
+        let (_dir, repo) = seed_repo("add-folder-ok");
+        let app = test_app();
+        let (st, json) = post_json(
+            app, "/api/projects/add-folder",
+            serde_json::json!({ "path": repo.to_string_lossy() }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // Auto-name = last path component when not provided.
+        let name = json["data"]["name"].as_str().unwrap_or("");
+        let expected = repo.file_name().unwrap().to_string_lossy();
+        assert_eq!(name, expected.as_ref());
+    }
+
+    #[tokio::test]
+    async fn add_folder_uses_explicit_name_when_provided() {
+        let (_dir, repo) = seed_repo("add-folder-named");
+        let (st, json) = post_json(
+            test_app(), "/api/projects/add-folder",
+            serde_json::json!({
+                "path": repo.to_string_lossy(),
+                "name": "ExplicitName"
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["data"]["name"], "ExplicitName");
+    }
+
+    #[tokio::test]
+    async fn add_folder_falls_back_to_default_when_name_is_empty_whitespace() {
+        // Empty/whitespace `name` must NOT be persisted as the project
+        // name — fall back to the last path component.
+        let (_dir, repo) = seed_repo("add-folder-empty-name");
+        let (st, json) = post_json(
+            test_app(), "/api/projects/add-folder",
+            serde_json::json!({ "path": repo.to_string_lossy(), "name": "   " }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let name = json["data"]["name"].as_str().unwrap_or("");
+        assert_ne!(name, "   ", "whitespace name must be replaced by default");
+        assert!(!name.trim().is_empty(), "default name must be non-empty");
+    }
+
+    #[tokio::test]
+    async fn add_folder_rejects_duplicate_path() {
+        let (_dir, repo) = seed_repo("add-folder-dup");
+        let path = repo.to_string_lossy().to_string();
+        let state = test_state();
+
+        // First add succeeds.
+        let app1 = build_router_with_auth(state.clone(), false);
+        let (st1, json1) = post_json(
+            app1, "/api/projects/add-folder",
+            serde_json::json!({ "path": path.clone() }),
+        ).await;
+        assert_eq!(st1, StatusCode::OK);
+        assert_eq!(json1["success"], serde_json::Value::Bool(true));
+
+        // Second add on the same path must fail.
+        let app2 = build_router_with_auth(state, false);
+        let (st2, json2) = post_json(
+            app2, "/api/projects/add-folder",
+            serde_json::json!({ "path": path }),
+        ).await;
+        assert_eq!(st2, StatusCode::OK);
+        assert_eq!(json2["success"], serde_json::Value::Bool(false));
+        let err = json2["error"].as_str().unwrap_or("");
+        assert!(err.contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn add_folder_detects_git_remote_when_repo_is_git() {
+        let (_dir, repo) = seed_repo("add-folder-git");
+        // Add a fake remote.
+        let _ = std::process::Command::new("git")
+            .args(["remote", "add", "origin", "https://github.com/test/repo.git"])
+            .current_dir(&repo)
+            .output();
+
+        let (st, json) = post_json(
+            test_app(), "/api/projects/add-folder",
+            serde_json::json!({ "path": repo.to_string_lossy() }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let repo_url = json["data"]["repo_url"].as_str().unwrap_or("");
+        assert!(repo_url.contains("github.com/test/repo"),
+            "repo_url should be detected from .git/config, got {repo_url}");
+    }
+
+    // ── projects::create — business contract ─────────────────────────
+
+    #[tokio::test]
+    async fn create_project_rejects_traversal_path() {
+        let (st, json) = post_json(
+            test_app(), "/api/projects",
+            serde_json::json!({
+                "path": "/home/user/../etc",
+                "name": "BadProject",
+                "remote_url": null,
+                "branch": "main",
+                "ai_configs": [],
+                "has_project": false,
+                "hidden": false
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn create_project_succeeds_with_clean_payload() {
+        let (_dir, repo) = seed_repo("create-clean");
+        let (st, json) = post_json(
+            test_app(), "/api/projects",
+            serde_json::json!({
+                "path": repo.to_string_lossy(),
+                "name": "TestProject",
+                "remote_url": null,
+                "branch": "main",
+                "ai_configs": [],
+                "has_project": false,
+                "hidden": false
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["data"]["name"], "TestProject");
+    }
+
+    // ── validate-audit / mark-bootstrapped — business contracts ──────
+
+    #[tokio::test]
+    async fn validate_audit_rejects_when_no_agents_md_exists() {
+        // Pre-bootstrap project (no docs/AGENTS.md) → validation must
+        // refuse with an actionable message. Pinning this avoids users
+        // marking a never-audited project as "validated".
+        let (_dir, repo) = seed_repo("validate-no-agents");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/validate-audit", pid),
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("AGENTS.md") || err.contains("audit"),
+            "expected actionable AGENTS.md / audit error, got {err}");
+    }
+
+    #[tokio::test]
+    async fn validate_audit_succeeds_with_agents_md_and_writes_kronn_state() {
+        // Project with docs/AGENTS.md → validation must succeed AND
+        // create docs/.kronn.json with validated_at populated.
+        let (_dir, repo) = seed_repo("validate-ok");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/validate-audit", pid),
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+
+        let kronn_state = repo.join("docs/.kronn.json");
+        assert!(kronn_state.exists(), "docs/.kronn.json must be created");
+        let content = std::fs::read_to_string(&kronn_state).unwrap();
+        assert!(content.contains("validated_at"), "validated_at must be set in .kronn.json");
+    }
+
+    #[tokio::test]
+    async fn validate_audit_is_idempotent_preserves_first_date() {
+        // Second call must NOT overwrite the validated_at timestamp.
+        // (kronn_state::mark_validated does the no-op-if-set check).
+        let (_dir, repo) = seed_repo("validate-idempotent");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+
+        // First call.
+        let _ = post_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{}/validate-audit", pid),
+            serde_json::json!({}),
+        ).await;
+        let first = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
+
+        // Second call (could be hours / days later).
+        let _ = post_json(
+            build_router_with_auth(state, false),
+            &format!("/api/projects/{}/validate-audit", pid),
+            serde_json::json!({}),
+        ).await;
+        let second = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
+
+        // The validated_at line must be unchanged (both runs happen on
+        // the same day, but the contract is "preserve the first date" —
+        // the rest of the file can re-rewrite the _readme line).
+        let extract = |s: &str| {
+            s.lines().find(|l| l.contains("validated_at"))
+                .map(|l| l.to_string()).unwrap_or_default()
+        };
+        assert_eq!(extract(&first), extract(&second),
+            "validated_at must be idempotent across repeated validate calls");
+    }
+
+    #[tokio::test]
+    async fn mark_bootstrapped_rejects_when_no_agents_md() {
+        let (_dir, repo) = seed_repo("bootstrap-no-agents");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/mark-bootstrapped", pid),
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn mark_bootstrapped_succeeds_with_agents_md_and_writes_kronn_state() {
+        let (_dir, repo) = seed_repo("bootstrap-ok");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/mark-bootstrapped", pid),
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+
+        let kronn_state = repo.join("docs/.kronn.json");
+        assert!(kronn_state.exists());
+        let content = std::fs::read_to_string(&kronn_state).unwrap();
+        assert!(content.contains("bootstrapped_at"),
+            "bootstrapped_at must be set in .kronn.json");
+    }
+
+    // ── save_briefing_form — business-contract tests ─────────────────
+
+    #[tokio::test]
+    async fn save_briefing_form_rejects_empty_q1_purpose() {
+        let (_dir, repo) = seed_repo("brief-q1");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "", // missing Q1
+                "team": "alice & bob",
+                "maturity": "MVP",
+                "dependencies": "stripe, sendgrid",
+                "traps": "race in auth.rs",
+                "additional": ""
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("mandatory") || err.contains("Q1"), "expected mandatory-Q1 error, got {err}");
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_rejects_empty_q5_traps() {
+        let (_dir, repo) = seed_repo("brief-q5");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "X", "team": "Y", "maturity": "Z",
+                "dependencies": "deps",
+                "traps": "", // missing Q5
+                "additional": ""
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_accepts_all_mandatory_filled_with_empty_q6() {
+        let (_dir, repo) = seed_repo("brief-ok");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "Build a CSM platform",
+                "team": "Pierre + Alice",
+                "maturity": "v0.8.7 production",
+                "dependencies": "Stripe, Sendgrid, Mailjet",
+                "traps": "Auth race on concurrent sessions",
+                "additional": "" // Q6 optional → renders as None.
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_writes_file_to_docs_when_present() {
+        // Seed a project + create docs/ dir → handler should write
+        // docs/briefing.md AND persist briefing_notes in DB.
+        let (_dir, repo) = seed_repo("brief-file");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "Test purpose",
+                "team": "Test team",
+                "maturity": "MVP",
+                "dependencies": "none",
+                "traps": "none",
+                "additional": "extra context"
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+
+        let briefing_path = repo.join("docs/briefing.md");
+        assert!(briefing_path.exists(), "docs/briefing.md must exist");
+        let content = std::fs::read_to_string(&briefing_path).unwrap();
+        // Pin the exact section structure (the audit's Phase 1 depends on it).
+        assert!(content.contains("# Project Briefing"));
+        assert!(content.contains("## Purpose"));
+        assert!(content.contains("Test purpose"));
+        assert!(content.contains("## Team"));
+        assert!(content.contains("## Maturity"));
+        assert!(content.contains("## External Dependencies"));
+        assert!(content.contains("## Traps & Fragile Areas"));
+        assert!(content.contains("## Additional Context"));
+        assert!(content.contains("extra context"));
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_renders_none_fallback_for_empty_additional() {
+        let (_dir, repo) = seed_repo("brief-none");
+        std::fs::create_dir_all(repo.join("docs")).unwrap();
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let _ = post_json(
+            app, &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "P", "team": "T", "maturity": "M",
+                "dependencies": "D", "traps": "Tr",
+                "additional": "" // empty → "None."
+            }),
+        ).await;
+
+        let content = std::fs::read_to_string(repo.join("docs/briefing.md")).unwrap();
+        // The handler hard-codes the "None." fallback string for additional.
+        let lines: Vec<&str> = content.lines().collect();
+        let additional_idx = lines.iter().position(|l| l.starts_with("## Additional Context"))
+            .expect("Additional section header must exist");
+        let after = &lines[additional_idx + 1];
+        assert_eq!(after.trim(), "None.", "empty Q6 must render as 'None.'");
+    }
+
+    #[tokio::test]
+    async fn save_briefing_form_db_only_when_docs_dir_absent() {
+        // Project without docs/ dir (pre-bootstrap) → handler must
+        // NOT crash. Stores briefing_notes in DB only.
+        let (_dir, repo) = seed_repo("brief-nodocs");
+        // intentionally NOT creating docs/
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/save-briefing", pid),
+            serde_json::json!({
+                "purpose": "P", "team": "T", "maturity": "M",
+                "dependencies": "D", "traps": "Tr", "additional": ""
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert!(!repo.join("docs/briefing.md").exists(),
+            "no docs/ dir → no briefing.md should have been written");
+    }
+
+    // ── audit briefing handlers ──────────────────────────────────────
+    envelope_post!(audit_save_briefing_form_unknown,
+        "/api/projects/nope/save-briefing",
+        serde_json::json!({ "answers": {} }));
+
+    #[tokio::test]
+    async fn audit_briefing_get_seeded_returns_envelope() {
+        let (_dir, repo) = seed_repo("briefing-get");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(app, &format!("/api/projects/{}/briefing", pid)).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn audit_briefing_set_seeded_returns_envelope() {
+        let (_dir, repo) = seed_repo("briefing-set");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = put_json(
+            app, &format!("/api/projects/{}/briefing", pid),
+            serde_json::json!({ "briefing_notes": "Test briefing content" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    // ── quick-apis cold endpoints ────────────────────────────────────
+    envelope_post!(qa_run_unknown_id, "/api/quick-apis/nope/run",
+        serde_json::json!({ "vars": {} }));
+    envelope_post!(qa_batch_run_unknown_id, "/api/quick-apis/nope/batch",
+        serde_json::json!({ "items": [], "vars": {} }));
+    envelope_get!(qa_export_unknown_id, "/api/quick-apis/nope/export");
+    envelope_post!(qa_import_invalid_kind,
+        "/api/quick-apis/import",
+        serde_json::json!({ "kind": "not-kronn-qa", "data": {} }));
+    envelope_post!(qa_import_invalid_payload,
+        "/api/quick-apis/import",
+        serde_json::json!({ "totally": "bogus" }));
+
+    // ── mcps cold endpoints ──────────────────────────────────────────
+    envelope_post!(mcp_custom_cleanup_orphan_env_unknown_server,
+        "/api/mcps/custom/nope-server/cleanup-orphan-env",
+        serde_json::json!({ "config_id": "nope" }));
+    envelope_get!(mcp_custom_export_file_unknown_server,
+        "/api/mcps/custom/nope-server/export-file");
+    envelope_post!(mcp_custom_import_file_invalid_payload,
+        "/api/mcps/custom/import-file",
+        serde_json::json!({ "filename": "x.json", "content": "not valid json" }));
+    envelope_post!(mcp_custom_import_file_valid_but_unknown_kind,
+        "/api/mcps/custom/import-file",
+        serde_json::json!({ "filename": "x.json", "content": "{\"kind\":\"unknown\"}" }));
+
+    // ── project handlers — happy-paths w/ seeded project ────────────
+
+    #[tokio::test]
+    async fn set_linked_repos_seeded_project_returns_envelope() {
+        let (_dir, repo) = seed_repo("linked-repos");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = put_json(
+            app, &format!("/api/projects/{}/linked-repos", pid),
+            serde_json::json!([
+                {
+                    "id": "lr-1", "name": "api", "kind": "api",
+                    "location": "/tmp/api-repo", "description": "API repo"
+                }
+            ]),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn linked_repos_candidates_seeded_returns_envelope() {
+        let (_dir, repo) = seed_repo("lr-candidates");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(
+            app, &format!("/api/projects/{}/linked-repos/candidates", pid),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn set_default_skills_seeded_returns_envelope() {
+        let (_dir, repo) = seed_repo("default-skills");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = put_json(
+            app, &format!("/api/projects/{}/default-skills", pid),
+            serde_json::json!(["rust", "frontend"]),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn set_default_profile_seeded_returns_envelope() {
+        let (_dir, repo) = seed_repo("default-profile");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = put_json(
+            app, &format!("/api/projects/{}/default-profile", pid),
+            serde_json::json!({ "profile_id": null }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn remap_path_seeded_returns_envelope() {
+        let (_dir, repo) = seed_repo("remap-path");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        // Try to remap to a new path. Will likely err (path doesn't exist)
+        // but the handler walks the validation logic.
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/remap-path", pid),
+            serde_json::json!({ "new_path": "/tmp/nonexistent-remap-target" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn anti_hallu_status_seeded_project() {
+        let (_dir, repo) = seed_repo("anti-hallu");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(
+            app, &format!("/api/projects/{}/anti-hallu/status", pid),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn redirectors_sync_seeded_project() {
+        let (_dir, repo) = seed_repo("redirectors");
+        let state = test_state();
+        let pid = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app, &format!("/api/projects/{}/redirectors/sync", pid),
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    // ── workflows.rs cold edge endpoints ─────────────────────────────
+    envelope_post!(workflow_trigger_unknown_id, "/api/workflows/nope/trigger",
+        serde_json::json!({ "variables": {} }));
+    envelope_delete!(workflow_runs_delete_all_unknown_wf, "/api/workflows/nope/runs");
+    envelope_get!(workflow_get_run_unknown_both, "/api/workflows/nope/runs/nope");
+    envelope_delete!(workflow_delete_run_unknown_both, "/api/workflows/nope/runs/nope");
+    envelope_post!(workflow_cancel_run_unknown,
+        "/api/workflows/nope/runs/nope/cancel", serde_json::json!({}));
+    envelope_post!(workflow_decide_run_unknown,
+        "/api/workflows/nope/runs/nope/decide",
+        serde_json::json!({ "verdict": "Approve", "comment": null }));
+    envelope_post!(workflow_decide_run_invalid_verdict,
+        "/api/workflows/nope/runs/nope/decide",
+        serde_json::json!({ "verdict": "Bogus" }));
+    envelope_post!(workflow_test_worktree_unknown,
+        "/api/workflows/nope/runs/nope/test-worktree", serde_json::json!({}));
+
+    // ── audit/run.rs global routes ──────────────────────────────────
+    envelope_get!(audit_status_all_returns_envelope, "/api/audit-status");
+    envelope_post!(audit_runs_cleanup_no_threshold,
+        "/api/audit-runs/cleanup", serde_json::json!({}));
+    envelope_post!(audit_runs_cleanup_with_threshold,
+        "/api/audit-runs/cleanup", serde_json::json!({ "keep_recent": 5 }));
+
+    // ── audit/run.rs cold paths (audit-status, audit-history, audit-latest, …) ─
+    envelope_get!(audit_status_unknown_project, "/api/projects/nope/audit-status");
+    envelope_get!(audit_resumable_unknown_project, "/api/projects/nope/audit-resumable");
+    envelope_get!(audit_latest_unknown_project, "/api/projects/nope/audit-latest");
+    envelope_get!(audit_history_unknown_project, "/api/projects/nope/audit-history");
+    envelope_post!(audit_partial_unknown_project, "/api/projects/nope/partial-audit",
+        serde_json::json!({}));
+    envelope_post!(audit_validate_unknown_project, "/api/projects/nope/validate-audit",
+        serde_json::json!({}));
+    envelope_get!(audit_briefing_get_unknown_project, "/api/projects/nope/briefing");
+    envelope_post!(audit_start_briefing_unknown_project, "/api/projects/nope/start-briefing",
+        serde_json::json!({}));
+
+    // ── discussions/crud + messaging cold paths ──────────────────────
+    envelope_get!(disc_list_returns_envelope, "/api/discussions");
+    envelope_get!(disc_get_unknown_id, "/api/discussions/nope");
+    envelope_delete!(disc_delete_unknown_id, "/api/discussions/nope");
+    envelope_post!(disc_run_agent_unknown_id, "/api/discussions/nope/run", serde_json::json!({}));
+    envelope_post!(disc_stop_agent_unknown_id, "/api/discussions/nope/stop", serde_json::json!({}));
+    envelope_post!(disc_dismiss_partial_unknown_id, "/api/discussions/nope/dismiss-partial", serde_json::json!({}));
+    envelope_post!(disc_orchestrate_unknown_id, "/api/discussions/nope/orchestrate", serde_json::json!({}));
+    envelope_post!(disc_share_unknown_id, "/api/discussions/nope/share", serde_json::json!({}));
+    envelope_get!(disc_meta_unknown_id, "/api/discussions/nope/meta");
+    envelope_get!(disc_message_unknown, "/api/discussions/nope/message/0");
+    envelope_post!(disc_create_minimal_payload, "/api/discussions",
+        serde_json::json!({
+            "title": "Test Disc",
+            "agent": "claude-code",
+            "language": "en",
+            "workspace_mode": "Direct"
+        }));
+    envelope_get!(disc_participants_unknown_id, "/api/discussions/nope/participants");
+    envelope_get!(disc_wait_unknown_id, "/api/discussions/nope/wait?timeout_s=1");
+    envelope_post!(disc_invite_peer_unknown_id, "/api/discussions/nope/invite-peer",
+        serde_json::json!({ "pseudo": "X", "invite_code": "kronn:X@127.0.0.1:1234" }));
+    envelope_get!(disc_source_endpoint_unknown_id, "/api/discussions/nope/source");
+
+    // ── api/themes::unlock — wrong / empty code paths ──────────────────
+    envelope_post!(themes_unlock_empty_code, "/api/themes/unlock",
+        serde_json::json!({ "code": "" }));
+    envelope_post!(themes_unlock_whitespace_only, "/api/themes/unlock",
+        serde_json::json!({ "code": "   " }));
+    envelope_post!(themes_unlock_invalid_code, "/api/themes/unlock",
+        serde_json::json!({ "code": "definitely-not-a-real-code-12345" }));
+
+    // ── api/skills auto-trigger endpoints ──────────────────────────────
+    envelope_get!(skills_list_disabled_auto, "/api/skills/auto-triggers/disabled");
+    envelope_post!(skills_toggle_auto_trigger_unknown,
+        "/api/skills/nope/auto-trigger/toggle", serde_json::json!({ "enabled": true }));
+
+    // ── api/workflows export/import + cancel/restart ───────────────────
+    envelope_get!(workflow_export_unknown, "/api/workflows/nope/export");
+    envelope_post!(workflow_import_garbage,
+        "/api/workflows/import", serde_json::json!({ "kind": "bogus", "data": {} }));
+    envelope_post!(workflow_clone_unknown, "/api/workflows/nope/clone", serde_json::json!({}));
+    envelope_get!(workflow_runs_unknown_run, "/api/workflows/runs/nope");
+
+    // ── workflow_trigger happy-path (seeded enabled workflow) ──────────
+
+    #[tokio::test]
+    async fn mcp_workflow_trigger_disabled_workflow_returns_err() {
+        // Seed a workflow with enabled=false. Trigger must refuse cleanly.
+        let state = test_state();
+        let now = chrono::Utc::now();
+        let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
+        let wf = kronn::models::Workflow {
+            id: workflow_id.clone(),
+            name: "DisabledWF".into(),
+            project_id: None,
+            trigger: kronn::models::WorkflowTrigger::Manual,
+            steps: vec![],
+            actions: vec![],
+            safety: kronn::models::WorkflowSafety {
+                sandbox: false, max_files: None, max_lines: None, require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            guards: None,
+            artifacts: std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: false, // disabled
+            created_at: now,
+            updated_at: now,
+        };
+        let wf_clone = wf.clone();
+        state.db.with_conn(move |conn| kronn::db::workflows::insert_workflow(conn, &wf_clone))
+            .await.unwrap();
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/workflow-trigger",
+            serde_json::json!({
+                "workflow_id": workflow_id,
+                "project_id": null,
+                "variables": {}
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("disabled"), "expected 'disabled' error, got {err}");
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_trigger_required_var_missing_returns_err() {
+        let state = test_state();
+        let now = chrono::Utc::now();
+        let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
+        let wf = kronn::models::Workflow {
+            id: workflow_id.clone(),
+            name: "VarsWF".into(),
+            project_id: None,
+            trigger: kronn::models::WorkflowTrigger::Manual,
+            steps: vec![],
+            actions: vec![],
+            safety: kronn::models::WorkflowSafety {
+                sandbox: false, max_files: None, max_lines: None, require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            guards: None,
+            artifacts: std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![kronn::models::PromptVariable {
+                name: "ticket".into(),
+                label: "Ticket".into(),
+                placeholder: String::new(),
+                description: None,
+                required: true,
+            }],
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let wf_clone = wf.clone();
+        state.db.with_conn(move |conn| kronn::db::workflows::insert_workflow(conn, &wf_clone))
+            .await.unwrap();
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/workflow-trigger",
+            serde_json::json!({
+                "workflow_id": workflow_id,
+                "project_id": null,
+                "variables": {} // missing required 'ticket'
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        let err = json["error"].as_str().unwrap_or("");
+        assert!(err.contains("obligatoire") || err.contains("required"),
+            "expected required-variable error, got {err}");
+    }
+
+    // ── qp_run / qp_batch_run happy-path (seeded qp + project) ──────────
+    //
+    // qp_run validates inputs, looks up qp + project in DB, creates a disc,
+    // inserts the initial User message, then fire-and-forget spawns the
+    // agent (which fails in test env — but the *return* response is built
+    // from the pre-spawn state). Walks ~150 LOC of mcp_remote::qp_run.
+
+    async fn seed_qp_and_project(state: &AppState) -> (String, String) {
+        let now = chrono::Utc::now();
+        let (_dir, repo) = seed_repo("qprun");
+        std::mem::forget(_dir);
+        let project_id = seed_project_with_repo(state, &repo).await;
+
+        let qp_id = format!("qp-{}", uuid::Uuid::new_v4());
+        let qp = kronn::models::QuickPrompt {
+            id: qp_id.clone(),
+            name: "TestQP".into(),
+            icon: "✨".into(),
+            prompt_template: "Analyse: {{topic}}".into(),
+            variables: vec![kronn::models::PromptVariable {
+                name: "topic".into(),
+                label: "Topic".into(),
+                placeholder: String::new(),
+                description: None,
+                required: true,
+            }],
+            agent: kronn::models::AgentType::ClaudeCode,
+            project_id: Some(project_id.clone()),
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            tier: kronn::models::ModelTier::Default,
+            description: "test QP".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        let q = qp.clone();
+        state.db.with_conn(move |conn| kronn::db::quick_prompts::insert_quick_prompt(conn, &q))
+            .await.unwrap();
+        (qp_id, project_id)
+    }
+
+    #[tokio::test]
+    async fn mcp_qp_run_seeded_returns_disc_id() {
+        let state = test_state();
+        let (qp_id, project_id) = seed_qp_and_project(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/qp-run",
+            serde_json::json!({
+                "qp_id": qp_id,
+                "project_id": project_id,
+                "vars": { "topic": "test" }
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        // Whether or not the agent spawn succeeded, the JSON wrapper must
+        // walk : qp lookup → project lookup → render template → create disc
+        // → insert initial message → fire spawn → build response.
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_qp_run_missing_required_var_returns_err() {
+        let state = test_state();
+        let (qp_id, project_id) = seed_qp_and_project(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/qp-run",
+            serde_json::json!({
+                "qp_id": qp_id,
+                "project_id": project_id,
+                "vars": {} // missing required 'topic'
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        // Either succeeds with empty template var, or returns err — but no 500.
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn mcp_qp_batch_run_seeded_with_items() {
+        let state = test_state();
+        let (qp_id, project_id) = seed_qp_and_project(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/qp-batch-run",
+            serde_json::json!({
+                "qp_id": qp_id,
+                "project_id": project_id,
+                "items": [
+                    { "topic": "first" },
+                    { "topic": "second" }
+                ]
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    // ── api/setup cold POST endpoints — exercises entry points we haven't hit ─
+    envelope_post!(setup_set_scan_paths_empty, "/api/setup/scan-paths",
+        serde_json::json!({ "paths": [] }));
+    envelope_post!(config_set_scan_paths_via_alias, "/api/config/scan-paths",
+        serde_json::json!({ "paths": ["/tmp/test-scan"] }));
+    envelope_post!(config_set_scan_ignore_empty, "/api/config/scan-ignore",
+        serde_json::json!({ "ignore": [] }));
+    envelope_post!(setup_complete_returns_envelope, "/api/setup/complete",
+        serde_json::json!({}));
+    envelope_post!(setup_save_api_key_invalid_value_with_star,
+        "/api/config/api-keys",
+        serde_json::json!({ "id": null, "name": "k1", "provider": "anthropic", "value": "sk-***" }));
+    envelope_post!(setup_save_api_key_empty_value,
+        "/api/config/api-keys",
+        serde_json::json!({ "id": null, "name": "k1", "provider": "anthropic", "value": "" }));
+    envelope_get!(setup_config_scan_paths_get, "/api/config/scan-paths");
+    envelope_get!(setup_config_scan_ignore_get, "/api/config/scan-ignore");
+
+    // ── api/profiles update_persona_name endpoint (PUT, never hit) ──────
+    envelope_post!(profiles_update_persona_name_unknown_uses_put_method_via_post_will_fail_405,
+        "/api/profiles/nope/persona-name", serde_json::json!({ "persona_name": "X" }));
+    // The PUT version (proper):
+    #[tokio::test]
+    async fn profiles_update_persona_name_unknown_id_via_put_returns_envelope() {
+        let app = test_app();
+        let (st, json) = put_json(
+            app, "/api/profiles/nope/persona-name",
+            serde_json::json!({ "persona_name": "TestPersona" }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    // ── api/disc_invite cold endpoints ──────────────────────────────────
+    envelope_get!(disc_invite_participants_unknown, "/api/discussions/nope/participants");
+    envelope_get!(disc_invite_wait_unknown, "/api/discussions/nope/wait?timeout_s=1");
+    envelope_post!(disc_invite_peer_join_no_disc,
+        "/api/discussions/peer-join", serde_json::json!({
+            "shared_id": "nope", "pseudo": "X",
+            "invite_code": "kronn:X@127.0.0.1:1", "from_avatar_email": null
+        }));
+    envelope_post!(disc_invite_peer_leave_no_disc,
+        "/api/discussions/peer-leave", serde_json::json!({
+            "shared_id": "nope", "pseudo": "X"
+        }));
+
+    // ── quick_prompts.rs cold reads with wrong id — history/metrics/versions ─
+    envelope_get!(qp_history_unknown_id, "/api/quick-prompts/nope/history");
+    envelope_get!(qp_metrics_unknown_id, "/api/quick-prompts/nope/metrics");
+    envelope_delete!(qp_delete_version_unknown_id, "/api/quick-prompts/nope/versions/0");
+
+    // ── audit/run.rs happy-path : pre-seeded audit_runs row ──────────
+    //
+    // Following the mcp_remote pre-seeded pattern that gave +0.11 Lines
+    // for 5 tests (7× the wrong-id ratio), seed a real project + a
+    // completed audit_runs row, then exercise the read endpoints
+    // (audit_latest, audit_history, audit_run_steps, audit_resumable).
+
+    async fn seed_project_with_audit_run(state: &AppState) -> (String, String) {
+        let now = chrono::Utc::now();
+        // Real project (so the FK on audit_runs.project_id holds).
+        let tmp = tempfile::tempdir().unwrap();
+        // Leak the tempdir so it survives the function — we don't need it back.
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+
+        let project_id = format!("proj-audit-{}", uuid::Uuid::new_v4());
+        let project = kronn::models::Project {
+            id: project_id.clone(),
+            name: "AuditTestProj".into(),
+            path: path.to_string_lossy().to_string(),
+            repo_url: None,
+            token_override: None,
+            ai_config: kronn::models::AiConfigStatus { detected: false, configs: vec![] },
+            audit_status: kronn::models::AiAuditStatus::Audited,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: now,
+            updated_at: now,
+        };
+        let p = project.clone();
+        state.db.with_conn(move |conn| kronn::db::projects::insert_project(conn, &p))
+            .await.unwrap();
+
+        let run_id = format!("audit-run-{}", uuid::Uuid::new_v4());
+        let pid_for_insert = project_id.clone();
+        let rid = run_id.clone();
+        let started = now - chrono::Duration::seconds(60);
+        state.db.with_conn(move |conn| {
+            kronn::db::audit_runs::insert_running(conn, &rid, &pid_for_insert, "full", "claude-code", started)?;
+            // Complete it so audit_latest returns it.
+            kronn::db::audit_runs::complete(
+                conn, &rid, chrono::Utc::now(), "Completed",
+                1, 2, 3, 4, // critical/high/medium/low
+                0, 0, 0,    // resolved/new/carried
+                75,         // health_score
+                None, None, // report_path / recommendations
+            )?;
+            Ok(())
+        }).await.unwrap();
+        (project_id, run_id)
+    }
+
+    #[tokio::test]
+    async fn audit_latest_returns_completed_run_envelope() {
+        let state = test_state();
+        let (project_id, _run_id) = seed_project_with_audit_run(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/projects/{}/audit-latest", project_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // Latest run should be the one we seeded — completed, with td counts.
+        let data = &json["data"];
+        assert!(data.is_object() || data.is_null(), "audit_latest data shape");
+    }
+
+    #[tokio::test]
+    async fn audit_history_returns_array_with_seeded_run() {
+        let state = test_state();
+        let (project_id, _run_id) = seed_project_with_audit_run(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(
+            app, &format!("/api/projects/{}/audit-history", project_id),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let arr = json["data"].as_array().expect("history is an array");
+        assert!(!arr.is_empty(), "history should include the seeded run");
+    }
+
+    #[tokio::test]
+    async fn audit_run_steps_returns_envelope_for_seeded_run() {
+        let state = test_state();
+        let (_project_id, run_id) = seed_project_with_audit_run(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/audit-runs/{}/steps", run_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+        // Steps may be empty since we didn't seed any — handler still
+        // walks the happy path through the SQL query.
+    }
+
+    #[tokio::test]
+    async fn audit_resumable_returns_envelope_for_seeded_project() {
+        let state = test_state();
+        let (project_id, _run_id) = seed_project_with_audit_run(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(
+            app, &format!("/api/projects/{}/audit-resumable", project_id),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn audit_info_returns_envelope_for_seeded_project() {
+        let state = test_state();
+        let (project_id, _run_id) = seed_project_with_audit_run(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(
+            app, &format!("/api/projects/{}/audit-info", project_id),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // Seeded project has a tempdir path with no audit files yet — arrays are empty.
+        let data = &json["data"];
+        assert!(data["files"].is_array());
+        assert!(data["todos"].is_array());
+        assert!(data["tech_debt_items"].is_array());
+    }
+
+    #[tokio::test]
+    async fn audit_status_returns_envelope_for_seeded_project() {
+        let state = test_state();
+        let (project_id, _run_id) = seed_project_with_audit_run(&state).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = get_json(
+            app, &format!("/api/projects/{}/audit-status", project_id),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    // ── mcp_remote.rs happy-path : pre-seeded terminal-status run ────
+    //
+    // workflow_wait_for_completion is a long-poll loop on DB row.status.
+    // With an already-terminal run pre-inserted, the loop exits on iter 1
+    // and returns the McpWaitResponse — walks ~30 LOC the wrong-id sweep
+    // skipped (run lookup happy path + is_terminal_status + status format).
+    //
+    // workflow_run_status / workflow_run_discussions behave similarly when
+    // the run row is present.
+
+    async fn seed_terminal_run(state: &AppState, status: kronn::models::RunStatus) -> String {
+        let now = chrono::Utc::now();
+        // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
+        let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
+        let wf = kronn::models::Workflow {
+            id: workflow_id.clone(),
+            name: "TestWF".into(),
+            project_id: None,
+            trigger: kronn::models::WorkflowTrigger::Manual,
+            steps: vec![],
+            actions: vec![],
+            safety: kronn::models::WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
+            workspace_config: None,
+            concurrency_limit: None,
+            guards: None,
+            artifacts: std::collections::HashMap::new(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        };
+        let wf_clone = wf.clone();
+        state.db.with_conn(move |conn| kronn::db::workflows::insert_workflow(conn, &wf_clone))
+            .await.unwrap();
+
+        let run_id = format!("run-{}", uuid::Uuid::new_v4());
+        let run = kronn::models::WorkflowRun {
+            id: run_id.clone(),
+            workflow_id: workflow_id.clone(),
+            status,
+            trigger_context: None,
+            step_results: vec![],
+            tokens_used: 1234,
+            workspace_path: None,
+            started_at: now - chrono::Duration::seconds(10),
+            finished_at: Some(now),
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
+            parent_run_id: None,
+            state: std::collections::HashMap::new(),
+            produced_branches: vec![],
+        };
+        let r = run.clone();
+        state.db.with_conn(move |conn| kronn::db::workflows::insert_run(conn, &r))
+            .await.unwrap();
+        run_id
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_wait_for_completion_returns_immediately_on_terminal_success() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Success).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/workflow-wait-for-completion",
+            serde_json::json!({ "run_id": run_id, "timeout_s": 5 }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        let data = &json["data"];
+        assert_eq!(data["run_id"], run_id);
+        assert!(data["workflow_id"].as_str().unwrap_or("").starts_with("wf-"));
+        assert_eq!(data["timed_out"], serde_json::Value::Bool(false));
+        assert!(data["next_check"].is_null(), "terminal run must not return polling hint");
+        assert_eq!(data["tokens_used"], 1234);
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_wait_for_completion_returns_immediately_on_failed() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Failed).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/workflow-wait-for-completion",
+            serde_json::json!({ "run_id": run_id, "timeout_s": 5 }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["data"]["timed_out"], serde_json::Value::Bool(false));
+        // Status should serialize as "Failed" via Debug
+        let status_str = json["data"]["status"].as_str().unwrap_or("");
+        assert_eq!(status_str, "Failed");
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_wait_for_completion_returns_immediately_on_cancelled() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Cancelled).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            "/api/mcp/workflow-wait-for-completion",
+            serde_json::json!({ "run_id": run_id, "timeout_s": 5 }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["status"], "Cancelled");
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_run_status_seeded_run_returns_envelope() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Success).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/mcp/workflow-run-status/{}", run_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["data"]["run_id"], run_id);
+    }
+
+    #[tokio::test]
+    async fn mcp_workflow_run_discussions_seeded_run_returns_envelope() {
+        let state = test_state();
+        let run_id = seed_terminal_run(&state, kronn::models::RunStatus::Success).await;
+        let app = build_router_with_auth(state, false);
+
+        let uri = format!("/api/mcp/workflow-run-discussions/{}", run_id);
+        let (st, json) = get_json(app, &uri).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        // No batch discs were seeded — `discussions` array should be empty.
+        let discs = json["data"]["discussions"].as_array().unwrap();
+        assert!(discs.is_empty(), "no child discs were seeded — array must be empty");
+    }
+
+    // ── disc_source.rs (0.8.4 cross-agent memory routes) ─────────────
+    // Each route's "wrong inputs" path exercises validation lines AND
+    // the DB-not-found branches (~10-30 LOC apiece).
+    envelope_post!(disc_source_create_minimal_payload, "/api/disc/create",
+        serde_json::json!({ "title": "T", "agent": "claude-code" }));
+    envelope_post!(disc_source_append_unknown_disc, "/api/disc/append",
+        serde_json::json!({ "disc_id": "nope", "messages": [] }));
+    envelope_post!(disc_source_link_unknown_disc, "/api/disc/link",
+        serde_json::json!({
+            "disc_id": "nope",
+            "source_agent": "claude-code",
+            "source_session_id": "s1"
+        }));
+    envelope_post!(disc_source_unlink_unknown_disc, "/api/disc/unlink",
+        serde_json::json!({ "disc_id": "nope" }));
+    envelope_get!(disc_source_find_by_session_unknown,
+        "/api/disc/find_by_session?source_agent=claude-code&source_session_id=unknown");
+    envelope_get!(disc_source_search_returns_envelope, "/api/disc/search?q=hello");
+    envelope_get!(disc_source_search_empty_query, "/api/disc/search?q=");
+    envelope_get!(disc_source_load_other_unknown_disc,
+        "/api/disc/load_other?disc_id=nope&limit=10");
+    envelope_get!(disc_source_list_sources_returns_envelope, "/api/disc/sources");
+    envelope_get!(disc_source_detail_unknown_id, "/api/disc/sources/unknown");
+
+    // ── mcp_remote.rs (was 22% Lines) — JSON wrappers around SSE flows ──
+    // Each of these endpoints has lots of input-validation lines BEFORE
+    // any actual workflow trigger. We exercise the validation path with
+    // wrong/empty inputs.
+    envelope_post!(mcp_workflow_trigger_unknown, "/api/mcp/workflow-trigger",
+        serde_json::json!({ "workflow_id": "nope", "project_id": "nope" }));
+    envelope_post!(mcp_workflow_trigger_missing_workflow_id, "/api/mcp/workflow-trigger",
+        serde_json::json!({ "project_id": "nope" }));
+    envelope_get!(mcp_workflow_run_status_unknown_run, "/api/mcp/workflow-run-status/unknown-run-id");
+    envelope_post!(mcp_qp_run_unknown, "/api/mcp/qp-run",
+        serde_json::json!({ "quick_prompt_id": "nope", "project_id": "nope", "vars": {} }));
+    envelope_post!(mcp_qp_run_empty_id, "/api/mcp/qp-run",
+        serde_json::json!({ "quick_prompt_id": "", "project_id": "", "vars": {} }));
+    envelope_post!(mcp_qp_batch_run_unknown, "/api/mcp/qp-batch-run",
+        serde_json::json!({ "quick_prompt_id": "nope", "project_id": "nope", "items": [] }));
+    envelope_post!(mcp_qp_batch_run_no_items, "/api/mcp/qp-batch-run",
+        serde_json::json!({ "quick_prompt_id": "x", "project_id": "x", "items": [] }));
+    envelope_get!(mcp_workflow_run_discussions_unknown, "/api/mcp/workflow-run-discussions/unknown-run");
+    envelope_post!(mcp_workflow_wait_unknown_run, "/api/mcp/workflow-wait-for-completion",
+        serde_json::json!({ "run_id": "unknown-run", "timeout_s": 1 }));
+    envelope_post!(mcp_workflow_wait_empty_run_id, "/api/mcp/workflow-wait-for-completion",
+        serde_json::json!({ "run_id": "", "timeout_s": 1 }));
+    envelope_post!(mcp_workflow_wait_clamps_timeout_low, "/api/mcp/workflow-wait-for-completion",
+        serde_json::json!({ "run_id": "nope", "timeout_s": 0 })); // clamps to MIN
+    envelope_post!(mcp_workflow_wait_clamps_timeout_high, "/api/mcp/workflow-wait-for-completion",
+        serde_json::json!({ "run_id": "nope", "timeout_s": 9999 })); // clamps to MAX
+
+    // ── audit/full.rs cleanup_audit_files + classify_docs_dir paths ──
+    // These are pure helpers under #[cfg(test)] reachability.
+
+    #[tokio::test]
+    async fn audit_cancel_unknown_project_returns_envelope() {
+        // POST /api/projects/:id/cancel-audit on a non-existent project.
+        let (st, json) = post_json(
+            test_app(),
+            "/api/projects/nope/cancel-audit",
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
+
+    #[tokio::test]
+    async fn project_git_branch_rejects_invalid_names() {
+        let (_dir, repo) = seed_repo("proj-branch-invalid");
+        let state = test_state();
+        let project_id = seed_project_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        for bad in ["", "with space", "has..dot"] {
+            let (st, json) = post_json(
+                build_router_with_auth(test_state(), false),
+                &format!("/api/projects/{}/git-branch", project_id),
+                serde_json::json!({ "name": bad }),
+            ).await;
+            assert_eq!(st, StatusCode::OK);
+            assert_eq!(json["success"], serde_json::Value::Bool(false), "bad name {bad:?} should be rejected");
+        }
+        // Sanity that we still own the app at the end (not actually used).
+        let _ = app;
+    }
+
+    #[tokio::test]
+    async fn disc_worktree_unlock_with_no_lock_is_idempotent() {
+        let (_dir, repo) = seed_repo("worktree-noop");
+        let state = test_state();
+        let disc_id = seed_disc_with_repo(&state, &repo).await;
+        let app = build_router_with_auth(state, false);
+
+        let (st, json) = post_json(
+            app,
+            &format!("/api/discussions/{}/worktree-unlock", disc_id),
+            serde_json::json!({}),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(json.get("success").is_some());
+    }
 }

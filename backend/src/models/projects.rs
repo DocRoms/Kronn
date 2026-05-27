@@ -555,12 +555,28 @@ pub struct DiscoverReposRequest {
     pub source_ids: Vec<String>,  // empty = use all available sources
 }
 
+/// 0.8.7 — per-source failure surfaced to the user (GitLab silently
+/// returning 0 repos because the token expired was the trigger ; the
+/// front-end now renders a chip with the error so the user knows WHY
+/// a source produced no results, instead of guessing the integration
+/// is broken).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct DiscoverSourceError {
+    pub source_id: String,
+    pub source_label: String,
+    pub provider: String, // "github" | "gitlab"
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct DiscoverReposResponse {
     pub repos: Vec<RemoteRepo>,
     pub sources: Vec<String>,
     pub available_sources: Vec<RepoSource>,
+    #[serde(default)]
+    pub errors: Vec<DiscoverSourceError>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

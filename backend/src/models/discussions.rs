@@ -21,6 +21,14 @@ pub struct Discussion {
     pub messages: Vec<DiscussionMessage>,
     #[serde(default)]
     pub message_count: u32,
+    /// Subset of `message_count` excluding `MessageRole::System` rows. The
+    /// streaming layer persists every tool call + every cached-summary
+    /// breadcrumb as its own System message, so `message_count` is inflated
+    /// from the user's point of view ("2 réponses + 50 outils" comptait 52).
+    /// The unread badge tracks this count instead, so System breadcrumbs
+    /// don't show up as "messages à lire".
+    #[serde(default)]
+    pub non_system_message_count: u32,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skill_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,6 +147,12 @@ pub struct DiscussionMessage {
     /// aggregator to compute "avg first-reply duration" per QP version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /// 0.8.7 anti-hallucination P2 — the lint report for this agent message
+    /// (niveau 0 heuristic + niveau 1 mechanical `[src:]` verification),
+    /// computed by `core::anti_halluc::analyze` at finalize. `None` on
+    /// User/System messages, when the feature is off, or when nothing flagged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lint_report: Option<crate::core::anti_halluc::LintReport>,
 }
 
 /// Per-discussion summary strategy. Pre-fix the auto-summary loop fired

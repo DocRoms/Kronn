@@ -238,6 +238,7 @@ mod tests {
             bio: None,
             global_context: None,
             global_context_mode: "always".into(),
+            anti_hallucination_mode: "warn".into(),
             debug_mode: false,
             default_model_tier: crate::models::ModelTier::Default,
             default_summary_strategy: crate::models::SummaryStrategy::Off,
@@ -272,5 +273,84 @@ mod tests {
             advertised_host(&cfg("10.0.0.5", Some(""))),
             "10.0.0.5"
         );
+    }
+
+    #[test]
+    fn is_tailscale_ip_accepts_canonical_cgnat_range() {
+        // 100.64.0.0/10 → first octet 100, second 64..=127 ; 4-octet form only.
+        assert!(is_tailscale_ip("100.64.0.1"));
+        assert!(is_tailscale_ip("100.65.10.20"));
+        assert!(is_tailscale_ip("100.100.0.1"));
+        assert!(is_tailscale_ip("100.127.255.254"));
+    }
+
+    #[test]
+    fn is_tailscale_ip_rejects_out_of_range() {
+        // Just outside the /10 (101.x, 100.63, 100.128).
+        assert!(!is_tailscale_ip("101.64.0.1"));
+        assert!(!is_tailscale_ip("100.63.0.1"));
+        assert!(!is_tailscale_ip("100.128.0.1"));
+        assert!(!is_tailscale_ip("10.0.0.1"));
+        assert!(!is_tailscale_ip("192.168.1.1"));
+    }
+
+    #[test]
+    fn is_tailscale_ip_rejects_malformed() {
+        // Less than 4 octets, IPv6, garbage.
+        assert!(!is_tailscale_ip("100.64.0"));
+        assert!(!is_tailscale_ip(""));
+        assert!(!is_tailscale_ip("100"));
+        assert!(!is_tailscale_ip("::1"));
+        assert!(!is_tailscale_ip("not-an-ip"));
+    }
+
+    #[test]
+    fn is_private_ip_accepts_rfc1918_class_a() {
+        assert!(is_private_ip("10.0.0.1"));
+        assert!(is_private_ip("10.255.255.255"));
+    }
+
+    #[test]
+    fn is_private_ip_accepts_rfc1918_class_b() {
+        // 172.16.0.0/12 → second octet 16..=31.
+        assert!(is_private_ip("172.16.0.1"));
+        assert!(is_private_ip("172.20.5.5"));
+        assert!(is_private_ip("172.31.255.255"));
+    }
+
+    #[test]
+    fn is_private_ip_accepts_rfc1918_class_c() {
+        assert!(is_private_ip("192.168.0.1"));
+        assert!(is_private_ip("192.168.1.100"));
+    }
+
+    #[test]
+    fn is_private_ip_rejects_near_misses() {
+        // 172.15 and 172.32 are public.
+        assert!(!is_private_ip("172.15.0.1"));
+        assert!(!is_private_ip("172.32.0.1"));
+        // 192.167 / 192.169 are public.
+        assert!(!is_private_ip("192.167.1.1"));
+        assert!(!is_private_ip("192.169.1.1"));
+        // 11.x and 9.x are public.
+        assert!(!is_private_ip("11.0.0.1"));
+        assert!(!is_private_ip("9.255.255.255"));
+    }
+
+    #[test]
+    fn is_private_ip_rejects_malformed() {
+        assert!(!is_private_ip(""));
+        assert!(!is_private_ip("garbage"));
+        assert!(!is_private_ip("192.168.1"));
+        assert!(!is_private_ip("::1"));
+    }
+
+    #[test]
+    fn is_tailscale_and_private_dont_overlap() {
+        // Sanity : a tailscale IP must NOT be classified as RFC1918 and vice-versa.
+        assert!(is_tailscale_ip("100.100.0.1"));
+        assert!(!is_private_ip("100.100.0.1"));
+        assert!(is_private_ip("10.0.0.1"));
+        assert!(!is_tailscale_ip("10.0.0.1"));
     }
 }

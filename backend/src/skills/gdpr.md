@@ -30,3 +30,7 @@ Grep logs/output for email patterns, IP addresses, phone numbers. Check DB schem
 
 ✓ Log: `user_id=42 action=login` — pseudonymized, no PII
 ✗ Log: `email=user@test.com ip=1.2.3.4 action=login` — PII in plaintext logs
+
+## Sourcing
+
+See `docs/AGENTS.md` § Anti-Hallucination Protocol for the canonical cascade and citation grammar. Domain note: article / deadline / CNIL guidance → `eur-lex.europa.eu`, `gdpr-info.eu/art-NN`, or `cnil.fr` URL with the document date. A wrong delay = real regulatory miss.

@@ -419,6 +419,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/setup/reset", post(api::setup::reset))
         // ── Version check (auto-update banner) ──
         .route("/api/version/check", get(api::version::check))
+        // ── Agent CLI usage / cost (via ccusage) ──
+        .route("/api/usage", get(api::usage::get_usage))
         // ── OpenAPI / Swagger UI ──
         // Spec served at `/api/openapi.json` by SwaggerUi (its `.url()`
         // mounts the spec route automatically). Interactive UI at
@@ -441,6 +443,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/tts-voice", post(api::setup::save_tts_voice))
         .route("/api/config/global-context", get(api::setup::get_global_context).post(api::setup::save_global_context))
         .route("/api/config/global-context-mode", get(api::setup::get_global_context_mode).post(api::setup::save_global_context_mode))
+        // 0.8.7 anti-hallucination mode (off | warn | enforce).
+        .route("/api/config/anti-hallucination-mode", get(api::setup::get_anti_hallucination_mode).post(api::setup::save_anti_hallucination_mode))
+        // 0.8.7 — spec doc served from include_str! (linked from Settings → Sourcing).
+        .route("/api/conventions/agents-md-format-v1", get(api::setup::get_agents_md_spec_v1))
         .route("/api/config/scan-paths", get(api::setup::get_scan_paths).post(api::setup::set_scan_paths))
         .route("/api/config/scan-ignore", get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore))
         .route("/api/config/scan-depth", get(api::setup::get_scan_depth).post(api::setup::set_scan_depth))
@@ -463,6 +469,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}", get(api::projects::get))
         .route("/api/projects/{id}", delete(api::projects::delete))
         .route("/api/projects/{id}/install-template", post(api::projects::install_template))
+        // 0.8.7 anti-hallu migration : inject the canonical section into
+        // pre-existing projects + re-sync redirectors. Both idempotent.
+        .route("/api/projects/{id}/anti-hallu/status", get(api::projects::anti_hallu_inject::status))
+        .route("/api/projects/{id}/anti-hallu/inject", post(api::projects::anti_hallu_inject::inject))
+        .route("/api/projects/{id}/redirectors/sync", post(api::projects::anti_hallu_inject::sync_redirectors))
         .route("/api/projects/{id}/ai-audit", post(api::audit::run_audit))
         .route("/api/projects/{id}/audit-info", get(api::audit::audit_info))
         .route("/api/projects/{id}/drift", get(api::audit::check_drift))
@@ -621,6 +632,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/mcp/workflow-trigger", post(api::mcp_remote::workflow_trigger))
         .route("/api/mcp/workflow-run-status/{run_id}", get(api::mcp_remote::workflow_run_status))
         .route("/api/mcp/qp-run", post(api::mcp_remote::qp_run))
+        // 0.8.7 phase 4 — PR2 (batch fan-out + run discussions) + PR3 (long-poll wait).
+        .route("/api/mcp/qp-batch-run", post(api::mcp_remote::qp_batch_run))
+        .route("/api/mcp/workflow-run-discussions/{run_id}", get(api::mcp_remote::workflow_run_discussions))
+        .route("/api/mcp/workflow-wait-for-completion", post(api::mcp_remote::workflow_wait_for_completion))
         // 0.8.6 (#24) — unified API-call logs read surface. Lists / shows
         // / purges rows from `api_call_logs` (workflow + broker + manual).
         .route("/api/api-call-logs", get(api::api_call_logs::list_api_call_logs))

@@ -25,6 +25,16 @@ vi.mock('../lib/api', () => ({
     getStatus: vi.fn(),
     reset: vi.fn(),
   },
+  // UpdateBanner is rendered inside Dashboard via App's tree and calls
+  // version.check on mount. The Dashboard component is itself mocked
+  // above so it never actually mounts UpdateBanner, BUT in the real
+  // App tree (e.g. when the lazy import resolves before mocks take
+  // effect in the test runner) the import chain still asks for
+  // `version`. Mocking it as a never-resolving promise keeps things
+  // inert without forcing the Dashboard mock to handle it.
+  version: {
+    check: vi.fn().mockReturnValue(new Promise(() => {})),
+  },
 }));
 
 import { setup as setupApi } from '../lib/api';

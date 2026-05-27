@@ -408,6 +408,7 @@ pub fn create_batch_run(
     let discussions: Vec<(Discussion, DiscussionMessage)> = input.items.iter().map(|item| {
         let disc_id = Uuid::new_v4().to_string();
         let initial_message = DiscussionMessage {
+            lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
             content: item.prompt.clone(),
@@ -432,7 +433,7 @@ pub fn create_batch_run(
             language: lang.clone(),
             participants: vec![effective_agent],
             messages: vec![initial_message.clone()],
-            message_count: 1,
+            message_count: 1, non_system_message_count: 1,
             skill_ids: qp.skill_ids.clone(),
             // 0.8.5 — QP bindings now flow into the child discussion so
             // a "compare agents", "batch run", or QP-chain spawn inherits

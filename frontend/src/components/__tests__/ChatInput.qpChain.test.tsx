@@ -22,7 +22,7 @@ const baseDiscussion: Discussion = {
   language: 'fr',
   participants: ['ClaudeCode'],
   messages: [],
-  message_count: 0,
+  message_count: 0, non_system_message_count: 0,
   skill_ids: [],
   profile_ids: [],
   directive_ids: [],

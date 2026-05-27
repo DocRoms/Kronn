@@ -57,6 +57,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 }
 
 import { IdentitySection } from '../components/settings/IdentitySection';
+import { AntiHallucSection } from '../components/settings/AntiHallucSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DebugSection } from '../components/settings/DebugSection';
@@ -730,6 +731,11 @@ export function SettingsPage({
           </div>
         </div>
       </div>
+
+      {/* 0.8.7 — Sourcing & Anti-hallucination policy section.
+          Lives ABOVE the Agent config card on purpose: it's the *rule* that
+          frames how agents document, not an agent-level toggle. */}
+      <AntiHallucSection toast={toast} t={t} />
 
       {/* ── Agent Config Accordion (Agents / Skills / Profiles / Directives) ── */}
       <div id="settings-agent-config" className="set-card">

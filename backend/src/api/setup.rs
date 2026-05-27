@@ -482,6 +482,55 @@ pub async fn save_global_context_mode(
     }
 }
 
+/// GET /api/config/anti-hallucination-mode
+pub async fn get_anti_hallucination_mode(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<String>> {
+    let config = state.config.read().await;
+    Json(ApiResponse::ok(config.server.anti_hallucination_mode.clone()))
+}
+
+/// POST /api/config/anti-hallucination-mode
+pub async fn save_anti_hallucination_mode(
+    State(state): State<AppState>,
+    Json(mode): Json<String>,
+) -> Json<ApiResponse<()>> {
+    if !crate::core::anti_halluc::is_valid_mode(&mode) {
+        return Json(ApiResponse::err(format!(
+            "Invalid mode '{}'. Expected off|warn|enforce.",
+            mode
+        )));
+    }
+    let mut config = state.config.write().await;
+    config.server.anti_hallucination_mode = mode.clone();
+    match config::save(&config).await {
+        Ok(_) => {
+            // Keep the process-global flag in sync so the change takes effect
+            // immediately on the next agent spawn (no restart needed).
+            crate::core::anti_halluc::set_mode(&mode);
+            Json(ApiResponse::ok(()))
+        }
+        Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
+    }
+}
+
+/// GET /api/conventions/agents-md-format-v1
+///
+/// Returns the Phase 2 spec embedded in the binary (`include_str!`) as
+/// `text/markdown`. Linked from Settings → Sourcing & Anti-hallucination so
+/// users see the convention this installation actually implements (the GitHub
+/// `main` copy may have moved on).
+pub async fn get_agents_md_spec_v1() -> axum::response::Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
+    )
+        .into_response()
+}
+
 /// POST /api/config/global-context
 pub async fn save_global_context(
     State(state): State<AppState>,
@@ -1540,6 +1589,85 @@ mod tests {
         assert_eq!(parsed.server.default_model_tier, crate::models::ModelTier::Reasoning);
     }
 
+    // ── 0.8.7 — anti_hallucination_mode ─────────────────────
+
+    #[test]
+    fn default_config_seeds_anti_hallucination_mode_to_warn() {
+        // 0.8.7 ships in `warn` (visible but non-blocking). If a refactor
+        // flips this to `off`, the whole feature silently stops on upgrade.
+        let cfg = config::default_config();
+        assert_eq!(cfg.server.anti_hallucination_mode, "warn");
+    }
+
+    #[test]
+    fn anti_hallucination_mode_round_trips_through_toml() {
+        let mut cfg = config::default_config();
+        cfg.server.anti_hallucination_mode = "enforce".into();
+        let serialised = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            serialised.contains("anti_hallucination_mode = \"enforce\""),
+            "expected mode in TOML, got: {}",
+            serialised,
+        );
+        let parsed: crate::models::AppConfig = toml::from_str(&serialised).unwrap();
+        assert_eq!(parsed.server.anti_hallucination_mode, "enforce");
+    }
+
+    #[test]
+    fn spec_v1_constant_ships_with_binary() {
+        // The Settings → Sourcing section links to this spec via
+        // /api/conventions/agents-md-format-v1, which serves the constant
+        // embedded at compile time. A regression that breaks the
+        // include_str! path (file moved, renamed) would silently turn the
+        // link into a 404 — fail the build instead.
+        let spec = crate::core::anti_halluc::SPEC_AGENTS_MD_V1;
+        assert!(spec.contains("Kronn `AGENTS.md` convention"));
+        assert!(spec.contains("kronn:doc-version"));
+        assert!(spec.len() > 1_000, "spec unexpectedly small: {} bytes", spec.len());
+    }
+
+    #[test]
+    fn spec_v1_repo_root_copy_matches_embedded_const() {
+        // 0.8.7 — the spec lives at TWO locations in the repo:
+        //   - `backend/docs/conventions/agents-md-format-v1.md` — the source
+        //     `include_str!` reads at compile time + the Dockerfile COPYs.
+        //   - `docs/conventions/agents-md-format-v1.md` — the repo-root copy
+        //     so the link in `docs/AGENTS.md` § anti-hallu resolves both for
+        //     Kronn itself AND for user projects that bootstrap the spec.
+        //
+        // The two MUST stay byte-identical. A `make sync-spec` target (or
+        // the next bootstrap audit of Kronn itself) refreshes the root
+        // copy from the embedded const. This test pins the invariant so a
+        // PR that edits one without the other fails CI immediately.
+        let root_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend has a parent")
+            .join("docs/conventions/agents-md-format-v1.md");
+        let root_copy = std::fs::read_to_string(&root_path)
+            .expect("docs/conventions/agents-md-format-v1.md must exist at repo root");
+        assert_eq!(
+            root_copy,
+            crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
+            "repo-root spec copy diverged from the embedded const — run `make sync-spec` or copy backend/docs/conventions/agents-md-format-v1.md to docs/conventions/agents-md-format-v1.md",
+        );
+    }
+
+    #[test]
+    fn missing_anti_hallucination_mode_in_toml_falls_back_to_warn() {
+        // A pre-0.8.7 config.toml has no such key — serde(default) must
+        // fill `warn` so the feature comes on after upgrade.
+        let legacy_server_toml = r#"
+host = "127.0.0.1"
+port = 3140
+max_concurrent_agents = 5
+agent_stall_timeout_min = 5
+global_context_mode = "always"
+debug_mode = false
+"#;
+        let parsed: crate::models::ServerConfig = toml::from_str(legacy_server_toml).unwrap();
+        assert_eq!(parsed.anti_hallucination_mode, "warn");
+    }
+
     // ── 0.8.6 phase 4 — default_summary_strategy ─────────────
 
     #[test]
@@ -1623,5 +1751,41 @@ debug_mode = false
             crate::models::ModelTier::Default,
             "missing default_model_tier must serde-default to Default",
         );
+    }
+
+    // ── mask_token contract ─────────────────────────────────────────────
+
+    #[test]
+    fn mask_token_short_token_fully_starred() {
+        // ≤ 8 chars: every character becomes '*' (no info leak whatsoever).
+        assert_eq!(mask_token(""), "");
+        assert_eq!(mask_token("a"), "*");
+        assert_eq!(mask_token("abc"), "***");
+        assert_eq!(mask_token("12345678"), "********");
+    }
+
+    #[test]
+    fn mask_token_long_token_keeps_first_and_last_four() {
+        // > 8 chars: format is "first4...last4". Critical UI contract:
+        // operators identify keys by the visible suffix.
+        assert_eq!(mask_token("sk-test-key-abcdef1234"), "sk-t...1234");
+        assert_eq!(mask_token("123456789"), "1234...6789");
+    }
+
+    #[test]
+    fn mask_token_exactly_9_chars_is_long_branch() {
+        // 9 = > 8, takes the long branch.
+        let result = mask_token("123456789");
+        assert!(result.contains("..."), "9-char token must enter long branch");
+        assert_eq!(result.len(), 11, "long-branch output is 4 + 3 + 4 = 11");
+    }
+
+    #[test]
+    fn mask_token_does_not_leak_middle_chars() {
+        let secret = "sk-ant-VERY_SECRET_MIDDLE-tail";
+        let masked = mask_token(secret);
+        assert!(!masked.contains("SECRET"), "middle bytes must NOT appear in mask");
+        assert!(!masked.contains("MIDDLE"), "middle bytes must NOT appear in mask");
+        assert!(masked.contains("tail"), "last 4 must be visible");
     }
 }

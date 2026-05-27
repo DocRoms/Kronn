@@ -641,6 +641,378 @@ pub async fn qp_run(
     }))
 }
 
+// ─── qp_batch_run (PR2) ─────────────────────────────────────────────────
+
+const MCP_MAX_BATCH_SIZE: usize = 50;
+
+#[derive(Debug, Deserialize)]
+pub struct McpBatchItem {
+    /// Optional discussion title. Defaults to `<qp_name> #<n>`.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Per-item variable values rendered into the QP template independently.
+    #[serde(default)]
+    pub vars: HashMap<String, String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpQpBatchRunRequest {
+    pub qp_id: String,
+    pub items: Vec<McpBatchItem>,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    #[serde(default)]
+    pub batch_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct McpQpBatchRunResponse {
+    /// The parent batch run id — poll it via `workflow_run_status` or list
+    /// the children via `workflow_run_discussions`.
+    pub run_id: String,
+    pub qp_id: String,
+    pub qp_name: String,
+    pub disc_ids: Vec<String>,
+    pub batch_total: u32,
+    /// Per-item baseline (avg single-launch duration of this QP). The batch
+    /// finishes when all items do — treat this as a floor, not the total.
+    pub expected_duration_ms: Option<u64>,
+    pub samples: u32,
+    pub next_check: NextCheck,
+}
+
+/// Default a batch item's discussion title.
+fn default_batch_item_title(qp_name: &str, idx: usize, provided: Option<&str>) -> String {
+    match provided {
+        Some(t) if !t.trim().is_empty() => t.trim().to_string(),
+        _ => format!("{} #{}", qp_name, idx + 1),
+    }
+}
+
+/// POST /api/mcp/qp-batch-run
+///
+/// Fan a Quick Prompt out to N discussions in one call (the deagentified
+/// twin of the UI batch flow). Each item renders the QP template with its
+/// own `vars`; all children link under one batch run for tracking. Agents
+/// are kicked off server-side (fire-and-forget, throttled by the runner's
+/// agent semaphore) — the MCP caller reads results via `workflow_run_discussions`.
+pub async fn qp_batch_run(
+    State(state): State<AppState>,
+    Json(req): Json<McpQpBatchRunRequest>,
+) -> Json<ApiResponse<McpQpBatchRunResponse>> {
+    if req.qp_id.is_empty() {
+        return Json(ApiResponse::err("qp_id is required"));
+    }
+    if req.items.is_empty() {
+        return Json(ApiResponse::err("Batch must contain at least 1 item"));
+    }
+    if req.items.len() > MCP_MAX_BATCH_SIZE {
+        return Json(ApiResponse::err(format!(
+            "Batch too large: {} items (max {})",
+            req.items.len(),
+            MCP_MAX_BATCH_SIZE
+        )));
+    }
+
+    let qp_lookup = req.qp_id.clone();
+    let qp = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .await
+    {
+        Ok(Some(q)) => q,
+        Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    // Validate required vars against every item, render each prompt.
+    let mut items: Vec<crate::db::workflows::BatchItemInput> = Vec::with_capacity(req.items.len());
+    for (idx, item) in req.items.iter().enumerate() {
+        for declared in &qp.variables {
+            if declared.required {
+                let val = item.vars.get(&declared.name).map(|s| s.trim()).unwrap_or("");
+                if val.is_empty() {
+                    let label = if declared.label.is_empty() {
+                        &declared.name
+                    } else {
+                        &declared.label
+                    };
+                    return Json(ApiResponse::err(format!(
+                        "Item #{} : variable « {} » est obligatoire pour cette Quick Prompt.",
+                        idx + 1,
+                        label
+                    )));
+                }
+            }
+        }
+        items.push(crate::db::workflows::BatchItemInput {
+            title: default_batch_item_title(&qp.name, idx, item.title.as_deref()),
+            prompt: render_qp_template(&qp.prompt_template, &item.vars),
+            agent_override: None,
+        });
+    }
+
+    let (author_pseudo, author_avatar_email) = {
+        let config = state.config.read().await;
+        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+    };
+    let project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
+    let batch_name = req.batch_name.clone().unwrap_or_else(|| {
+        format!("MCP batch · {} · {}", qp.name, Utc::now().format("%H:%M:%S"))
+    });
+
+    let qp_for_create = qp.clone();
+    let outcome = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::create_batch_run(
+                conn,
+                crate::db::workflows::CreateBatchRunInput {
+                    quick_prompt: &qp_for_create,
+                    items,
+                    batch_name: Some(batch_name),
+                    project_id,
+                    parent_run_id: None,
+                    author_pseudo,
+                    author_avatar_email,
+                    language: "fr".into(),
+                    workspace_mode: "Direct".into(),
+                },
+            )
+        })
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => return Json(ApiResponse::err(format!("Failed to create batch: {}", e))),
+    };
+
+    // Kick off every child agent fire-and-forget (semaphore-throttled in the
+    // runner). The MCP caller doesn't await SSE — results land in the DB.
+    for disc_id in &outcome.discussion_ids {
+        let kickoff_state = state.clone();
+        let kickoff_disc_id = disc_id.clone();
+        tokio::spawn(async move {
+            let _sse = crate::api::discussions::streaming::make_agent_stream(
+                kickoff_state,
+                kickoff_disc_id,
+                None,
+            )
+            .await;
+        });
+    }
+
+    // ETA baseline from QP version metrics (per-item single launch).
+    let qp_id_for_metrics = req.qp_id.clone();
+    let metrics = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &qp_id_for_metrics)
+        })
+        .await
+        .unwrap_or_default();
+    let total_launches: u32 = metrics.iter().map(|m| m.launches).sum();
+    let weighted_ms_sum: u64 = metrics
+        .iter()
+        .filter_map(|m| m.avg_duration_ms.map(|d| d * m.launches as u64))
+        .sum();
+    let expected_duration_ms = if total_launches > 0 && weighted_ms_sum > 0 {
+        Some(weighted_ms_sum / total_launches as u64)
+    } else {
+        None
+    };
+    let next_check = next_check_initial(expected_duration_ms, total_launches);
+
+    tracing::info!(
+        "MCP qp_batch_run created run {} with {} discs for QP {}",
+        outcome.run_id,
+        outcome.batch_total,
+        qp.name
+    );
+
+    Json(ApiResponse::ok(McpQpBatchRunResponse {
+        run_id: outcome.run_id,
+        qp_id: qp.id,
+        qp_name: qp.name,
+        disc_ids: outcome.discussion_ids,
+        batch_total: outcome.batch_total,
+        expected_duration_ms,
+        samples: total_launches,
+        next_check,
+    }))
+}
+
+// ─── workflow_run_discussions (PR2) ─────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct McpRunDiscussionItem {
+    pub disc_id: String,
+    pub title: String,
+    pub agent: String,
+    pub message_count: u32,
+    pub archived: bool,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct McpRunDiscussionsResponse {
+    pub run_id: String,
+    pub disc_count: u32,
+    pub discussions: Vec<McpRunDiscussionItem>,
+}
+
+/// GET /api/mcp/workflow-run-discussions/:run_id
+///
+/// List the discussions a run spawned (batch children or workflow
+/// BatchQuickPrompt fan-out). Empty for a pure linear workflow. The agent
+/// then `disc_load_other`s the ones it cares about.
+pub async fn workflow_run_discussions(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<McpRunDiscussionsResponse>> {
+    let run_id_lookup = run_id.clone();
+    let discs = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::list_discussions_by_run(conn, &run_id_lookup))
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let discussions: Vec<McpRunDiscussionItem> = discs
+        .into_iter()
+        .map(|d| McpRunDiscussionItem {
+            disc_id: d.id,
+            title: d.title,
+            agent: format!("{:?}", d.agent),
+            message_count: d.message_count,
+            archived: d.archived,
+            created_at: d.created_at,
+        })
+        .collect();
+
+    Json(ApiResponse::ok(McpRunDiscussionsResponse {
+        run_id,
+        disc_count: discussions.len() as u32,
+        discussions,
+    }))
+}
+
+// ─── workflow_wait_for_completion (PR3) ─────────────────────────────────
+
+const WAIT_POLL_INTERVAL_MS: u64 = 1500;
+const WAIT_MIN_TIMEOUT_S: u64 = 1;
+const WAIT_MAX_TIMEOUT_S: u64 = 60;
+
+/// Clamp the caller-requested long-poll timeout to a safe server window.
+fn clamp_wait_timeout(requested: Option<u64>) -> u64 {
+    requested
+        .unwrap_or(WAIT_MAX_TIMEOUT_S)
+        .clamp(WAIT_MIN_TIMEOUT_S, WAIT_MAX_TIMEOUT_S)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct McpWaitRequest {
+    pub run_id: String,
+    /// Max seconds to hold the connection waiting for a terminal status.
+    /// Clamped server-side to [1, 60]. On timeout the current (non-terminal)
+    /// status is returned with `timed_out = true` + a `next_check` hint.
+    #[serde(default)]
+    pub timeout_s: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct McpWaitResponse {
+    pub run_id: String,
+    pub workflow_id: String,
+    pub status: String,
+    pub finished_at: Option<chrono::DateTime<Utc>>,
+    pub elapsed_ms: u64,
+    pub tokens_used: u64,
+    /// True when we returned because the timeout elapsed, not because the
+    /// run reached a terminal status.
+    pub timed_out: bool,
+    /// `None` when terminal; otherwise a polling hint for the next call.
+    pub next_check: Option<NextCheck>,
+}
+
+/// POST /api/mcp/workflow-wait-for-completion
+///
+/// Long-poll a run until it reaches a terminal status or `timeout_s`
+/// elapses. Saves the agent the back-and-forth of repeated status polls
+/// for short runs — one call blocks (up to 60s) and returns the verdict.
+pub async fn workflow_wait_for_completion(
+    State(state): State<AppState>,
+    Json(req): Json<McpWaitRequest>,
+) -> Json<ApiResponse<McpWaitResponse>> {
+    if req.run_id.is_empty() {
+        return Json(ApiResponse::err("run_id is required"));
+    }
+    let timeout_s = clamp_wait_timeout(req.timeout_s);
+    let deadline = Utc::now() + chrono::Duration::seconds(timeout_s as i64);
+
+    loop {
+        let run_id_lookup = req.run_id.clone();
+        let run = match state
+            .db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id_lookup))
+            .await
+        {
+            Ok(Some(r)) => r,
+            Ok(None) => return Json(ApiResponse::err("Run not found")),
+            Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+        };
+
+        let now = Utc::now();
+        let end = run.finished_at.unwrap_or(now);
+        let elapsed_ms = (end - run.started_at).num_milliseconds().max(0) as u64;
+
+        if is_terminal_status(&run.status) {
+            return Json(ApiResponse::ok(McpWaitResponse {
+                run_id: run.id,
+                workflow_id: run.workflow_id,
+                status: format!("{:?}", run.status),
+                finished_at: run.finished_at,
+                elapsed_ms,
+                tokens_used: run.tokens_used,
+                timed_out: false,
+                next_check: None,
+            }));
+        }
+
+        if now >= deadline {
+            // Timed out still in-flight — hand back a polling hint computed
+            // from this workflow's completed history (current run excluded).
+            let wf_id = run.workflow_id.clone();
+            let run_id_excl = run.id.clone();
+            let history = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::workflows::list_runs_paginated(conn, &wf_id, Some(RUN_AVG_LIMIT + 1), None)
+                })
+                .await
+                .unwrap_or_default();
+            let history: Vec<WorkflowRun> =
+                history.into_iter().filter(|r| r.id != run_id_excl).collect();
+            let (expected_duration_ms, samples) = avg_workflow_duration_ms(&history);
+            let next_check = next_check_polling(expected_duration_ms, elapsed_ms, samples);
+
+            return Json(ApiResponse::ok(McpWaitResponse {
+                run_id: run.id,
+                workflow_id: run.workflow_id,
+                status: format!("{:?}", run.status),
+                finished_at: run.finished_at,
+                elapsed_ms,
+                tokens_used: run.tokens_used,
+                timed_out: true,
+                next_check: Some(next_check),
+            }));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(WAIT_POLL_INTERVAL_MS)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,5 +1135,27 @@ mod tests {
         assert!(!is_terminal_status(&RunStatus::Pending));
         assert!(!is_terminal_status(&RunStatus::Running));
         assert!(!is_terminal_status(&RunStatus::WaitingApproval));
+    }
+
+    #[test]
+    fn default_batch_item_title_uses_provided_when_present() {
+        assert_eq!(default_batch_item_title("Audit QP", 0, Some("Custom")), "Custom");
+        assert_eq!(default_batch_item_title("Audit QP", 0, Some("  Trimmed  ")), "Trimmed");
+    }
+
+    #[test]
+    fn default_batch_item_title_falls_back_to_indexed_name() {
+        assert_eq!(default_batch_item_title("Audit QP", 0, None), "Audit QP #1");
+        assert_eq!(default_batch_item_title("Audit QP", 4, None), "Audit QP #5");
+        // Blank provided title is treated as absent.
+        assert_eq!(default_batch_item_title("Audit QP", 2, Some("   ")), "Audit QP #3");
+    }
+
+    #[test]
+    fn clamp_wait_timeout_defaults_and_bounds() {
+        assert_eq!(clamp_wait_timeout(None), WAIT_MAX_TIMEOUT_S);
+        assert_eq!(clamp_wait_timeout(Some(0)), WAIT_MIN_TIMEOUT_S);
+        assert_eq!(clamp_wait_timeout(Some(5)), 5);
+        assert_eq!(clamp_wait_timeout(Some(9999)), WAIT_MAX_TIMEOUT_S);
     }
 }

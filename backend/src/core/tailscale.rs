@@ -426,4 +426,120 @@ mod tests {
         assert_eq!(ips[0].ip, "192.168.1.10");
         std::env::remove_var("KRONN_HOST_IPS");
     }
+
+    #[test]
+    fn classify_ip_skips_veth_iface() {
+        // veth is the Linux virtual ethernet that Docker pairs to containers —
+        // never user-relevant.
+        assert!(classify_ip("172.17.0.99", "veth1234").is_none());
+    }
+
+    #[test]
+    fn classify_ip_vpn_utun_branch_mac_wireguard() {
+        let (_, kind, label) = classify_ip("10.42.0.5", "utun3").unwrap();
+        assert_eq!(kind, "vpn");
+        assert!(label.contains("utun3"));
+    }
+
+    #[test]
+    fn classify_ip_vpn_wg_branch_wireguard() {
+        let (_, kind, label) = classify_ip("10.0.0.5", "wg0").unwrap();
+        assert_eq!(kind, "vpn");
+        assert!(label.contains("wg0"));
+    }
+
+    #[test]
+    fn classify_ip_vpn_tap_branch() {
+        let (_, kind, _) = classify_ip("10.0.0.5", "tap0").unwrap();
+        assert_eq!(kind, "vpn");
+    }
+
+    #[test]
+    fn classify_ip_vpn_ppp_branch_legacy_modem() {
+        let (_, kind, _) = classify_ip("172.20.0.5", "ppp0").unwrap();
+        assert_eq!(kind, "vpn");
+    }
+
+    #[test]
+    fn classify_ip_public_ip_is_classified_lan_with_public_label() {
+        // The fall-through path: any non-tailscale, non-private IP on a
+        // non-vpn interface still gets returned (with the "Public" label
+        // hint) because the user may want to advertise it. Just verifies
+        // the branch is reachable + labeled correctly.
+        let (ip, kind, label) = classify_ip("8.8.8.8", "eth0").unwrap();
+        assert_eq!(ip, "8.8.8.8");
+        assert_eq!(kind, "lan");
+        assert!(label.contains("Public"));
+    }
+
+    #[test]
+    fn classify_ip_malformed_input_returns_none() {
+        assert!(classify_ip("not-an-ip", "eth0").is_none());
+        assert!(classify_ip("", "eth0").is_none());
+        assert!(classify_ip("256.256.256.256", "eth0").is_none());
+        assert!(classify_ip("::1", "eth0").is_none()); // IPv6 not handled here
+    }
+
+    #[test]
+    fn classify_ip_class_b_private_172_16_thru_31() {
+        for second in [16u8, 20, 25, 31] {
+            let ip = format!("172.{}.0.1", second);
+            let (_, kind, _) = classify_ip(&ip, "eth0").expect("should classify");
+            assert_eq!(kind, "lan", "172.{}.x.x must be private LAN", second);
+        }
+    }
+
+    #[test]
+    fn classify_ip_class_b_172_15_and_32_are_public() {
+        // Just outside 172.16-31 — must be classified Public (not LAN).
+        let (_, _, label_15) = classify_ip("172.15.0.1", "eth0").unwrap();
+        assert!(label_15.contains("Public"));
+        let (_, _, label_32) = classify_ip("172.32.0.1", "eth0").unwrap();
+        assert!(label_32.contains("Public"));
+    }
+
+    #[test]
+    fn detect_via_host_env_returns_tailscale_when_present() {
+        std::env::set_var(
+            "KRONN_HOST_IPS",
+            "eth0:192.168.1.10,tailscale0:100.100.5.5,docker0:172.17.0.1",
+        );
+        let ip = detect_via_host_env().expect("tailscale entry should be detected");
+        assert_eq!(ip, "100.100.5.5");
+        std::env::remove_var("KRONN_HOST_IPS");
+    }
+
+    #[test]
+    fn detect_via_host_env_returns_none_when_no_tailscale_entry() {
+        std::env::set_var(
+            "KRONN_HOST_IPS",
+            "eth0:192.168.1.10,docker0:172.17.0.1",
+        );
+        assert!(detect_via_host_env().is_none());
+        std::env::remove_var("KRONN_HOST_IPS");
+    }
+
+    #[test]
+    fn detect_via_host_env_returns_none_when_unset() {
+        std::env::remove_var("KRONN_HOST_IPS");
+        assert!(detect_via_host_env().is_none());
+    }
+
+    #[test]
+    fn parse_host_ips_env_malformed_entries_are_skipped() {
+        // No colon, trailing comma, only one part — all skipped silently.
+        std::env::set_var("KRONN_HOST_IPS", "garbage,eth0:192.168.1.5,broken,more-garbage,");
+        let ips = parse_host_ips_env().expect("should still parse the good entry");
+        assert_eq!(ips.len(), 1);
+        assert_eq!(ips[0].ip, "192.168.1.5");
+        std::env::remove_var("KRONN_HOST_IPS");
+    }
+
+    #[test]
+    fn detect_ip_sync_does_not_panic() {
+        // Just verifies sync wrapper is callable from a non-tokio context.
+        // Returns Option<String> so accept either Some or None — depends on
+        // whether the host has a real tailscale interface or not.
+        let _ = detect_ip_sync();
+    }
 }

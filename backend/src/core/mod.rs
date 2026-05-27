@@ -1,7 +1,9 @@
 pub mod checksums;
 pub mod kronn_state;
 pub mod redact;
+pub mod anti_halluc;
 pub mod cmd;
+pub mod usage;
 pub mod context_files;
 pub mod env;
 pub mod config;

@@ -92,6 +92,22 @@ pub async fn bootstrap(
                 if docs_template.is_dir() {
                     copy_dir_nondestructive(&docs_template, &docs_target)?;
                 }
+                // 0.8.7 — copy the anti-hallu spec embedded in the binary
+                // into the project's `docs/conventions/` so any agent
+                // running on this project (with or without Kronn) can
+                // open the convention locally. Idempotent : skip if
+                // already present (re-bootstrap doesn't clobber user
+                // edits ; PR3 endpoint `/anti-hallu/inject` is the
+                // explicit re-sync path).
+                let conventions_dir = docs_target.join("conventions");
+                let _ = std::fs::create_dir_all(&conventions_dir);
+                let spec_path = conventions_dir.join("agents-md-format-v1.md");
+                if !spec_path.exists() {
+                    let _ = std::fs::write(
+                        &spec_path,
+                        crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
+                    );
+                }
                 // 0.7.1 — agent-writable subfolders. Bootstrapped only
                 // when missing (idempotent), with a short README so a
                 // human poking around immediately understands what each
@@ -201,6 +217,7 @@ pub async fn bootstrap(
 
     let discussion_id = Uuid::new_v4().to_string();
     let initial_message = DiscussionMessage {
+        lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
         content: bootstrap_prompt,
@@ -219,7 +236,7 @@ pub async fn bootstrap(
         language: language.clone(),
         participants: vec![agent_type],
         messages: vec![initial_message.clone()],
-        message_count: 1,
+        message_count: 1, non_system_message_count: 1,
         skill_ids: req.skill_ids.clone(),
         profile_ids: vec![
             "architect".into(),

@@ -3,8 +3,9 @@ import { useState, useCallback, useRef, useEffect, useMemo, lazy, Suspense } fro
 import { projects as projectsApi, mcps as mcpsApi, agents as agentsApi, discussions as discussionsApi, workflows as workflowsApi, config as configApi, skills as skillsApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useToast } from '../hooks/useToast';
-import type { RemoteRepo, RepoSource, DriftCheckResponse, AuditProgress } from '../types/generated';
+import type { RemoteRepo, RepoSource, DiscoverSourceError, DriftCheckResponse, AuditProgress } from '../types/generated';
 import { useT } from '../lib/I18nContext';
+import { unseenBasis } from '../components/SwipeableDiscItem';
 import { detectStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isUsable } from '../lib/constants';
@@ -305,7 +306,12 @@ export function Dashboard({ onReset }: DashboardProps) {
     setLastSeenMsgCount(prev => {
       const next = { ...prev };
       for (const d of allDiscussions) {
-        const total = Math.max(d.messages.length, d.message_count ?? 0);
+        // 0.8.7 — seed lastSeen with the SAME basis the badge uses so
+        // "mark all read" reliably drops `totalUnseen` to 0. Before, the
+        // seed used `message_count` (incl. System) while the badge math
+        // was about to switch — keeping them aligned to the non-System
+        // basis is the invariant.
+        const total = unseenBasis(d);
         // Only bump UP — never lower an existing seed. Defensive against
         // an `allDiscussions` snapshot that lags behind the cache.
         if ((next[d.id] ?? 0) < total) next[d.id] = total;
@@ -316,7 +322,9 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, [allDiscussions]);
 
   const totalUnseen = useMemo(() => allDiscussions.reduce((acc, disc) => {
-    const unseen = (disc.message_count ?? disc.messages.length) - (lastSeenMsgCount[disc.id] ?? 0);
+    // 0.8.7 — basis excludes System messages so tool-call breadcrumbs +
+    // cached-summary lines don't inflate the top-level "to read" counter.
+    const unseen = unseenBasis(disc) - (lastSeenMsgCount[disc.id] ?? 0);
     return acc + (unseen > 0 && disc.id !== activeDiscussionId ? unseen : 0);
   }, 0), [allDiscussions, lastSeenMsgCount, activeDiscussionId]);
 
@@ -366,6 +374,23 @@ export function Dashboard({ onReset }: DashboardProps) {
   // effect's deps included `bootstrapRepoMcp`, so picking the empty option
   // re-fired the effect, the `!bootstrapRepoMcp` check passed again, and
   // the dropdown snapped back to the first MCP. Now the auto-pick only
+  // 0.8.7 — reset the discover-repos state whenever the "Add project" modal
+  // closes. Without this, a previously-toggled `selectedSourceIds = [perso]`
+  // would leak into the next open and the next Discover request would filter
+  // server-side to just that source — the user would see "only my personal
+  // GitHub" repos and think the multi-provider detection is broken. Same for
+  // `repoSearch` (an old query would hide newly-fetched results).
+  useEffect(() => {
+    if (showBootstrap) return;
+    setDiscoveredRepos([]);
+    setDiscoverSources([]);
+    setAvailableSources([]);
+    setSelectedSourceIds([]);
+    setDiscoverError('');
+    setDiscoverSourceErrors([]);
+    setRepoSearch('');
+  }, [showBootstrap]);
+
   // fires once per modal-open, on the false→true transition of `showBootstrap`.
   const autoPickedBootstrapMcps = useRef(false);
   useEffect(() => {
@@ -398,6 +423,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [discoverError, setDiscoverError] = useState('');
   const [availableSources, setAvailableSources] = useState<RepoSource[]>([]);
   const [selectedSourceIds, setSelectedSourceIds] = useState<string[]>([]);
+  const [discoverSourceErrors, setDiscoverSourceErrors] = useState<DiscoverSourceError[]>([]);
   const [repoSearch, setRepoSearch] = useState('');
 
   const handleBootstrap = async () => {
@@ -476,6 +502,7 @@ export function Dashboard({ onReset }: DashboardProps) {
       setDiscoveredRepos(res.repos);
       setDiscoverSources(res.sources);
       setAvailableSources(res.available_sources);
+      setDiscoverSourceErrors(res.errors ?? []);
       // On first call, auto-select all sources
       if (selectedSourceIds.length === 0 && res.available_sources.length > 0) {
         setSelectedSourceIds(res.available_sources.map(s => s.id));
@@ -494,6 +521,12 @@ export function Dashboard({ onReset }: DashboardProps) {
     setSelectedSourceIds(next);
     if (next.length > 0) {
       handleDiscoverRepos(next);
+    } else {
+      // All chips unchecked — clear the list so the user doesn't see stale
+      // repos hanging on while no source is selected (perceived as "the
+      // filter is broken because the list doesn't react to my clicks").
+      setDiscoveredRepos([]);
+      setDiscoverSources([]);
     }
   };
 
@@ -989,6 +1022,23 @@ export function Dashboard({ onReset }: DashboardProps) {
                 {discoverError && (
                   <div className="dash-discover-error">
                     {discoverError}
+                  </div>
+                )}
+
+                {/* 0.8.7 — per-source failures (e.g. GitLab token expired,
+                    GitHub scopes missing). Surfaced so the user knows WHY
+                    a configured source returned 0 repos instead of guessing
+                    the integration is broken. */}
+                {discoverSourceErrors.length > 0 && (
+                  <div className="dash-discover-source-errors" data-testid="discover-source-errors">
+                    {discoverSourceErrors.map(err => (
+                      <div key={err.source_id} className="dash-discover-source-error" data-provider={err.provider}>
+                        <span className="dash-discover-source-error-label">
+                          {err.provider === 'github' ? '🐙' : '🦊'} {err.source_label}
+                        </span>
+                        <span className="dash-discover-source-error-msg">{err.message}</span>
+                      </div>
+                    ))}
                   </div>
                 )}
 

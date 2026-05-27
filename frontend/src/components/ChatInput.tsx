@@ -331,9 +331,18 @@ export function ChatInput({
   };
 
   // ─── Send handler ────────────────────────────────────────────────────────
+  // Closure-stale guard : the `sending` prop is updated by the parent on
+  // the `false→true` edge, but two synchronous clicks fire BEFORE React
+  // re-renders, so the second click still sees `sending=false`. The ref
+  // below (set+cleared in the same tick) catches that race the way
+  // `feedback_race_guards.md` documents — `disabled={sending}` is not
+  // enough by itself, and double-POST on send is the highest-blast bug
+  // in the chat path.
+  const sendInFlightRef = useRef(false);
   const handleSendMessage = useCallback(async () => {
     const inputVal = chatInputValueRef.current;
-    if (!discussion || !inputVal.trim() || sending) return;
+    if (!discussion || !inputVal.trim() || sending || sendInFlightRef.current) return;
+    sendInFlightRef.current = true;
     const msg = inputVal.trim();
     const { targetAgent } = parseMention(msg);
 
@@ -382,7 +391,16 @@ export function ChatInput({
     setRestoredDraftAt(null);
     updateChatInput('');
     setMentionQuery(null);
-    onSend(msg, targetAgent);
+    try {
+      onSend(msg, targetAgent);
+    } finally {
+      // Release the synchronous re-entry guard ONE microtask later — by
+      // then either the parent has flipped `sending=true` (the prop-based
+      // guard takes over for the in-flight duration) OR onSend threw
+      // synchronously without flipping it (the user must be able to
+      // retry, so the ref must not stay stuck).
+      queueMicrotask(() => { sendInFlightRef.current = false; });
+    }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills]);
 

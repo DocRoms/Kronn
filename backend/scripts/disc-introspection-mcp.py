@@ -455,6 +455,17 @@ TOOLS = [
             "`docs_url`, `is_custom`, `config_keys[]` (env keys + auth-"
             "managed flag), `endpoints[]` (path/method/description/"
             "side_effect), and a `hint` field.\n\n"
+            "**⚠ CALL THIS BEFORE every `workflow_create_draft`, "
+            "`qp_create_draft`, `qa_create_draft`, `qa_update`, and "
+            "`api_call` whose plugin/config you have NOT just listed "
+            "this session.** Plugin slugs (`api_plugin_slug`), config "
+            "ids (`api_config_id`), endpoint paths, and env keys are "
+            "NOT memorizable across sessions — Kronn's allowlist "
+            "refuses any value not declared, and a fabricated slug "
+            "surfaces only at execution time (then fails opaquely). "
+            "This tool is the only source of truth for those ids; "
+            "guessing from a prior session's memory is the #1 failure "
+            "mode for downstream MCP calls.\n\n"
             "**`config_keys[]`** — each entry is `{env_key, label, "
             "auth_managed}`. The `env_key` (UPPER_SNAKE) is the slug "
             "you can reference in `api_call` arguments via the "
@@ -480,6 +491,40 @@ TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "convention_get",
+        "description": (
+            "Fetch the canonical Kronn documentation convention. The "
+            "convention defines how to author `docs/AGENTS.md` (and other "
+            "agent-context files) — the `<!-- kronn:section name/curated/"
+            "audit -->` markers, the 9-type `[src: …]` provenance grammar "
+            "(file / url / user / commit / api / code-comment / inferred / "
+            "hypothesis / training-data), and the `curated=\"ai\"` vs "
+            "`curated=\"human\"` ownership rules.\n\n"
+            "**Call this BEFORE writing to a `curated=\"ai\"` section of "
+            "any `docs/AGENTS.md`** — the embedded spec is the source of "
+            "truth (the GitHub `main` copy may have moved on; this tool "
+            "returns the convention THIS Kronn installation actually "
+            "implements + lints against).\n\n"
+            "Returns the markdown spec verbatim. `name` defaults to "
+            "`agents-md-format`, `version` to `v1` (only shipped today). "
+            "Future conventions will use the same tool with different "
+            "names."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "Convention name (default: 'agents-md-format').",
+                },
+                "version": {
+                    "type": "string",
+                    "description": "Convention version (default: 'v1').",
+                },
+            },
+        },
+    },
     # ─── 0.8.5 — autonomous draft creation tools ────────────────────────
     # Symmetric to the `KRONN:WORKFLOW_READY` / `KRONN:QP_IMPROVED`
     # signal+button path: these tools let the agent CREATE the artifact
@@ -501,6 +546,21 @@ TOOLS = [
             "they want autonomous creation; otherwise emit a "
             "`KRONN:WORKFLOW_READY` block and let the user one-click "
             "deploy via the existing UI CTA.\n\n"
+            "**⚠ Discovery first — DO NOT INVENT.** A fabricated step "
+            "fails at run time, not at draft time. Before calling this "
+            "tool, verify every reference: every `step_type` is in the "
+            "closed enum (Agent / ApiCall / BatchApiCall / Exec / Gate "
+            "/ Notify / BatchQuickPrompt); every ApiCall step's "
+            "`api_plugin_slug` + `api_config_id` exists in `mcp_list` "
+            "(call it first if you haven't this session); every Agent "
+            "step's `skill_ids` / `profile_ids` / `directive_ids` "
+            "exists in the relevant Kronn config (skills/profiles/"
+            "directives endpoints — see the `workflow-architect` skill "
+            "for the canonical lists). If a binding cannot be enumerated "
+            "AT CALL TIME, ASK the user — never guess. A workflow drafted "
+            "with hallucinated slugs/ids passes schema validation and "
+            "fails opaquely at the first run, wasting both your output "
+            "and the user's debug time.\n\n"
             "Payload mirrors `CreateWorkflowRequest`: name (required), "
             "trigger (required, e.g. `{ \"type\": \"Manual\" }`), steps "
             "(required, ≥ 1 ≤ 20 items). Optional: project_id, "
@@ -549,6 +609,16 @@ TOOLS = [
             "For one-off improvements to an existing QP, prefer the "
             "`KRONN:QP_IMPROVED` signal+button flow (`qp-improver` "
             "skill) which targets an existing QP by id.\n\n"
+            "**⚠ Discovery first — DO NOT INVENT bindings.** "
+            "`skill_ids`, `profile_ids`, `directive_ids` and `agent` "
+            "must reference REAL Kronn ids. If you can't enumerate "
+            "them via `qp_list` (which echoes the user's existing "
+            "bindings catalog) or via the dedicated skills/profiles/"
+            "directives list endpoints, ASK the user — never guess a "
+            "UUID. A QP drafted with a fabricated `skill_id` silently "
+            "strips that binding at run time: the QP runs without "
+            "the skill, the user only notices via missing behaviour, "
+            "and the debug session blames the wrong layer.\n\n"
             "Returns the created QP JSON (id, all fields) so the "
             "agent can echo the id back to the user."
         ),
@@ -890,10 +960,11 @@ TOOLS = [
             "The hint adapts : projection-anchored while within the "
             "average duration, fixed backoff after overshoot.\n\n"
             "**For batch workflows** : individual child discussions are "
-            "not listed here in PR1 — use `workflow_run_discussions` "
-            "(0.8.6 phase 4 PR2) when shipped, or read the disc list "
-            "from the Kronn DB directly. For linear workflows the "
-            "`steps[]` array is enough."
+            "not listed here — call `workflow_run_discussions({run_id})` "
+            "to get the child `disc_id`s, then `disc_load_other` each. "
+            "For linear workflows the `steps[]` array is enough.\n\n"
+            "**Prefer `workflow_wait_for_completion`** for short runs when "
+            "you just want the final verdict in a single call."
         ),
         "inputSchema": {
             "type": "object",
@@ -948,6 +1019,113 @@ TOOLS = [
                 },
             },
             "required": ["qp_id"],
+        },
+    },
+    {
+        "name": "qp_batch_run",
+        "description": (
+            "Fan a Quick Prompt out to N discussions in ONE call — the "
+            "batch twin of `qp_run`. Returns `{run_id, qp_id, qp_name, "
+            "disc_ids[], batch_total, expected_duration_ms?, samples, "
+            "next_check}`.\n\n"
+            "**Items** : pass `items: [{title?, vars?}, ...]` — one entry "
+            "per child disc. Each item's `vars` render the QP `{{var}}` "
+            "placeholders independently, so you can run the same prompt "
+            "over a list (10 tickets, 5 hosts, 3 regions…). `title` is "
+            "optional (defaults to `<qp_name> #<n>`). Required QP vars must "
+            "be non-empty on EVERY item. Max 50 items.\n\n"
+            "**Discovery first** : `qp_list` for the `qp_id` + its required "
+            "vars.\n\n"
+            "**Track progress** : all children link under one batch "
+            "`run_id`. Poll it with `workflow_run_status({run_id})` "
+            "(batch_completed / batch_total) or list the children with "
+            "`workflow_run_discussions({run_id})`, then `disc_load_other` "
+            "the ones you care about. `next_check` is a per-item baseline "
+            "(single-launch avg) — the batch finishes when all items do, "
+            "so treat it as a floor.\n\n"
+            "**vs `qp_run`** : `qp_run` = 1 disc ; `qp_batch_run` = N discs "
+            "under one trackable batch."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qp_id": {"type": "string", "description": "Quick Prompt id (from `qp_list`)."},
+                "items": {
+                    "type": "array",
+                    "description": "One entry per child disc: `{title?: string, vars?: {name: value}}`. Max 50.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string", "description": "Optional disc title."},
+                            "vars": {"type": "object", "description": "Per-item `{{var}}` values (string map)."},
+                        },
+                    },
+                },
+                "project_id": {
+                    "type": "string",
+                    "description": "Optional project override. Defaults to the QP's project, else the current disc's project.",
+                },
+                "batch_name": {
+                    "type": "string",
+                    "description": "Optional sidebar group name. Defaults to `MCP batch · <qp_name> · <time>`.",
+                },
+            },
+            "required": ["qp_id", "items"],
+        },
+    },
+    {
+        "name": "workflow_run_discussions",
+        "description": (
+            "List the discussions a run spawned (batch children, or a "
+            "workflow's `BatchQuickPrompt` fan-out). Returns `{run_id, "
+            "disc_count, discussions: [{disc_id, title, agent, "
+            "message_count, archived, created_at}]}`.\n\n"
+            "Empty list for a pure linear workflow (those have no child "
+            "discs — read `workflow_run_status({run_id}).steps[]` "
+            "instead). After getting the list, `disc_load_other(disc_id)` "
+            "to read any child's full conversation.\n\n"
+            "Pairs with `qp_batch_run` / `workflow_trigger` : trigger → "
+            "wait/poll → `workflow_run_discussions` → read children."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "description": "Batch/workflow run id."},
+            },
+            "required": ["run_id"],
+        },
+    },
+    {
+        "name": "workflow_wait_for_completion",
+        "description": (
+            "Block (long-poll) until a run reaches a terminal status or "
+            "`timeout_s` elapses — saves the back-and-forth of repeated "
+            "`workflow_run_status` calls on short runs. Returns `{run_id, "
+            "workflow_id, status, finished_at?, elapsed_ms, tokens_used, "
+            "timed_out, next_check?}`.\n\n"
+            "**timeout_s** : how long to hold the connection (default 60, "
+            "clamped to [1, 60]). If the run finishes first you get the "
+            "terminal status immediately with `timed_out: false` and "
+            "`next_check: null`. If the timeout wins, `timed_out: true` + a "
+            "`next_check` hint tells you when to call again.\n\n"
+            "**When to use** : short/medium runs where you want the verdict "
+            "in one call. For long runs (multi-minute), prefer "
+            "`workflow_run_status` + honour `next_check` so you don't hold "
+            "a connection open. Terminal statuses : `Success | Failed | "
+            "Cancelled | StoppedByGuard` (and the run pauses on "
+            "`WaitingApproval` — that's NOT terminal, so a Gate'd workflow "
+            "will time out here, by design)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string", "description": "Run id to wait on."},
+                "timeout_s": {
+                    "type": "integer",
+                    "description": "Max seconds to wait (default 60, clamped [1, 60]).",
+                },
+            },
+            "required": ["run_id"],
         },
     },
     {
@@ -1245,6 +1423,23 @@ def _http(method, path, body=None):
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
             return json.load(resp)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
+
+
+def _http_text(method, path):
+    """Variant of `_http` for endpoints that ship raw text (not JSON / not the
+    `ApiResponse` envelope) — e.g. `/api/conventions/agents-md-format-v1`
+    which returns the embedded `text/markdown` spec verbatim."""
+    url = f"{_backend_url()}{path}"
+    req = urllib.request.Request(url, method=method)
+    token = os.environ.get("KRONN_AUTH_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            return resp.read().decode("utf-8")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
@@ -1866,6 +2061,40 @@ def call_mcp_list(_args):
     return {"configs": out_configs, "servers_with_api": out_servers}
 
 
+# Allowlist of (name, version) → backend path. Keeps the surface tight
+# (an agent can't bait this tool into fetching arbitrary URLs) and gives a
+# clean error when a misspelled name is requested.
+_CONVENTION_PATHS = {
+    ("agents-md-format", "v1"): "/api/conventions/agents-md-format-v1",
+}
+
+
+def call_convention_get(args):
+    """Fetch a Kronn documentation convention spec verbatim.
+
+    Defaults to the only convention shipped in 0.8.7 (`agents-md-format` v1).
+    Returns `{name, version, content_markdown}` so the agent gets the spec
+    body inline (no follow-up call needed). The list is allowlisted — bogus
+    names raise instead of issuing the GET.
+    """
+    name = (args.get("name") or "agents-md-format").strip()
+    version = (args.get("version") or "v1").strip()
+    key = (name, version)
+    path = _CONVENTION_PATHS.get(key)
+    if path is None:
+        known = ", ".join(f"{n}@{v}" for (n, v) in _CONVENTION_PATHS)
+        raise RuntimeError(
+            f"convention_get: unknown convention {name}@{version}. "
+            f"Known: {known}"
+        )
+    content = _http_text("GET", path)
+    return {
+        "name": name,
+        "version": version,
+        "content_markdown": content,
+    }
+
+
 def call_workflow_create_draft(args):
     # 0.8.5 — POST /api/workflows with `enabled: false` (forced
     # client-side; the backend honours the flag since 0.8.5). The
@@ -2187,6 +2416,82 @@ def call_qp_run(args):
     return _unwrap(_http("POST", "/api/mcp/qp-run", body))
 
 
+def call_qp_batch_run(args):
+    """0.8.7 phase 4 PR2 — fan a Quick Prompt out to N discussions.
+
+    The backend `POST /api/mcp/qp-batch-run` renders the QP template per
+    item, creates ONE batch run linking all child discs, and kicks off
+    every agent in the background (semaphore-throttled). Returns
+    `{run_id, disc_ids[], batch_total, ..., next_check}`. Track via
+    `workflow_run_status` / `workflow_run_discussions`.
+    """
+    qp_id = args.get("qp_id")
+    if not qp_id:
+        raise RuntimeError("qp_batch_run: missing required 'qp_id'")
+    items = args.get("items")
+    if not isinstance(items, list) or not items:
+        raise RuntimeError("qp_batch_run: 'items' must be a non-empty array")
+    norm_items = []
+    for it in items:
+        if not isinstance(it, dict):
+            raise RuntimeError("qp_batch_run: each item must be an object {title?, vars?}")
+        norm = {}
+        title = it.get("title")
+        if title is not None:
+            norm["title"] = str(title)
+        vars_obj = it.get("vars")
+        if isinstance(vars_obj, dict):
+            # Same str-coercion as qp_run.vars — backend expects HashMap<String, String>.
+            norm["vars"] = {str(k): str(v) for k, v in vars_obj.items()}
+        norm_items.append(norm)
+    body = {"qp_id": qp_id, "items": norm_items}
+    for k in ("project_id", "batch_name"):
+        v = args.get(k)
+        if v is not None:
+            body[k] = v
+    # Auto-inherit current disc's project (same UX as qp_run / disc_create).
+    if "project_id" not in body:
+        inherited = _current_project_id()
+        if inherited:
+            body["project_id"] = inherited
+    return _unwrap(_http("POST", "/api/mcp/qp-batch-run", body))
+
+
+def call_workflow_run_discussions(args):
+    """0.8.7 phase 4 PR2 — list the discussions a run spawned.
+
+    Pure pass-through to `GET /api/mcp/workflow-run-discussions/<run_id>`.
+    Empty for linear workflows (use `workflow_run_status.steps[]` there).
+    """
+    run_id = args.get("run_id")
+    if not run_id:
+        raise RuntimeError("workflow_run_discussions: missing required 'run_id'")
+    return _unwrap(_http("GET", f"/api/mcp/workflow-run-discussions/{run_id}"))
+
+
+def call_workflow_wait_for_completion(args):
+    """0.8.7 phase 4 PR3 — long-poll a run until terminal or timeout.
+
+    The backend `POST /api/mcp/workflow-wait-for-completion` holds the
+    connection up to `timeout_s` (clamped [1, 60]) and returns the
+    terminal status as soon as the run finishes, else `timed_out=true`
+    plus a `next_check` hint for the next call.
+    """
+    run_id = args.get("run_id")
+    if not run_id:
+        raise RuntimeError("workflow_wait_for_completion: missing required 'run_id'")
+    body = {"run_id": run_id}
+    timeout_s = args.get("timeout_s")
+    if timeout_s is not None:
+        try:
+            body["timeout_s"] = int(timeout_s)
+        except (TypeError, ValueError):
+            raise RuntimeError(
+                "workflow_wait_for_completion: 'timeout_s' must be an integer"
+            )
+    return _unwrap(_http("POST", "/api/mcp/workflow-wait-for-completion", body))
+
+
 DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
@@ -2218,6 +2523,10 @@ DISPATCH = {
     "qp_list": call_qp_list,
     "qa_list": call_qa_list,
     "mcp_list": call_mcp_list,
+    # 0.8.7 — fetch a Kronn doc convention spec on demand (cheap if not
+    # called; lets agents about to author AGENTS.md sections pull the
+    # canonical [src:] grammar instead of guessing from training-data).
+    "convention_get": call_convention_get,
     # 0.8.5 — autonomous draft creation. Both default to a safe state
     # (workflow disabled / QP manually launched) so a misfire can't
     # cascade into prod cron.
@@ -2240,6 +2549,11 @@ DISPATCH = {
     "workflow_trigger": call_workflow_trigger,
     "workflow_run_status": call_workflow_run_status,
     "qp_run": call_qp_run,
+    # 0.8.7 phase 4 PR2/PR3 — batch fan-out, child-disc listing, long-poll
+    # wait. Completes the mobile remote-control surface.
+    "qp_batch_run": call_qp_batch_run,
+    "workflow_run_discussions": call_workflow_run_discussions,
+    "workflow_wait_for_completion": call_workflow_wait_for_completion,
     # 0.8.6 phase 4 — synchronous QA execution. The deagentified twin
     # of `api_call` : same end-result, zero token cost on request
     # construction. Always prefer when a matching QA exists.

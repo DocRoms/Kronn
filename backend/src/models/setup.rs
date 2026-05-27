@@ -120,6 +120,15 @@ pub struct ServerConfig {
     /// - `"never"` — disabled
     #[serde(default = "default_global_context_mode")]
     pub global_context_mode: String,
+    /// 0.8.7 anti-hallucination mode: `off` | `warn` | `enforce`.
+    ///
+    /// - `off` — feature disabled, nothing injected or linted.
+    /// - `warn` (default) — P1 sourcing directive injected + P2 lint (heuristic + mechanical `[src:]` verification) surfaced as a non-blocking pill.
+    /// - `enforce` — same as `warn` in 0.8.7; reserved for the Phase 3 write-time refusal of unverifiable citations.
+    ///
+    /// See `core::anti_halluc`. Mirrored into the process-global flag at load + save.
+    #[serde(default = "default_anti_hallucination_mode")]
+    pub anti_hallucination_mode: String,
     /// Debug mode — when true, the tracing subscriber is initialized at
     /// `debug` level instead of `info`, producing significantly more
     /// output on stdout. Lets users diagnose agent detection / project
@@ -168,6 +177,7 @@ fn default_summary_strategy_off() -> crate::models::SummaryStrategy {
 }
 
 fn default_global_context_mode() -> String { "always".to_string() }
+fn default_anti_hallucination_mode() -> String { crate::core::anti_halluc::DEFAULT_MODE_STR.to_string() }
 fn default_max_agents() -> usize { 5 }
 fn default_agent_stall_timeout() -> u32 { 5 }
 

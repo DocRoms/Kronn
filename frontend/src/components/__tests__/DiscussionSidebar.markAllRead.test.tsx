@@ -54,7 +54,7 @@ const mkDisc = (id: string, msgCount: number, archived = false): Discussion => (
   language: 'fr',
   participants: ['ClaudeCode'],
   messages: [],
-  message_count: msgCount,
+  message_count: msgCount, non_system_message_count: msgCount,
   archived,
   pinned: false,
   workspace_mode: 'Direct',
@@ -175,16 +175,20 @@ describe('DiscussionSidebar — Mark all as read (0.8.3 #277)', () => {
     expect(btn.getAttribute('title')).toContain('300');
   });
 
-  it('uses Math.max(messages.length, message_count) for the count', () => {
-    // 0.8.3 guard: a disc whose list-endpoint shape says
-    // `message_count = 75` but whose local `messages` array is empty
-    // (the normal list shape) MUST count for 75, not 0. Without
-    // Math.max, the unread total for fresh list-state discs would
-    // be undercounted and the button would disappear prematurely.
+  it('uses non_system_message_count over an empty messages[] (0.8.3 + 0.8.7 guard)', () => {
+    // 0.8.3 guard: a disc whose list-endpoint shape has an empty `messages`
+    // array MUST still count its unread (the badge would otherwise undercount
+    // until `discussions.get` resolves and populates the array).
+    //
+    // 0.8.7 refinement: the basis is now `non_system_message_count` (not
+    // `message_count`), so System rows from tool calls + cached summaries
+    // don't inflate the "à lire" total. This case combines both: empty
+    // messages[] AND a non-System count of 75 must read 75.
     const disc: Discussion = {
       ...mkDisc('d1', 0),
       messages: [],
-      message_count: 75,
+      message_count: 90,             // inflated by 15 System rows
+      non_system_message_count: 75,  // the real to-read count
     };
     render(
       <DiscussionSidebar

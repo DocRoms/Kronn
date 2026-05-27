@@ -111,6 +111,50 @@ export function ProjectCard({
   // the load effect — see AiDocViewer L37).
   const [docDeepLink, setDocDeepLink] = useState<string | undefined>(undefined);
 
+  // 0.8.7 — anti-hallu section status. Lazily fetched at mount + after every
+  // explicit inject so the badge reflects current state. `null` = not yet
+  // loaded (no badge displayed), `{present: false}` = legacy project that
+  // needs migration → CTA shown, `{present: true}` = section is canonical.
+  const [antiHalluStatus, setAntiHalluStatus] = useState<{
+    present: boolean;
+    audit_date?: string | null;
+    file_exists: boolean;
+  } | null>(null);
+  const [antiHalluBusy, setAntiHalluBusy] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    projectsApi
+      .antiHalluStatus(proj.id)
+      .then(s => {
+        if (alive) setAntiHalluStatus(s);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [proj.id]);
+
+  const handleInjectAntiHallu = useCallback(async () => {
+    if (antiHalluBusy) return;
+    setAntiHalluBusy(true);
+    try {
+      const r = await projectsApi.injectAntiHallu(proj.id);
+      // Refetch status to reflect the new state.
+      const s = await projectsApi.antiHalluStatus(proj.id);
+      setAntiHalluStatus(s);
+      // Small toast via document title flash — minimal UX without
+      // bringing in a full toast system here. The badge state change is
+      // the primary signal.
+      if (r?.status === 'ok') {
+        // Browser console as last-resort feedback for debugging.
+        console.info(`[anti-hallu] ${r.result} on ${proj.id}`);
+      }
+    } finally {
+      setAntiHalluBusy(false);
+    }
+  }, [proj.id, antiHalluBusy]);
+
   // 0.8.3 (#314) — post-validation deep-link consumer. MessageBubble
   // writes `kronn:postValidation:<projectId>` to sessionStorage when
   // the user clicks the "View Tech Debts" CTA in the validation
@@ -815,6 +859,33 @@ export function ProjectCard({
                 detail files under `docs/tech-debt/` and table rows
                 in `docs/inconsistencies-tech-debt.md`. Click jumps to
                 the docs viewer with the tech-debt section open. */}
+            {/* 0.8.7 — Anti-hallu canonical section badge. Green check
+                when present in docs/AGENTS.md, amber inject CTA when
+                missing. Hidden during audit (the audit itself will
+                refresh the section via STEP 0). i18n FR/EN/ES. */}
+            {!auditActive && antiHalluStatus !== null && (
+              antiHalluStatus.present ? (
+                <span
+                  className="dash-badge-green"
+                  title={antiHalluStatus.audit_date
+                    ? t('projects.antiHallu.refreshed', antiHalluStatus.audit_date)
+                    : t('projects.antiHallu.present')}
+                >
+                  <ShieldCheck size={9} /> {t('projects.antiHallu.present')}
+                </span>
+              ) : antiHalluStatus.file_exists ? (
+                <span
+                  className="dash-badge-orange cursor-pointer"
+                  onClick={(e) => { e.stopPropagation(); handleInjectAntiHallu(); }}
+                  title={t('projects.antiHallu.injectTooltip')}
+                >
+                  {antiHalluBusy
+                    ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.antiHallu.injecting')}</>
+                    : <><AlertTriangle size={9} /> {t('projects.antiHallu.missing')}</>
+                  }
+                </span>
+              ) : null
+            )}
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
               <span
                 className="dash-badge-tech-debt"

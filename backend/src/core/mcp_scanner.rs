@@ -3387,4 +3387,101 @@ mod host_sync_tests {
         assert_eq!(claude_entry.get("type").unwrap().as_str(), Some("http"));
         assert_eq!(claude_entry.get("url").unwrap().as_str(), Some("https://example.com/mcp"));
     }
+
+    #[test]
+    fn slugify_label_simple() {
+        assert_eq!(slugify_label("MyServer"), "myserver");
+        assert_eq!(slugify_label("Hello World"), "hello-world");
+    }
+
+    #[test]
+    fn slugify_label_collapses_adjacent_separators() {
+        // Multiple non-alnum chars in a row collapse into a single dash.
+        assert_eq!(slugify_label("Foo   Bar"), "foo-bar");
+        assert_eq!(slugify_label("Foo!!Bar"), "foo-bar");
+        assert_eq!(slugify_label("Foo / Bar / Baz"), "foo-bar-baz");
+    }
+
+    #[test]
+    fn slugify_label_strips_leading_and_trailing_separators() {
+        // Empty segments before/after the meaningful content are filtered out.
+        assert_eq!(slugify_label("   trim me   "), "trim-me");
+        assert_eq!(slugify_label("--foo--"), "foo");
+        assert_eq!(slugify_label("!@#bar!@#"), "bar");
+    }
+
+    #[test]
+    fn slugify_label_keeps_alnum_only() {
+        // Punctuation, accents (non-ASCII alnum), digits all handled.
+        assert_eq!(slugify_label("Bug-Report-2025"), "bug-report-2025");
+        assert_eq!(slugify_label("API_v3.5"), "api-v3-5");
+    }
+
+    #[test]
+    fn slugify_label_empty_input_yields_empty() {
+        assert_eq!(slugify_label(""), "");
+        assert_eq!(slugify_label("   "), "");
+        assert_eq!(slugify_label("!!!"), "");
+    }
+
+    #[test]
+    fn is_default_mcp_context_recognises_unedited_template() {
+        // The default template contains "<!-- Examples:" marker + only
+        // comment/heading lines outside it.
+        let template = r#"# foo — Usage Context
+
+> Instructions for AI agents using **foo** in this project.
+
+**Server:** test
+
+## Rules
+
+<!-- Examples:
+- Always use sender address: contact@example.com
+-->
+"#;
+        assert!(is_default_mcp_context(template));
+    }
+
+    #[test]
+    fn is_default_mcp_context_detects_user_edit() {
+        // A real rule outside the <!-- Examples: block flips the result.
+        let edited = r#"# foo — Usage Context
+
+> Instructions for AI agents using **foo** in this project.
+
+**Server:** test
+
+## Rules
+
+Always send emails from contact@example.com
+
+<!-- Examples:
+- Always use sender address: contact@example.com
+-->
+"#;
+        assert!(!is_default_mcp_context(edited),
+            "rule line outside the examples block must flip result");
+    }
+
+    #[test]
+    fn is_default_mcp_context_no_marker_means_custom() {
+        // No "<!-- Examples:" marker at all → user wrote from scratch → customized.
+        assert!(!is_default_mcp_context("# entirely custom\nDo X always"));
+        assert!(!is_default_mcp_context(""));
+    }
+
+    #[test]
+    fn is_default_mcp_context_tolerates_bullet_only_lines() {
+        // Bullet lines (starting with '-') are considered structure, not custom rules.
+        let bullet_only = r#"# Title
+
+<!-- Examples:
+- bullet one
+- bullet two
+-->
+"#;
+        assert!(is_default_mcp_context(bullet_only),
+            "bare bullets inside Examples block are template structure");
+    }
 }

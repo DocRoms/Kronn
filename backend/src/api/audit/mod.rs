@@ -12,6 +12,7 @@ use std::pin::Pin;
 use axum::response::sse::Event;
 use futures::Stream;
 
+pub mod anti_hallu_step;
 pub mod briefing;
 pub mod drift;
 pub mod full;
@@ -39,7 +40,7 @@ pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>>
 
 pub(crate) const PROMPT_PREAMBLE: &str = "\
 Rules: Write in English. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
-- Do NOT invent information — see § MARKER DISCIPLINE below.\n\
+- Do NOT invent — read `docs/AGENTS.md` § 0 Anti-Hallucination Protocol (STEP 0 of this audit just wrote/refreshed it). The cascade is `read code → existing docs/ → external doc → escalate via TODO marker → never assert without proof`. Every non-trivial fact written into `docs/` MUST carry `[src: file: <path>:<line>]` or `[src: url: …]` ; fabricated citations (path doesn't exist / outside project root) are mechanically rejected.\n\
 - Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
 - Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
 - If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
@@ -78,6 +79,106 @@ pub(crate) struct AnalysisStep {
     pub(crate) sources: &'static [&'static str],
 }
 
+/// 0.8.7 — Anti-hallu canonical section body (without the `<!-- kronn:section -->`
+/// wrappers, which are written dynamically with the current audit date).
+///
+/// SOURCE OF TRUTH for the anti-hallucination protocol. Mirrored in
+/// `templates/docs/AGENTS.md` (the new-project bootstrap copy) — a test in
+/// this module asserts the two stay in sync.
+///
+/// Lives here (not in `core::anti_halluc`) because the audit step 0 is the
+/// only writer ; the runtime `PREAMBLE` now points to this section instead
+/// of duplicating it.
+pub(crate) const ANTI_HALLU_SECTION_BODY: &str = "\
+## 0. Anti-Hallucination Protocol\n\
+\n\
+You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:\n\
+\n\
+1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.\n\
+2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.\n\
+3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.\n\
+4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.\n\
+5. **NEVER ASSERT WITHOUT PROOF** — \"I don't know yet, let me check\" beats a fabrication every time.\n\
+\n\
+### Citation grammar (verified mechanically by Kronn when present)\n\
+\n\
+Attach a structured citation to every non-trivial assertion:\n\
+\n\
+- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`\n\
+- `[src: file: <path>:<start-end>]` — line range\n\
+- `[src: url: <url>]` — external doc\n\
+- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)\n\
+- `[src: commit: <sha>]` — git commit\n\
+\n\
+A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.\n\
+\n\
+Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.\n\
+";
+
+/// 0.8.7 — Audit STEP 0 doctrine (used by the `apply_anti_hallu_section`
+/// deterministic function in `anti_hallu_step.rs`, NOT as an LLM prompt).
+///
+/// The pre-step is implemented in Rust because it's 100% mechanical
+/// (read → edit → write). No need to burn tokens or risk hallucination
+/// on an idempotent file edit. This const stays as documentation for
+/// the case where an external tool wants to invoke an agent on this
+/// step or to surface the doctrine via the audit detail UI.
+///
+/// **Separate const, NOT in `ANALYSIS_STEPS`**, because the existing
+/// drift detection API (`drift.rs:131, 211`) uses 1-indexed step numbers
+/// that map to `ANALYSIS_STEPS[step - 1]`. Inserting STEP 0 would shift
+/// everything.
+#[allow(dead_code)] // doc-only constant ; the real work is in anti_hallu_step.rs
+pub(crate) const STEP_0_ANTI_HALLU: AnalysisStep = AnalysisStep {
+    target_file: "docs/AGENTS.md",
+    prompt: "\
+This is the FIRST step of the audit. Your job is to ensure `docs/AGENTS.md` carries the canonical anti-hallucination protocol section that every subsequent step (and every future agent reading this file) will rely on.\n\
+\n\
+## Algorithm\n\
+\n\
+1. Read `docs/AGENTS.md`.\n\
+2. Search for the opening marker `<!-- kronn:section name=\"anti-hallu\"`.\n\
+3. **If found** : refresh ONLY the `audit=\"<date>\"` attribute on the opening marker (set it to today's date, ISO YYYY-MM-DD). Do NOT touch the body — `curated=\"ai\"` means Kronn owns the content. Leave the closing `<!-- kronn:section:end -->` marker untouched.\n\
+4. **If NOT found** : insert the canonical block (exactly as below) immediately after the file's H1 (`# AI agent context — Entry point`) and BEFORE the next `---` separator. Preserve everything else.\n\
+\n\
+## Canonical block to write (EXACT, no edits)\n\
+\n\
+```markdown\n\
+<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"<TODAY YYYY-MM-DD>\" -->\n\
+## 0. Anti-Hallucination Protocol\n\
+\n\
+You may NEVER state a non-trivial technical fact (file paths, function / API / config names, versions, behaviour, conventions) without proof. Apply this cascade — stop as soon as you have it:\n\
+\n\
+1. **READ THE CODE** — Read / Glob / Grep the repo. Cite `file:line`. Source of truth #1.\n\
+2. **READ `docs/`** — siblings of this file, `conventions/`, `architecture/`, etc. Trust a doc claim only if its `[src:]` still resolves.\n\
+3. **OFFICIAL EXTERNAL DOC** — WebFetch / the relevant MCP for external libs / APIs / specs. Cite the URL.\n\
+4. **ASK THE USER** — directly, or via a focused sub-discussion. Faster than guessing.\n\
+5. **NEVER ASSERT WITHOUT PROOF** — \"I don't know yet, let me check\" beats a fabrication every time.\n\
+\n\
+### Citation grammar (verified mechanically by Kronn when present)\n\
+\n\
+Attach a structured citation to every non-trivial assertion:\n\
+\n\
+- `[src: file: <path>:<line>]` — e.g. `[src: file: backend/src/lib.rs:440]`\n\
+- `[src: file: <path>:<start-end>]` — line range\n\
+- `[src: url: <url>]` — external doc\n\
+- `[src: user:<identifier>:<date>: <ref>]` — human confirmation (stable handle preferred over email; privacy by default)\n\
+- `[src: commit: <sha>]` — git commit\n\
+\n\
+A citation pointing to a file/line that does not exist, or escaping the project root, is **rejected as fabricated**. A code comment is NOT authoritative — treat it as a hint to verify, never as the fact itself.\n\
+\n\
+Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-format-v1.md). **Honest by design**: `verified` means the citation *exists*, not that the claim is *true*.\n\
+<!-- kronn:section:end -->\n\
+```\n\
+\n\
+## DO NOT\n\
+\n\
+- Do NOT touch any OTHER section of `docs/AGENTS.md` in this step (placeholders, tables, etc. are handled by subsequent steps).\n\
+- Do NOT add commentary, summary, or step-numbering. Output the file silently after the write.\n\
+- Do NOT escalate (no `<!-- TODO: ask user -->`). This step is purely mechanical.",
+    sources: &["docs/AGENTS.md"],
+};
+
 pub(crate) const ANALYSIS_STEPS: &[AnalysisStep] = &[
     // Step 1: Project analysis + index
     AnalysisStep {
@@ -95,7 +196,9 @@ Then fill docs/AGENTS.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
 - Code placement table: replace {{CODE_TYPE_*}} with where to put new endpoints, pages, tests\n\
 - Stack table: replace {{TECH_*}} with all major technologies, versions, and roles\n\
 - Workflow constraints: replace {{WORKFLOW_CONSTRAINT_*}} with project-specific rules\n\
-- {{DATE}}: set to today's date (YYYY-MM-DD)",
+- {{DATE}}: set to today's date (YYYY-MM-DD)\n\
+\n\
+**ANTI-HALLU FOR THIS STEP** — every cell in the Stack / Source-of-truth / Code-placement / Prerequisites / Common-tasks tables MUST be anchored. Append a citation in parentheses at the end of each cell value: `(src: file: <path>:<line>)`. For the Stack table specifically: a version cell MUST cite the lockfile or the manifest line where the version is pinned (e.g. `Rust 1.78 (src: file: Cargo.toml:5)`, `Symfony 7.3.6 (src: file: composer.lock:2884)`). If a row cannot be anchored to a real file/line, do NOT add it — Quality > quantity. {{DATE}} is the only exception.",
         sources: &["README.md", "package.json", "Cargo.toml", "composer.json", "go.mod", "docker-compose.yml", "Makefile", "Dockerfile"],
     },
 
@@ -137,7 +240,12 @@ Fill docs/coding-rules.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Replace {{CONVENTION_*}} with coding conventions OBSERVED in existing code (naming, error handling, imports). Write fewer rather than inventing.\n\
 - Replace {{MISTAKE_*}} with common mistakes to avoid (from linter configs, framework gotchas observed in code)\n\
 - If no linter/formatter is configured, write 'Not configured' in the Config column\n\
-- Add or remove language sections as needed to match the actual project stack",
+- Add or remove language sections as needed to match the actual project stack\n\
+\n\
+**ANTI-HALLU FOR THIS STEP** — {{CONVENTION_*}} and {{MISTAKE_*}} are the #1 vector for training-data leakage into AGENTS.md. Apply this rule strictly:\n\
+- Every CONVENTION row MUST cite the rule's source: either a linter config (`[src: file: .eslintrc.json:12]`, `[src: file: rustfmt.toml:3]`) OR at least 3 observed call sites (`[src: file: src/foo.rs:120]`, `[src: file: src/bar.rs:45]`, …).\n\
+- Every MISTAKE row MUST cite either a linter rule that enforces the prohibition OR a real bug found in the repo's git history (`[src: commit: <sha>]`).\n\
+- A rule you 'know from the language ecosystem' but cannot anchor in this repo is NOT a project convention — do NOT add it. Write fewer rules with proof, not more rules from memory.",
         sources: &["package.json", "Cargo.toml", "tsconfig.json", "rustfmt.toml", "pyproject.toml"],
     },
 
@@ -514,11 +622,11 @@ Format each row:\n\
 - **Decision**: one-line summary of the choice (e.g., \"Subdomain-based locale routing\").\n\
 - **Why chosen**: rationale you can defend from the code or docs (e.g., \"SEO + hreflang correctness, simpler than middleware-based path prefixing\").\n\
 - **What NOT to do**: anti-pattern a newcomer might attempt (e.g., \"Don't add a `/fr/` path prefix — it would duplicate routes and break the `_alternates` SEO logic\").\n\
-- **Source**: file:line OR `briefing.md` OR `user` if confirmed by the user during validation. Use `inferred from <evidence>` only when no single source is canonical.\n\n\
+- **Source**: MUST be one of: a verifiable `file:line` (cite with `[src: file: path:line]`), a `briefing.md` reference, OR `user` (i.e. confirmed in a previous validation discussion). **FORBIDDEN**: `inferred from <evidence>` — if you cannot pin a single concrete source, the decision does NOT belong here. The whole point of `decisions.md` is that future agents can verify each entry; an inferred 'why chosen' is a fabricated rationale that becomes doctrine.\n\n\
 \
 Quality rules:\n\
 - **Quality > quantity**: target 3-8 real decisions. A repo with 2 strong decisions is fine; a list of 15 fluff items is worse than 3 strong ones.\n\
-- **Do NOT invent**: every decision must be traceable to code or a user-confirmed source. If you can't cite evidence, skip it.\n\
+- **Do NOT invent**: every decision must be traceable to code or a user-confirmed source. If you can't cite evidence, skip it. A 'Why chosen' you cannot anchor in `file:line` or `user` is a post-hoc rationalisation, not a recorded decision — drop the row.\n\
 - **Examples** (good shape — adapt to the actual repo):\n\
   · \"Single Mutex on SQLite\" → \"Single-writer model fits our access pattern; multi-writer would need WAL + busy_timeout tuning\" → \"Don't add a connection pool\" → `src/db/conn.rs:42`\n\
   · \"No ORM\" → \"Pure SQL is faster for our 12-table schema; the maintenance cost of an ORM dependency exceeds the win\" → \"Don't introduce diesel/sea-orm\" → `src/db/queries.rs` + user\n\
@@ -1407,6 +1515,83 @@ mod prompt_tests {
         // new wording mentions the unverified case explicitly.
         assert!(PROMPT_PREAMBLE.contains("could not check") || PROMPT_PREAMBLE.contains("couldn't check"),
             "PREAMBLE must qualify TODO: verify as 'could not check', not generic 'unknown'");
+    }
+
+    #[test]
+    fn audit_step_blocks_do_not_duplicate_doctrine() {
+        // 0.8.7 redesign — anti-regression test demanded by the architecte
+        // expert (R2 P1-A). The doctrine lives in ONE place :
+        // `docs/AGENTS.md` § Anti-Hallucination (written by STEP 0).
+        // Step prompts may carry TASK-SPECIFIC reminders (e.g. "Step 4
+        // requires 3 observed call sites for each CONVENTION") but must
+        // NOT redume the cascade or the citation grammar — that's how
+        // the doctrine started drifting in the first place. Pin no step
+        // prompt re-inlines the cascade.
+        //
+        // We allow `[src: file:` to APPEAR in step prompts (steps need
+        // to give CONCRETE EXAMPLES of citations they expect in cells),
+        // but we forbid the cascade keywords that signal a doctrine
+        // re-inline (`READ THE CODE`, `ANTI-HALLUCINATION PROTOCOL`,
+        // `NEVER ASSERT WITHOUT PROOF`).
+        for (i, step) in ANALYSIS_STEPS.iter().enumerate() {
+            let step_num = i + 1;
+            assert!(
+                !step.prompt.contains("ANTI-HALLUCINATION PROTOCOL"),
+                "step {step_num} ({}) re-inlines the protocol header — doctrine must live in docs/AGENTS.md § Anti-Hallucination (written by STEP 0), step prompts only carry task-specific reminders",
+                step.target_file,
+            );
+            assert!(
+                !step.prompt.contains("READ THE CODE"),
+                "step {step_num} ({}) re-inlines the cascade step 1 — pointer to AGENTS.md § Anti-Hallucination is enough",
+                step.target_file,
+            );
+            assert!(
+                !step.prompt.contains("NEVER ASSERT WITHOUT PROOF"),
+                "step {step_num} ({}) re-inlines the cascade step 5 — pointer is enough",
+                step.target_file,
+            );
+            // Step prompts can be long (some are 400+ words for legit
+            // task-specific reasons like Step 9's TD discipline). The
+            // anti-duplication test is structural, not size-based.
+        }
+    }
+
+    #[test]
+    fn preamble_pins_pointer_to_anti_hallu_section() {
+        // 0.8.7 redesign — the audit PROMPT_PREAMBLE no longer carries the
+        // full doctrine inline. STEP 0 (`anti_hallu_step::apply`) writes
+        // the canonical anti-hallucination section into `docs/AGENTS.md`
+        // BEFORE the numbered steps run ; PROMPT_PREAMBLE now points at
+        // that section + ships the citation grammar inline as a
+        // token-budget safety net. Pin both : the pointer + the grammar.
+        assert!(
+            PROMPT_PREAMBLE.contains("docs/AGENTS.md")
+                && PROMPT_PREAMBLE.contains("Anti-Hallucination"),
+            "PROMPT_PREAMBLE must point at `docs/AGENTS.md` § Anti-Hallucination (written by STEP 0)",
+        );
+        // Citation grammar must remain inline so agents writing into
+        // `docs/` know the structured form Kronn verifies mechanically.
+        assert!(PROMPT_PREAMBLE.contains("[src: file:"), "[src: file:] grammar missing");
+        assert!(PROMPT_PREAMBLE.contains("[src: url:"), "[src: url:] grammar missing");
+        // The TODO: ask user escalation path is still the audit-specific
+        // way to surface gaps — distinct from the runtime PREAMBLE's
+        // `ASK THE USER` cascade step.
+        assert!(
+            PROMPT_PREAMBLE.contains("TODO") || PROMPT_PREAMBLE.contains("escalate"),
+            "PROMPT_PREAMBLE must reference the escalation marker",
+        );
+        // Size sanity — PROMPT_PREAMBLE was 450+ words before the
+        // redesign. The anti-hallu doctrine block is now a single
+        // bullet pointer, but the MARKER DISCIPLINE section (the
+        // 3 TODO marker types + WRONG/RIGHT example) is legitimate
+        // audit task-specific doctrine that stays. Cap kept loose
+        // (< 500) to catch a real re-inline of the cascade while
+        // not flagging the existing marker discipline.
+        let word_count = PROMPT_PREAMBLE.split_whitespace().count();
+        assert!(
+            word_count < 500,
+            "PROMPT_PREAMBLE ballooned to {word_count} words — anti-hallu cascade should live in docs/AGENTS.md § Anti-Hallucination (written by STEP 0), not re-inlined here",
+        );
     }
 
     #[test]

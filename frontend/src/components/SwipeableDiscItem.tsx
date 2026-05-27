@@ -9,6 +9,17 @@ import '../pages/DiscussionsPage.css';
 
 const SWIPE_THRESHOLD = 80;
 
+/** The "messages à lire" basis. Falls back to filtering the `messages` array
+ *  (excluding System rows) only when the backend hasn't populated
+ *  `non_system_message_count` yet — legacy clients hitting a fresh backend
+ *  always get the field; the fallback covers the inverse during a partial
+ *  rollout. `message_count` is the LAST resort. */
+export function unseenBasis(disc: Pick<Discussion, 'message_count' | 'messages' | 'non_system_message_count'>): number {
+  if (typeof disc.non_system_message_count === 'number') return disc.non_system_message_count;
+  if (disc.messages?.length) return disc.messages.filter(m => m.role !== 'System').length;
+  return disc.message_count ?? 0;
+}
+
 export interface SwipeableDiscItemProps {
   disc: Discussion;
   isActive: boolean;
@@ -72,12 +83,16 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
     } else if (offsetX < -SWIPE_THRESHOLD) {
       onDelete(disc.id);
     } else if (Math.abs(offsetX) < 5) {
-      onSelect(disc.id, disc.message_count ?? disc.messages.length);
+      onSelect(disc.id, unseenBasis(disc));
     }
     setOffsetX(0);
   };
 
-  const unseen = (disc.message_count ?? disc.messages.length) - lastSeenCount;
+  // The unread badge tracks USER + AGENT messages only — the streaming layer
+  // persists tool calls + cached-summary lines as MessageRole::System rows,
+  // which inflate `message_count`. Using `non_system_message_count` keeps
+  // "50 outils dans un message" from showing up as "50 à lire".
+  const unseen = unseenBasis(disc) - lastSeenCount;
   const showBadge = unseen > 0 && !isActive;
   const bgColor = offsetX > 30 ? `rgba(59,130,246,${Math.min(Math.abs(offsetX) / 120, 0.4)})`
                  : offsetX < -30 ? `rgba(239,68,68,${Math.min(Math.abs(offsetX) / 120, 0.4)})`

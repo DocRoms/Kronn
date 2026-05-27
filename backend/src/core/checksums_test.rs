@@ -258,3 +258,100 @@ fn empty_sources_returns_empty_checksums() {
 
     let _ = fs::remove_dir_all(&dir);
 }
+
+// ── sha256_of_bytes — pin the hex contract ──────────────────────────────
+
+#[test]
+fn sha256_of_bytes_known_vector_empty_string() {
+    // RFC test vector: SHA-256(empty) = e3b0c44298fc1c149afbf4c8996fb924
+    //                                   27ae41e4649b934ca495991b7852b855
+    assert_eq!(
+        sha256_of_bytes(b""),
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    );
+}
+
+#[test]
+fn sha256_of_bytes_known_vector_abc() {
+    // Standard SHA-256(b"abc") test vector.
+    assert_eq!(
+        sha256_of_bytes(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+}
+
+#[test]
+fn sha256_of_bytes_unicode_does_not_panic() {
+    // Hashing UTF-8 bytes of a non-ASCII string — verifies the byte-level
+    // hash treats text as bytes, not code points.
+    let hex = sha256_of_bytes("éèàç中".as_bytes());
+    assert_eq!(hex.len(), 64, "SHA-256 hex is always 64 chars");
+    assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "all hex chars must be valid");
+}
+
+#[test]
+fn sha256_of_bytes_one_byte_diff_changes_hash() {
+    // Avalanche : flipping one bit must flip ~half the hash bits.
+    let a = sha256_of_bytes(b"hello world");
+    let b = sha256_of_bytes(b"hello worlD");
+    assert_ne!(a, b);
+    // At least 20 hex chars must differ — looser than the strict ~32 for
+    // avalanche but safely above the "single-char change" floor.
+    let diff = a.chars().zip(b.chars()).filter(|(x, y)| x != y).count();
+    assert!(diff > 20, "avalanche should change many hex chars, got diff={diff}");
+}
+
+// ── matches_simple_glob — pin pattern matching contract ─────────────────
+
+#[test]
+fn glob_star_matches_everything() {
+    assert!(matches_simple_glob("*", "any"));
+    assert!(matches_simple_glob("*", ""));
+    assert!(matches_simple_glob("*", "a/b/c.rs"));
+}
+
+#[test]
+fn glob_no_wildcard_is_exact_match() {
+    assert!(matches_simple_glob("foo.rs", "foo.rs"));
+    assert!(!matches_simple_glob("foo.rs", "bar.rs"));
+    assert!(!matches_simple_glob("foo.rs", "foo.rs.bak"));
+    assert!(!matches_simple_glob("foo.rs", "prefix-foo.rs"));
+}
+
+#[test]
+fn glob_single_star_in_middle() {
+    // `*.md` — suffix match.
+    assert!(matches_simple_glob("*.md", "README.md"));
+    assert!(matches_simple_glob("*.md", ".md"));
+    assert!(matches_simple_glob("*.md", "a.md"));
+    assert!(!matches_simple_glob("*.md", "README.txt"));
+    assert!(!matches_simple_glob("*.md", "README.md.bak"));
+}
+
+#[test]
+fn glob_prefix_and_suffix() {
+    // `TD-*.md` — prefix + suffix.
+    assert!(matches_simple_glob("TD-*.md", "TD-001.md"));
+    assert!(matches_simple_glob("TD-*.md", "TD-.md"), "zero-char middle still matches");
+    assert!(!matches_simple_glob("TD-*.md", "001.md"));
+    assert!(!matches_simple_glob("TD-*.md", "TD-001"));
+}
+
+#[test]
+fn glob_too_short_name_for_prefix_plus_suffix() {
+    // Pattern requires at least prefix + suffix length — name shorter than
+    // that must not match (even if endswith is technically true).
+    assert!(!matches_simple_glob("abc*xyz", "ab"));
+    assert!(!matches_simple_glob("abc*xyz", "yz"));
+    // Exactly prefix + suffix : matches (the `*` matched zero chars).
+    assert!(matches_simple_glob("abc*xyz", "abcxyz"));
+}
+
+#[test]
+fn glob_multiple_stars_falls_back_to_exact_match() {
+    // The current impl only handles 0 or 1 `*`. Multi-star patterns fall
+    // back to exact-match — pinning this behaviour so the fallback path
+    // isn't silently broken.
+    assert!(matches_simple_glob("a*b*c", "a*b*c"), "fallback is exact match on multi-star");
+    assert!(!matches_simple_glob("a*b*c", "aXbYc"));
+}

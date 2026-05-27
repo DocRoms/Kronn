@@ -18,6 +18,12 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Build app (only our code recompiles, deps are cached)
 COPY src ./src
+# Embedded resources read by `include_str!` at compile time (e.g. the Phase 2
+# anti-hallu spec in `core::anti_halluc::SPEC_AGENTS_MD_V1`). Anything under
+# `backend/` referenced via `include_str!` MUST also be COPIED here, otherwise
+# the Docker builder breaks even though `cargo build` works locally. Caught
+# 2026-05-26 when shipping the spec doc — see feedback_include_str_docker_context.
+COPY docs ./docs
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     # 0.8.6 fix : `cargo clean -p kronn` BEFORE the build nukes the stale
@@ -90,6 +96,19 @@ RUN ARCH=$(dpkg --print-architecture) && \
     tar -xzf /tmp/rtk.tar.gz -C /usr/local/bin rtk && \
     chmod +x /usr/local/bin/rtk && \
     rm /tmp/rtk.tar.gz
+
+# Install ccusage (agent CLI usage/cost reporter) globally so `GET /api/usage`
+# can shell out to it with zero runtime npx fetch — same "pre-installed, pinned"
+# discipline as RTK above. Reads the CLIs' local JSONL logs (Claude / Codex /
+# Gemini …) and reports real token + cache breakdown with up-to-date pricing.
+ARG CCUSAGE_VERSION=20.0.5
+RUN npm install -g ccusage@${CCUSAGE_VERSION} && npm cache clean --force \
+    # ccusage 20.x ships a native binary it tries to `chmod +x` on first run.
+    # The backend runs as the non-root `kronn` user, who can't chmod a
+    # root-owned file → EPERM at runtime. Pre-make it executable AND hand the
+    # ccusage tree to kronn so any runtime self-heal chmod is permitted.
+    && chmod -R a+rx /usr/local/lib/node_modules/ccusage \
+    && chown -R kronn:kronn /usr/local/lib/node_modules/ccusage
 
 COPY --from=builder /usr/local/bin/kronn /usr/local/bin/kronn
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

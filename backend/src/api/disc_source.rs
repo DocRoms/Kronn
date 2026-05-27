@@ -101,7 +101,7 @@ pub async fn disc_create(
         language,
         participants: vec![agent],
         messages: vec![],
-        message_count: 0,
+        message_count: 0, non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -225,6 +225,7 @@ pub async fn disc_append(
         }
 
         let msg = DiscussionMessage {
+            lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: incoming.role.clone(),
             content: incoming.content.clone(),

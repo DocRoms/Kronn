@@ -52,6 +52,7 @@ export const API_NAMESPACES = [
   'docs',
   'autoTriggersApi',
   'rtk',
+  'usage',
   'userContext',
   'version',
   'apiCallLogs',
@@ -94,6 +95,7 @@ interface DefaultMock {
   docs: Record<string, AnyFn>;
   autoTriggersApi: Record<string, AnyFn>;
   rtk: Record<string, AnyFn>;
+  usage: Record<string, AnyFn>;
   userContext: Record<string, AnyFn>;
   version: Record<string, AnyFn>;
   apiCallLogs: Record<string, AnyFn>;
@@ -172,6 +174,9 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       createPr: resolve({ url: '' }),
       bootstrap: resolve({}),
       migrateDocs: resolve({ status: 'NotApplicable' }),
+      antiHalluStatus: resolve({ present: false, file_exists: false }),
+      injectAntiHallu: resolve({ status: 'ok', result: 'noop' }),
+      syncRedirectors: resolve({ status: 'ok', created: [], already_present: [], failed: [] }),
       partialAudit: resolve({}),
       exportZip: resolve(new Blob()),
       importZip: resolve({ imported: 0 }),
@@ -290,6 +295,15 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       activate: resolve({ success: true, stdout: '', stderr: '' }),
       deactivate: resolve({ success: true, stdout: '', stderr: '' }),
       savings: resolve({ available: false, total_tokens_saved: 0, ratio_percent: 0, sample_count: 0 }),
+    },
+
+    usage: {
+      get: resolve({
+        period_kind: 'daily',
+        rows: [],
+        totals: { input_tokens: 0, output_tokens: 0, cache_creation_tokens: 0, cache_read_tokens: 0, total_tokens: 0, total_cost: 0 },
+        agents_detected: [],
+      }),
     },
 
     skills: {

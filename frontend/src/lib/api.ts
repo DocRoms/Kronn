@@ -89,6 +89,7 @@ import type {
   ImportQuickPromptRequest,
   VersionCheck,
   DbBackupResponse,
+  UsageReport,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -384,6 +385,9 @@ export const config = {
   /** When to inject: "always" | "no_project" | "never". */
   getGlobalContextMode: () => api<string>('GET', '/config/global-context-mode'),
   saveGlobalContextMode: (mode: string) => api<void>('POST', '/config/global-context-mode', mode),
+  /** 0.8.7 anti-hallucination mode: "off" | "warn" | "enforce". */
+  getAntiHallucinationMode: () => api<string>('GET', '/config/anti-hallucination-mode'),
+  saveAntiHallucinationMode: (mode: string) => api<void>('POST', '/config/anti-hallucination-mode', mode),
   getScanPaths: () => api<string[]>('GET', '/config/scan-paths'),
   setScanPaths: (paths: string[]) => api<void>('POST', '/config/scan-paths', { paths }),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
@@ -465,6 +469,29 @@ export const projects = {
   clone: (req: CloneProjectRequest) => api<CloneProjectResponse>('POST', '/projects/clone', req),
   discoverRepos: (req?: DiscoverReposRequest) => api<DiscoverReposResponse>('POST', '/projects/discover-repos', req ?? { source_ids: [] }),
   installTemplate: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/install-template`),
+  /** 0.8.7 — check whether the anti-hallu canonical section is present
+   *  in `docs/AGENTS.md`. Frontend uses this to decide between the
+   *  "✓ Anti-hallu v1" badge (present) and the "⚠ inject" CTA. */
+  antiHalluStatus: (id: string) =>
+    api<{ present: boolean; audit_date?: string | null; file_exists: boolean }>(
+      'GET',
+      `/projects/${id}/anti-hallu/status`,
+    ),
+  /** 0.8.7 — inject the anti-hallu canonical section into `docs/AGENTS.md`.
+   *  Idempotent. Returns `result: "inserted" | "refreshed" | "noop" | "missing"`. */
+  injectAntiHallu: (id: string) =>
+    api<{ status: 'ok' | 'error'; result: 'inserted' | 'refreshed' | 'noop' | 'missing'; error?: string }>(
+      'POST',
+      `/projects/${id}/anti-hallu/inject`,
+    ),
+  /** 0.8.7 — re-sync the redirector files (CLAUDE.md, GEMINI.md, …) from
+   *  the binary templates into the project. Idempotent : already-present
+   *  files are NOT overwritten. */
+  syncRedirectors: (id: string) =>
+    api<{ status: 'ok' | 'partial'; created: string[]; already_present: string[]; failed: string[] }>(
+      'POST',
+      `/projects/${id}/redirectors/sync`,
+    ),
   auditInfo: (id: string) => api<{ files: { path: string; filled: boolean }[]; todos: { file: string; line: number; text: string }[] }>('GET', `/projects/${id}/audit-info`),
   validateAudit: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/validate-audit`),
   markBootstrapped: (id: string) => api<AiAuditStatus>('POST', `/projects/${id}/mark-bootstrapped`),
@@ -1525,6 +1552,16 @@ export const rtk = {
   /** Read the installed-vs-latest RTK version and precomputed
    *  `update_available` flag — feeds the freshness pill. */
   version: () => api<RtkVersionInfo>('GET', '/rtk/version'),
+};
+
+// ─── Agent CLI usage / cost (via ccusage) ───────────────────────────────────
+
+export const usage = {
+  /** 0.8.7 — global usage/cost report across the detected CLIs (Claude /
+   *  Codex / Gemini …). `period` = daily | weekly | monthly. Real token +
+   *  cache breakdown, not Kronn's rough estimate. */
+  get: (period: 'daily' | 'weekly' | 'monthly' = 'daily') =>
+    api<UsageReport>('GET', `/usage?period=${period}`),
 };
 
 // ─── Ollama (local LLM) ────────────────────────────────────────────────────

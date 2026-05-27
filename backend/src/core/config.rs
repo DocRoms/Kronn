@@ -154,6 +154,7 @@ pub fn default_config() -> AppConfig {
             bio: None,
             global_context: None,
             global_context_mode: "always".into(),
+            anti_hallucination_mode: crate::core::anti_halluc::DEFAULT_MODE_STR.into(),
             debug_mode: false,
             default_model_tier: ModelTier::Default,
             // 0.8.6 phase 4 — auto-summary off out of the box. See
@@ -344,6 +345,120 @@ mod tests {
             file_mode, 0o600,
             "config.toml must be 0600 on Unix (contains auth_token + encryption_secret), got {:o}",
             file_mode
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn load_returns_none_when_no_config_file() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-load-none-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let loaded = load().await.expect("load must succeed even with no file");
+        assert!(loaded.is_none(), "absent config file must return None, got {loaded:?}");
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn is_first_run_true_before_any_save() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-first-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let first = is_first_run().await.expect("first_run check");
+        assert!(first, "with no config file, is_first_run must be true");
+
+        let cfg = default_config();
+        save(&cfg).await.expect("save");
+
+        let still_first = is_first_run().await.expect("first_run after save");
+        assert!(!still_first, "after a save, is_first_run must be false");
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn save_then_load_preserves_default_scan_ignores() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-scan-ignore-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let cfg = default_config();
+        save(&cfg).await.expect("save");
+        let loaded = load().await.expect("load").expect("Some");
+
+        // Default ignore list must roundtrip — these strings are checked
+        // against during scans so a serialization drop would silently scan
+        // node_modules / .git / target etc.
+        for needle in ["node_modules", ".git", "target", "dist", ".cache", ".rustup"] {
+            assert!(
+                loaded.scan.ignore.iter().any(|s| s == needle),
+                "loaded scan.ignore must contain {needle:?} ; got {:?}",
+                loaded.scan.ignore
+            );
+        }
+        assert_eq!(loaded.scan.scan_depth, 4, "scan_depth must default to 4");
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn save_preserves_anti_hallucination_mode_and_default_tier() {
+        // 0.8.7 + 0.8.6 fields that should NEVER be dropped on roundtrip.
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-anti-hallu-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let mut cfg = default_config();
+        cfg.server.anti_hallucination_mode = "strict".into();
+        cfg.server.default_model_tier = ModelTier::Reasoning;
+        save(&cfg).await.expect("save");
+
+        let loaded = load().await.expect("load").expect("Some");
+        assert_eq!(loaded.server.anti_hallucination_mode, "strict");
+        assert!(
+            matches!(loaded.server.default_model_tier, ModelTier::Reasoning),
+            "default_model_tier dropped on save/load: {:?}",
+            loaded.server.default_model_tier
         );
 
         std::env::remove_var("KRONN_DATA_DIR");
