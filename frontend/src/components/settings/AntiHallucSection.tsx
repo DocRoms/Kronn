@@ -79,6 +79,7 @@ export function AntiHallucSection({ toast, t }: AntiHallucSectionProps) {
         <div className="flex-row gap-4 set-section-header-lg">
           <ShieldCheck size={14} className="text-accent" />
           <span className="font-semibold text-lg">{t('settings.sourcingTitle')}</span>
+          <span className="set-beta-badge" title={t('settings.betaBadgeHint')}>{t('settings.betaBadge')}</span>
         </div>
         <p className="set-hint">
           {t('settings.sourcingIntro')}

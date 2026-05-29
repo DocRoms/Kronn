@@ -435,6 +435,20 @@
   border-radius: var(--kr-r-xs);
 }
 
+/* "Beta" pill — signals a section that is still evolving. */
+.set-beta-badge {
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--kr-r-pill, 999px);
+  background: rgba(var(--kr-warning-rgb), 0.16);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  cursor: help;
+}
+
 .set-gender-badge[data-gender="F"] {
   background: rgba(var(--kr-pink-rgb), 0.15);
   color: var(--kr-pink);

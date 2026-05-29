@@ -309,6 +309,34 @@ describe('DiscussionSidebar — search filter', () => {
       expect(screen.queryByText('Banana bread')).toBeNull();
     });
   });
+
+  it('a search hides empty project folders + non-matching favorites', async () => {
+    const projects = [mkProject('p-acme', 'AcmeRepo', 'git@github.com:acme-org/AcmeRepo.git')];
+    const discussions = [
+      // A favorite that does NOT match the query — must disappear during search.
+      mkDisc({ id: 'fav1', pinned: true, title: 'Pinned unrelated note' }),
+      // A project disc that does NOT match — its folder must vanish entirely.
+      mkDisc({ id: 'pj1', project_id: 'p-acme', title: 'AcmeRepo chore' }),
+      // The one we're hunting for.
+      mkDisc({ id: 'tgt', project_id: null, title: 'Ticket EW-7149 UTM bug' }),
+    ];
+    render(<DiscussionSidebar {...baseProps} projects={projects} discussions={discussions} />);
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const input = document.querySelector('.disc-search-input') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'ew-7149' } });
+
+    await waitFor(() => {
+      // The match shows …
+      expect(screen.getByText('Ticket EW-7149 UTM bug')).toBeInTheDocument();
+      // … the non-matching favorite + its section are gone …
+      expect(screen.queryByText('Pinned unrelated note')).toBeNull();
+      expect(screen.queryByText('disc.favorites')).toBeNull();
+      // … and the empty project folder header (AcmeRepo) is gone too.
+      expect(screen.queryByText('AcmeRepo chore')).toBeNull();
+      expect(screen.queryByText('AcmeRepo')).toBeNull();
+    });
+  });
 });
 
 describe('DiscussionSidebar — loose-disc cap (+N more)', () => {

@@ -121,6 +121,66 @@ The strongest and least-defined idea: if claim B is derived from claim A, invali
 propagate a `needs-review` to B. This edges toward a distributed truth graph — powerful, but a
 large surface (maintenance, UX, scale). Explicitly parked as research; not a near-term target.
 
+## RFC-6 — Local NLI faithfulness layer ("Niveau 2", zero-token)
+
+> ⚠️ **Needs expert validation before any decision.** The model/distribution claims below are an
+> engineer's sketch, not an ML specialist's verdict — validate with a dedicated NLI/ML expert panel
+> (min 5 distinct experts + consensus + an anti-hallu fact-checker) before committing.
+
+The core spec + RFCs 1–5 verify that a citation *exists* (file/line resolves, in bounds). None
+verify that the cited content **actually supports** the claim. This RFC closes that gap with a
+**local Natural-Language-Inference cross-encoder** (zero token, full backend) scoring
+`claim ⊨ source` → {entailment, neutral, contradiction}; contradiction / weak-entailment → flag.
+It is the zero-token form of the "Niveau 2" the anti-hallu program reserved for an LLM judge.
+
+**Empirical motivation (2026-05-31 deep re-pass).** A 4-conversation forensic re-pass (one linguistic
+expert per persona, reconciled against the machine verdict) on a real Symfony project produced a
+clean motivating case: the *only* genuine hallucination in the corpus was a **content-semantic**
+claim — an agent asserted "the CSS `nth-of-type(even)` already in place alternates the background",
+when `grep` confirms **no such rule exists** in the stylesheet. Niveau-1 cannot see it: the sentence
+carries no `[src:]` / inline anchor (nothing to resolve), and even if it did, existence+bounds never
+compares the prose against the file's *content*. This is precisely the `claim ⊨ source` gap RFC-6
+closes, and a ready seed for the de-risking pair-set below (a real `(stylesheet, "nth-of-type rule
+exists")` → expected **contradiction**). The same re-pass also confirmed `.xlf` **key** existence and
+verbatim-quote fidelity stay out of Niveau-1's reach for the same structural reason.
+
+**What it adds.** "The file exists" → "the file says that." Mechanical verification (Niveau 1)
+stays the authority for **code-anchored** claims (does `foo.rs:42` exist?); NLI is the authority for
+**NL↔NL faithfulness** (does the agent's prose answer follow from an NL source). Clean division of
+labour — complementary, not competing.
+
+**Two caveats.**
+1. *Distribution.* HHEM / DeBERTa-NLI are trained on natural language, not code. Mitigated by
+   scoping NLI to the agent's **NL response** (hypothesis = NL ✓) against an **NL premise** (docs,
+   conversation context, another agent's output, or `evidence[]`). A raw-code premise stays
+   Niveau-1's job.
+2. *Decomposition.* True atomic-claim splitting needs an LLM (which we avoid). Syntactic
+   sentence-split (already done by the Niveau-0 linter) is the free ceiling → sentence-level NLI,
+   fine for a non-blocking pill, not for a hard gate.
+
+**Highest-value placements** (most → least tractable):
+1. **Faithfulness gate on continual-learning** (`learning_propose(claim, evidence[])` → verify
+   `claim ⊨ evidence[]` before persisting): `evidence[]` is a clean, pre-decomposed NL premise and
+   the stakes are maximal (a bad claim in memory contaminates everything). This is the *teeth* of
+   the continual-learning safeguard.
+2. **Faithfulness of the agent's NL reply** against the doc/context it used (prose↔prose).
+3. **NLI on cited content** (Niveau-1 resolves `[src:]` → fetch chunk → NLI), best when the chunk
+   is a doc rather than code.
+
+**Stack.** ONNX export + `ort` (fast to integrate, native per-OS dep → real packaging friction for
+the Tauri desktop / Docker targets) vs `candle` (pure-Rust, lighter packaging, heavier model
+porting). HHEM-2.1-Open (Apache-2.0, Flan-T5-based, faithfulness-tuned) vs a vanilla
+`cross-encoder/nli-deberta-v3` (cleaner 3-class ONNX export). Zero *token*, not zero *cost* (CPU,
+latency, a few-hundred-MB model to distribute).
+
+**De-risking before any Rust.** A throwaway Python proto over ~30 real `(source, claim)` pairs from
+Kronn — including code claims and NL claims — to measure whether the model actually discriminates.
+If it fails on code, NLI is confined to NL↔NL (per the division of labour above).
+
+**Sequencing.** Not near-term. Precondition: the Niveau-0/1 telemetry (added 0.8.7) must first show
+that claims are *cited often enough* for NLI to have a premise to chew on. Then it lands as the
+continual-learning safeguard's verifier, not as a standalone "score every message" pass.
+
 ---
 
 ## Guiding principle for promoting anything here into the core
