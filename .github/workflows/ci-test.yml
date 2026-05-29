@@ -185,6 +185,31 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
 
+  # ── Code-duplication ceiling (jscpd, all 3 languages) ──────────────────
+  # Copy-paste detector across Rust + TS/TSX + Python. Baseline 2026-05-29 =
+  # 3.75% duplicated lines (270 clones, rust-dominated). The threshold (4%)
+  # lives in `.jscpd.json` — jscpd exits 1 when exceeded, failing this job.
+  # Same ratchet philosophy as the coverage floors: pinned just above the
+  # current state so accumulating copy-paste fails the build, RATCHET DOWN
+  # as the AgentIo refactor removes the rust loop duplication. This is the
+  # mechanical guard that stops agents (and humans) from merging dup'd code.
+  duplication-check:
+    if: github.event.label.name == 'ci-test'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: jscpd — code duplication ceiling
+        # Config (threshold, ignores, formats) is in .jscpd.json at repo root.
+        # `--yes` so npx fetches jscpd non-interactively. Pinned major @4 for
+        # reproducibility (output/threshold semantics are stable within v4).
+        run: npx --yes jscpd@4 backend/src frontend/src backend/scripts --config .jscpd.json
+
   # ── Python helper tests ────────────────────────────────────────────────
   # `backend/scripts/disc-introspection-mcp.py` powers the kronn-internal
   # MCP server (5+ agent CLIs invoke it). Its 0.8.5 auto-inherit helpers

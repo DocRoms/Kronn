@@ -4,7 +4,7 @@
 //! and on_result condition evaluation.
 
 use std::time::Instant;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::time::{timeout, Duration};
 
 use crate::agents::runner::{self, OutputMode, StreamJsonEvent};
@@ -20,6 +20,7 @@ pub struct StepOutcome {
 }
 
 /// Output from a single agent run, including token usage.
+#[derive(Debug)]
 struct AgentOutput {
     text: String,
     tokens_used: u64,
@@ -427,41 +428,53 @@ async fn run_agent_with_timeout(
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(1800));
 
-    let mut agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
-        agent_type: &step.agent,
-        project_path,
+    let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
         work_dir: Some(work_dir),
-        prompt,
-        tokens: tokens_config,
         full_access,
         skill_ids: &step.skill_ids,
         directive_ids: &step.directive_ids,
         profile_ids: &step.profile_ids,
-        mcp_context_override: None,
         tier: step.agent_settings.as_ref()
             .and_then(|s| s.tier)
             .unwrap_or_default(),
-        model_tiers: None,
-        context_files_prompt: "",
-        discussion_id: None,
+        ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
+    // 0.8.8 — the post-spawn consumption loop + finalize is extracted into
+    // `drive_agent_to_output` (generic over `runner::AgentIo`) so it's
+    // unit-testable with a `ScriptedProcess` — no real CLI, no tokens.
+    drive_agent_to_output(
+        agent_process,
+        progress_tx,
+        stall_timeout,
+        &step.agent,
+        &step.name,
+    ).await
+}
+
+/// Consume an agent process to completion : stream output (with live
+/// `progress_tx` updates + tool-call breadcrumbs), enforce the stall
+/// timeout, then collect text + tokens. Generic over [`runner::AgentIo`]
+/// (0.8.8 test-seam) so the loop is exercised by a `ScriptedProcess` in
+/// tests without spawning a CLI.
+async fn drive_agent_to_output(
+    mut process: impl runner::AgentIo,
+    progress_tx: Option<&ProgressSender>,
+    stall_timeout: Duration,
+    agent: &AgentType,
+    step_name: &str,
+) -> Result<AgentOutput> {
     let mut output = String::new();
-    let is_stream_json = agent_process.output_mode == OutputMode::StreamJson;
+    let is_stream_json = process.output_mode() == OutputMode::StreamJson;
     let mut stream_json_tokens: u64 = 0;
-    // Tool-call accumulator. Claude Code's stream-json emits tool input as
-    // a series of partial JSON deltas (potentially many small fragments).
-    // We buffer the deltas, then on ToolEnd parse the assembled JSON to
-    // extract the most informative field (file_path / command / pattern)
-    // and surface a one-liner like `🔧 Edit · src/foo.rs` to the operator.
-    // Without this, the live view is silent for the entire tool-call loop
-    // (Edit / Bash / Read / Glob…) — frequently > 30 s of "nothing
-    // happening" UX even though the agent is fully active.
+    // Tool-call accumulator (see run_agent_with_timeout's doc): Claude Code's
+    // stream-json emits tool input as partial JSON deltas; we buffer them and
+    // surface a `🔧 Edit · src/foo.rs` one-liner on ToolEnd.
     let mut current_tool: Option<String> = None;
     let mut current_tool_input = String::new();
 
     loop {
-        match timeout(stall_timeout, agent_process.next_line()).await {
+        match timeout(stall_timeout, process.next_line()).await {
             Ok(Some(line)) => {
                 if is_stream_json {
                     match runner::parse_claude_stream_line(&line) {
@@ -521,17 +534,16 @@ async fn run_agent_with_timeout(
             Err(_) => {
                 // Stall timeout — kill the process
                 tracing::warn!("Step '{}' stalled (no output for {:?}), killing agent",
-                    step.name, stall_timeout);
-                let _ = agent_process.child.kill().await;
+                    step_name, stall_timeout);
+                process.kill().await;
                 anyhow::bail!("Agent stalled (no output for {}s)", stall_timeout.as_secs());
             }
         }
     }
 
-    // Wait for process to finish
-    let status = agent_process.child.wait().await
-        .context("Failed to wait for agent process")?;
-    agent_process.fix_ownership();
+    // Wait for process to finish.
+    let status = process.wait().await;
+    process.fix_ownership();
 
     // Drain stderr through the flushed accessor — `captured_stderr()` races
     // with the stderr reader task and returns empty when the agent crashes
@@ -540,18 +552,23 @@ async fn run_agent_with_timeout(
     // "Agent exited with status: exit status: 1" with the actual error
     // (auth expiry, rate limit, context overflow, panic stack…) silently
     // dropped on the floor.
-    let stderr_lines = agent_process.captured_stderr_flushed().await;
+    let stderr_lines = process.captured_stderr_flushed().await;
 
-    if !status.success() {
+    let success = status.map(|s| s.success).unwrap_or(false);
+    if !success {
+        let exit_desc = match status {
+            Some(s) => format!("exit code {:?}", s.code),
+            None => "unknown exit status".to_string(),
+        };
         // Show the last ~20 lines of stderr — Claude Code panics dump a
         // full backtrace; older lines rarely add signal once we've seen
         // the message.
         let tail: Vec<&String> = stderr_lines.iter().rev().take(20).collect();
         let stderr_tail = tail.iter().rev().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
         if stderr_tail.is_empty() {
-            anyhow::bail!("Agent exited with {} but produced no stderr (likely killed by signal or sandbox). Check the host's container logs (`docker logs kronn-backend` or journald) for the underlying cause.", status);
+            anyhow::bail!("Agent exited with {} but produced no stderr (likely killed by signal or sandbox). Check the host's container logs (`docker logs kronn-backend` or journald) for the underlying cause.", exit_desc);
         } else {
-            anyhow::bail!("Agent exited with {}:\n{}", status, stderr_tail);
+            anyhow::bail!("Agent exited with {}:\n{}", exit_desc, stderr_tail);
         }
     }
 
@@ -561,14 +578,14 @@ async fn run_agent_with_timeout(
     let tokens_used = if stream_json_tokens > 0 {
         stream_json_tokens
     } else {
-        let (cleaned, count) = runner::parse_token_usage(&step.agent, &output, &stderr_lines);
+        let (cleaned, count) = runner::parse_token_usage(agent, &output, &stderr_lines);
         if count > 0 {
             output = cleaned;
         }
         count
     };
 
-    tracing::info!("Step '{}' finished — {} tokens used", step.name, tokens_used);
+    tracing::info!("Step '{}' finished — {} tokens used", step_name, tokens_used);
 
     Ok(AgentOutput {
         text: output,
@@ -1027,5 +1044,117 @@ mod tests {
         // The truncated body should be exactly 120 `é` chars.
         let body = s.trim_start_matches(" · ").trim_end_matches("…\n");
         assert_eq!(body.chars().count(), 120);
+    }
+}
+
+#[cfg(test)]
+mod drive_agent_to_output_tests {
+    //! Unit tests for the workflow Agent-step consumption loop, driven by a
+    //! scripted `AgentIo` (0.8.8 test-seam). Pins text/token accumulation,
+    //! tool-call progress breadcrumbs, raw-vs-stream-json handling, and the
+    //! non-zero-exit error path — without spawning a CLI or burning tokens.
+    use super::drive_agent_to_output;
+    use crate::agents::runner::ScriptedProcess;
+    use crate::models::AgentType;
+    use std::time::Duration;
+
+    fn text_delta(s: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":{}}}}}}}"#,
+            serde_json::to_string(s).unwrap()
+        )
+    }
+    fn usage(input: u64, output: u64) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"message_delta","usage":{{"input_tokens":{},"output_tokens":{}}}}}}}"#,
+            input, output
+        )
+    }
+    fn tool_start(name: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_start","content_block":{{"type":"tool_use","name":"{}"}}}}}}"#,
+            name
+        )
+    }
+
+    const LONG: Duration = Duration::from_secs(3600);
+
+    #[tokio::test]
+    async fn stream_json_collects_text_and_tokens() {
+        let proc = ScriptedProcess::stream_json([
+            text_delta("Hello "),
+            usage(100, 50),
+            text_delta("world"),
+        ]);
+        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "step1")
+            .await
+            .expect("clean exit");
+        assert_eq!(out.text, "Hello world");
+        assert_eq!(out.tokens_used, 150, "tokens come from the stream-json Usage event");
+    }
+
+    #[tokio::test]
+    async fn raw_mode_joins_lines() {
+        let proc = ScriptedProcess::raw(["first", "second"]);
+        let out = drive_agent_to_output(proc, None, LONG, &AgentType::Vibe, "step-raw")
+            .await
+            .expect("clean exit");
+        assert!(out.text.contains("first"));
+        assert!(out.text.contains("second"));
+    }
+
+    #[tokio::test]
+    async fn progress_tx_receives_text_and_tool_breadcrumbs() {
+        // A ToolStart must surface a `🔧 <name>` breadcrumb on progress_tx so
+        // the workflow run view shows a sign of life during tool loops.
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
+        let proc = ScriptedProcess::stream_json([
+            text_delta("thinking"),
+            tool_start("Edit"),
+        ]);
+        let out = drive_agent_to_output(proc, Some(&tx), LONG, &AgentType::ClaudeCode, "s")
+            .await
+            .expect("clean exit");
+        drop(tx);
+        assert_eq!(out.text, "thinking");
+        let mut msgs = Vec::new();
+        while let Ok(m) = rx.try_recv() { msgs.push(m); }
+        assert!(msgs.iter().any(|m| m == "thinking"), "text streamed to progress_tx");
+        assert!(msgs.iter().any(|m| m.contains("🔧") && m.contains("Edit")),
+            "tool-start breadcrumb streamed: {msgs:?}");
+    }
+
+    #[tokio::test]
+    async fn failed_exit_bails_with_stderr_tail() {
+        let proc = ScriptedProcess::stream_json(Vec::<String>::new())
+            .with_exit(false, Some(1))
+            .with_stderr(["Error: rate limit reached", "retry later"]);
+        let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "boom")
+            .await
+            .expect_err("non-zero exit must bail");
+        let msg = err.to_string();
+        assert!(msg.contains("Agent exited"), "got: {msg}");
+        assert!(msg.contains("rate limit reached"), "stderr tail should surface: {msg}");
+    }
+
+    #[tokio::test]
+    async fn failed_exit_no_stderr_gives_actionable_message() {
+        let proc = ScriptedProcess::stream_json(Vec::<String>::new())
+            .with_exit(false, Some(137)); // SIGKILL-ish, no stderr
+        let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "killed")
+            .await
+            .expect_err("non-zero exit must bail");
+        let msg = err.to_string();
+        assert!(msg.contains("no stderr"), "should hint at signal/sandbox: {msg}");
+    }
+
+    #[tokio::test]
+    async fn clean_exit_empty_output_is_ok() {
+        let proc = ScriptedProcess::stream_json(Vec::<String>::new());
+        let out = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "empty")
+            .await
+            .expect("clean empty exit is ok");
+        assert_eq!(out.text, "");
+        assert_eq!(out.tokens_used, 0);
     }
 }

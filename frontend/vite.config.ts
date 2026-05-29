@@ -77,17 +77,45 @@ export default defineConfig({
         'src/types/generated.ts',
         'src/main.tsx',
         'src/vite-env.d.ts',
+        // Web Workers — run off the main thread via `self.onmessage` /
+        // `self.postMessage`, loading ML models (Transformers STT / VITS
+        // TTS). happy-dom can't instantiate a Worker context, so V8 never
+        // records their lines and they drag the headline down for code
+        // that is, by construction, un-unit-testable here (covered by the
+        // e2e voice flow instead).
+        'src/lib/stt-worker.ts',
+        'src/lib/tts-worker.ts',
+        // TTS playback engine — drives a Web Worker + `new Audio()` /
+        // HTMLAudioElement playback. happy-dom has no audio element or
+        // Worker runtime, so the synth/play loop can't execute here
+        // (covered by the e2e voice flow, like the workers above).
+        'src/lib/tts-engine.ts',
       ],
-      // Regression floors — pinned just below the 2026-05-29 baseline
-      // (Statements 56.18 / Branches 50.79 / Functions 48.41 / Lines 59.16)
-      // so a single test removal doesn't tank CI. Bump these up when
-      // we land another coverage push. Don't lower them — that's the
-      // whole point of the floor.
+      // Regression floors — pinned just below the actual coverage so a
+      // single test removal tanks CI. Bump these up when we land another
+      // coverage push. Don't lower them — that's the whole point.
+      //
+      // 2026-05-29 coverage sprint raised the bar in two waves:
+      //  (1) api.ts (the entire UI↔backend boundary) 11%→99% Functions /
+      //      25%→92% Lines — every method (verb/URL/encoding/body) + SSE
+      //      streamers exercised. Workers (stt/tts) excluded above.
+      //  (2) leaf + stateful components: QuickApiForm 0→96%, ProjectSkills
+      //      5→100%, SwipeableDiscItem 44→95%, DiscussionSidebar 69→97%,
+      //      MessageBubble 67→85% Lines.
+      //  (3) mid-tier components: GitPanel 31→93%, CustomApiAiHelper
+      //      51→94%, ApiCallAiHelper 54→94%, AiDocViewer 38→67%,
+      //      AgentsSection 52→70%. tts-engine.ts excluded (Web Audio).
+      //  (4) WorkflowWizard 35→80%, WorkflowDetail 50→62%,
+      //      ProjectLinkedRepos 39→97%. Crossed the 70% Lines milestone.
+      // Actuals: Statements 67.6 / Branches 63.1 / Functions 63.0 / Lines 71.0.
+      // Floors kept DELIBERATELY TIGHT (~0.5pt under actual) until we reach
+      // 75% Lines front / 80% back — a >1pt cushion is too loose at this
+      // stage. Ratchet up after every coverage push; never down.
       thresholds: {
-        statements: 55,
-        branches: 50,
-        functions: 47,
-        lines: 58,
+        statements: 67,
+        branches: 62.5,
+        functions: 62.5,
+        lines: 70.5,
       },
     },
   },

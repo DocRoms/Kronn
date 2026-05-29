@@ -9,6 +9,72 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.7] - 2026-05-28
 
+### Changed — Frontend workflow-builder component coverage (4th wave)
+
+- **`WorkflowWizard`** 35 → 80 % Lines / 17 → 71 % Funcs (+77 tests, no prior test) — the 728-LOC multi-step builder: mode toggle, step navigation + name-gate, add/insert/move/remove steps, every step-type swap (Agent/Notify/Gate/Exec/JsonData/ApiCall/BatchQuickPrompt/BatchApiCall), `parseCronExpr` branches + Cron/Tracker trigger editors, per-step Advanced panel (`on_result` conditions, Goto + STATE blocks, retry/stall/backoff), QP-binding banner, skills/profiles/directives chips, undeclared-`{{var}}` declare flow, preset deep-link transform, QuickStart picker, full per-type Summary recap, Config tab (sandbox/allowlist/launch-vars/expert), and the create-vs-update save handler with payload assertion + double-click guard.
+- **`WorkflowDetail`** 50 → 62 % Lines / 33 → 44 % Funcs (+26 tests) — run-history list, trigger/cancel/delete-run (+ confirm + catch branches), gate decision, synthesized live-run, `LiveFinishedBanner` variants, batch-chip navigation.
+- **`ProjectLinkedRepos`** 39 → 97 % Lines / 35 → 97 % Funcs (+13 tests) — add (validation + payload), remove (confirm), URL-vs-path rendering, max-entries guard, save-error catch, picker prefill.
+
++116 tests, full suite green, tsc + eslint clean. Frontend total now **Functions 63.0 %, Lines 71.0 %, Statements 67.6 %, Branches 63.1 %** — crossed the 70 % Lines milestone, up from the 48/59/56/51 baseline. Floors ratcheted (statements 62→66, branches 55→61, functions 55→61, lines 65→69). Remaining gap is concentrated in the 5 page-shells + 3 huge chat/project components (integration-test territory, deferred).
+
+### Changed — Frontend mid-tier component coverage (3rd wave)
+
+Targeted the lowest-coverage mid-size components, prioritising the worst Functions % (error-handlers / rare branches — the gap the QA audit flagged):
+
+- **`GitPanel`** 31 → 93 % Lines / 15 → 85 % Funcs (+34 tests) — the sensitive git panel: commit (payload + amend/sign), push, create-branch, create-PR (template prefill + auto-push-when-no-upstream + GitLab MR + existing-PR link), diff-on-click, exec terminal, and every rejected-api catch branch.
+- **`CustomApiAiHelper`** 51 → 94 % / **`ApiCallAiHelper`** 54 → 94 % (+24 tests) — the AI-assisted form helpers: send→`sendMessageStream`, `KRONN:APPLY` block parse → SuggestionCard → `onApply` mapped payload, stream error branch, stop/minimize/restore/close teardown, agent-switch re-create.
+- **`AgentsSection`** 52 → 70 % (+18 tests) — per-agent install/uninstall (with `confirm()` + post-uninstall verify), enable/disable toggle, full-access switch (click + keyboard), re-entry guard, all error toasts.
+- **`AiDocViewer`** 38 → 67 % (+17 tests) — tree navigation → `readAiFile`, debounced `searchAiFiles`, tech-debt fix-CTA, and the three api-reject catch branches.
+
+`tts-engine.ts` excluded from coverage (Web Worker + `new Audio()` playback, un-instrumentable in happy-dom — covered by the e2e voice flow, like the STT/TTS workers). +93 tests, full suite green, tsc + eslint clean. Frontend total now **Functions 57.1 %, Lines 66.9 %, Statements 63.7 %, Branches 57.0 %** (from the 48/59/56/51 baseline). Floors ratcheted (statements 58→62, branches 52→55, functions 52→55, lines 61→65).
+
+### Changed — Frontend component coverage : leaf + stateful test pass
+
+Following the `api.ts` sprint, brought the under-tested components up — targeting the lowest-coverage files first (biggest reliability win per test):
+
+- **`QuickApiForm`** 0 → 96 % Lines / 91 % Funcs (+22 tests) — the QuickApi builder mirror of `QuickPromptForm`: field edits, dynamic variable rows auto-synced from `{{var}}` tokens, `ApiCallStepCard` wiring, save-payload mapping, inline error surfacing, race-free double-click guard, edit-mode round-trip.
+- **`ProjectSkills`** 5 → 100 % (+9 tests) — chip rendering, external badge, active styling, unknown-category fallback, toggle add/remove with the `togglingRef` re-entry guard.
+- **`SwipeableDiscItem`** 44 → 95 % Lines / 89 % Funcs (+11 tests) — the previously-uncovered pointer/swipe math: delta clamping (`sign(d)·min(|d|·0.7, 120)`), threshold-crossing reveals (archive-right / delete-left), sub-threshold snap-back, tap→`onSelect(id, unseenBasis)`, `pointerCancel` abort.
+- **`DiscussionSidebar`** 69 → 97 % Lines / 94 % Funcs (+20 tests) — grouping (multi-org headers, "Local" last, pinned cross-project section), collapse/expand keys, search filter (title + id-prefix + clear + no-match), loose-disc cap "+N more", batch pastilles (status pill, parent-workflow nav, delete/retry confirm flows).
+- **`MessageBubble`** 67 → 85 % Lines / 72 % Funcs (+49 tests) — role/variant selection, author gravatar-vs-initials-vs-fallback, copy/TTS button states, footer chips (tokens / auth_mode / duration / model_tier / full-access), last-message edit+retry affordances, edit-mode Ctrl+Enter, auth-error & partial-response CTAs, summary-cached expand toggle, `MarkdownContent` copyable-block + table `extractText` paths.
+
+`ProjectList` (76 %) and `IdentitySection` (76 %) were already adequately covered and left as-is. Frontend total after both waves: **Functions 48.4 → 53.7 %, Lines 59.2 → 63.2 %, Statements 56.2 → 60.2 %, Branches 50.8 → 54.3 %**. Floors ratcheted again (statements 57→58, functions 50→52, branches 50→52, lines 60→61). +111 component tests, full suite green.
+
+### Changed — Frontend `api.ts` becomes the best-covered file (the UI↔backend boundary)
+
+`lib/api.ts` is the single seam between every UI surface and the backend — one wrong verb, typo'd path, or botched query-string is a production break that no page-level test localizes. It was the worst-covered critical file (**11 % Functions / 25 % Lines**) because the structural `expect(api.foo).toBeDefined()` tests never actually *called* the methods. This sprint makes it the **best**-covered:
+
+- **Every non-streaming method exercised** (`api.methods.test.ts`, +115 tests) — verb + URL + path/query encoding + request-body shape, across the long tail that was uncovered: projects (audit-info / anti-hallu / briefing / linked-repos / ai-files / git ops), mcps (config CRUD / custom-spec / host-discovery / context files), discussions (share / participants / test-mode / context files / git ops), workflows (bundles / run lifecycle / test-worktree / dry-run helpers / batch), quickPrompts + quickApis (batch / compare / export-import / versions), plus profiles / stats / apiCallLogs / userContext. Special non-`api()` paths covered too: blob exports (`exportData`, `exportWorkflow`, `exportQp`, `exportQa`) with content-disposition filename + fallback + non-ok throw, FormData uploads (`importData`, `uploadContextFile`), and the pure `exportFileUrl` URL-builder.
+- **SSE streamers pinned** (`api.streaming.test.ts`, +18 tests) via a `ReadableStream` mock harness — `projects.auditStream` / `partialAuditStream`, `discussions.orchestrate`, `discussions.sendMessageStream` / `runAgent` (delegation + `onLog`), `workflows.triggerStream` (run_start / step_progress + variables-body branch) and `testStepStream`. Each asserts the full event→handler dispatch table, the `HTTP <status>` error path, and the aborted-fetch-as-clean-done path — exactly where "spinner forever, event never fires" bugs hide. (`_streamSSE` + `fullAuditStream` were already covered.)
+
+**Result** : `api.ts` **11 → 98.9 % Functions** (261/264), **25 → 92.4 % Lines**, **~25 → 72.8 % Branches**. Frontend total moved Functions 48.4 → 51.6 %, Lines 59.2 → 61.4 %, Statements 56.2 → 58.4 %. `vite.config.ts` coverage floors ratcheted up (statements 55→57, functions 47→50, lines 58→60) to lock the gain. Web Workers (`stt-worker.ts` / `tts-worker.ts`) excluded from coverage — they run off-thread loading ML models, un-instrumentable in happy-dom (covered by the e2e voice flow).
+
+### Changed — small pure-logic extractions (frontend)
+
+Three inline helpers lifted out of heavy page shells into `lib/` so the logic is unit-tested independently of the (un-mountable-cheaply) pages: `pluginKind` (MCP plugin-kind bucketing, 4 cases — `lib/pluginKind.ts`), `linkify` (URL→anchor splitting with paren/edge cases — `lib/linkify.tsx`), `findLastAgentMessage` (auto-TTS target selection — `lib/discussionHelpers.ts`). +21 tests. Behaviour identical; `McpPage` / `DiscussionsPage` now import them.
+
+### Changed — `AgentIo` test-seam : the agent pipelines become unit-testable (no CLI, no tokens)
+
+The agent-consumption loops (the bug-prone core the QA audit flagged: SSE streaming, tool-call parsing, decoder-loop detection, stall/cancel/error-exit) had **zero** unit coverage because every test would spawn a real CLI subprocess. Introduced a `runner::AgentIo` trait (`#[async_trait]`, mirroring the `TrackerSource` convention) abstracting the agent process surface — `next_line / output_mode / kill / wait / try_wait / child_id / captured_stderr_flushed / fix_ownership` + a portable `AgentExit { success, code }`. `AgentProcess` impls it for production; a `#[cfg(test)] ScriptedProcess` yields pre-canned lines with no subprocess. The pipeline loops are now generic over `impl AgentIo` and driven by scripted output under test.
+
+- **`AgentStartConfig::new(agent_type, project_path, prompt, tokens)`** — the 11 spawn sites (streaming / orchestration ×5 / audit ×3 / steps / runner) previously repeated `mcp_context_override: None, model_tiers: None, context_files_prompt: "", discussion_id: None, …` verbatim ; now use struct-update over the constructor. ~90 lines of boilerplate removed, behaviour identical.
+- **`run_agent_collect`** (silent summarization collect) — generic over `impl AgentIo` + 5 scripted tests (raw join+trim, empty stream, stream-json text-only accumulation, non-JSON→raw-text fallback contract, single line).
+- **`run_agent_streaming`** (orchestration debate rounds) — generic + 7 tests : raw chunk emission, stream-json text accumulation, tool-call → exactly one Log event (no JSON leak into prose), terminal-signal truncation, **decoder-loop abort** (EW-7189), empty-response error-exit formatting, clean-exit `[No response]`.
+- **`make_agent_stream`** (main chat SSE) — extracted the two pure pieces shared with `run_agent_streaming` into tested helpers : `is_decoder_loop` (the `</thinking>`×N detector — was byte-duplicated 2×) + `classify_tool_call` → `ToolRecord::{Kronn,Native}` (the kronn-internal-vs-native transcript bucketing). 8 helper tests (threshold fire, reset-on-change, short/whitespace ignored, both buckets, arg truncation). The async control flow was deliberately left in place — its cancel/timeout/stall paths are covered by-proxy via `run_agent_streaming` (same `tokio::select!` mechanic).
+- **`run_agent_with_timeout`** (workflow Agent step — Ticket Autopilot / BatchQuickPrompt) — post-spawn loop extracted into `drive_agent_to_output(impl AgentIo, …)` + 6 scripted tests : text+token collection, raw join, progress_tx tool breadcrumbs, failed-exit-with-stderr-tail, failed-exit-no-stderr actionable message, clean-empty-exit.
+
+**Result** : the extracted/migrated functions are ~100 % covered ; backend total holds at ~77.8 % Lines / 81.6 % Functions. The host files (`streaming.rs` 48 %, `runner.rs` 63 %) stay below 75 % at the FILE level because the bulk is the real-`Command` spawn machinery + the 500-line SSE handler body — inherently un-unit-testable without a mocked subprocess (a deliberately deferred fixtures sprint). The **bug-prone consumption logic is now pinned** — that's the Reliability lever, independent of the file-level %.
+
+**Tech-debt acknowledged** : a future full refactor can (a) merge the duplicated `StreamJsonEvent` match-arms between `make_agent_stream` + `run_agent_streaming` into one handler (would finally move the jscpd rust dup down), and (b) fully extract `make_agent_stream`'s 180-line loop to test cancel/timeout/stall directly instead of by-proxy. Both scoped out here for safety on the core chat path.
+
+### Changed — CI hardening : duplication ceiling + coverage floors + Node 24 + E2E container
+
+- **`duplication-check` job (jscpd)** across Rust + TS/TSX + Python — `.jscpd.json` pins `threshold: 4` (baseline 3.75 % dup lines, 270 clones, rust-dominated). Exits 1 when exceeded, mirroring the coverage floors. Ratchet down as dup drops, never raise. Non-code formats (md/yaml/sql/json) excluded so they don't dilute the real signal.
+- **Coverage regression floors** : backend `cargo llvm-cov --fail-under-lines 77 --fail-under-functions 81 --fail-under-regions 78` (via `taiki-e/install-action`) ; frontend `coverage.thresholds {statements 55 / branches 50 / functions 47 / lines 58}` in `vite.config.ts`, CI runs `pnpm test:coverage`.
+- **E2E job moved into the official Playwright container** (`mcr.microsoft.com/playwright:v1.59.1-noble`, image tag == resolved `@playwright/test`) — browsers pre-baked, **zero `cdn.playwright.dev` download**. That CDN intermittently TCP-half-closed after the 170 MiB chromium .zip hit 100 %, hanging the step to the job timeout so the browser cache never saved (cold-loop, 3× in project history). Rust + C toolchain installed in-container via rustup + apt.
+- **Node 24 runtime opt-in** (`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`) — silences the Node 20 deprecation annotations ahead of GitHub's 2026-06-02 cutover.
+- **`.gitignore`** : `frontend/coverage/` + `backend/coverage/` (lcov-report was being committed).
+
 ### Fixed — "Add project → Discover repos" multi-provider regression
 
 - **Discover-repos state is now reset when the "Add project" modal closes**, so a re-open starts from a clean slate. Pre-fix `selectedSourceIds` survived modal close → if the user had previously unchecked `github Euronews` or `GitLab` chips, the next open would send a filtered `source_ids` request and the backend would correctly return only the perso GitHub repos. The user perceived it as *"only my personal GitHub key is detected"* even though both pro tokens were configured + functional. The reset wipes 6 states (`selectedSourceIds`, `discoveredRepos`, `availableSources`, `discoverSources`, `discoverSourceErrors`, `repoSearch`, `discoverError`). Also fixed : toggling the last active source-chip OFF now clears the repo list (was leaving stale repos visible while no chip was active).

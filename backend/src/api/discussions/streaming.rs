@@ -32,6 +32,65 @@ use super::{
     AGENT_GLOBAL_TIMEOUT, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
 };
 
+// ── Decoder-loop detector (shared by make_agent_stream + run_agent_streaming) ──
+//
+// Guards against Claude Opus extended-thinking decoder loops (EW-7189:
+// `</thinking>\n` × 6349 in one stream). When the same non-trivial text delta
+// arrives `DECODER_LOOP_MAX_REPEATS` times in a row, the caller kills the
+// agent. Whitespace / very-short deltas (". ", "\n") can repeat legitimately
+// in formatted output, so they're ignored. `strip_thinking_leaks` in the
+// parser normally catches the known leak, but the same mechanic could trigger
+// on any repeating token — the detector stays kind-agnostic.
+pub(super) const DECODER_LOOP_MAX_REPEATS: u32 = 50;
+const DECODER_LOOP_MIN_LEN: usize = 3;
+
+/// Stateful repeat detector. Caller owns `last`/`count` across the stream.
+/// Returns `true` once the same non-trivial delta has repeated
+/// `DECODER_LOOP_MAX_REPEATS` times — the caller then aborts the run.
+/// Extracted (0.8.8) so both streaming loops share one implementation
+/// instead of two byte-identical copies.
+pub(super) fn is_decoder_loop(text: &str, last: &mut String, count: &mut u32) -> bool {
+    if text.len() >= DECODER_LOOP_MIN_LEN && !text.trim().is_empty() {
+        if text == *last {
+            *count += 1;
+            if *count >= DECODER_LOOP_MAX_REPEATS {
+                return true;
+            }
+        } else {
+            *last = text.to_string();
+            *count = 1;
+        }
+    }
+    false
+}
+
+/// A completed tool call, classified into the transcript bucket the UI
+/// renders it in. `mcp__kronn-internal__*` calls go to the Kronn-MCP banner ;
+/// everything else (Claude-native Read/Bash/Edit, third-party MCP) to the
+/// agent-native banner. Pure — extracted (0.8.8) from `make_agent_stream`'s
+/// `ToolEnd` arm so the bucketing + arg-formatting is unit-testable.
+pub(super) enum ToolRecord {
+    Kronn(String),
+    Native(String),
+}
+
+/// Format a finished tool call into its transcript record. kronn-internal
+/// calls get pretty-printed args (`disc_get_message(4)`) ; native calls get
+/// their raw input truncated to ~120 chars to keep the banner compact.
+pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
+    if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
+        let pretty_args = pretty_kronn_args(name, input);
+        ToolRecord::Kronn(format!("[kronn-internal: {}({})]", name, pretty_args))
+    } else {
+        let args = if input.is_empty() {
+            String::new()
+        } else {
+            truncate_tool_args(input, 120)
+        };
+        ToolRecord::Native(format!("[agent-native: {}({})]", tool, args))
+    }
+}
+
 /// Shared SSE stream builder.
 ///
 /// 0.8.6 phase 4 — visibility bumped to `pub(crate)` so the MCP-remote
@@ -415,9 +474,8 @@ pub(crate) async fn make_agent_stream(
         let _ = tx.send(AgentStreamEvent::Meta { auth_mode: auth_mode_str.clone() }).await;
 
         match runner::start_agent_with_config(runner::AgentStartConfig {
-            agent_type: &agent_type, project_path: &project_path,
             work_dir: workspace_path.as_deref(),
-            prompt: &prompt, tokens: &tokens, full_access,
+            full_access,
             skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),
             tier: disc_tier, model_tiers: Some(&model_tiers_config),
@@ -425,6 +483,7 @@ pub(crate) async fn make_agent_stream(
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
+            ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
         }).await {
             Ok(mut process) => {
                 let mut full_response = String::new();
@@ -523,16 +582,11 @@ pub(crate) async fn make_agent_stream(
                 // extended-thinking decoder loops (observed on EW-7189:
                 // `</thinking>\n` × 6349 in one stream). When the same
                 // non-trivial delta arrives N times in a row we kill the
-                // child. `strip_thinking_leaks` in the parser normally
-                // catches the known leak, but the same mechanic could
-                // trigger on any other repeating token, so the detector
-                // stays kind-agnostic. Counts only post-strip text (empty
-                // chunks become `Skip` and never hit this loop).
+                // child. Detection lives in the shared `is_decoder_loop`
+                // helper (module top) ; these own the per-stream state.
                 let mut last_text_delta = String::new();
                 let mut repeat_delta_count: u32 = 0;
                 let mut stopped_on_loop: bool = false;
-                const MAX_REPEAT_DELTAS: u32 = 50;
-                const REPEAT_MIN_LEN: usize = 3;
 
                 // Stall timeout pattern: the `tokio::time::sleep(stall_timeout)` future
                 // is created fresh on each iteration of the `while let` loop because the
@@ -573,23 +627,15 @@ pub(crate) async fn make_agent_stream(
                                 // deltas (". ", "\n") can repeat legitimately
                                 // in formatted output without signalling a
                                 // decoder loop.
-                                if text.len() >= REPEAT_MIN_LEN && !text.trim().is_empty() {
-                                    if text == last_text_delta {
-                                        repeat_delta_count += 1;
-                                        if repeat_delta_count >= MAX_REPEAT_DELTAS {
-                                            tracing::warn!(
-                                                "Agent stream entered a decoder loop — same delta {:?} repeated {} times, aborting",
-                                                text.chars().take(40).collect::<String>(),
-                                                repeat_delta_count,
-                                            );
-                                            stopped_on_loop = true;
-                                            was_interrupted = true;
-                                            break;
-                                        }
-                                    } else {
-                                        last_text_delta = text.clone();
-                                        repeat_delta_count = 1;
-                                    }
+                                if is_decoder_loop(&text, &mut last_text_delta, &mut repeat_delta_count) {
+                                    tracing::warn!(
+                                        "Agent stream entered a decoder loop — same delta {:?} repeated {} times, aborting",
+                                        text.chars().take(40).collect::<String>(),
+                                        repeat_delta_count,
+                                    );
+                                    stopped_on_loop = true;
+                                    was_interrupted = true;
+                                    break;
                                 }
                                 full_response.push_str(&text);
                                 chunks_since_checkpoint += 1;
@@ -654,28 +700,9 @@ pub(crate) async fn make_agent_stream(
                                     //   - everything else → agent-native (Claude
                                     //     Code's own Read/Bash/Edit, third-party
                                     //     MCP servers, etc.).
-                                    if let Some(name) = tool.strip_prefix("mcp__kronn-internal__") {
-                                        let pretty_args = pretty_kronn_args(name, &current_tool_input);
-                                        kronn_tool_calls.push(format!(
-                                            "[kronn-internal: {}({})]",
-                                            name, pretty_args
-                                        ));
-                                    } else {
-                                        // Args : keep concise — large file
-                                        // contents (Edit, Write) would bloat
-                                        // the disc transcript. Truncate at
-                                        // ~120 chars to fit the banner without
-                                        // sacrificing the key signal (which
-                                        // file, what command).
-                                        let args = if current_tool_input.is_empty() {
-                                            String::new()
-                                        } else {
-                                            truncate_tool_args(&current_tool_input, 120)
-                                        };
-                                        native_tool_calls.push(format!(
-                                            "[agent-native: {}({})]",
-                                            tool, args
-                                        ));
+                                    match classify_tool_call(tool, &current_tool_input) {
+                                        ToolRecord::Kronn(record) => kronn_tool_calls.push(record),
+                                        ToolRecord::Native(record) => native_tool_calls.push(record),
                                     }
                                 }
                                 current_tool = None;
@@ -774,7 +801,7 @@ pub(crate) async fn make_agent_stream(
                         in a row and was killed to stop the pollution. This is a known failure mode \
                         (often extended-thinking leak on Opus). Try re-running with a fresh prompt — \
                         adjusting the question wording usually avoids it.",
-                        MAX_REPEAT_DELTAS
+                        DECODER_LOOP_MAX_REPEATS
                     ));
                 }
                 if stopped_on_size {
@@ -1258,7 +1285,7 @@ pub(super) struct AgentRunResult {
 /// Handles stream-json and plain text modes, tool logging, error detection, and token parsing.
 /// Does NOT save to DB — caller handles that (format differs per call site).
 pub(super) async fn run_agent_streaming(
-    mut process: runner::AgentProcess,
+    mut process: impl runner::AgentIo,
     tx: &tokio::sync::mpsc::Sender<AgentStreamEvent>,
     meta: &AgentStreamMeta,
     agent_type: &AgentType,
@@ -1267,17 +1294,15 @@ pub(super) async fn run_agent_streaming(
     let mut stream_tokens: u64 = 0;
     let mut current_tool: Option<String> = None;
     let mut tool_input = String::new();
-    let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+    let is_stream_json = process.output_mode() == runner::OutputMode::StreamJson;
     let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
     let mut signal_stop = false;
-    // Same decoder-loop detector as the main stream loop. Orchestration runs
-    // use the same Claude model and can exhibit the same failure mode; we
+    // Shared decoder-loop detector (`is_decoder_loop`, module top). Orchestration
+    // runs use the same Claude model and can exhibit the same failure mode; we
     // break out and return whatever text arrived before the loop started.
     let mut last_text_delta = String::new();
     let mut repeat_delta_count: u32 = 0;
-    const MAX_REPEAT_DELTAS: u32 = 50;
-    const REPEAT_MIN_LEN: usize = 3;
     loop {
         tokio::select! {
             line = process.next_line() => {
@@ -1286,25 +1311,16 @@ pub(super) async fn run_agent_streaming(
                         if is_stream_json {
                             match runner::parse_claude_stream_line(&line) {
                                 runner::StreamJsonEvent::Text(text) => {
-                                    // Decoder-loop guard — same mechanic as the main
-                                    // stream loop (see MAX_REPEAT_DELTAS above).
-                                    if text.len() >= REPEAT_MIN_LEN && !text.trim().is_empty() {
-                                        if text == last_text_delta {
-                                            repeat_delta_count += 1;
-                                            if repeat_delta_count >= MAX_REPEAT_DELTAS {
-                                                tracing::warn!(
-                                                    "Orchestration agent entered a decoder loop — delta {:?} repeated {} times, aborting",
-                                                    text.chars().take(40).collect::<String>(),
-                                                    repeat_delta_count,
-                                                );
-                                                let _ = process.child.kill().await;
-                                                full_response.push_str("\n\n---\n🔁 **Decoder loop detected** — agent killed.");
-                                                break;
-                                            }
-                                        } else {
-                                            last_text_delta = text.clone();
-                                            repeat_delta_count = 1;
-                                        }
+                                    // Decoder-loop guard — shared detector.
+                                    if is_decoder_loop(&text, &mut last_text_delta, &mut repeat_delta_count) {
+                                        tracing::warn!(
+                                            "Orchestration agent entered a decoder loop — delta {:?} repeated {} times, aborting",
+                                            text.chars().take(40).collect::<String>(),
+                                            repeat_delta_count,
+                                        );
+                                        process.kill().await;
+                                        full_response.push_str("\n\n---\n🔁 **Decoder loop detected** — agent killed.");
+                                        break;
                                     }
                                     full_response.push_str(&text);
                                     if !tx.is_closed() {
@@ -1364,25 +1380,25 @@ pub(super) async fn run_agent_streaming(
             }
             _ = tokio::time::sleep_until(deadline) => {
                 tracing::warn!("Agent {:?} timed out (round: {})", agent_type, meta.round_label);
-                let _ = process.child.kill().await;
+                process.kill().await;
                 break;
             }
         }
     }
     if signal_stop {
-        let _ = process.child.kill().await;
+        process.kill().await;
     }
 
-    let status = process.child.wait().await;
+    let status = process.wait().await;
     process.fix_ownership();
-    let success = status.as_ref().map(|s| s.success()).unwrap_or(false);
+    let success = status.map(|s| s.success).unwrap_or(false);
     let stderr = process.captured_stderr_flushed().await;
     let stderr_text = stderr.join("\n");
 
     if full_response.is_empty() && !success {
         let exit_info = match &status {
-            Ok(s) => format!("exit code: {:?}", s.code()),
-            Err(e) => format!("wait error: {}", e),
+            Some(s) => format!("exit code: {:?}", s.code),
+            None => "exit status unavailable".to_string(),
         };
         tracing::error!("Agent {:?} exited with error ({}). stderr: {}",
             agent_type, exit_info,
@@ -1421,9 +1437,14 @@ pub(super) async fn run_agent_streaming(
 
 /// Run an agent silently (no SSE streaming), return collected text.
 /// Used for conversation summarization before debate.
-pub(super) async fn run_agent_collect(mut process: runner::AgentProcess) -> String {
+///
+/// Generic over [`runner::AgentIo`] (0.8.8 test-seam refactor) so the
+/// accumulation + stream-json-vs-raw + teardown logic is unit-testable with
+/// a `ScriptedProcess`, without spawning a real CLI. Production passes a real
+/// `AgentProcess`; both impl `AgentIo`.
+pub(super) async fn run_agent_collect(mut process: impl runner::AgentIo) -> String {
     let mut output = String::new();
-    let is_json = process.output_mode == runner::OutputMode::StreamJson;
+    let is_json = process.output_mode() == runner::OutputMode::StreamJson;
     let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
     loop {
         tokio::select! {
@@ -1444,12 +1465,12 @@ pub(super) async fn run_agent_collect(mut process: runner::AgentProcess) -> Stri
             }
             _ = tokio::time::sleep_until(deadline) => {
                 tracing::warn!("Agent timed out during silent collection");
-                let _ = process.child.kill().await;
+                process.kill().await;
                 break;
             }
         }
     }
-    let _ = process.child.wait().await;
+    let _ = process.wait().await;
     output.trim().to_string()
 }
 
@@ -1604,5 +1625,352 @@ mod truncate_tool_args_tests {
         // Boundary case : input length == max chars → no ellipsis.
         let raw = "x".repeat(50);
         assert_eq!(truncate_tool_args(&raw, 50), "x".repeat(50));
+    }
+}
+
+#[cfg(test)]
+mod run_agent_collect_tests {
+    //! Unit tests for the silent-collection loop, driven by a scripted
+    //! `AgentIo` (no real subprocess). Pins the raw-vs-stream-json branch,
+    //! line accumulation, trimming, and empty-stream handling — the logic
+    //! that was previously untestable because it required spawning a CLI.
+    use super::run_agent_collect;
+    use crate::agents::runner::ScriptedProcess;
+
+    /// Helper: a claude `--output-format stream-json` text-delta line.
+    fn text_delta(s: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":{}}}}}}}"#,
+            serde_json::to_string(s).unwrap()
+        )
+    }
+
+    #[tokio::test]
+    async fn raw_mode_joins_lines_with_newline_and_trims() {
+        let proc = ScriptedProcess::raw(["  first", "second", "third  "]);
+        let out = run_agent_collect(proc).await;
+        assert_eq!(out, "first\nsecond\nthird");
+    }
+
+    #[tokio::test]
+    async fn empty_stream_yields_empty_string() {
+        let proc = ScriptedProcess::raw(Vec::<String>::new());
+        let out = run_agent_collect(proc).await;
+        assert_eq!(out, "");
+    }
+
+    #[tokio::test]
+    async fn stream_json_accumulates_only_text_events() {
+        // Mix text deltas with a tool-use line + a non-text event ; only the
+        // text must survive into the collected summary.
+        let proc = ScriptedProcess::stream_json([
+            text_delta("Hello "),
+            // A tool-start / non-text event the parser classifies as non-Text:
+            r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"x","name":"Read","input":{}}}}"#.to_string(),
+            text_delta("world"),
+        ]);
+        let out = run_agent_collect(proc).await;
+        assert_eq!(out, "Hello world");
+    }
+
+    #[tokio::test]
+    async fn stream_json_non_json_falls_back_to_raw_text() {
+        // CONTRACT (parse_claude_stream_line, runner.rs): in stream-json mode
+        // a NON-JSON line is passed through as raw Text — a deliberate
+        // "never silently lose agent output" choice. A valid JSON object with
+        // no recognized `type` (e.g. `{}`) IS skipped. This test pins both so
+        // the fallback isn't accidentally "fixed" into dropping real output.
+        let proc = ScriptedProcess::stream_json([
+            "plain log noise".to_string(), // non-JSON → kept as text
+            text_delta("real"),            // text_delta → kept
+            "{}".to_string(),              // typeless JSON → skipped
+        ]);
+        let out = run_agent_collect(proc).await;
+        assert_eq!(out, "plain log noisereal");
+    }
+
+    #[tokio::test]
+    async fn raw_mode_single_line_no_leading_newline() {
+        let proc = ScriptedProcess::raw(["only"]);
+        assert_eq!(run_agent_collect(proc).await, "only");
+    }
+}
+
+#[cfg(test)]
+mod run_agent_streaming_tests {
+    //! Unit tests for the SSE-producing agent loop, driven by a scripted
+    //! `AgentIo`. These pin the bug-prone paths the 2026-05-28 QA audit
+    //! flagged as untested : tool-call event → Log emission, terminal-signal
+    //! truncation, decoder-loop abort, and the error-exit message — all
+    //! without spawning a CLI or burning tokens.
+    use super::{run_agent_streaming, AgentStreamMeta};
+    use crate::api::discussions::AgentStreamEvent;
+    use crate::agents::runner::ScriptedProcess;
+    use crate::models::AgentType;
+
+    fn text_delta(s: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_delta","delta":{{"type":"text_delta","text":{}}}}}}}"#,
+            serde_json::to_string(s).unwrap()
+        )
+    }
+    fn tool_start(name: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"type":"content_block_start","content_block":{{"type":"tool_use","name":"{}"}}}}}}"#,
+            name
+        )
+    }
+    fn tool_input(partial: &str) -> String {
+        format!(
+            r#"{{"type":"stream_event","event":{{"delta":{{"type":"input_json_delta","partial_json":{}}}}}}}"#,
+            serde_json::to_string(partial).unwrap()
+        )
+    }
+    fn tool_end() -> String {
+        r#"{"type":"stream_event","event":{"type":"content_block_stop"}}"#.to_string()
+    }
+
+    fn meta() -> AgentStreamMeta {
+        AgentStreamMeta {
+            agent_name: "TestAgent".into(),
+            agent_type: AgentType::ClaudeCode,
+            round_label: serde_json::json!("round-1"),
+        }
+    }
+
+    /// Drain a finished channel into a Vec for assertions.
+    fn drain(mut rx: tokio::sync::mpsc::Receiver<AgentStreamEvent>) -> Vec<AgentStreamEvent> {
+        let mut out = Vec::new();
+        while let Ok(ev) = rx.try_recv() {
+            out.push(ev);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn raw_accumulates_and_sends_chunks() {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let proc = ScriptedProcess::raw(["line one", "line two"]);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        assert_eq!(res.response, "line one\nline two");
+        let chunks = drain(rx).into_iter()
+            .filter(|e| matches!(e, AgentStreamEvent::Chunk { .. }))
+            .count();
+        assert_eq!(chunks, 2, "one Chunk per raw line");
+    }
+
+    #[tokio::test]
+    async fn stream_json_text_accumulates() {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let proc = ScriptedProcess::stream_json([text_delta("Hello "), text_delta("world")]);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        assert_eq!(res.response, "Hello world");
+        assert!(drain(rx).iter().any(|e| matches!(e, AgentStreamEvent::Chunk { .. })));
+    }
+
+    #[tokio::test]
+    async fn tool_call_emits_a_log_event() {
+        // ToolStart → ToolInputDelta → ToolEnd must produce exactly one Log
+        // event (the human-readable tool-call breadcrumb), not pollute the
+        // response text.
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let proc = ScriptedProcess::stream_json([
+            text_delta("Reading file. "),
+            tool_start("Read"),
+            tool_input("{\"path\":\"src/lib.rs\"}"),
+            tool_end(),
+            text_delta("Done."),
+        ]);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        // Tool JSON must NOT leak into the prose response.
+        assert_eq!(res.response, "Reading file. Done.");
+        let logs: Vec<_> = drain(rx).into_iter()
+            .filter(|e| matches!(e, AgentStreamEvent::Log { .. }))
+            .collect();
+        assert_eq!(logs.len(), 1, "exactly one Log event for the Read tool call");
+        if let AgentStreamEvent::Log { text } = &logs[0] {
+            assert!(text.contains("Read"), "log should name the tool: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_signal_stops_and_truncates() {
+        // A KRONN:* terminal marker mid-stream must stop the loop and
+        // truncate everything after the signal — the agent hands back to
+        // the user instead of streaming on.
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        let proc = ScriptedProcess::raw([
+            "Architecture proposed.",
+            "KRONN:ARCHITECTURE_READY",
+            "this trailing line must never be reached",
+        ]);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        assert!(res.response.contains("Architecture proposed."));
+        assert!(
+            !res.response.contains("trailing line must never be reached"),
+            "content after the terminal signal must be truncated: {:?}", res.response
+        );
+        let _ = drain(rx);
+    }
+
+    #[tokio::test]
+    async fn decoder_loop_is_detected_and_aborted() {
+        // The same text delta repeated past MAX_REPEAT_DELTAS (50) is the
+        // extended-thinking decoder-loop failure (EW-7189). The loop must
+        // kill the agent and append a marker rather than stream forever.
+        let mut lines = Vec::new();
+        for _ in 0..60 {
+            lines.push(text_delta("RepeatedChunk")); // ≥3 chars, non-empty
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(500);
+        let proc = ScriptedProcess::stream_json(lines);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        assert!(
+            res.response.contains("Decoder loop detected"),
+            "expected decoder-loop abort marker, got: {:?}",
+            res.response.chars().rev().take(80).collect::<String>()
+        );
+        let _ = drain(rx);
+    }
+
+    #[tokio::test]
+    async fn empty_response_with_failed_exit_formats_error() {
+        // No output + non-zero exit → the "[Agent exited with error]" message
+        // so the user sees a diagnostic instead of a blank reply.
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let proc = ScriptedProcess::stream_json(Vec::<String>::new())
+            .with_exit(false, Some(1))
+            .with_stderr(["boom: something failed"]);
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        assert!(res.response.contains("[Agent exited with error]"), "got: {:?}", res.response);
+        assert!(res.response.contains("boom: something failed"), "stderr should surface: {:?}", res.response);
+        let _ = drain(rx);
+    }
+
+    #[tokio::test]
+    async fn empty_response_clean_exit_is_no_response() {
+        let (tx, rx) = tokio::sync::mpsc::channel(10);
+        let proc = ScriptedProcess::stream_json(Vec::<String>::new()); // success, no output
+        let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
+        drop(tx);
+        assert_eq!(res.response, "[No response]");
+        let _ = drain(rx);
+    }
+}
+
+#[cfg(test)]
+mod stream_helpers_tests {
+    //! Pure helpers extracted (0.8.8) from the two streaming loops so they're
+    //! tested once instead of living as byte-identical copies.
+    use super::{classify_tool_call, is_decoder_loop, ToolRecord, DECODER_LOOP_MAX_REPEATS};
+
+    // ── is_decoder_loop ────────────────────────────────────────────────
+
+    #[test]
+    fn decoder_loop_fires_after_threshold_repeats() {
+        let (mut last, mut count) = (String::new(), 0u32);
+        let mut fired_at = None;
+        for i in 1..=DECODER_LOOP_MAX_REPEATS + 5 {
+            if is_decoder_loop("</thinking>\n", &mut last, &mut count) {
+                fired_at = Some(i);
+                break;
+            }
+        }
+        // First call sets count=1, so the Nth identical delta makes count==N ;
+        // fires exactly when count reaches the threshold.
+        assert_eq!(fired_at, Some(DECODER_LOOP_MAX_REPEATS));
+    }
+
+    #[test]
+    fn decoder_loop_resets_on_different_delta() {
+        let (mut last, mut count) = (String::new(), 0u32);
+        // 40 of "aaa", then a different delta, then 40 of "bbb" — neither run
+        // reaches 50, so it never fires.
+        for _ in 0..40 {
+            assert!(!is_decoder_loop("aaa", &mut last, &mut count));
+        }
+        assert!(!is_decoder_loop("bbb", &mut last, &mut count));
+        assert_eq!(count, 1, "counter resets when the delta changes");
+        for _ in 0..40 {
+            assert!(!is_decoder_loop("bbb", &mut last, &mut count));
+        }
+    }
+
+    #[test]
+    fn decoder_loop_ignores_short_and_whitespace_deltas() {
+        // Deltas < 3 chars OR whitespace-only repeat legitimately in formatted
+        // output (". ", "\n") and must NEVER trip the detector.
+        let (mut last, mut count) = (String::new(), 0u32);
+        for _ in 0..200 {
+            assert!(!is_decoder_loop(". ", &mut last, &mut count), "short delta must not fire");
+            assert!(!is_decoder_loop("\n\n\n", &mut last, &mut count), "whitespace delta must not fire");
+            assert!(!is_decoder_loop("a", &mut last, &mut count), "1-char delta must not fire");
+        }
+        assert_eq!(count, 0, "ignored deltas never increment the counter");
+    }
+
+    #[test]
+    fn decoder_loop_does_not_fire_just_below_threshold() {
+        let (mut last, mut count) = (String::new(), 0u32);
+        for _ in 0..(DECODER_LOOP_MAX_REPEATS - 1) {
+            assert!(!is_decoder_loop("repeated", &mut last, &mut count));
+        }
+        assert_eq!(count, DECODER_LOOP_MAX_REPEATS - 1);
+    }
+
+    // ── classify_tool_call ─────────────────────────────────────────────
+
+    #[test]
+    fn kronn_internal_tool_goes_to_kronn_bucket_with_pretty_args() {
+        let r = classify_tool_call("mcp__kronn-internal__disc_get_message", r#"{"idx":4}"#);
+        match r {
+            ToolRecord::Kronn(s) => {
+                assert!(s.starts_with("[kronn-internal: disc_get_message("), "got {s}");
+                assert!(s.contains('4'), "pretty args should surface the idx: {s}");
+            }
+            ToolRecord::Native(_) => panic!("kronn-internal prefix must map to Kronn bucket"),
+        }
+    }
+
+    #[test]
+    fn native_tool_goes_to_native_bucket() {
+        let r = classify_tool_call("Read", r#"{"path":"src/lib.rs"}"#);
+        match r {
+            ToolRecord::Native(s) => {
+                assert!(s.starts_with("[agent-native: Read("), "got {s}");
+                assert!(s.contains("src/lib.rs"));
+            }
+            ToolRecord::Kronn(_) => panic!("non-kronn tool must map to Native bucket"),
+        }
+    }
+
+    #[test]
+    fn native_tool_with_empty_input_has_empty_args() {
+        let r = classify_tool_call("Bash", "");
+        match r {
+            ToolRecord::Native(s) => assert_eq!(s, "[agent-native: Bash()]"),
+            ToolRecord::Kronn(_) => panic!("Bash is native"),
+        }
+    }
+
+    #[test]
+    fn native_tool_long_input_is_truncated() {
+        // Edit/Write can carry huge content — the native record truncates to
+        // keep the transcript banner compact (~120 chars + ellipsis).
+        let big = format!(r#"{{"content":"{}"}}"#, "x".repeat(500));
+        let r = classify_tool_call("Write", &big);
+        match r {
+            ToolRecord::Native(s) => {
+                assert!(s.contains('…'), "long input should be truncated with ellipsis: {s}");
+                assert!(s.len() < big.len(), "record must be shorter than the raw input");
+            }
+            ToolRecord::Kronn(_) => panic!("Write is native"),
+        }
     }
 }

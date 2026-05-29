@@ -4,7 +4,9 @@ import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
 import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
-import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, ApiSpec, CustomApiPayload, McpServer } from '../types/generated';
+import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, CustomApiPayload, McpServer } from '../types/generated';
+import { pluginKind, type PluginKind } from '../lib/pluginKind';
+import { linkify } from '../lib/linkify';
 import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
 import { Dropdown } from '../components/Dropdown';
 import {
@@ -14,31 +16,6 @@ import {
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
-
-/** Derive plugin kind from transport + tags + api_spec presence.
- *
- *  0.8.6 phase 4 — `cli` added : plugins that speak MCP BUT shell out
- *  to a local CLI binary (Fastly via `fastly-mcp`, GitLab via `glab
- *  mcp serve`). From the user's install standpoint they have the
- *  same prereq as a CLI agent (binary on the host), so we surface
- *  them as a separate category instead of lumping them with pure-MCP
- *  servers. Detection : the registry entry carries a `cli` tag.
- *
- *  `cli` is checked FIRST so it wins over both `api`/`hybrid` detection
- *  — e.g. a future CLI wrapper that ALSO exposes a REST API stays
- *  bucketed as CLI (the prereq is what matters to the user). */
-type PluginKind = 'mcp' | 'api' | 'hybrid' | 'cli';
-function pluginKind(m: { transport: McpDefinition['transport']; api_spec?: ApiSpec | null; tags?: string[] }): PluginKind {
-  const hasApi = !!m.api_spec;
-  const hasCliTag = Array.isArray(m.tags) && m.tags.includes('cli');
-  // McpTransport is a discriminated union; the API-only sentinel is the
-  // string literal "ApiOnly" (not a { tag: ... } object).
-  const isApiOnly = (m.transport as unknown) === 'ApiOnly';
-  if (hasCliTag) return 'cli';
-  if (isApiOnly) return 'api';
-  if (hasApi) return 'hybrid';
-  return 'mcp';
-}
 
 /**
  * Compact "what kind of plugin is this" badge — shown on each installed
@@ -142,17 +119,6 @@ const ENV_PLACEHOLDERS: Record<string, string> = {
   API_SECRET: 'your-api-secret',
   BASE_URL: 'https://api.example.com',
 };
-
-/** Turn plain text with URLs into React nodes with clickable links */
-function linkify(text: string): React.ReactNode[] {
-  const urlRe = /(https?:\/\/[^\s)]+)/g;
-  const parts = text.split(urlRe);
-  return parts.map((part, i) =>
-    urlRe.test(part)
-      ? <a key={i} href={part} target="_blank" rel="noopener noreferrer" className="mcp-secrets-token-link" style={{ display: 'inline' }}>{part}</a>
-      : part
-  );
-}
 
 interface McpPageProps {
   projects: Project[];
