@@ -9,6 +9,80 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.7] - 2026-05-28
 
+### Changed — Anti-hallucination: closed the web-project extension gap (.twig / .xlf) via a 4-conversation linguistic re-pass
+
+A deep, multi-agent forensic re-pass (one linguistic expert per persona → reconciliation against the machine's real verdict → consolidated synthesis) read **every message** of the 4 persona conversations on the Symfony project DOCROMS_WEB and surfaced a single dominant root cause the earlier sampling missed.
+
+- **`.twig` / `.html.twig` / `.xlf` (+ `.scss`, `.less`) were absent from the source-extension allowlist.** On a Symfony/web project these are THE primary files — so every real `templates/…html.twig` / `translations/messages.*.xlf` citation went unverified, and worse, the sentences citing them read as *unsourced* (false positives too). Fixed by extending the allowlist. No double-extension special-case is needed: matching is `ends_with`, and `foo.html.twig` ends with `.twig`.
+- **The two extension lists had drifted** (`contains_code_anchor` lacked `.php`/`.go`/… that `looks_like_file_anchor` already had). Unified into a single shared `SOURCE_EXTS` const so they can't diverge again.
+- **Proven on the real conversations:** verified sources **19 → 35** (+16 legitimate file citations recovered, incl. Clarisse's `templates/pages/projets.html.twig:82` — line 82 exact on disk — and Liza's `translations/messages.{fr,en}.xlf`), **0 false red**, and 8 non-resolving anchors (proposed/placeholder files) correctly surfaced as soft-amber "couldn't verify". The bounds check now also catches inline anchors whose line is out of range.
+- **Honest limits documented** (module doc + this entry): the lint verifies *anchors* (path resolves, line in bounds), never file *content*. So 6 families stay structurally out of reach and are NOT bugs: semantic-content claims (the one real hallucination in the corpus — a non-existent `nth-of-type(even)` CSS rule — is invisible by construction), verbatim quotes, i18n *keys* inside an `.xlf` (the file resolves, the key isn't looked up — don't oversell `.xlf`), absence claims, bare basenames without `/` or `:line`, and approximate `~N` line numbers. 0 false positives across the whole corpus.
+
++6 anti_halluc tests (web extensions, unified-list guard, real-twig green, out-of-bounds-twig soft-amber). Full backend lib suite 2929 green, clippy clean.
+
+### Changed — Anti-hallucination: ~300-test hardening campaign + closed the ES recall gap
+
+A full autonomous validation campaign: a 9-dimension adversarial bug-hunt (~153 new integration tests in `backend/tests/anti_hallu_*.rs` — lang/citation-forms/verify-outcomes/security-jail/utf8/malformed-markers/tiers/multiroot/perf-caps), a forensic replay of `analyze()` against 7 real agent messages from 4 live persona discussions on a real project (17 verified sources, 0 fabricated, 0 real defects), and the closing of the last documented hole.
+
+- **Closed the Spanish recall gap.** `CLAIM_CUES`/`HEDGES`/`OPINION_CUES`/`CONDITIONAL_OPENERS` were EN+FR only — a genuine Spanish code claim ("la función está definida en…") flagged via nothing. Added native ES cues (`está definido`, `se encuentra`, `la función`, `devuelve`, `es vulnerable`…) + ES precision guards (`debería`, `es preferible`, `cuando`, `creo que`…). Spanish claims now flag natively, ES opinions/hedges still suppressed. The heuristic is genuinely trilingual now.
+- **Security/robustness invariants pinned** by the bug-hunt: a relative path escaping the project root (`../`, symlinked dir) is NEVER `Verified`; no panic on UTF-8 / emoji / CJK / malformed `[src:` / nested brackets / 100k-char inputs; the `MAX_SOURCES_VERIFIED` / `MAX_FLAGGED_SPANS` caps hold.
+
+Backend ~174 unit + ~153 integration anti-hallu tests, all green; clippy clean. The bug-hunt found **0 new defects** — the core is solid after the session's four fixes (FR-question flagging, root-file recall, green-drawer colour, ES recall) + the two honesty tiers (unverified, unverifiable).
+
+### Changed — Anti-hallucination: live-validated, hardened, + an honest "unverified" tier
+
+A live PW validation campaign on a real project (DOCROMS_WEB, real Claude tokens) + a massive deterministic test expansion. Three real bugs found & fixed, one new honest signal added.
+
+**Bugs found & fixed (the live + exhaustive testing earned its keep):**
+- **French questions flagged as claims.** `is_question()` was dead code: `split_sentences` stripped the terminal `?` before it ran, so "Où est-ce configuré ?" was wrongly flagged unsourced. Fixed by re-appending the `?`/`!` terminator.
+- **Root-level files never verified.** A live multi-citation test showed `composer.json:1` (cited, exists) not verified — `looks_like_file_anchor` required a `/`, dropping root files. Now accepts a slash **or** an explicit `:line` (so `composer.json:1` / `Cargo.toml:5` verify; bare prose `node.js` still excluded).
+- **Green drawer on an orange background.** The lint detail drawer used a hardcoded amber background regardless of severity, so a verified (green) reply expanded onto an orange panel that read as "not good". Drawer now echoes `data-severity` (green/amber/red) + verified source paths render green, not red.
+
+**New "unverified" tier (soft amber) — honesty over silence.** A natural inline anchor (`` `src/x.rs:9` ``) that doesn't resolve used to be silently dropped (a wrong inline citation escaped entirely). It's now surfaced honestly as `unverified_count` → a soft-amber "N citation(s) non vérifiée(s)" pill — distinct from the red "fabricated" (reserved for formal `[src:]` that fail, high-confidence) and from green "verified". The drawer gets a dedicated "Citées, non vérifiées" group, and the "Sources vérifiées" group now shows on ANY report with verified sources (say what's good *and* what's missing). i18n FR/EN/ES.
+
+**New "unverifiable" tier (neutral grey) — Option B, warn about everything.** A reply citing ONLY uncheckable sources (URL / user-confirmed / inferred / commit / hypothesis) used to be dropped at finalize (`has_signal()` false → no pill), so "what couldn't be tested" was invisible. `has_signal()` is now simply `unsourced_count > 0 || !sources.is_empty()` — ANY citation is surfaced. These get a neutral grey "N source(s) non vérifiable(s)" pill + a "Non vérifiables (URL, déclaré…)" drawer group. The full honesty model now maps to the three things a user needs to know: ✅ vérifiée (green) · ✗ invalide (red) · ~ non vérifiée (soft amber) · — non vérifiable (neutral). The "« Vérifiée » ≠ vraie" caveat stays on every pill.
+
+**Telemetry + testable finalize** (from the prior commit): `tracing::info!(target:"anti_halluc", …)` per reply + the extracted `finalize_lint_report` helper.
+
+**Test coverage:** backend `anti_halluc` **88 → 174 tests** (classify/verify/clean_reference/multi-root/inline-anchor matrices, FR/EN/ES corpus precision guard at 0% FP, per-return-type scenario matrix 2-3 per pill type, finalize seam). Frontend lint pill **12 → 44 tests** (severity priority, every status→colour, drawer grouping per severity, the unverified tier). Full backend suite 2904 green. A live PW E2E scenario script lives at `docs/research/anti-hallu-e2e-scenarios.md`.
+
+**Live-validated (DOCROMS_WEB):** green (verified inline anchor), no-false-positive (opinion/reasoning), multi-source green (surfaced the composer.json bug), red "source invalide" (formal `[src:]` out-of-bounds → "line 50 beyond file length 8"). The honest limit, documented: a live LLM can't be deterministically forced to emit every case (a well-behaved agent refuses to echo a knowingly-false citation = its own sourcing discipline working).
+
+### Added — CLI-style message queue (type while the agent is streaming)
+
+You can now type and send follow-up messages while an agent is still replying — instead of being blocked, they're **queued** and **merged into a single follow-up turn** that auto-fires when the response completes. The classic missing piece vs the raw CLIs. Implemented at Kronn's **orchestration layer** (the merged message becomes a normal `sendMessageStream` only once the prior run's `sending: true→false` edge fires), so it's **agent-agnostic** — works for ClaudeCode / Codex / Gemini / Vibe / Ollama alike, regardless of whether the underlying CLI supports queueing.
+
+- The composer textarea stays editable while the agent streams; Enter (or a dashed queue-send button next to Stop) adds the message to the pending set.
+- Parts added while pending are **accumulated and sent together as ONE message** (blank-line-joined) → the agent produces a single combined response, not N separate full responses. (True mid-stream injection into a running CLI turn isn't possible — the subprocess already has its prompt — so merging into one next-turn message is the efficient equivalent.)
+- Pending parts render as ghost "outbox" bubbles above the composer (position number, optional `@agent`, ✕ to cancel each); the first explicit `@mention` among the parts sets the target agent.
+- Stop clears the queue (stop means stop). The double-click send guard is preserved (`abortControllers` set synchronously → a same-tick second fire enqueues rather than launching a parallel run).
+- New `useMessageQueue` hook (mirrors the proven `useQpChain` edge-trigger pattern; +9 unit tests). i18n FR/EN/ES.
+
+### Fixed — Sidebar search now hides empty folders + non-matching favorites
+
+Searching a discussion in the sidebar used to keep **every** project/org folder header and **every** favorite on screen — the actual matches were buried, forcing the user to expand folders and scroll. The folder/favorite visibility and the header counts were computed from the *unfiltered* disc lists. Now `matchesFilters` is applied to the favorites section, the "Général" group, the per-project/org folder visibility, and all the header counts. Since `matchesFilters` returns true for everything when no search/source filter is active, normal (unsearched) rendering is unchanged — but during a search only folders that contain a match render, non-matching favorites disappear, and the counts reflect the matches. (Folders already auto-expanded during search; the loose-disc cap + archives already bypassed the filter — those were fine.) +1 test in `DiscussionSidebar.grouping.test.tsx`.
+
+### Changed — Anti-hallucination hardening (telemetry + testable finalize + dedup)
+
+Follow-up to the precision fixes, prepping for data-driven tuning + live validation:
+- **Telemetry hook** — the finalize path now emits one structured `tracing::info!(target: "anti_halluc", …)` line per agent reply with `unsourced` / `fabricated` / `verified` / `roots` counts. There was previously ZERO observability, so the real false-positive / verified-anchor rate couldn't be measured (the P4 heuristic is meant to be tuned from real data). `grep target=anti_halluc` now yields that dataset without touching the DB.
+- **Testable finalize seam** — extracted the roots-assembly + `has_signal` gate out of the (un-unit-testable) `make_agent_stream` SSE closure into `anti_halluc::finalize_lint_report(text, workspace_path, project_path)`. This was the lowest-covered / highest-blast-radius part of the path; now covered by a sequential mode-aware test (off→None, verified→green, no-signal→None, worktree-root-first). `streaming.rs` just calls the helper.
+- **Fixed `verified_count` double-count** — a file cited BOTH as a formal `[src:]` marker and an inline backtick anchor was counted twice (inflating the green chip + future telemetry). Dedup now keys on the bare path (type prefix + wrappers + `:line` stripped). +1 test.
+
++2 anti_halluc tests (88 total), clippy clean.
+
+### Fixed — Anti-hallucination: false positives, false "not found", and the missing green badge
+
+A multi-agent investigation (4 parallel deep-dives + a 60-message real-prose corpus) traced the user-reported anti-hallu problems to a handful of root causes. Key finding: agents barely emit formal `[src:]` markers (0 in 60 real messages) but **already self-source ~81 % of the time with natural backticked paths** — which the system accepted as "anchored" but never mechanically verified, so nothing ever earned a green badge and the prose heuristic carried the whole load (and over-flagged).
+
+- **Green badge now actually shows (P2).** `LintReport::is_empty()` treated a fully-verified report as "nothing to show", so finalize stored `None` and the (already-built) green pill was dead code. Added `verified_count()` + `has_signal()`; the report is now stored whenever there's a signal — RED (`fabricated_count>0`), AMBER (`unsourced_count>0`), or **GREEN** (≥1 mechanically-verified source, 0 unsourced, 0 fabricated). Wording stays honest: "verified" = the source exists/resolves, not that the claim is true.
+- **Natural anchors are auto-verified (P1, niveau-1.5).** `analyze()` now extracts backticked `` `path/file.ext[:line]` `` anchors (high-precision: slash + known extension required) and verifies them through the same path-jailed `verify_file_ref`. Purely positive — only resolving anchors are added (as verified File sources → green); a non-resolving inline anchor is dropped, never counted as fabricated. This converts the way agents *actually* write into a green signal with zero change to their behaviour.
+- **Far fewer false "file not found" (P3).** `clean_reference()` strips the backticks / quotes / brackets / trailing punctuation agents wrap citations in (`` `src/foo.rs:42` `` used to fail outright). `verify_file_ref` now takes multiple roots and finalize passes the **Isolated-discussion git worktree first, then the main checkout** — so a file the agent saw/created in the worktree no longer reports NotFound. The lexical `../`-jail + symlink-escape re-check are applied per-root, so the SSRF/path-escape guarantees are unchanged.
+- **Heuristic precision (P4).** The "N unsourced claim(s)" pill had a ~60 % false-positive rate on the corpus. Added accent/hyphen-insensitive matching (`peut être` == `peut-être`, the exact gap that flagged the reported DI sentence), opinion/recommendation suppressors (`devrait`, `je recommande`, `n'est pas toujours`, `anti-pattern`…), a conditional guard (a claim cue after `si`/`quand`/`if` is hypothetical, matched at word boundaries so `si` doesn't fire inside `version`), and skipping of questions / Markdown headings / imperative bullets.
+- **Clearer directive (P5).** Rewrote the injected `PREAMBLE`: states the verify-cascade inline (instead of only pointing at a `docs/AGENTS.md` section that may not exist), explicitly blesses natural backticked-path / URL anchors as valid sources, reserves the formal `[src:]` grammar for curated docs, and gives agents an explicit way to mark opinions/guesses (`je recommande` / `[src: inferred: …]`).
+
+`verify_source_marker` / `analyze` keep their `Option<&Path>` signatures as thin wrappers over new `_roots` variants (no churn on existing callers). +19 backend tests (86 in `anti_halluc` total), frontend pill unchanged (its green/amber/red derivation + FR/EN/ES strings were already built — 12 `lintPill` tests green). The fix is behind the existing non-blocking `warn` mode.
+
 ### Changed — Frontend workflow-builder component coverage (4th wave)
 
 - **`WorkflowWizard`** 35 → 80 % Lines / 17 → 71 % Funcs (+77 tests, no prior test) — the 728-LOC multi-step builder: mode toggle, step navigation + name-gate, add/insert/move/remove steps, every step-type swap (Agent/Notify/Gate/Exec/JsonData/ApiCall/BatchQuickPrompt/BatchApiCall), `parseCronExpr` branches + Cron/Tracker trigger editors, per-step Advanced panel (`on_result` conditions, Goto + STATE blocks, retry/stall/backoff), QP-binding banner, skills/profiles/directives chips, undeclared-`{{var}}` declare flow, preset deep-link transform, QuickStart picker, full per-type Summary recap, Config tab (sandbox/allowlist/launch-vars/expert), and the create-vs-update save handler with payload assertion + double-click guard.

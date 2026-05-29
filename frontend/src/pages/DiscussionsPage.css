@@ -621,6 +621,98 @@
   .disc-queued-qp-badge { animation: none; }
 }
 
+/* ── Queued follow-up messages (CLI-style outbox) ──────────────────────────
+   Ghost "outbox" bubbles shown above the composer while the agent streams.
+   User-aligned (right), dashed + accent-tinted to read as "pending, not yet
+   sent", with a subtle pulse on the newest one. */
+.disc-queued-msgs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 12px 0;
+  align-items: flex-end;
+}
+/* One growing bubble — a column of lines, one per queued part. */
+.disc-queued-bubble {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 80%;
+  padding: 6px 10px;
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border: 1px dashed rgba(var(--kr-accent-rgb), 0.45);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  animation: disc-queued-pulse 1.6s ease-in-out infinite;
+}
+.disc-queued-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.disc-queued-clock { color: var(--kr-accent); flex-shrink: 0; }
+.disc-queued-label {
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex: 1;
+}
+.disc-queued-clear {
+  flex-shrink: 0;
+  background: transparent;
+  border: none;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+  font-size: var(--kr-fs-xs);
+  padding: 0 2px;
+}
+.disc-queued-clear:hover { color: var(--kr-error-soft); text-decoration: underline; }
+/* One queued message = one line. */
+.disc-queued-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-left: 16px; /* aligns text under the header label, past the clock */
+}
+.disc-queued-agent {
+  flex-shrink: 0;
+  color: var(--kr-accent);
+  font-weight: 600;
+  font-size: var(--kr-fs-xs);
+}
+.disc-queued-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.disc-queued-cancel {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+  padding: 2px;
+  border-radius: var(--kr-r-sm);
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.disc-queued-line:hover .disc-queued-cancel { opacity: 1; }
+.disc-queued-cancel:hover {
+  color: var(--kr-error-soft);
+  background: rgba(var(--kr-error-rgb), 0.12);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .disc-queued-bubble { animation: none; }
+}
+
 .disc-unseen-badge {
   background: var(--kr-accent);
   color: var(--kr-bg-base);
@@ -2053,6 +2145,13 @@
   border: 1px solid var(--kr-border-light);
   cursor: default;
   color: var(--kr-text-ghost);
+}
+
+/* Queue-send variant — shown next to Stop while the agent streams. Dashed to
+   echo the ghost "outbox" bubbles: this enqueues, it doesn't send now. */
+.disc-send-btn[data-variant="queue"] {
+  border-style: dashed;
+  border-color: rgba(var(--kr-accent-rgb), 0.5);
 }
 
 /* ── Context files (attach) ────────────────────────────── */
@@ -3754,15 +3853,42 @@
   border-color: rgba(var(--kr-success-rgb), 0.35);
   background: rgba(var(--kr-success-rgb), 0.08);
 }
+/* Soft amber — "couldn't verify" (inline anchor didn't resolve). Honest, not
+   alarming: lower-key than the unsourced amber, clearly not the red. */
+.disc-msg-lint-pill[data-severity="unverified"] {
+  color: var(--kr-warning);
+  border-color: rgba(var(--kr-warning-rgb), 0.28);
+  background: rgba(var(--kr-warning-rgb), 0.05);
+}
+/* Neutral grey — "unverifiable" (URL / user-declared / inferred). Not a
+   problem, just honestly uncheckable. Option B: surfaced, never hidden. */
+.disc-msg-lint-pill[data-severity="unchecked"] {
+  color: var(--kr-text-secondary);
+  border-color: var(--kr-border-light);
+  background: var(--kr-bg-subtle, rgba(128, 128, 128, 0.06));
+}
+.disc-lint-item[data-status="unchecked"] code {
+  color: var(--kr-text-secondary);
+}
 .disc-msg-lint-pill:hover { filter: brightness(1.1); }
 
 .disc-msg-lint-detail {
   margin-top: 6px;
   padding: 8px 10px;
   border-radius: var(--kr-r-sm);
+  /* Default (amber) for the unsourced case; severity variants below override. */
   background: rgba(var(--kr-warning-rgb), 0.06);
   border: 1px solid rgba(var(--kr-warning-rgb), 0.18);
   font-size: var(--kr-fs-2xs);
+}
+/* Green pill → green drawer (was always amber → read as "pas bon" on a verified reply). */
+.disc-msg-lint-detail[data-severity="verified"] {
+  background: rgba(var(--kr-success-rgb), 0.06);
+  border-color: rgba(var(--kr-success-rgb), 0.20);
+}
+.disc-msg-lint-detail[data-severity="fabricated"] {
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border-color: rgba(var(--kr-error-rgb), 0.20);
 }
 .disc-lint-group + .disc-lint-group { margin-top: 8px; }
 .disc-lint-group-title {
@@ -3778,6 +3904,14 @@
 .disc-lint-item[data-status] code {
   color: var(--kr-error);
   font-family: var(--kr-font-mono, monospace);
+}
+/* A verified source is good news — its path shouldn't read as an error (red). */
+.disc-lint-item[data-status="verified"] code {
+  color: var(--kr-success);
+}
+/* "Couldn't verify" — neutral amber, not the red of a fabricated citation. */
+.disc-lint-item[data-status="unverified"] code {
+  color: var(--kr-warning);
 }
 /* Honest caveat: a verified citation only means the source exists. */
 .disc-lint-caveat {

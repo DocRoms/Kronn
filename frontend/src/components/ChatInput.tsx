@@ -341,7 +341,11 @@ export function ChatInput({
   const sendInFlightRef = useRef(false);
   const handleSendMessage = useCallback(async () => {
     const inputVal = chatInputValueRef.current;
-    if (!discussion || !inputVal.trim() || sending || sendInFlightRef.current) return;
+    // NOTE: `sending` is intentionally NOT a guard here. Submitting mid-stream
+    // is allowed — the parent (handleSendMessage) routes it to the message
+    // QUEUE instead of dropping it (CLI-style). `sendInFlightRef` still blocks
+    // a same-tick double-fire of the SAME keystroke.
+    if (!discussion || !inputVal.trim() || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     const msg = inputVal.trim();
     const { targetAgent } = parseMention(msg);
@@ -908,7 +912,10 @@ export function ChatInput({
               handleSendMessage();
             }
           }}
-          disabled={sending || disabled}
+          // Editable WHILE the agent streams — typing + Enter queues a
+          // follow-up (the parent routes it to useMessageQueue). Only a
+          // hard-disabled composer (no usable agent) blocks input.
+          disabled={disabled}
         />
 
         {/* Bottom toolbar inside composer */}
@@ -1127,7 +1134,7 @@ export function ChatInput({
 
           {/* Right: shortcut hint + primary action */}
           <span className="disc-composer-hint">
-            {sending ? '' : 'Enter'}
+            {sending ? (chatInputHasText ? t('disc.queueHint') : '') : 'Enter'}
           </span>
 
           {sending ? (
@@ -1184,6 +1191,21 @@ export function ChatInput({
                     </div>
                   )}
                 </div>
+              )}
+              {/* Queue-send: while the agent streams, a message with text can
+                  be added to the queue by mouse (Enter does it from the
+                  textarea). Only shown when there's something to queue. */}
+              {chatInputHasText && (
+                <button
+                  className="disc-send-btn"
+                  data-active={true}
+                  data-variant="queue"
+                  onClick={handleSendMessage}
+                  title={t('disc.queueSend')}
+                  aria-label={t('disc.queueSend')}
+                >
+                  <Send size={16} />
+                </button>
               )}
               <button
                 className="disc-stop-btn"

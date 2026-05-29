@@ -22,6 +22,7 @@ import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
 import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
+import { useMessageQueue } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
@@ -32,7 +33,7 @@ import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu,
+  Menu, X, Clock,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
@@ -980,7 +981,17 @@ export function DiscussionsPage({
     //
     // `abortControllers.current[discId]` is set synchronously a few
     // lines below; presence here means a previous call is in-flight.
-    if (sending || abortControllers.current[discId]) return;
+    //
+    // 0.8.8 — instead of dropping a message typed mid-stream, QUEUE it
+    // (CLI-style). `useMessageQueue` drains one per completion edge, so the
+    // queued follow-up auto-fires when the current run finishes. The double-
+    // click guard is preserved: `abortControllers.current[discId]` is set
+    // synchronously, so a fast second click within the same tick enqueues
+    // rather than launching a parallel run.
+    if (sendingMap[discId] || abortControllers.current[discId]) {
+      enqueueMessage(msg, targetAgent);
+      return;
+    }
     stopTts();
 
     // Optimistically add user message to loadedDiscussions so it appears immediately
@@ -1071,6 +1082,21 @@ export function DiscussionsPage({
     onFire: handleSendMessage,
   });
 
+  // CLI-style message queue — type follow-up messages while the agent is still
+  // streaming; they auto-fire one-by-one as each response completes. Handled at
+  // Kronn's orchestration layer (never concurrent sends), so it works for EVERY
+  // agent type regardless of whether the underlying CLI supports queueing.
+  const {
+    queue: queuedMessages,
+    enqueue: enqueueMessage,
+    removeQueued: removeQueuedMessage,
+    clearQueue: clearMessageQueue,
+  } = useMessageQueue({
+    discId: activeDiscussionId,
+    sending,
+    onFire: handleSendMessage,
+  });
+
   const handleStop = () => {
     if (!activeDiscussionId) return;
     const discId = activeDiscussionId;
@@ -1086,6 +1112,9 @@ export function DiscussionsPage({
     const controller = abortControllers.current[discId];
     if (controller) controller.abort();
     cleanupStream(discId);
+    // Stop means stop: drop any messages the user queued during this run
+    // rather than auto-firing them on the (now cancelled) completion edge.
+    clearMessageQueue();
   };
 
   const handleTtsToggle = useCallback(() => {
@@ -2573,6 +2602,49 @@ export function DiscussionsPage({
                 />
               );
             })()}
+
+            {/* Queued follow-ups — messages the user typed while the agent is
+                still streaming. Rendered as ghost "outbox" bubbles just above
+                the composer; they auto-fire one-by-one as each response
+                completes (useMessageQueue). Each can be cancelled via its ✕. */}
+            {queuedMessages.length > 0 && (
+              <div className="disc-queued-msgs" aria-label={t('disc.queuedAria')}>
+                {/* ONE growing "outbox" bubble — each queued part on its own
+                    line, all sent together as a single merged message. */}
+                <div className="disc-queued-bubble" title={t('disc.queuedHint')}>
+                  <div className="disc-queued-head">
+                    <Clock size={11} className="disc-queued-clock" />
+                    <span className="disc-queued-label">{t('disc.queuedAria')}</span>
+                    {queuedMessages.length > 1 && (
+                      <button
+                        type="button"
+                        className="disc-queued-clear"
+                        onClick={clearMessageQueue}
+                        aria-label={t('disc.queuedClearAll')}
+                        title={t('disc.queuedClearAll')}
+                      >
+                        {t('disc.queuedClearAll')}
+                      </button>
+                    )}
+                  </div>
+                  {queuedMessages.map(qm => (
+                    <div key={qm.id} className="disc-queued-line">
+                      {qm.targetAgent && <span className="disc-queued-agent">@{qm.targetAgent}</span>}
+                      <span className="disc-queued-text">{qm.content}</span>
+                      <button
+                        type="button"
+                        className="disc-queued-cancel"
+                        onClick={() => removeQueuedMessage(qm.id)}
+                        aria-label={t('disc.queuedCancel')}
+                        title={t('disc.queuedCancel')}
+                      >
+                        <X size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Input — unified composer.
                 `key={activeDiscussion.id}` forces a fresh mount whenever the

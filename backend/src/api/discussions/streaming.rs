@@ -892,17 +892,15 @@ pub(crate) async fn make_agent_stream(
                 // against the project's host filesystem (the tree the agent
                 // saw). Skipped when the mode is off ; non-blocking either way.
                 // Computed BEFORE `full_response` is moved into the message.
-                let lint_report = if crate::core::anti_halluc::current_mode().is_active() {
-                    let root = if project_path.is_empty() {
-                        None
-                    } else {
-                        Some(crate::core::scanner::resolve_host_path(&project_path))
-                    };
-                    let report = crate::core::anti_halluc::analyze(&full_response, root.as_deref());
-                    if report.is_empty() { None } else { Some(report) }
-                } else {
-                    None
-                };
+                // Resolve citations against the tree the agent actually ran in
+                // (Isolated worktree first, then the main checkout), keep the
+                // report only when it has a signal, and emit telemetry. All of
+                // that lives in the unit-tested `finalize_lint_report` helper.
+                let lint_report = crate::core::anti_halluc::finalize_lint_report(
+                    &full_response,
+                    workspace_path.as_deref(),
+                    &project_path,
+                );
 
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),

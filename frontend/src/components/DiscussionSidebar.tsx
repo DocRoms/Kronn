@@ -460,9 +460,12 @@ export function DiscussionSidebar({
           ))}
         </div>
 
-        {/* Pinned / Favorites — always at the top, cross-project, never collapsed */}
+        {/* Pinned / Favorites — always at the top, cross-project, never collapsed.
+            During an active search/source filter, only matching favorites show
+            (and the section hides entirely if none match) — otherwise every
+            pinned disc stayed visible and buried the actual search results. */}
         {(() => {
-          const pinned = discussions.filter(d => d.pinned && !d.archived);
+          const pinned = discussions.filter(d => d.pinned && !d.archived && matchesFilters(d));
           if (pinned.length === 0) return null;
           return (
             <div>
@@ -494,7 +497,9 @@ export function DiscussionSidebar({
 
         {/* Global discussions (no project) */}
         {(() => {
-          const globalDiscs = activeDiscByProject.get(null) ?? [];
+          // Filter up front so the header + count + visibility all reflect the
+          // search (an empty "Général" group no longer shows during search).
+          const globalDiscs = (activeDiscByProject.get(null) ?? []).filter(matchesFilters);
           if (globalDiscs.length === 0) return null;
           const isCollapsed = collapsedGroups.has('__global__') && !deferredSearch;
           return (
@@ -512,7 +517,7 @@ export function DiscussionSidebar({
                   <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
                 )}
               </button>
-              {!isCollapsed && globalDiscs.filter(matchesFilters).sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+              {!isCollapsed && globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
                 <SwipeableDiscItem
                   key={disc.id}
                   disc={disc}
@@ -535,7 +540,11 @@ export function DiscussionSidebar({
 
         {/* Project discussions — grouped by org */}
         {(() => {
-          const visibleProjects = projects.filter(p => !isHiddenPath(p.path) && (activeDiscByProject.get(p.id) ?? []).length > 0);
+          // `.filter(matchesFilters)` is a no-op when no search/source filter is
+          // active (matchesFilters returns true for all), but during a search it
+          // hides folders that contain zero matching discs — the user no longer
+          // has to scroll past empty project/org headers to find their results.
+          const visibleProjects = projects.filter(p => !isHiddenPath(p.path) && (activeDiscByProject.get(p.id) ?? []).filter(matchesFilters).length > 0);
           // Build org groups
           const orgMap = new Map<string, typeof visibleProjects>();
           for (const p of visibleProjects) {
@@ -555,7 +564,7 @@ export function DiscussionSidebar({
           return sortedOrgs.map(([orgName, orgProjects]) => {
             const orgKey = `org::${orgName}`;
             const isOrgCollapsed = collapsedGroups.has(orgKey) && !deferredSearch;
-            const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).length, 0);
+            const orgDiscCount = orgProjects.reduce((sum, p) => sum + (activeDiscByProject.get(p.id) ?? []).filter(matchesFilters).length, 0);
             // Color from org name hash (same as Dashboard)
             const orgColor = orgName === localLabel ? 'var(--kr-text-dim)'
               : `hsl(${[...orgName].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 0)}, 50%, 60%)`;
@@ -592,7 +601,7 @@ export function DiscussionSidebar({
                       >
                         <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
                         <Folder size={10} /> {proj.name}
-                        <span className="disc-group-count">{projDiscs.length}</span>
+                        <span className="disc-group-count">{projDiscs.filter(matchesFilters).length}</span>
                         {(unseenByGroup.get(proj.id) ?? 0) > 0 && (
                           <span className="disc-group-unseen">{unseenByGroup.get(proj.id)}</span>
                         )}

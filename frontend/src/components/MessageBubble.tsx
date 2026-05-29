@@ -175,14 +175,30 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   //                            citations doesn't earn a green chip for free.
   //   - null                  — nothing to surface (no sources, no flags).
   const verifiedCount = lint?.sources?.filter(s => s.status === 'verified').length ?? 0;
-  const lintSeverity: 'fabricated' | 'unsourced' | 'verified' | null = lint
+  const unverifiedCount = lint?.unverified_count ?? 0;
+  // Sources that CAN'T be machine-checked (URL / user-confirmed / inferred /
+  // commit / hypothesis) — distinct from the inline anchors that DID fail
+  // (those carry "couldn't verify" in their detail + drive `unverified`).
+  const unverifiableCount = lint?.sources?.filter(
+    s => s.status === 'unchecked' && !s.detail.includes("couldn't verify"),
+  ).length ?? 0;
+  // Priority (worst signal wins the headline colour):
+  //   fabricated (red, formal [src:] failed) > unsourced (amber, claim w/ no
+  //   anchor) > unverified (soft amber, inline anchor didn't resolve) >
+  //   verified (green) > unverifiable (NEUTRAL grey — cited but uncheckable;
+  //   Option B: surfaced, never hidden — "warn about everything").
+  const lintSeverity: 'fabricated' | 'unsourced' | 'unverified' | 'verified' | 'unchecked' | null = lint
     ? (lint.fabricated_count > 0
         ? 'fabricated'
         : lint.unsourced_count > 0
           ? 'unsourced'
-          : verifiedCount > 0
-            ? 'verified'
-            : null)
+          : unverifiedCount > 0
+            ? 'unverified'
+            : verifiedCount > 0
+              ? 'verified'
+              : unverifiableCount > 0
+                ? 'unchecked'
+                : null)
     : null;
 
   // Duration calculation (O(1) — prevUserTs is pre-computed)
@@ -425,7 +441,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                   ? <>{lint.fabricated_count} {t('disc.lintFabricated')}</>
                   : lintSeverity === 'unsourced'
                     ? <>{lint.unsourced_count} {t('disc.lintUnsourced')}</>
-                    : <>{verifiedCount} {t('disc.lintVerified')}</>}
+                    : lintSeverity === 'unverified'
+                      ? <>{unverifiedCount} {t('disc.lintUnverified')}</>
+                      : lintSeverity === 'unchecked'
+                        ? <>{unverifiableCount} {t('disc.lintUnverifiable')}</>
+                        : <>{verifiedCount} {t('disc.lintVerified')}</>}
               </button>
             )}
           </div>
@@ -458,7 +478,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           </div>
         </div>
         {showLint && lint && (
-          <div className="disc-msg-lint-detail" id={`lint-detail-${msg.id}`} data-testid="lint-detail">
+          <div className="disc-msg-lint-detail" data-severity={lintSeverity} id={`lint-detail-${msg.id}`} data-testid="lint-detail">
             {lint.sources.some(s => s.status !== 'verified' && s.status !== 'unchecked') && (
               <div className="disc-lint-group">
                 <div className="disc-lint-group-title">{t('disc.lintSourcesTitle')}</div>
@@ -471,11 +491,27 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                   ))}
               </div>
             )}
-            {/* When severity is 'verified', open the panel onto the positive
-                list (otherwise clicking the green pill would show an empty
-                detail — bad UX). Lists every source that resolved on disk
-                so the user can audit *what* was actually verified. */}
-            {lintSeverity === 'verified' && verifiedCount > 0 && (
+            {/* Inline anchors the agent emitted that did NOT resolve — honest
+                "couldn't verify" (typo? cross-repo? wrong line?), distinct from
+                the red "fabricated" formal citations above. Status is
+                'unchecked' so they stay out of the red bucket; we surface them
+                by their detail marker. */}
+            {lint.sources.some(s => s.status === 'unchecked' && s.detail.includes("couldn't verify")) && (
+              <div className="disc-lint-group" data-testid="lint-unverified-group">
+                <div className="disc-lint-group-title">{t('disc.lintUnverifiedTitle')}</div>
+                {lint.sources
+                  .filter(s => s.status === 'unchecked' && s.detail.includes("couldn't verify"))
+                  .map((s, i) => (
+                    <div key={`unv-${i}`} className="disc-lint-item" data-status="unverified">
+                      <code>{s.raw}</code> — {s.detail}
+                    </div>
+                  ))}
+              </div>
+            )}
+            {/* Positive list — every source that resolved on disk, so the user
+                can audit *what* was verified. Shown whenever there's ≥1, even
+                on a mixed (e.g. unverified-severity) report. */}
+            {verifiedCount > 0 && (
               <div className="disc-lint-group" data-testid="lint-verified-group">
                 <div className="disc-lint-group-title">{t('disc.lintVerifiedTitle')}</div>
                 {lint.sources
@@ -493,6 +529,21 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                 {lint.flagged_spans.map((sp, i) => (
                   <div key={`span-${i}`} className="disc-lint-item">“{sp.text}”</div>
                 ))}
+              </div>
+            )}
+            {/* Sources that can't be machine-checked (URL / user-confirmed /
+                inferred / commit / hypothesis). Listed honestly so the user
+                sees "what couldn't be tested" — Option B, never hidden. */}
+            {lint.sources.some(s => s.status === 'unchecked' && !s.detail.includes("couldn't verify")) && (
+              <div className="disc-lint-group" data-testid="lint-unverifiable-group">
+                <div className="disc-lint-group-title">{t('disc.lintUnverifiableTitle')}</div>
+                {lint.sources
+                  .filter(s => s.status === 'unchecked' && !s.detail.includes("couldn't verify"))
+                  .map((s, i) => (
+                    <div key={`unc-${i}`} className="disc-lint-item" data-status="unchecked">
+                      <code>{s.raw}</code> — {s.detail}
+                    </div>
+                  ))}
               </div>
             )}
             <div className="disc-lint-caveat">{t('disc.lintCaveat')}</div>

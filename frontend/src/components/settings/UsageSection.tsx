@@ -132,7 +132,7 @@ export function UsageSection(_props: UsageSectionProps) {
   const periods: Period[] = ['daily', 'weekly', 'monthly'];
 
   return (
-    <div className="set-compression set-compression-state-ok" data-testid="usage-section">
+    <div id="settings-usage" className="set-compression set-compression-state-ok" data-testid="usage-section">
       {/* ── Head : icon + title + period toggle (always visible) ── */}
       <div className="set-compression-head">
         <div className="set-compression-icon">

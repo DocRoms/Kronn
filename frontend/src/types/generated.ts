@@ -1332,6 +1332,8 @@ export interface LintReport {
   sources: SourceCheck[];
   /** Niveau 1 — count of citations that failed verification (high confidence). */
   fabricated_count: number;
+  /** Niveau 1.5 — natural inline anchors that didn't resolve (soft signal). */
+  unverified_count?: number;
 }
 
 /** 0.8.7 — Agent CLI usage report (via ccusage). */
