@@ -529,12 +529,9 @@ pub async fn full_audit(
             let mut step_tokens: u64 = 0;
 
             match runner::start_agent_with_config(runner::AgentStartConfig {
-                agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
-                prompt: &full_prompt, tokens: &tokens, full_access: true,
-                skill_ids: &[], directive_ids: &[], profile_ids: &[],
-                mcp_context_override: None,
-                tier: crate::models::ModelTier::Reasoning, model_tiers: None, context_files_prompt: "",
-                discussion_id: None,
+                full_access: true,
+                tier: crate::models::ModelTier::Reasoning,
+                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &full_prompt, &tokens)
             }).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation

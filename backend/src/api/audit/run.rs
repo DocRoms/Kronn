@@ -125,12 +125,9 @@ pub async fn run_audit(
 
             // Always use full_access for audit (agent needs to write files)
             match runner::start_agent_with_config(runner::AgentStartConfig {
-                agent_type: &agent_type, project_path: &project_path_str, work_dir: None,
-                prompt: &full_prompt, tokens: &tokens, full_access: true,
-                skill_ids: &[], directive_ids: &[], profile_ids: &[],
-                mcp_context_override: None,
-                tier: crate::models::ModelTier::Reasoning, model_tiers: None, context_files_prompt: "",
-                discussion_id: None,
+                full_access: true,
+                tier: crate::models::ModelTier::Reasoning,
+                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &full_prompt, &tokens)
             }).await {
                 Ok(mut process) => {
                     while let Some(line) = process.next_line().await {

@@ -24,6 +24,7 @@ import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
+import { findLastAgentMessage } from '../lib/discussionHelpers';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
@@ -358,7 +359,7 @@ export function DiscussionsPage({
     }
     if (ttsEnabled && msgs.length > prevMsgCountRef.current) {
       const newMsgs = msgs.slice(prevMsgCountRef.current);
-      const lastAgent = [...newMsgs].reverse().find(m => m.role === 'Agent');
+      const lastAgent = findLastAgentMessage(newMsgs);
       if (lastAgent && !sending) {
         const autoId = lastAgent.id;
         setTtsPlayingMsgId(autoId);

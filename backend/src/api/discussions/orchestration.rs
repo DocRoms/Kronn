@@ -296,17 +296,14 @@ pub async fn orchestrate(
 
             let fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
             match runner::start_agent_with_config(runner::AgentStartConfig {
-                agent_type: &primary_agent_type, project_path: &project_path,
                 work_dir: orch_workspace_path.as_deref(),
-                prompt: &summary_prompt, tokens: &tokens, full_access: fa,
-                skill_ids: &[], directive_ids: &[], profile_ids: &[],
+                full_access: fa,
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier, model_tiers: Some(&model_tiers_config),
-                context_files_prompt: "",
                 // Internal summarisation pass — keep disc_id off to avoid
                 // recursion (agent shouldn't call disc_summarize on itself
                 // while running this very prompt).
-                discussion_id: None,
+                ..runner::AgentStartConfig::new(&primary_agent_type, &project_path, &summary_prompt, &tokens)
             }).await {
                 Ok(process) => {
                     let summary = run_agent_collect(process).await;
@@ -349,14 +346,14 @@ pub async fn orchestrate(
 
                 let fa = *agent_access.get(&format!("{:?}", agent_type)).unwrap_or(&false);
                 match runner::start_agent_with_config(runner::AgentStartConfig {
-                    agent_type, project_path: &project_path,
                     work_dir: orch_workspace_path.as_deref(),
-                    prompt: &prompt, tokens: &tokens, full_access: fa,
+                    full_access: fa,
                     skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
                     tier: disc_tier, model_tiers: Some(&model_tiers_config),
                     context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
+                    ..runner::AgentStartConfig::new(agent_type, &project_path, &prompt, &tokens)
                 }).await {
                     Ok(process) => {
                         let meta = AgentStreamMeta {
@@ -454,14 +451,14 @@ pub async fn orchestrate(
             let synth_prompt = build_synthesis_prompt(&original_question, &round_responses, &disc_language);
             let synth_fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
             match runner::start_agent_with_config(runner::AgentStartConfig {
-                agent_type: &primary_agent_type, project_path: &project_path,
                 work_dir: orch_workspace_path.as_deref(),
-                prompt: &synth_prompt, tokens: &tokens, full_access: synth_fa,
+                full_access: synth_fa,
                 skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),
                 tier: disc_tier, model_tiers: Some(&model_tiers_config),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
+                ..runner::AgentStartConfig::new(&primary_agent_type, &project_path, &synth_prompt, &tokens)
             }).await {
                 Ok(process) => {
                     let meta = AgentStreamMeta {
@@ -701,20 +698,10 @@ pub(super) async fn maybe_generate_summary(
     };
 
     match runner::start_agent_with_config(runner::AgentStartConfig {
-        agent_type,
-        project_path: "",
-        work_dir: None,
-        prompt: &summary_prompt,
-        tokens,
-        full_access: false,
-        skill_ids: &[],
-        directive_ids: &[],
-        profile_ids: &[],
         mcp_context_override: Some(""),
         tier: crate::models::ModelTier::Economy,
         model_tiers: Some(&model_tiers),
-        context_files_prompt: "",
-        discussion_id: None,
+        ..runner::AgentStartConfig::new(agent_type, "", &summary_prompt, tokens)
     }).await {
         Ok(mut process) => {
             let mut summary = String::new();
@@ -877,20 +864,10 @@ pub async fn generate_summary_on_demand(
         cfg.agents.model_tiers.clone()
     };
     let mut process = runner::start_agent_with_config(runner::AgentStartConfig {
-        agent_type: &disc.agent,
-        project_path: "",
-        work_dir: None,
-        prompt: &summary_prompt,
-        tokens,
-        full_access: false,
-        skill_ids: &[],
-        directive_ids: &[],
-        profile_ids: &[],
         mcp_context_override: Some(""),
         tier: ModelTier::Economy,
         model_tiers: Some(&model_tiers),
-        context_files_prompt: "",
-        discussion_id: None,
+        ..runner::AgentStartConfig::new(&disc.agent, "", &summary_prompt, tokens)
     }).await.map_err(|e| format!("agent start failed: {}", e))?;
 
     let mut out = String::new();

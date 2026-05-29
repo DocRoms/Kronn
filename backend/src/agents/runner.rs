@@ -137,6 +137,173 @@ impl AgentProcess {
     }
 }
 
+/// Owned, portable exit status. The pipeline loops only ever read
+/// `.success` / `.code`, so we avoid threading `std::process::ExitStatus`
+/// (which can't be constructed portably in test fakes) through the trait.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AgentExit {
+    pub success: bool,
+    pub code: Option<i32>,
+}
+
+impl AgentExit {
+    fn from_status(status: std::process::ExitStatus) -> Self {
+        Self { success: status.success(), code: status.code() }
+    }
+}
+
+/// Abstraction over an agent's output stream + process lifecycle.
+///
+/// The pipeline loops (`run_agent_collect`, `run_agent_streaming`,
+/// `make_agent_stream`, `full_audit`, the workflow Agent step) are written
+/// against this trait so they can be driven by a real spawned
+/// [`AgentProcess`] in production OR a `ScriptedProcess` (test-only, no real
+/// subprocess) under test — covering the bug-prone consumption logic
+/// (tool-call parsing, decoder-loop detection, checkpointing, cancellation,
+/// stream-json vs raw) without burning tokens or needing a CLI binary.
+///
+/// Call sites use static dispatch (`impl AgentIo`), but `#[async_trait]`
+/// keeps the returned futures `Send` so a loop can still be `tokio::spawn`ed
+/// (the `make_agent_stream` path does). Mirrors the existing
+/// `workflows::tracker::TrackerSource` convention in this codebase.
+#[async_trait::async_trait]
+pub trait AgentIo: Send {
+    /// Next output line. `None` once the stream is exhausted.
+    async fn next_line(&mut self) -> Option<String>;
+    /// How to interpret stdout (StreamJson → parse events ; otherwise raw).
+    fn output_mode(&self) -> OutputMode;
+    /// Best-effort kill of the underlying process.
+    async fn kill(&mut self);
+    /// Await process exit. `None` when nothing real backs it (scripted).
+    async fn wait(&mut self) -> Option<AgentExit>;
+    /// Non-blocking exit poll — used by the audit zombie-detector.
+    fn try_wait(&mut self) -> Option<AgentExit>;
+    /// Underlying OS pid, when a real process backs this (for cancellation
+    /// registration). `None` for scripted fakes.
+    fn child_id(&self) -> Option<u32>;
+    /// Captured stderr, flushed after exit (StdoutOnly mode diagnostics).
+    async fn captured_stderr_flushed(&mut self) -> Vec<String>;
+    /// Fix file ownership after the run (Docker uid remap). No-op when there
+    /// is no work dir (scripted).
+    fn fix_ownership(&self);
+}
+
+#[async_trait::async_trait]
+impl AgentIo for AgentProcess {
+    async fn next_line(&mut self) -> Option<String> {
+        AgentProcess::next_line(self).await
+    }
+    fn output_mode(&self) -> OutputMode {
+        self.output_mode
+    }
+    async fn kill(&mut self) {
+        let _ = self.child.kill().await;
+    }
+    async fn wait(&mut self) -> Option<AgentExit> {
+        self.child.wait().await.ok().map(AgentExit::from_status)
+    }
+    fn try_wait(&mut self) -> Option<AgentExit> {
+        // io::Result<Option<ExitStatus>> → Option<AgentExit> : both an error
+        // and "still running" collapse to None (the caller treats both as
+        // "not exited yet"), which matches the existing zombie-detector use.
+        self.child.try_wait().ok().flatten().map(AgentExit::from_status)
+    }
+    fn child_id(&self) -> Option<u32> {
+        self.child.id()
+    }
+    async fn captured_stderr_flushed(&mut self) -> Vec<String> {
+        AgentProcess::captured_stderr_flushed(self).await
+    }
+    fn fix_ownership(&self) {
+        AgentProcess::fix_ownership(self)
+    }
+}
+
+/// Test-only scripted [`AgentIo`] — yields a pre-canned sequence of output
+/// lines with no real subprocess. Lets the pipeline loops be unit-tested
+/// (line accumulation, stream-json parsing, teardown) without spawning a CLI
+/// or burning tokens.
+///
+/// `#[cfg(test)]` so it never ships in the binary. Visible to unit tests
+/// across the lib crate (cfg(test) is crate-wide); integration tests in
+/// `tests/` can't see it — but loop logic is unit-level anyway.
+#[cfg(test)]
+pub struct ScriptedProcess {
+    lines: std::collections::VecDeque<String>,
+    output_mode: OutputMode,
+    exit: AgentExit,
+    /// Set by `kill()` so a test can assert the loop killed on timeout/cancel.
+    pub killed: bool,
+    /// Pre-canned stderr returned by `captured_stderr_flushed`.
+    stderr: Vec<String>,
+}
+
+#[cfg(test)]
+impl ScriptedProcess {
+    /// Scripted process in raw-line mode (each line emitted verbatim).
+    pub fn raw(lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            lines: lines.into_iter().map(Into::into).collect(),
+            output_mode: OutputMode::Text,
+            exit: AgentExit { success: true, code: Some(0) },
+            killed: false,
+            stderr: Vec::new(),
+        }
+    }
+
+    /// Scripted process in StreamJson mode (lines are claude-stream JSON).
+    pub fn stream_json(lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        Self {
+            lines: lines.into_iter().map(Into::into).collect(),
+            output_mode: OutputMode::StreamJson,
+            exit: AgentExit { success: true, code: Some(0) },
+            killed: false,
+            stderr: Vec::new(),
+        }
+    }
+
+    /// Override the exit status the loop sees on `wait()`.
+    pub fn with_exit(mut self, success: bool, code: Option<i32>) -> Self {
+        self.exit = AgentExit { success, code };
+        self
+    }
+
+    /// Pre-load stderr lines for the StdoutOnly diagnostic path.
+    pub fn with_stderr(mut self, lines: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.stderr = lines.into_iter().map(Into::into).collect();
+        self
+    }
+}
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl AgentIo for ScriptedProcess {
+    async fn next_line(&mut self) -> Option<String> {
+        self.lines.pop_front()
+    }
+    fn output_mode(&self) -> OutputMode {
+        self.output_mode
+    }
+    async fn kill(&mut self) {
+        self.killed = true;
+    }
+    async fn wait(&mut self) -> Option<AgentExit> {
+        Some(self.exit)
+    }
+    fn try_wait(&mut self) -> Option<AgentExit> {
+        // Mirror real semantics: "exited" only once the scripted stream is
+        // drained ; otherwise "still running" (None).
+        if self.lines.is_empty() { Some(self.exit) } else { None }
+    }
+    fn child_id(&self) -> Option<u32> {
+        None
+    }
+    async fn captured_stderr_flushed(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.stderr)
+    }
+    fn fix_ownership(&self) {}
+}
+
 /// Fix file ownership after agent execution or file operations.
 /// Files created in Docker may have wrong ownership if container UID differs from host UID.
 /// On macOS with VirtioFS, chown is silently ignored by the filesystem driver.
@@ -213,6 +380,51 @@ pub struct AgentStartConfig<'a> {
     pub discussion_id: Option<&'a str>,
 }
 
+impl<'a> AgentStartConfig<'a> {
+    /// Base config from the 4 always-required fields. Every optional field
+    /// (work_dir / skills / directives / profiles / mcp override / tier /
+    /// model_tiers / context files / discussion_id) defaults to empty/None.
+    ///
+    /// Call sites override only what differs via struct-update syntax:
+    /// ```ignore
+    /// AgentStartConfig {
+    ///     full_access: true,
+    ///     skill_ids: &skills,
+    ///     tier: ModelTier::Reasoning,
+    ///     ..AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
+    /// }
+    /// ```
+    /// `Default` can't be derived because `agent_type` + `tokens` are
+    /// required references with no sensible default (TokensConfig isn't
+    /// const-constructible). This constructor is the equivalent ergonomics
+    /// for the 11 spawn sites that previously repeated `mcp_context_override:
+    /// None, model_tiers: None, context_files_prompt: "", discussion_id:
+    /// None, …` verbatim.
+    pub fn new(
+        agent_type: &'a AgentType,
+        project_path: &'a str,
+        prompt: &'a str,
+        tokens: &'a TokensConfig,
+    ) -> Self {
+        Self {
+            agent_type,
+            project_path,
+            prompt,
+            tokens,
+            work_dir: None,
+            full_access: false,
+            skill_ids: &[],
+            directive_ids: &[],
+            profile_ids: &[],
+            mcp_context_override: None,
+            tier: ModelTier::Default,
+            model_tiers: None,
+            context_files_prompt: "",
+            discussion_id: None,
+        }
+    }
+}
+
 /// Resolve a ModelTier to a concrete --model flag value for a given agent.
 /// Returns None for Default tier or agents without --model support.
 pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overrides: Option<&ModelTiersConfig>) -> Option<String> {
@@ -278,13 +490,8 @@ pub async fn start_agent(
     full_access: bool,
 ) -> Result<AgentProcess, String> {
     start_agent_with_config(AgentStartConfig {
-        agent_type, project_path, work_dir: None, prompt, tokens, full_access,
-        skill_ids: &[], directive_ids: &[], profile_ids: &[],
-        mcp_context_override: None,
-        tier: ModelTier::Default,
-        model_tiers: None,
-        context_files_prompt: "",
-        discussion_id: None,
+        full_access,
+        ..AgentStartConfig::new(agent_type, project_path, prompt, tokens)
     }).await
 }
 

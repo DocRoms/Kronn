@@ -708,27 +708,29 @@ mod tests {
 
     #[test]
     fn orchestration_summarization_passes_empty_context_files_prompt() {
-        // The 3 internal summarization sites (line 286 main-disc
-        // summary, line 689 generate_summary_on_demand, line 864
-        // generate_summary_on_demand inner) compress conversation
-        // history into a brief — they don't reason about the project.
-        // Injecting linked_repos there would waste tokens on every
-        // summary pass without producing better summaries.
+        // The internal summarization sites compress conversation history
+        // into a brief — they don't reason about the project, so injecting
+        // linked_repos / companion_context there would waste tokens on
+        // every summary pass without producing better summaries.
         //
-        // This guard fires if someone "fixes" them by symmetrically
-        // adding `&companion_context` and we end up paying 3x the
-        // companion_context tokens per turn.
+        // GUARD (post-`AgentStartConfig::new` refactor 2026-05-29): the
+        // summarization sites now omit `context_files_prompt` entirely and
+        // inherit the `""` default from `AgentStartConfig::new(...)`, so the
+        // old `context_files_prompt: ""` sentinel string no longer appears
+        // in source. The real invariant is expressed inversely: the ONLY
+        // sites that pass `&companion_context` are the 2 user-facing ones
+        // (debate round + final synthesis). If someone "symmetrically fixes"
+        // a summary pass by adding `&companion_context`, this count jumps to
+        // 3+ and the test fires — exactly the protection we want, now
+        // independent of the defaulted empty-string literal.
         let src = read_source("src/api/discussions/orchestration.rs");
-        // We need at least 3 explicit `context_files_prompt: ""` to
-        // remain. There may be 4 (one per summarization call) — that's
-        // also fine. What we DON'T want is for that count to drop.
-        let empty_calls = src.matches("context_files_prompt: \"\"").count();
-        assert!(
-            empty_calls >= 3,
-            "expected ≥3 summarization sites to keep `context_files_prompt: \"\"` (token-saver), \
-             found {}. If you intentionally added companion_context to a summary pass, \
-             confirm it actually improves the summary before relaxing this guard.",
-            empty_calls
+        let companion_calls = src.matches("context_files_prompt: &companion_context").count();
+        assert_eq!(
+            companion_calls, 2,
+            "expected EXACTLY 2 sites passing `&companion_context` (debate + synthesis); found {}. \
+             A 3rd means a summarization pass started paying companion_context tokens — confirm it \
+             actually improves the summary before relaxing this guard.",
+            companion_calls
         );
     }
 
