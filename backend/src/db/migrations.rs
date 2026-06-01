@@ -82,6 +82,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("060_discussion_sessions", include_str!("sql/060_discussion_sessions.sql")),
         ("061_api_call_logs", include_str!("sql/061_api_call_logs.sql")),
         ("062_message_lint_report", include_str!("sql/062_message_lint_report.sql")),
+        ("063_continual_learning", include_str!("sql/063_continual_learning.sql")),
     ];
 
     // Check if there are pending migrations before backing up

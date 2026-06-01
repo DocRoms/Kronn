@@ -7,6 +7,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [Unreleased]
+
+### Added — Continual Learning (0.9.0, behind a default-OFF beta toggle)
+
+Agents can propose **durable learnings** (conventions, preferences, facts, pitfalls) that a human validates before they're persisted into injected truth files — closing the "every discussion re-explains the same context" gap. Full design + the multi-agent review that hardened it: `docs/research/continual-learning-0.9.0-spec.md`.
+
+- **Master toggle `continual_learning_enabled` — default OFF (beta).** The feature writes agent-proposed content into injected docs, so it ships opt-in: a bug can't pollute a user's docs. Settings → *Apprentissage continu* (`ContinualLearningSection`) + endpoints `GET/POST /api/config/continual-learning-enabled`. Gates capture only — validating/rejecting existing pending candidates stays allowed when off.
+- **Typed MCP tool `learning_propose(claim, evidence[], kind)`** (no free-form fence) — evidence is mandatory; disc/project/agent auto-inherited from the current discussion.
+- **Two-gate verification.** Gate-1 (existence, reuses `core::anti_halluc::verify_source_marker`) runs at propose AND re-runs at validate against the current code. Gate-2 (faithfulness `claim ⊨ evidence`, `FaithfulnessChecker` trait) is **informative, never auto-blocking (posture B)** and **default OFF** — a throwaway NLI proto on 255 real pairs (`docs/research/nli-proto-findings.md`) showed local NLI isn't reliable enough untuned; LLM-judge is the quality backend when enabled.
+- **Write-path safeguards (all enforced backend, hardened across a 5-round adversarial review by a second agent):** non-empty evidence · secret-guard (`core::redact`) · `fact` ⇒ ≥1 `Verified` file/code evidence · `preference` ⇒ ≥1 dated `user` evidence · post-render re-lint refuses any fabricated `[src:]` BEFORE writing · `validate` only promotes `pending` rows · promoted entries carry re-lint-safe `[src:]` provenance · negative-learning (3-strike, partial unique index so rejected claims can re-accumulate) · confidence haircut · anti-generalization warning.
+- **Doc-wiring** (`core::learning_doc`, mirrors the anti-hallu STEP machinery): when ON, a `<!-- kronn:section name="learnings" -->` pointer to `docs/learnings.md` is injected into `docs/AGENTS.md` (so agents discover project-scope learnings — verified that `docs/` isn't auto-injected, only `~/.kronn/user-context/*.md` is) + the file is seeded; when OFF, the section is removed (the file is kept). Endpoint `POST /api/projects/{id}/learnings/sync`.
+- **Staleness cron** (`core::learning_sweep`, hourly, `COALESCE(last_validated_at, created_at)` − 7d) spawned in BOTH `backend/src/main.rs` and `desktop/src-tauri/src/main.rs`.
+- **UI**: pending-count badge in `ChatHeader` (polls; opens a validation modal) + `LearningsModal` (type chip, confidence, evidence list, Gate-2 chip when present, Validate/Reject). i18n FR/EN/ES.
+- Migration `063_continual_learning` (`learnings` + `learning_rejections`). ~65 backend + frontend tests; reviewed clean over 5 rounds (≈18 findings, all addressed). *Remaining (optional, not blocking): manual-archive→modal intercept; wiring the LLM-judge backend; SSE-driven badge.*
+
+---
+
 ## [0.8.7] - 2026-05-28
 
 ### Changed — Anti-hallucination: closed the web-project extension gap (.twig / .xlf) via a 4-conversation linguistic re-pass

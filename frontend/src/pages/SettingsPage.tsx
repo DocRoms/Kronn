@@ -58,6 +58,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 
 import { IdentitySection } from '../components/settings/IdentitySection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
+import { ContinualLearningSection } from '../components/settings/ContinualLearningSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
 import { UsageSection } from '../components/settings/UsageSection';
 import { DebugSection } from '../components/settings/DebugSection';
@@ -736,6 +737,10 @@ export function SettingsPage({
           Lives ABOVE the Agent config card on purpose: it's the *rule* that
           frames how agents document, not an agent-level toggle. */}
       <AntiHallucSection toast={toast} t={t} />
+
+      {/* 0.9.0 — Continual Learning master toggle (beta, default OFF). Sits next
+          to anti-hallu: it's the upstream quality gate the learnings rely on. */}
+      <ContinualLearningSection toast={toast} t={t} />
 
       {/* ── Agent Config Accordion (Agents / Skills / Profiles / Directives) ── */}
       <div id="settings-agent-config" className="set-card">

@@ -56,6 +56,7 @@ export const API_NAMESPACES = [
   'userContext',
   'version',
   'apiCallLogs',
+  'learnings',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -99,6 +100,7 @@ interface DefaultMock {
   userContext: Record<string, AnyFn>;
   version: Record<string, AnyFn>;
   apiCallLogs: Record<string, AnyFn>;
+  learnings: Record<string, AnyFn>;
 }
 
 /**
@@ -144,6 +146,8 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       getServerConfig: resolve({ pseudo: null, avatar_email: null, host: 'localhost', port: 3140, default_model_tier: 'default', default_summary_strategy: 'Off' }),
       setServerConfig: resolve(undefined),
       dbBackup: resolve({ backup_path: '/tmp/test-backup.db', size_bytes: 0, taken_at: '2026-05-09T00:00:00Z' }),
+      getContinualLearningEnabled: resolve(false),
+      saveContinualLearningEnabled: resolve(undefined),
     },
 
     contacts: {
@@ -380,6 +384,17 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       list: resolve([]),
       get: resolve(null),
       purge: resolve(0),
+    },
+
+    learnings: {
+      // 0.9.0 — Continual Learning. Neutral defaults so components mount clean:
+      // pending → 0 (badge hidden), list/forDiscussion → empty.
+      propose: resolve({ accepted: true, warnings: [], evidence_checks: [], learning: null }),
+      list: resolve([]),
+      pending: resolve({ count: 0 }),
+      validate: resolve({}),
+      reject: resolve(undefined),
+      forDiscussion: resolve([]),
     },
   };
 

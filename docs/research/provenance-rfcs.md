@@ -20,6 +20,7 @@ The core spec records existence + bounds. This RFC proposes a richer *freshness*
 citation's declared status degrades monotonically over its lifetime.
 
 ```
+
 verified → stale → degraded → invalidated
 ```
 
@@ -180,6 +181,18 @@ If it fails on code, NLI is confined to NL↔NL (per the division of labour abov
 **Sequencing.** Not near-term. Precondition: the Niveau-0/1 telemetry (added 0.8.7) must first show
 that claims are *cited often enough* for NLI to have a premise to chew on. Then it lands as the
 continual-learning safeguard's verifier, not as a standalone "score every message" pass.
+
+**Proto result (2026-05-31 — see `nli-proto-findings.md`).** A throwaway proto over **255 real
+pairs** (mined from 32 Kronn conversations + 82 verified subtle-hallucination adversarials + gold
+cases, 3-judge labels at 84% unanimity) tested two local multilingual NLI models. Conclusion: a
+local NLI is **NOT reliable as a standalone gate** here — both models under-recognize the loose
+descriptive entailments agents actually write (acc 0.34–0.42; would false-flag ~85% of legitimate
+claims). BUT the stronger model (mDeBERTa) caught **all gold hallucinations**, incl. the
+`nth-of-type` case at ent_p 0.004 vs 0.972 for a true match — real signal **at the extremes**.
+Net: ship the `FaithfulnessChecker` trait with **LLM-judge as the quality backend**, local NLI as
+an optional cheap tail-signal (`ent_p` < ~0.1), `off` by default — and **posture B (informative,
+human-gated), never auto-blocking**, is the data-backed call. CPU latency (~4 s/pair) confirms NLI
+must be async/opt-in, not per-message.
 
 ---
 

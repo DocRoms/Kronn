@@ -12,6 +12,7 @@ import {
   FlaskConical, Info, ChevronRight, UserCircle,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
+import { LearningsBadge } from './LearningsBadge';
 import { ProfileTooltip } from './ProfileTooltip';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 
@@ -483,6 +484,8 @@ export function ChatHeader({
         </div>
       </div>
       <div className="disc-chat-header-actions">
+        {/* 0.9.0 — pending-learnings badge (self-contained; hidden when 0). */}
+        <LearningsBadge t={t} toast={toast} />
         {/* MCP info button */}
         <div className="relative">
           <button

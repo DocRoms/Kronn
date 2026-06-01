@@ -1170,6 +1170,73 @@ TOOLS = [
             "required": ["qa_id"],
         },
     },
+    {
+        "name": "learning_propose",
+        "description": (
+            "0.9.0 — Propose a DURABLE learning Kronn should remember across "
+            "discussions (a project convention, a user preference, a verified "
+            "fact, a pitfall). Use when something emerges that future sessions "
+            "would otherwise re-learn.\n\n"
+            "Typed + evidence-mandatory by design: every learning MUST cite at "
+            "least one `evidence` source — there is no free-form path. The "
+            "server verifies the evidence resolves (Gate-1) and — when a "
+            "faithfulness backend is enabled (off by default) — scores whether "
+            "the claim follows from it (Gate-2), then a HUMAN validates before "
+            "anything is written to a truth file. So propose freely: a weak or "
+            "wrong candidate is caught downstream, never silently persisted.\n\n"
+            "`kind`: `fact` (mechanically verifiable — cite file:line or url), "
+            "`preference` (the user stated it — cite a user confirmation), "
+            "`inference` (you derived it — needs stronger validation). "
+            "Avoid absolutes (always/never) without a scope. "
+            "disc/project/agent are auto-inherited from the current discussion."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "claim": {
+                    "type": "string",
+                    "description": "The learning, one clear sentence. Scope it (e.g. 'In this repo, ...').",
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["fact", "preference", "inference"],
+                    "description": "fact | preference | inference.",
+                },
+                "evidence": {
+                    "type": "array",
+                    "minItems": 1,
+                    "description": "≥1 source backing the claim. MANDATORY — no evidence = refused.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {
+                                "type": "string",
+                                "enum": ["file", "url", "disc", "cmd", "user"],
+                                "description": "Source type.",
+                            },
+                            "ref": {
+                                "type": "string",
+                                "description": "Resolvable ref: 'path/file.ext:line', a URL, a disc id, a command, or 'user:YYYY-MM-DD'.",
+                            },
+                            "quote": {
+                                "type": "string",
+                                "description": "Short supporting excerpt (the premise the faithfulness check reads). Recommended.",
+                            },
+                        },
+                        "required": ["kind", "ref"],
+                    },
+                },
+                "confidence": {
+                    "type": "number",
+                    "description": "Optional self-confidence 0.0–1.0 (a haircut is applied server-side).",
+                },
+                "project_id": {"type": "string", "description": "Optional — auto-inherited from the current disc."},
+                "discussion_id": {"type": "string", "description": "Optional — auto-inherited."},
+                "source_agent": {"type": "string", "description": "Optional — auto-inherited (e.g. 'ClaudeCode')."},
+            },
+            "required": ["claim", "kind", "evidence"],
+        },
+    },
 ]
 
 
@@ -2492,6 +2559,43 @@ def call_workflow_wait_for_completion(args):
     return _unwrap(_http("POST", "/api/mcp/workflow-wait-for-completion", body))
 
 
+def call_learning_propose(args):
+    # 0.9.0 — Continual Learning. Propose a durable fact/preference/inference,
+    # gated server-side (evidence existence + faithfulness + human validation).
+    # Client-side guards mirror the server's hard rejects for a fast, clear error.
+    claim = (args.get("claim") or "").strip()
+    if not claim:
+        raise RuntimeError("learning_propose: 'claim' is required and non-empty")
+    kind = args.get("kind")
+    if kind not in ("fact", "preference", "inference"):
+        raise RuntimeError("learning_propose: 'kind' must be fact | preference | inference")
+    evidence = args.get("evidence")
+    if not isinstance(evidence, list) or not evidence:
+        raise RuntimeError(
+            "learning_propose: 'evidence' must be a non-empty array of "
+            "{kind, ref[, quote]} — a learning with no source is refused"
+        )
+    for i, e in enumerate(evidence):
+        if not isinstance(e, dict) or not (e.get("ref") or "").strip():
+            raise RuntimeError(f"learning_propose: evidence[{i}] needs a non-empty 'ref'")
+    body = {"claim": claim, "kind": kind, "evidence": evidence}
+    if args.get("confidence") is not None:
+        body["confidence"] = args["confidence"]
+    # Auto-inherit disc + project + agent from the current discussion.
+    meta = _current_disc_meta()
+    if meta:
+        body.setdefault("discussion_id", meta.get("id"))
+        if meta.get("project_id"):
+            body.setdefault("project_id", meta["project_id"])
+        if meta.get("agent"):
+            body.setdefault("source_agent", meta["agent"])
+    # Explicit args win over inheritance.
+    for k in ("discussion_id", "project_id", "source_agent"):
+        if args.get(k):
+            body[k] = args[k]
+    return _unwrap(_http("POST", "/api/learnings/propose", body))
+
+
 DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
@@ -2558,6 +2662,10 @@ DISPATCH = {
     # of `api_call` : same end-result, zero token cost on request
     # construction. Always prefer when a matching QA exists.
     "qa_run": call_qa_run,
+    # 0.9.0 — Continual Learning. Propose a durable learning (typed, evidence
+    # mandatory). Server gates it (existence + faithfulness) + a human validates
+    # before it's ever written to a truth file. Free-form fences are NOT used.
+    "learning_propose": call_learning_propose,
 }
 
 

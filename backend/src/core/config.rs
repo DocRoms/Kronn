@@ -155,6 +155,7 @@ pub fn default_config() -> AppConfig {
             global_context: None,
             global_context_mode: "always".into(),
             anti_hallucination_mode: crate::core::anti_halluc::DEFAULT_MODE_STR.into(),
+            continual_learning_enabled: false, // 0.9.0 — opt-in (beta), see ServerConfig doc
             debug_mode: false,
             default_model_tier: ModelTier::Default,
             // 0.8.6 phase 4 — auto-summary off out of the box. See

@@ -545,6 +545,12 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
 
+    // 0.9.0 — Continual Learning staleness sweep (hourly). Mirror of the spawn
+    // in backend/src/main.rs (feature in the lib, spawn per-binary).
+    let learning_sweep =
+        std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(state.db.clone()));
+    tokio::spawn(async move { learning_sweep.start().await });
+
     // Start WS client manager for multi-user sync
     let ws_state = state.clone();
     tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });
