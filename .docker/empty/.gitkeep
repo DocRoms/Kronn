@@ -1,0 +1,10 @@
+# Intentionally-empty directory used as a SAFE bind-mount fallback in
+# docker-compose.yml for OPTIONAL host paths (npm/cargo/rustup/bun/extra bin
+# dirs, SSH agent socket) when their KRONN_* env var is unset.
+#
+# Why not /dev/null? On WSL2 + Docker Desktop the daemon runs in a VM and the
+# cross-VM layer can't relay the /dev/null character device as a bind SOURCE —
+# runc then creates /dev/null as a DIRECTORY in the container and `open(/dev/null)`
+# fails with "is a directory", crashing container init (make start). An empty
+# real directory binds cleanly on every platform and degrades gracefully:
+# an empty bin dir on PATH = "tool absent", a dir at the agent socket = "no agent".

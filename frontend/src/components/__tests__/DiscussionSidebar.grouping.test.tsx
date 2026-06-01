@@ -499,6 +499,29 @@ describe('DiscussionSidebar — batch groups', () => {
     expect(onRetryBatch).toHaveBeenCalledWith(runId, 'qp-7', ['b1', 'b2']);
   });
 
+  it('review-batch button calls onReviewBatch with run id, label, and child ids', async () => {
+    const onReviewBatch = vi.fn();
+    const summaries = [mkBatchSummary({
+      run_id: runId,
+      quick_prompt_name: 'Analyse tickets',
+    })];
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        projects={projects}
+        discussions={batchDiscs}
+        batchSummaries={summaries}
+        onReviewBatch={onReviewBatch}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const reviewBtn = document.querySelector('.disc-batch-review') as HTMLButtonElement;
+    expect(reviewBtn).not.toBeNull();
+    fireEvent.click(reviewBtn);
+    expect(onReviewBatch).toHaveBeenCalledWith(runId, 'Analyse tickets', ['b1', 'b2']);
+  });
+
   it('cancelling the delete confirm does NOT call onDeleteBatch', async () => {
     const onDeleteBatch = vi.fn();
     window.confirm = vi.fn(() => false);

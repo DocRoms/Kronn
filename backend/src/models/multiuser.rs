@@ -107,6 +107,18 @@ pub enum WsMessage {
         batch_completed: u32,
         batch_failed: u32,
     },
+    /// A batch child discussion's agent run just STARTED. Symmetric to
+    /// `BatchRunProgress` (which fires on completion). Batch children run
+    /// server-side with no SSE consumer on the client, so without this signal
+    /// the per-disc `sendingMap` is never set to `true` and an in-flight child
+    /// shows no "agent working" spinner. The frontend flips `sendingMap[disc]`
+    /// on so the sidebar pill + open chat view render the in-progress state;
+    /// `BatchRunProgress` / `BatchRunFinished` clear it on completion.
+    BatchRunChildStarted {
+        run_id: String,
+        /// Id of the child discussion whose agent run is starting.
+        discussion_id: String,
+    },
     /// 0.8.2 — Linear workflow run state change. Fires on each step
     /// transition (StepStart, StepDone) AND every status flip (Running
     /// → WaitingApproval, → Success, → Failed, → Cancelled). Open
@@ -133,4 +145,31 @@ pub enum WsMessage {
     PartialResponseRecovered {
         discussion_ids: Vec<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn batch_run_child_started_serializes_snake_case_and_round_trips() {
+        let m = WsMessage::BatchRunChildStarted {
+            run_id: "run-1".into(),
+            discussion_id: "disc-1".into(),
+        };
+        let j = serde_json::to_value(&m).expect("serialize");
+        // The frontend matches on this exact snake_case tag.
+        assert_eq!(j["type"], "batch_run_child_started");
+        assert_eq!(j["run_id"], "run-1");
+        assert_eq!(j["discussion_id"], "disc-1");
+
+        let back: WsMessage = serde_json::from_value(j).expect("round-trip");
+        match back {
+            WsMessage::BatchRunChildStarted { run_id, discussion_id } => {
+                assert_eq!(run_id, "run-1");
+                assert_eq!(discussion_id, "disc-1");
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
 }

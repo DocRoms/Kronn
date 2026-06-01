@@ -26,6 +26,8 @@ import { useMessageQueue } from '../hooks/useMessageQueue';
 import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
+import { saveDraft } from '../lib/chat-drafts';
+import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
 import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
@@ -33,7 +35,7 @@ import {
   ChevronRight, Cpu, Loader2,
   MessageSquare, AlertTriangle,
   ShieldCheck, Check, Rocket, Play, Zap,
-  Menu, X, Clock,
+  Menu, X, Clock, ExternalLink,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
@@ -229,6 +231,10 @@ export function DiscussionsPage({
   // (see handleWsMessage below) so newly-finished batches pick up their
   // parent_run_sequence label without a full page reload.
   const [batchSummaries, setBatchSummaries] = useState<BatchRunSummary[]>([]);
+  const [batchReview, setBatchReview] = useState<{ runId: string; label: string; discIds: string[] } | null>(null);
+  const [batchReviewDiscs, setBatchReviewDiscs] = useState<Discussion[]>([]);
+  const [batchReviewLoading, setBatchReviewLoading] = useState(false);
+  const [batchReviewError, setBatchReviewError] = useState<string | null>(null);
   const refetchBatchSummaries = useCallback(() => {
     workflowsApi.listBatchRunSummaries()
       .then(setBatchSummaries)
@@ -237,6 +243,20 @@ export function DiscussionsPage({
         // "batch groups have no parent pastille" without any signal.
         console.warn('Failed to load batch run summaries:', e);
       });
+  }, []);
+  const openBatchReview = useCallback(async (runId: string, label: string, discIds: string[]) => {
+    setBatchReview({ runId, label, discIds });
+    setBatchReviewDiscs([]);
+    setBatchReviewError(null);
+    setBatchReviewLoading(true);
+    try {
+      const loaded = await Promise.all(discIds.map(id => discussionsApi.get(id)));
+      setBatchReviewDiscs(loaded);
+    } catch (e) {
+      setBatchReviewError(userError(e));
+    } finally {
+      setBatchReviewLoading(false);
+    }
   }, []);
   const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(() => {
@@ -331,6 +351,19 @@ export function DiscussionsPage({
   const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
     ? loadedDiscussions[activeDiscussionId]
     : allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
+  const batchReviewRows = useMemo(
+    () => buildBatchTriageRows(batchReviewDiscs),
+    [batchReviewDiscs],
+  );
+
+  const continueBatchTriage = useCallback((row: BatchTriageRow) => {
+    const draft = buildContinuationDraft(row);
+    saveDraft(row.discussion.id, draft);
+    setActiveDiscussionId(row.discussion.id);
+    setBatchReview(null);
+    setSidebarOpen(false);
+    toast(t('disc.batchReviewDraftReady'), 'success');
+  }, [toast, t]);
 
   const activeAgentDisabled = useMemo(() => {
     if (!activeDiscussion || agents.length === 0) return false;
@@ -440,6 +473,11 @@ export function DiscussionsPage({
       // (no SSE consumer → cleanupStream never runs), so the WS event is the
       // only signal we get that the agent actually finished.
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      // Invariant: sending=false ⟺ no live controller. If this disc's run had
+      // been started via SSE (controller set) but ends via this WS event, an
+      // orphaned controller would keep the send re-entry guard armed forever —
+      // every queued follow-up would re-enqueue instead of firing (stuck queue).
+      delete abortControllers.current[msg.discussion_id];
       reloadDiscussion(msg.discussion_id);
       const name = msg.batch_name ?? 'Batch';
       if (msg.batch_failed === 0) {
@@ -450,11 +488,22 @@ export function DiscussionsPage({
         toast(t('qp.batch.toast.partial', name, msg.batch_completed, msg.batch_failed), 'warning');
       }
     }
+    // Batch child STARTED — set the per-disc "Agent en cours..." indicator on.
+    // Batch children run server-side with no SSE consumer on the client, so
+    // this WS event is the only signal that an agent actually began. Without
+    // it, sendingMap[child] stays unset and an in-flight child shows no spinner
+    // (sidebar pill + open chat view). The progress/finished events below clear
+    // it. refetchDiscussions() so a child created mid-batch shows up in the list.
+    if (msg.type === 'batch_run_child_started') {
+      setSendingMap(prev => ({ ...prev, [msg.discussion_id]: true }));
+      refetchDiscussions();
+    }
     // Batch progress tick — clear the spinner for the disc that just finished
     // and refresh the list so the pill ticks live.
     if (msg.type === 'batch_run_progress') {
       refetchDiscussions();
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      delete abortControllers.current[msg.discussion_id]; // keep sending⟺controller invariant
       reloadDiscussion(msg.discussion_id);
     }
     // Backend boot recovered in-flight agent partials — refresh the affected
@@ -462,9 +511,14 @@ export function DiscussionsPage({
     if (msg.type === 'partial_response_recovered') {
       refetchDiscussions();
       for (const id of msg.discussion_ids) {
-        reloadDiscussion(id);
-        // Drop any stale "sending" indicator left over from before the restart.
+        // Synchronous cleanup FIRST (before the async reload), so a reload
+        // failure can't skip it. Drop the stale "sending" indicator left over
+        // from before the restart, AND the orphaned SSE controller — otherwise
+        // handleSendMessage's re-entry guard stays armed and queued follow-ups
+        // re-enqueue forever instead of firing (stuck queue).
         setSendingMap(prev => ({ ...prev, [id]: false }));
+        delete abortControllers.current[id];
+        reloadDiscussion(id);
       }
       toast(t('disc.partialRecoveredToast', msg.discussion_ids.length), 'info');
     }
@@ -1584,6 +1638,7 @@ export function DiscussionsPage({
               toast(t('disc.batchRetryError', userError(e)), 'error');
             }
           }}
+          onReviewBatch={openBatchReview}
           collapsedGroups={collapsedDiscGroups}
           onToggleGroup={handleToggleGroup}
           onCollapse={() => setSidebarCollapsed(true)}
@@ -1634,6 +1689,79 @@ export function DiscussionsPage({
             onNavigate={(page) => { setShowNewDiscussion(false); onNavigate(page); }}
             t={t}
           />
+        )}
+
+        {batchReview && (
+          <div className="disc-batch-review-backdrop" role="presentation" onClick={() => setBatchReview(null)}>
+            <section
+              className="disc-batch-review-panel"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="disc-batch-review-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <header className="disc-batch-review-head">
+                <div>
+                  <h2 id="disc-batch-review-title">{t('disc.batchReviewTitle')}</h2>
+                  <p>{batchReview.label} · {t('disc.batchReviewCount', batchReview.discIds.length)}</p>
+                </div>
+                <button type="button" className="btn btn-ghost btn-icon" onClick={() => setBatchReview(null)} aria-label={t('common.close')}>
+                  <X size={16} />
+                </button>
+              </header>
+
+              {batchReviewLoading && (
+                <div className="disc-batch-review-state">
+                  <Loader2 size={16} className="spin" />
+                  {t('disc.batchReviewLoading')}
+                </div>
+              )}
+
+              {batchReviewError && (
+                <div className="disc-batch-review-state" data-kind="error">
+                  <AlertTriangle size={16} />
+                  {t('disc.batchReviewError', batchReviewError)}
+                </div>
+              )}
+
+              {!batchReviewLoading && !batchReviewError && (
+                <div className="disc-batch-review-table">
+                  {batchReviewRows.map((row) => {
+                    const result = row.result;
+                    const verdict = result?.verdict ?? t('disc.batchReviewNoJson');
+                    const confidence = result?.confidence ?? 'n/a';
+                    const summary = result?.human_summary ?? row.parseError ?? '';
+                    const questions = result?.open_questions?.length ?? 0;
+                    return (
+                      <article key={row.discussion.id} className="disc-batch-review-row">
+                        <div className="disc-batch-review-main">
+                          <button type="button" className="disc-batch-review-ticket" onClick={() => setActiveDiscussionId(row.discussion.id)}>
+                            {result?.ticket_id || row.discussion.title}
+                          </button>
+                          <p>{summary}</p>
+                        </div>
+                        <div className="disc-batch-review-meta">
+                          <span className="badge">{verdict}</span>
+                          <span className="badge badge-muted">{confidence}</span>
+                          <span className="badge badge-muted">{t('disc.batchReviewQuestions', questions)}</span>
+                        </div>
+                        <div className="disc-batch-review-actions">
+                          <button type="button" className="btn btn-sm btn-ghost" onClick={() => setActiveDiscussionId(row.discussion.id)}>
+                            <ExternalLink size={14} />
+                            {t('disc.batchReviewOpen')}
+                          </button>
+                          <button type="button" className="btn btn-sm" onClick={() => continueBatchTriage(row)}>
+                            <Play size={14} />
+                            {t('disc.batchReviewContinue')}
+                          </button>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          </div>
         )}
 
         {/* Active discussion chat */}
@@ -2717,4 +2845,3 @@ export function DiscussionsPage({
     </div>
   );
 }
-

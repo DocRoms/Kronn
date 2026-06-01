@@ -456,6 +456,11 @@ fn rewrite_internal_refs(docs_dir: &Path) -> usize {
 /// they live OUTSIDE `docs/`.
 fn rewrite_root_redirectors(project_path: &Path) -> usize {
     static REDIRECTORS: &[&str] = &[
+        // README is the single most common home for the "AI agents MUST read
+        // ai/index.md" pointer — if we skip it, the migration leaves a stale
+        // `ai/index.md` reference that `rewrite_refs_in_text` would otherwise
+        // correctly rewrite to `docs/AGENTS.md`.
+        "README.md",
         "CLAUDE.md",
         "AGENTS.md",
         "GEMINI.md",
@@ -588,6 +593,7 @@ pub fn prefill_template_placeholders(project_path: &Path) -> usize {
     });
     // 2. Root redirectors — same shape as `rewrite_root_redirectors`.
     static REDIRECTORS: &[&str] = &[
+        "README.md",
         "CLAUDE.md",
         "AGENTS.md",
         "GEMINI.md",
@@ -891,6 +897,12 @@ mod tests {
         ).unwrap();
         // Add a root redirector that references ai/.
         std::fs::write(root.join("CLAUDE.md"), "Read ai/index.md for context.\n").unwrap();
+        // README is the most common home for the AI-entry pointer — it MUST be
+        // rewritten too (regression: it was missing from REDIRECTORS).
+        std::fs::write(
+            root.join("README.md"),
+            "# Project\n> For AI agents: you MUST read `ai/index.md` first.\n",
+        ).unwrap();
         // Commit so git mv works on tracked files.
         let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
         let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "init"]).current_dir(&root).output().await.unwrap();
@@ -921,6 +933,11 @@ mod tests {
         let claude = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
         assert!(claude.contains("docs/AGENTS.md"));
         assert!(!claude.contains("ai/index.md"));
+        // README — the AI-entry pointer must be remapped to the canonical
+        // `docs/AGENTS.md`, NOT left at `ai/index.md` (regression guard).
+        let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
+        assert!(readme.contains("docs/AGENTS.md"), "README should point to docs/AGENTS.md, got: {readme}");
+        assert!(!readme.contains("ai/index.md"), "README must not keep the stale ai/index.md pointer");
     }
 
     #[tokio::test]

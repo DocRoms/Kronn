@@ -854,6 +854,14 @@ pub struct WorkflowSafety {
 pub struct WorkspaceConfig {
     #[serde(default)]
     pub hooks: WorkspaceHooks,
+    /// When true, a run MUST get its own git worktree — if `Workspace::create`
+    /// fails, the run is aborted instead of silently falling back to the main
+    /// checkout. Set on code-pushing presets (Ticket→PR, AutoDev…) where
+    /// running agents that `git push` / mutate files in the developer's main
+    /// working tree is dangerous. Default false → legacy warn-and-fallback
+    /// (fine for read-only audit/briefing workflows on non-git projects).
+    #[serde(default)]
+    pub require_isolation: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -1102,6 +1110,11 @@ pub struct WorkflowSummary {
     pub project_name: Option<String>,
     pub trigger_type: String,
     pub step_count: u32,
+    /// Number of steps missing required config (unwired API plugin/endpoint,
+    /// batch QP ref, agent prompt, …). Lets the card flag a freshly
+    /// AI-generated workflow that still needs wiring, without fetching its
+    /// full step list. 0 = ready to run.
+    pub misconfigured_step_count: u32,
     pub enabled: bool,
     pub last_run: Option<WorkflowRunSummary>,
     pub created_at: DateTime<Utc>,
@@ -1234,6 +1247,21 @@ pub struct TestStepRequest {
 #[cfg(test)]
 mod step_deserialization_tests {
     use super::*;
+
+    #[test]
+    fn workspace_config_require_isolation_defaults_false_for_legacy_rows() {
+        // Back-compat: a workflow saved before the field existed has a
+        // workspace_config with only `hooks`. It MUST deserialize with
+        // require_isolation = false — otherwise existing workflows would
+        // suddenly abort when their worktree can't be made.
+        let legacy: WorkspaceConfig = serde_json::from_str(r#"{"hooks":{}}"#).unwrap();
+        assert!(!legacy.require_isolation);
+
+        // And the new field round-trips when present.
+        let modern: WorkspaceConfig =
+            serde_json::from_str(r#"{"hooks":{},"require_isolation":true}"#).unwrap();
+        assert!(modern.require_isolation);
+    }
 
     /// 0.8.5 dogfooding regression test — JIRA helper case.
     ///

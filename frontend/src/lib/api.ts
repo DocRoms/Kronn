@@ -650,7 +650,7 @@ export const projects = {
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
   gitStatus: (id: string) => api<{ branch: string; default_branch: string; is_default_branch: boolean; files: { path: string; status: string; staged: boolean }[]; ahead: number; behind: number; has_upstream: boolean; provider: string; pr_url?: string | null }>('GET', `/projects/${id}/git-status`),
-  gitDiff: (id: string, path: string) => api<{ path: string; diff: string }>('GET', `/projects/${id}/git-diff?path=${encodeURIComponent(path)}`),
+  gitDiff: (id: string, path: string, committed = false) => api<{ path: string; diff: string }>('GET', `/projects/${id}/git-diff?path=${encodeURIComponent(path)}${committed ? '&committed=true' : ''}`),
   gitCreateBranch: (id: string, req: { name: string }) => api<{ branch: string }>('POST', `/projects/${id}/git-branch`, req),
   gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }) => api<{ hash: string; message: string }>('POST', `/projects/${id}/git-commit`, req),
   gitPush: (id: string) => api<{ success: boolean; message: string }>('POST', `/projects/${id}/git-push`, {}),
@@ -802,7 +802,7 @@ export const projects = {
           switch (type) {
             case 'template_installed': handlers.onTemplateInstalled(p.installed as boolean); break;
             // 0.8.3 (#272) — pre-audit legacy docs migration. Emitted
-            // at most once per run, BEFORE the 10-step audit loop.
+            // at most once per run, BEFORE the 9-step audit loop.
             // The handler is optional so older callers compile without
             // changes; when present, the frontend shows a toast +
             // list of moved entries so the user sees that their
@@ -1011,7 +1011,7 @@ export const discussions = {
 
   // ── Discussion-scoped git operations ──
   gitStatus: (id: string) => api<{ branch: string; default_branch: string; is_default_branch: boolean; files: { path: string; status: string; staged: boolean }[]; ahead: number; behind: number; has_upstream: boolean; provider: string; pr_url?: string | null }>('GET', `/discussions/${id}/git-status`),
-  gitDiff: (id: string, path: string) => api<{ path: string; diff: string }>('GET', `/discussions/${id}/git-diff?path=${encodeURIComponent(path)}`),
+  gitDiff: (id: string, path: string, committed = false) => api<{ path: string; diff: string }>('GET', `/discussions/${id}/git-diff?path=${encodeURIComponent(path)}${committed ? '&committed=true' : ''}`),
   gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }) => api<{ hash: string; message: string }>('POST', `/discussions/${id}/git-commit`, req),
   gitPush: (id: string) => api<{ success: boolean; message: string }>('POST', `/discussions/${id}/git-push`, {}),
   createPr: (id: string, req: { title: string; body?: string; base?: string }) => api<{ url: string }>('POST', `/discussions/${id}/git-pr`, req),

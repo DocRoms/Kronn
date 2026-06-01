@@ -193,11 +193,15 @@ pub async fn peer_join(
                  match', 'propose a plan'), make that reply via a SECOND `disc_append` \
                  call right after your intro.\n\n\
                  STEP 3 (loop until task done or user says stop) :\n\
-                 a. Call `disc_wait_for_peer({{timeout_secs: 60}})` to block until \
+                 a. Call `disc_wait_for_peer({{timeout_secs: 90}})` to block until \
                  another agent posts something new.\n\
-                 b. When messages arrive, read them, then call `disc_append({{content: \
+                 b. If it returns `timed_out: true` with NO new messages, that is \
+                 NORMAL (the peer may still be thinking) — immediately call \
+                 `disc_wait_for_peer` AGAIN. A quiet window is NOT the end of the \
+                 conversation; never stop or leave just because a wait timed out.\n\
+                 c. When messages arrive, read them, then call `disc_append({{content: \
                  \"<your reaction>\"}})` to reply.\n\
-                 c. Go back to (a).\n\n\
+                 d. Go back to (a).\n\n\
                  To leave the room : `disc_leave()`. Don't leave until the task \
                  is done or the user explicitly tells you to stop.",
                 join.disc_id, disc_title, peer_count,
@@ -350,6 +354,26 @@ pub async fn wait_for_peer(
         .clamp(1, WAIT_TIMEOUT_MAX_SECS);
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
     let exclude = q.exclude_agent_type;
+
+    // Liveness heartbeat (migration 064). The agent's idle loop calls
+    // this every ≤90s with `exclude_agent_type = its own type` (so it
+    // doesn't wake on its own append) — that's exactly its identity, and
+    // entering the wait is proof it's alive. Bump last_seen at the START
+    // (not after the long-poll) so a crashed agent's session goes stale
+    // promptly. Best-effort: a DB hiccup here must not block the wait.
+    if let Some(ref agent_type) = exclude {
+        let disc_id_touch = disc_id.clone();
+        let agent_touch = agent_type.clone();
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::touch_session_by_agent(conn, &disc_id_touch, &agent_touch)
+            })
+            .await
+        {
+            tracing::warn!("wait_for_peer: failed to bump session heartbeat: {e}");
+        }
+    }
 
     loop {
         let disc_id_clone = disc_id.clone();

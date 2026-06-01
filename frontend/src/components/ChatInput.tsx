@@ -4,6 +4,7 @@ import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFi
 import { isUsable } from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
+import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi } from '../lib/api';
 import { detectTriggeredSkills } from '../lib/autoTriggers';
@@ -680,16 +681,35 @@ export function ChatInput({
           }
         }}
         onPaste={e => {
-          if (!onUploadFiles) return;
-          const items = Array.from(e.clipboardData.items);
-          const files = items
-            .filter(item => item.kind === 'file')
-            .map(item => item.getAsFile())
-            .filter((f): f is File => f !== null);
-          if (files.length > 0) {
-            e.preventDefault();
-            onUploadFiles(files);
+          // 1) File paste (images / attachments) — existing behaviour.
+          if (onUploadFiles) {
+            const items = Array.from(e.clipboardData.items);
+            const files = items
+              .filter(item => item.kind === 'file')
+              .map(item => item.getAsFile())
+              .filter((f): f is File => f !== null);
+            if (files.length > 0) {
+              e.preventDefault();
+              onUploadFiles(files);
+              return;
+            }
           }
+          // 2) Blockquote-aware multiline paste: pasting several lines while the
+          //    caret is on a `> ` line keeps the whole paste quoted. No-op
+          //    otherwise (single line, or not in a blockquote) → native paste.
+          const ta = chatInputRef.current;
+          if (!ta) return;
+          const start = ta.selectionStart ?? 0;
+          const lineStart = ta.value.lastIndexOf('\n', start - 1) + 1;
+          const currentLine = ta.value.slice(lineStart, start);
+          const quoted = quoteMultilinePaste(currentLine, e.clipboardData.getData('text'));
+          if (quoted === null) return;
+          e.preventDefault();
+          // Insert at the selection (preserves the textarea's own undo stack),
+          // then re-run the existing onChange pipeline (draft save, autosize,
+          // emoji popover) by dispatching the input event React listens to.
+          ta.setRangeText(quoted, start, ta.selectionEnd ?? start, 'end');
+          ta.dispatchEvent(new Event('input', { bubbles: true }));
         }}
       >
         {/* @mention autocomplete dropdown */}

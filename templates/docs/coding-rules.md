@@ -10,6 +10,7 @@
 - Prefer smallest diffs. Avoid drive-by refactors.
 - Follow existing naming in adjacent code. Avoid generic names (`Helper`, `Utils`).
 - **Every change must include tests** — see [testing-quality](testing-quality.md).
+- **Comment sparingly — explain *why*, never *what*.** A comment earns its place only if it adds what the code can't say: a non-obvious rationale, a real gotcha, or a ticket ref for a *surprising* decision. Do NOT narrate what the code does, restate the line above, or leave "this is now loaded from X — see Y" pointers the code/ticket already makes obvious. Match the file's existing comment density; a clear name beats a paragraph.
 
 ## {{LANGUAGE_1}} [ex: "Rust", "TypeScript", "Python"]
 

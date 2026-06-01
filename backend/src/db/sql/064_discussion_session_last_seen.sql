@@ -1,0 +1,23 @@
+-- 0.8.7 (2026-06-04) — session liveness heartbeat.
+--
+-- `count_live_participants` (the double-responder guard in send_message)
+-- counted `status='active'` with no notion of staleness. An agent that
+-- crashed without `disc_leave` lingered as 'active' forever and kept
+-- suppressing Kronn's own auto-response → the human could send messages
+-- into a dead room and get NO reply at all (flagged in Codex review,
+-- 2026-06-04). There is no UI action to drop a stale session, so the
+-- only robust fix is a heartbeat.
+--
+-- `last_seen` is bumped whenever a live agent proves it's alive — every
+-- `disc_wait_for_peer` long-poll (the agent's idle loop, ≤90s cadence)
+-- and every `disc_append` (posting a reply). `count_live_participants`
+-- then counts only `active AND last_seen` within a staleness window, so
+-- a crashed agent stops suppressing auto-response after ~5 minutes.
+--
+-- Backfill: existing rows get last_seen = joined_at. Pre-heartbeat
+-- 'active' owner rows (from migration 060's backfill) are thus treated
+-- as STALE immediately — the safe default: Kronn auto-responds normally
+-- until a session actually heartbeats, rather than silently swallowing
+-- replies for discs whose CLI is long gone.
+ALTER TABLE discussion_sessions ADD COLUMN last_seen DATETIME;
+UPDATE discussion_sessions SET last_seen = joined_at WHERE last_seen IS NULL;

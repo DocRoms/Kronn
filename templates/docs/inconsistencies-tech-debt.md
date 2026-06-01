@@ -34,3 +34,20 @@ Details in `tech-debt/TD-YYYYMMDD-slug.md` (use today's date for YYYYMMDD).
 | ID | Problem | Area | Severity |
 |----|---------|------|----------|
 | {{ID}} | {{PROBLEM}} | {{AREA}} | {{SEVERITY}} |
+
+## Dimension coverage
+
+> Filled by the audit (Step 8 § B). **Every dimension MUST have an outcome** — `findings` (listed above), `scanned — nothing substantiable`, or `N/A: <verifiable reason>`. A blank row, or an unverifiable reason, means the audit is **incomplete**. This matrix is the breadth contract; the TDs above are the depth.
+
+| Dimension | Outcome | Evidence / reason |
+|-----------|---------|-------------------|
+| Dependencies | {{DEP_OUTCOME}} | {{DEP_EVIDENCE}} |
+| Security | {{SEC_OUTCOME}} | {{SEC_EVIDENCE}} |
+| Code quality | {{CQ_OUTCOME}} | {{CQ_EVIDENCE}} |
+| Scalability | {{SCAL_OUTCOME}} | {{SCAL_EVIDENCE}} |
+| Maintainability | {{MAINT_OUTCOME}} | {{MAINT_EVIDENCE}} |
+| Accessibility | {{A11Y_OUTCOME}} | {{A11Y_EVIDENCE}} |
+| Observability | {{OBS_OUTCOME}} | {{OBS_EVIDENCE}} |
+| Compliance | {{COMP_OUTCOME}} | {{COMP_EVIDENCE}} |
+| Performance | {{PERF_OUTCOME}} | {{PERF_EVIDENCE}} |
+| Documentation drift | {{DRIFT_OUTCOME}} | {{DRIFT_EVIDENCE}} |

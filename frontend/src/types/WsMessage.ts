@@ -15,7 +15,12 @@ discussion_id: string, batch_name: string | null, batch_total: number, batch_com
  * Id of the child discussion that just completed — frontend uses it to
  * clear the per-disc sendingMap indicator.
  */
-discussion_id: string, batch_total: number, batch_completed: number, batch_failed: number, } | { "type": "workflow_run_updated", run_id: string, workflow_id: string, status: string, 
+discussion_id: string, batch_total: number, batch_completed: number, batch_failed: number, } | { "type": "batch_run_child_started", run_id: string,
+/**
+ * Id of the child discussion whose agent run is starting — frontend uses it
+ * to set the per-disc sendingMap indicator (spinner) on.
+ */
+discussion_id: string, } | { "type": "workflow_run_updated", run_id: string, workflow_id: string, status: string,
 /**
  * Index of the currently-running (or just-completed) step. -1 when
  * the run starts and no step is in flight yet.

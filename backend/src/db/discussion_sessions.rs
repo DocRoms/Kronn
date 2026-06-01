@@ -86,10 +86,14 @@ pub fn create_session(
         return Err(anyhow!("invalid role `{role}` — expected owner|peer"));
     }
     let now = Utc::now().to_rfc3339();
+    // Seed last_seen at join (migration 064) so a freshly-joined agent
+    // counts as a live responder immediately — before its first
+    // disc_wait_for_peer heartbeat — closing the window where a human
+    // message right after join would still trigger Kronn's auto-response.
     conn.execute(
         "INSERT INTO discussion_sessions
-            (disc_id, agent_type, session_id, role, status, joined_at)
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5)",
+            (disc_id, agent_type, session_id, role, status, joined_at, last_seen)
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?5)",
         params![disc_id, agent_type, session_id, role, now],
     )?;
     Ok(conn.last_insert_rowid())
@@ -207,6 +211,84 @@ pub fn count_active_participants(conn: &Connection, disc_id: &str) -> Result<i64
         |r| r.get(0),
     )?;
     Ok(n)
+}
+
+/// A session that hasn't heartbeated (`last_seen`, migration 064) in this
+/// long is considered ABANDONED — the agent crashed or dropped without
+/// `disc_leave`. This is deliberately NOT a per-message liveness window:
+/// an earlier 300s window (2026-06-04) proved far too aggressive — a
+/// turn-based CLI peer idles well over 5min between human turns, so it read
+/// as dead and Kronn double-replied (observed live on disc ca495847,
+/// 2026-06-08). 24h is longer than any realistic turn gap, so a genuinely
+/// present peer is never reaped, while a long-dead ghost eventually stops
+/// pinning presence-sticky `count_live_participants`.
+pub const SESSION_ABANDON_SECS: i64 = 86_400;
+
+/// Bump `last_seen = now` for the live session of (disc_id, agent_type)
+/// (migration 064 heartbeat). Called whenever an agent proves it's alive
+/// — every `disc_wait_for_peer` long-poll (idle loop) and `disc_append`
+/// (posting). Only touches `status='active'` rows; a paused/left session
+/// isn't a live responder so its heartbeat is irrelevant. No-op (0 rows)
+/// when the caller isn't a tracked participant (e.g. a Kronn-launched
+/// agent with no session row) — harmless.
+pub fn touch_session_by_agent(conn: &Connection, disc_id: &str, agent_type: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET last_seen = ?3
+          WHERE disc_id = ?1 AND agent_type = ?2 AND status = 'active'",
+        params![disc_id, agent_type, now],
+    )?;
+    Ok(())
+}
+
+/// Count LIVE responders = MCP-joined agents currently `status='active'`
+/// (NOT `paused`, NOT `left`) on this disc. Used by `send_message` to
+/// suppress the double-responder bug: when ≥1 agent is connected, Kronn
+/// must NOT auto-spawn its own runner on a human message — the connected
+/// agent answers (the user message is persisted + broadcast, so the peer
+/// picks it up via its own loop or when the human relays it).
+///
+/// PRESENCE-STICKY (2026-06-08, user decision): a session counts as long as
+/// it is `active`, with NO time-since-heartbeat window. The earlier 300s
+/// staleness window broke turn-based collaboration — a CLI peer that idles
+/// more than 5 minutes between human turns read as dead and Kronn
+/// double-replied (reproduced on disc ca495847: user msg at 14:05 → Kronn
+/// native reply 14:05:50 AND the CLI peer's MCP reply 14:06:38, because the
+/// peer's last_seen was 48min old). Crashed-peer safety is handled OUT of
+/// band, not by shrinking this window:
+///   (a) [`reap_abandoned_sessions`] retires sessions idle > 24h, and
+///   (b) the user can always force a reply via `POST /run` (`run_agent`),
+///       which is intentionally NOT gated.
+/// `paused` is excluded on purpose: a paused agent won't reply → Kronn
+/// SHOULD still auto-respond if every connected agent is paused.
+pub fn count_live_participants(conn: &Connection, disc_id: &str) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM discussion_sessions
+          WHERE disc_id = ?1 AND status = 'active'",
+        params![disc_id],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// Garbage-collect abandoned sessions: mark every `status='active'` row
+/// whose `last_seen` (falling back to `joined_at` for pre-heartbeat rows)
+/// is older than [`SESSION_ABANDON_SECS`] as `left`. Idempotent. Run at
+/// boot (and once via migration 065) so presence-sticky
+/// [`count_live_participants`] is never pinned by a long-dead ghost — an
+/// agent that exited without `disc_leave`. Returns the rows retired.
+pub fn reap_abandoned_sessions(conn: &Connection) -> Result<u64> {
+    let cutoff = (Utc::now() - Duration::seconds(SESSION_ABANDON_SECS)).to_rfc3339();
+    let now = Utc::now().to_rfc3339();
+    let n = conn.execute(
+        "UPDATE discussion_sessions
+            SET status = 'left', left_at = COALESCE(left_at, ?2)
+          WHERE status = 'active'
+            AND COALESCE(last_seen, joined_at) < ?1",
+        params![cutoff, now],
+    )?;
+    Ok(n as u64)
 }
 
 // ─── invite tokens ──────────────────────────────────────────────────
@@ -568,6 +650,74 @@ mod tests {
         let id3 = create_session(&conn, "d1", "GeminiCli", Some("c"), "peer").unwrap();
         mark_session_left(&conn, id3).unwrap();
         assert_eq!(count_active_participants(&conn, "d1").unwrap(), 2);
+    }
+
+    #[test]
+    fn count_live_participants_only_counts_active() {
+        // Double-responder guard (2026-06-04): only `active` sessions are
+        // live responders. `paused` (won't reply) and `left` must NOT count,
+        // else Kronn would wrongly suppress its own auto-response.
+        let conn = setup_db();
+        let id_active = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
+        let id_paused = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
+        let id_left = create_session(&conn, "d1", "GeminiCli", Some("c"), "peer").unwrap();
+        set_session_status(&conn, id_paused, "paused").unwrap();
+        mark_session_left(&conn, id_left).unwrap();
+        // active=1, paused=1, left=1
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "only the active session is a live responder");
+        assert_eq!(count_active_participants(&conn, "d1").unwrap(), 2, "active+paused for the UI badge");
+        // Pausing the last active one → no live responder (Kronn should auto-spawn).
+        set_session_status(&conn, id_active, "paused").unwrap();
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 0, "all paused → no live responder");
+    }
+
+    #[test]
+    fn count_live_participants_is_presence_sticky() {
+        // PRESENCE-STICKY (2026-06-08): an `active` session counts no matter
+        // how old its last_seen is — a turn-based CLI peer idles for many
+        // minutes between human turns but is NOT gone. The earlier 300s
+        // window wrongly dropped it → double-responder. Only `paused`/`left`
+        // stop counting.
+        let conn = setup_db();
+        let id_fresh = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
+        let id_old = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
+        // Force the peer's heartbeat to 48 min ago (the ca495847 repro gap) —
+        // well past the OLD 5min window, but it must STILL count now.
+        let old_ts = (Utc::now() - Duration::minutes(48)).to_rfc3339();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_old, old_ts],
+        )
+        .unwrap();
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 2, "an idle-but-active peer still counts (sticky)");
+
+        // paused / left drop out.
+        set_session_status(&conn, id_fresh, "paused").unwrap();
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "paused no longer a live responder");
+        mark_session_left(&conn, id_old).unwrap();
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 0, "left no longer a live responder");
+    }
+
+    #[test]
+    fn reap_abandoned_sessions_retires_only_long_dead_active_rows() {
+        // The crashed-peer safety valve for presence-sticky: a session idle
+        // beyond SESSION_ABANDON_SECS (24h) is marked 'left' so it stops
+        // pinning the gate. A recently-active peer is untouched.
+        let conn = setup_db();
+        let id_recent = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
+        let id_dead = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
+        // Recent peer: last_seen 1h ago (well within 24h) → kept.
+        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_recent, (Utc::now() - Duration::hours(1)).to_rfc3339()]).unwrap();
+        // Dead ghost: last_seen 3 days ago → reaped.
+        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_dead, (Utc::now() - Duration::days(3)).to_rfc3339()]).unwrap();
+
+        let reaped = reap_abandoned_sessions(&conn).unwrap();
+        assert_eq!(reaped, 1, "only the 3-day-old ghost is retired");
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "recent peer still live, ghost gone");
+        // Idempotent: a second pass reaps nothing.
+        assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "idempotent");
     }
 
     #[test]

@@ -2,8 +2,8 @@
 // pattern" cards). These guard the shape contract that drives the wizard:
 //   - all presets have unique stable IDs
 //   - the TICKET_TO_PR autopilot ships the expected pipeline (fetch_issue
-//     fixture → analyze → plan_gate → implement loop → review → create_pr →
-//     ready_gate → notify)
+//     fixture → analyze → plan_gate → implement loop → review → ready_gate →
+//     create_pr → notify) — gate BEFORE the push/PR
 //   - skill_ids on Agent steps point at known external skills (vendored)
 //
 // Drift on any of these = a broken preset at click time. The wizard renders
@@ -53,8 +53,8 @@ describe('TICKET_TO_PR preset', () => {
       'implement',
       'run_tests',
       'review',
-      'create_pr',
       'ready_gate',
+      'create_pr',
       'notify_done',
     ]);
     expect(p.onFailure).toBeDefined();

@@ -820,6 +820,9 @@ export interface WorkflowSafety {
 
 export interface WorkspaceConfig {
   hooks: WorkspaceHooks;
+  /** When true, the run aborts if its git worktree can't be created (instead of
+   *  silently falling back to the main checkout). Set on code-pushing presets. */
+  require_isolation?: boolean;
 }
 
 export interface WorkspaceHooks {
@@ -915,6 +918,9 @@ export interface WorkflowSummary {
   project_name: string | null;
   trigger_type: string;
   step_count: number;
+  /** Steps missing required config (unwired API plugin/endpoint, batch QP ref,
+   *  agent prompt, …). 0 = ready. Drives the card "à configurer" badge. */
+  misconfigured_step_count: number;
   enabled: boolean;
   last_run: WorkflowRunSummary | null;
   created_at: string;
@@ -1605,6 +1611,7 @@ export type WsMessage =
   | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string }
   | { type: 'batch_run_finished'; run_id: string; discussion_id: string; batch_name: string | null; batch_total: number; batch_completed: number; batch_failed: number }
   | { type: 'batch_run_progress'; run_id: string; discussion_id: string; batch_total: number; batch_completed: number; batch_failed: number }
+  | { type: 'batch_run_child_started'; run_id: string; discussion_id: string }
   | { type: 'workflow_run_updated'; run_id: string; workflow_id: string; status: string; step_index: number; total_steps: number; current_step: string | null }
   | { type: 'partial_response_recovered'; discussion_ids: string[] };
 

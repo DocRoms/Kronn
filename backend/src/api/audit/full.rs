@@ -1,5 +1,5 @@
 // `POST /api/projects/:id/full-audit` — the unified end-to-end pipeline:
-// install template if needed → run the 10-step audit → create the
+// install template if needed → run the 9-step audit → create the
 // validation discussion. Plus `POST /api/projects/:id/cancel-audit`
 // which kills the running agent process and cleans the docs/ tree
 // + redirector files so the project is back to a clean slate.
@@ -27,7 +27,7 @@ use super::helpers::{
 use super::{SseStream, ANALYSIS_STEPS, PROMPT_PREAMBLE};
 
 /// POST /api/projects/:id/full-audit
-/// Unified endpoint: install template + run 10-step audit + create validation discussion.
+/// Unified endpoint: install template + run 9-step audit + create validation discussion.
 pub async fn full_audit(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -112,6 +112,27 @@ pub async fn full_audit(
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
 
+    let active_in_tracker = audit_tracker
+        .lock()
+        .map(|t| t.get_progress(&project_id).is_some())
+        .unwrap_or(true);
+    let active_in_db = db.with_conn({
+        let project_id = project_id.clone();
+        move |conn| crate::db::audit_runs::has_running_for_project(conn, &project_id)
+    }).await.unwrap_or(true);
+    if active_in_tracker || active_in_db {
+        let stream: SseStream = Box::pin(futures::stream::once(async {
+            Ok::<_, Infallible>(
+                Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": "Audit already running for this project; wait for it to finish or use the cleanup action before launching another audit."
+                    }).to_string(),
+                )
+            )
+        }));
+        return Sse::new(stream);
+    }
+
     // Clear any stale cancellation flag for this project
     if let Ok(mut tracker) = audit_tracker.lock() {
         tracker.cancelled.remove(&project_id);
@@ -140,7 +161,7 @@ pub async fn full_audit(
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id, total_steps as u32, "full_audit");
             // Phase 1 starts here; advance_step will update to "auditing"
-            // once the 10-step loop begins. The intermediate installing
+            // once the 9-step loop begins. The intermediate installing
             // phase is visible by checking step_index == 0.
             if let Some(entry) = t.progress.get_mut(&project_id) {
                 entry.phase = "installing".into();
@@ -314,7 +335,7 @@ pub async fn full_audit(
             );
         }
 
-        // ── Phase 2: Run 10-step audit ──
+        // ── Phase 2: Run 9-step audit ──
         // Remove bootstrap prompt
         let index_file = project_path.join("docs/AGENTS.md");
         if index_file.exists() {
@@ -322,12 +343,23 @@ pub async fn full_audit(
         }
 
         // 0.8.2 — Snapshot the existing `docs/tech-debt/` directory BEFORE
-        // Step 9 has a chance to touch it. Used by the reconciliation
+        // Step 8 has a chance to touch it. Used by the reconciliation
         // pass (after the loop) to classify TDs that the agent did NOT
         // re-emit (Fixed / Stale / Missed / Uncertain). Cheap operation
         // — content-hashes a handful of small markdown files. Survives
         // a fresh project (empty Vec).
         let pre_audit_td_snapshot = super::reconciliation::snapshot_tech_debt_dir(
+            &project_path.join("docs"),
+        );
+
+        // chantier 4 (2026-06-04) — Option C re-audit dedup list. When the
+        // project already has tech-debt entries, an in-place re-audit tends
+        // to recopy the priors (the agent SEES them in the target file →
+        // Carried + anti-repetition → finds nothing new). We inject the
+        // priors as an explicit dedup list into Step 8 and force a fresh
+        // full pass (see `render_known_debt_block`). Empty on a first audit
+        // → block is never injected → unchanged from-scratch behaviour.
+        let prior_td_digests = super::reconciliation::digest_prior_tech_debt(
             &project_path.join("docs"),
         );
 
@@ -350,7 +382,7 @@ pub async fn full_audit(
         // successful `step_done` we bump `last_successful_step` AND
         // persist via `update_last_completed_step`. At end-of-stream
         // we use these two locals to decide between:
-        //   - `complete()`         (all 10 steps success — happy path)
+        //   - `complete()`         (all 9 steps success — happy path)
         //   - `mark_interrupted()` (some step warning OR stream ended
         //                          before step 10 — resumable later)
         //   - `mark_failed()`      (catastrophic failure, e.g. start_agent
@@ -416,6 +448,28 @@ pub async fn full_audit(
             }
         }
 
+        // ── Deterministic detectors (chantier 1, 2026-06-03) ──
+        // Run cheap mechanical source scans ONCE up front; the rendered
+        // block is injected into the Step 8 (tech-debt) prompt as
+        // ground-truth anchors the agent must account for. Off the async
+        // executor (filesystem walk) via spawn_blocking.
+        let detector_signals: Vec<crate::core::audit_detectors::DetectedSignal> = {
+            let p = project_path.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::core::audit_detectors::run_detectors(&p)
+            })
+            .await
+            {
+                Ok(sigs) => sigs,
+                Err(e) => {
+                    // Detector panic must not abort the audit, but it must not
+                    // be silent either (consistency with chantier 3 logging).
+                    tracing::error!("audit detectors panicked, Step 8 gets no signals: {e}");
+                    Vec::new()
+                }
+            }
+        };
+
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
@@ -473,13 +527,16 @@ pub async fn full_audit(
             // first replayed step doesn't crash on UNIQUE.
             {
                 let run_id = audit_run_id.clone();
+                let log_run_id = run_id.clone();
                 let label = file_label.to_string();
                 let started = Utc::now();
-                let _ = db.with_conn(move |conn| {
+                if let Err(e) = db.with_conn(move |conn| {
                     crate::db::audit_runs::insert_audit_step_start(
                         conn, &run_id, step as u32, &label, started,
                     )
-                }).await;
+                }).await {
+                    tracing::error!("Failed to persist audit step start for run {log_run_id}: {e}");
+                }
             }
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -491,6 +548,22 @@ pub async fn full_audit(
 
             if let Some(ref notes) = briefing_notes {
                 full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+            }
+            // chantier 1 (2026-06-03) — inject deterministic detector signals
+            // ONLY into the tech-debt step (Step 8). They anchor the dimension
+            // coverage with verifiable file:line signals the LLM single-pass
+            // commonly misses.
+            if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
+                let block = crate::core::audit_detectors::render_signals_block(&detector_signals);
+                full_prompt.push_str(&format!("\n\n{}\n", block));
+                // chantier 4 — re-audit dedup list (Option C). Only when priors
+                // exist; on a first audit `prior_td_digests` is empty and the
+                // block is skipped (render returns "" but we guard to avoid the
+                // stray blank lines).
+                if !prior_td_digests.is_empty() {
+                    let known = super::reconciliation::render_known_debt_block(&prior_td_digests);
+                    full_prompt.push_str(&format!("\n\n{}\n", known));
+                }
             }
             // 0.8.3 (#272) — pre-existing user docs are migrated to
             // docs/legacy/ before the audit runs. Tell the agent to
@@ -695,7 +768,7 @@ pub async fn full_audit(
                     // so the user can re-run the step OR resume from a
                     // clean baseline, and report `success: false` in
                     // step_done so the overall audit summary is honest.
-                    let (success, warning) = crate::api::audit::validation::validate_and_repair_step_output(
+                    let (mut success, mut warning) = crate::api::audit::validation::validate_and_repair_step_output(
                         cli_success,
                         &project_path,
                         analysis_step.target_file,
@@ -716,6 +789,41 @@ pub async fn full_audit(
                         );
                     }
 
+                    // chantier 1b (2026-06-03) — detector disposition gate.
+                    // After Step 8, every injected detector signal must be
+                    // addressed somewhere in the tech-debt output (TD / baseline
+                    // / matrix). An undisposed signal = silently-ignored ground
+                    // truth → Step 8 incomplete (blocking, re-run on resume).
+                    // Only runs when the prior checks passed (no point gating a
+                    // step that's already failing).
+                    if success && analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
+                        if let Some(w) = crate::api::audit::validation::check_detector_disposition(
+                            &project_path,
+                            &detector_signals,
+                        ) {
+                            success = false;
+                            tracing::warn!(
+                                "Audit step {} ({}) detector disposition gate failed: {}",
+                                step, file_label, w.reason
+                            );
+                            yield Event::default().event("step_warning").data(
+                                serde_json::json!({
+                                    "step": step,
+                                    "file": file_label,
+                                    "reason": w.reason.clone(),
+                                    "repaired_from_template": false,
+                                }).to_string()
+                            );
+                            // Persist the disposition warning into `warning` so
+                            // finalize_audit_step records WHY the step failed
+                            // (Codex 1b #2) — otherwise the recap shows a failed
+                            // step with no reason. Safe to overwrite: this gate
+                            // only runs when `success` was still true, i.e. the
+                            // validation pass produced no warning.
+                            warning = Some(w);
+                        }
+                    }
+
                     let step_done = serde_json::json!({
                         "step": step,
                         "success": success,
@@ -733,10 +841,11 @@ pub async fn full_audit(
                     // even though the CLI exited 0.
                     {
                         let run_id = audit_run_id.clone();
+                        let log_run_id = run_id.clone();
                         let warn_reason = warning.as_ref().map(|w| w.reason.clone());
                         let repaired = warning.as_ref().map(|w| w.repaired).unwrap_or(false);
                         let ended = Utc::now();
-                        let _ = db.with_conn(move |conn| {
+                        if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::finalize_audit_step(
                                 conn,
                                 &run_id,
@@ -749,7 +858,9 @@ pub async fn full_audit(
                                 warn_reason.as_deref(),
                                 repaired,
                             )
-                        }).await;
+                        }).await {
+                            tracing::error!("Failed to finalize audit step {step} for run {log_run_id}: {e}");
+                        }
                     }
 
                     // 0.8.3 (#311) — track per-step progress in audit_runs
@@ -761,17 +872,20 @@ pub async fn full_audit(
                     if success {
                         last_successful_step = step as u32;
                         let run_id = audit_run_id.clone();
+                        let log_run_id = run_id.clone();
                         let step_n = step as u32;
-                        let _ = db.with_conn(move |conn| {
+                        if let Err(e) = db.with_conn(move |conn| {
                             crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
-                        }).await;
+                        }).await {
+                            tracing::error!("Failed to persist last_completed_step={step_n} for run {log_run_id}: {e}");
+                        }
                     } else {
                         // Track that something went wrong so the
                         // end-of-stream branch knows to mark the run
                         // as Interrupted rather than Completed and
                         // skip the validation discussion creation
                         // (cf F8c #312 — no validation disc unless all
-                        // 10 steps reported success).
+                        // 9 steps reported success).
                         any_step_warning = true;
                     }
                 }
@@ -822,9 +936,20 @@ pub async fn full_audit(
             let snapshot = pre_audit_td_snapshot.clone();
             let recon_outcome = tokio::task::spawn_blocking(move || {
                 use super::reconciliation::{
-                    check_signature_in_source, classify, compute_delta, render_report,
+                    check_signature_in_source, classify, compute_delta_with_index,
+                    parse_index_td_ids, render_report, DeltaKind,
                 };
-                let deltas = compute_delta(&snapshot);
+                // Index-aware delta (fix 2026-06-03): a prior whose id is still
+                // listed in the freshly-written index is `Carried` (re-emitted),
+                // NOT a `Missed` candidate. Without this, Step 8's anti-repetition
+                // (keep correct detail files verbatim) made every re-listed prior
+                // look "missed".
+                let still_listed = std::fs::read_to_string(
+                    project_path_for_recon.join("docs/inconsistencies-tech-debt.md"),
+                )
+                .map(|c| parse_index_td_ids(&c))
+                .unwrap_or_default();
+                let deltas = compute_delta_with_index(&snapshot, &still_listed);
                 let project_path_for_check = project_path_for_recon.clone();
                 let entries = classify(
                     &deltas,
@@ -837,9 +962,11 @@ pub async fn full_audit(
                 let report_path = project_path_for_recon
                     .join("docs/tech-debt")
                     .join(format!("_reconciliation-{}.md", today));
+                // Re-emitted priors (Updated refreshed OR Carried re-listed) are
+                // healthy, not candidates.
                 let candidates = entries
                     .iter()
-                    .filter(|e| e.delta != super::reconciliation::DeltaKind::Updated)
+                    .filter(|e| !matches!(e.delta, DeltaKind::Updated | DeltaKind::Carried))
                     .count();
                 let updated = entries.len() - candidates;
                 (report_path, report, candidates, updated)
@@ -879,7 +1006,7 @@ pub async fn full_audit(
         //
         // 0.8.3 (#312 F8c) — additional gate: the validation disc is
         // ONLY created when every step reported success AND we made
-        // it through all 10 steps. Pre-fix, a rate-limit at step 5
+        // it through all 9 steps. Pre-fix, a rate-limit at step 5
         // produced a validation disc anyway (because the SSE handler
         // reached this code regardless of step outcomes), and the
         // ProjectCard then said "Validation en cours" on an audit
@@ -1051,7 +1178,7 @@ pub async fn full_audit(
         let snapshot_for_count = pre_audit_td_snapshot.clone();
         let db_for_complete = db.clone();
         let ended_at = Utc::now();
-        let _ = tokio::task::spawn_blocking(move || {
+        let completion_counts = tokio::task::spawn_blocking(move || {
             let td_dir = project_path_for_count.join("docs/tech-debt");
             let counts = count_td_severities(&td_dir);
             let (resolved, new, carried) = compute_reconciliation_counts(
@@ -1060,7 +1187,7 @@ pub async fn full_audit(
             let score = crate::models::compute_health_score(
                 counts.critical, counts.high, counts.medium, counts.low,
             );
-            // 0.8.2 — Step 10 cluster detector. Surfaces "you have 4
+            // 0.8.2 — Step 9 cluster detector. Surfaces "you have 4
             // docker findings, consider a focused Docker audit" cards
             // on the dashboard. Empty Vec is fine — UI hides the card.
             let recs = compute_cluster_recommendations(&td_dir);
@@ -1071,13 +1198,14 @@ pub async fn full_audit(
             };
             (counts, resolved, new, carried, score, recs_json)
         })
-        .await
-        .map(|(counts, resolved, new, carried, score, recs_json)| {
-            let run_id = run_id_for_complete.clone();
-            let succeeded = audit_fully_succeeded;
-            let last_step = last_successful_step;
-            tokio::spawn(async move {
-                let _ = db_for_complete.with_conn(move |conn| {
+        .await;
+        match completion_counts {
+            Ok((counts, resolved, new, carried, score, recs_json)) => {
+                let run_id = run_id_for_complete.clone();
+                let log_run_id = run_id.clone();
+                let succeeded = audit_fully_succeeded;
+                let last_step = last_successful_step;
+                if let Err(e) = db_for_complete.with_conn(move |conn| {
                     if succeeded {
                         crate::db::audit_runs::complete(
                             conn, &run_id, ended_at, "Completed",
@@ -1096,9 +1224,14 @@ pub async fn full_audit(
                             &format!("interrupted after step {last_step}/10 (warning or stream-end)"),
                         )
                     }
-                }).await;
-            });
-        });
+                }).await {
+                    tracing::error!("Failed to finalize audit run {log_run_id}: {e}");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to compute audit completion metrics for run {run_id_for_complete}: {e}");
+            }
+        }
 
         // Audit fully complete — drop progress so UI polling can stop and
         // `GET /audit-status` reports `None`.

@@ -147,6 +147,19 @@ pub(crate) async fn make_agent_stream(
     // broadcast a WS event when it finishes.
     let batch_run_id = disc.workflow_run_id.clone();
 
+    // ── Batch child START hook ──────────────────────────────────────────
+    // Symmetric to the BatchRunProgress/BatchRunFinished broadcast at the end
+    // of the stream. Batch children run server-side with no SSE consumer on
+    // the client, so without this the per-disc `sendingMap` is never set to
+    // `true` and an in-flight child shows no "agent working" spinner. Fire it
+    // the moment the run begins so any connected client flips the indicator on.
+    if let Some(ref run_id) = batch_run_id {
+        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
+            run_id: run_id.clone(),
+            discussion_id: discussion_id.clone(),
+        });
+    }
+
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
         state.db.with_conn(move |conn| {

@@ -32,6 +32,11 @@ export interface WorkflowPreset {
   onFailure?: WorkflowStep[];
   /** Optional Exec allowlist (`workflow.exec_allowlist`). */
   execAllowlist?: string[];
+  /** When true, the workflow's `workspace_config.require_isolation` is set so a
+   *  run ABORTS if its git worktree can't be created — instead of silently
+   *  running agents that push/mutate code in the developer's main checkout.
+   *  Set on code-pushing presets (Ticket→PR, AutoDev, PR-Gate, Feasibility). */
+  requireIsolation?: boolean;
   /** Optional launch-time variables. Used by presets like Feature Planner
    *  that take a single source URL/key at launch (epic URL, GitHub issue
    *  link, etc.). The wizard will populate the workflow's `variables`
@@ -99,6 +104,7 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     descKey: 'wiz.preset.autoDev.desc',
     primitives: ['JsonData', 'Agent', 'Exec', 'Loop', 'State', 'Notify'],
     execAllowlist: ['cargo', 'npm', 'make', 'pytest'],
+    requireIsolation: true,
     // 0.7+ — pas de launch variables par défaut : le step `fetch_issue`
     // est en mode JsonData (fixture), il n'utilise aucune variable. Si
     // l'utilisateur swap fetch_issue en ApiCall et tape `{{issue_key}}`
@@ -188,6 +194,7 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     descKey: 'wiz.preset.prGate.desc',
     primitives: ['JsonData', 'Agent', 'Exec', 'Gate', 'Webhook', 'Rollback'],
     execAllowlist: ['cargo', 'npm', 'pytest'],
+    requireIsolation: true,
     // 0.7+ — pas de launch variables par défaut. Cf. AUTO_DEV.
     steps: [
       // 0.7+ — Même pattern qu'AUTO_DEV : JsonData (fixture) par défaut
@@ -494,6 +501,7 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     // any project (Cargo / npm-pnpm-yarn / composer / pytest / make).
     // Without it, the preset would only work on Rust projects.
     execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer'],
+    requireIsolation: true,
     steps: [
       // Étape 1 — Source du ticket. JsonData fixture par défaut, swap
       // en ApiCall (+ quick_api_id) quand un plugin tracker est actif.
@@ -646,11 +654,24 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
           { contains: 'NEEDS_CHANGES', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
         ],
       }),
-      // Étape 7 — Création de la PR. `finishing-a-development-branch`
-      // guide l'agent à travers les 4 options (merge local / PR / keep
-      // / discard) avec verify-tests-first et structured PR body. Pour
-      // le préset on pousse le pattern PR (option 2 du skill) — l'user
-      // peut switcher dans le prompt.
+      // Étape 7 — Validation humaine AVANT le push + PR (gate-before-effect).
+      // Volontairement placée AVANT create_pr : pousser une branche et créer
+      // une PR sont des effets externes ~irréversibles. Ici l'humain voit le
+      // plan, l'implémentation ET le résultat des tests — y compris un
+      // `[SIGNAL: SKIPPED]` (tests non lancés) — et décide en connaissance de
+      // cause. request_changes → retour à implement. Tant qu'il n'a pas
+      // approuvé, AUCUN push n'a eu lieu (contrairement à l'ordre inverse, où
+      // le gate ne protégeait plus que la notif finale).
+      step({
+        name: 'ready_gate',
+        step_type: { type: 'Gate' },
+        gate_message: t('wiz.preset.ticketToPr.readyGateMessage'),
+        gate_request_changes_target: 'implement',
+      }),
+      // Étape 8 — Création de la PR, UNIQUEMENT après l'approbation humaine.
+      // `finishing-a-development-branch` guide le pattern push + PR. Le prompt
+      // refuse de pousser si les tests ont été skippés/échoués (cf.
+      // createPrPrompt) — double garde avec le gate ci-dessus.
       step({
         name: 'create_pr',
         step_type: { type: 'Agent' },
@@ -660,15 +681,6 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
           'finishing-a-development-branch',
           'verification-before-completion',
         ],
-      }),
-      // Étape 8 — Validation humaine avant le merge. L'humain peut
-      // demander des changements (Goto implement) ou approuver (continue
-      // vers notify). Pas d'auto-merge en v1 — l'humain reste le gatekeeper.
-      step({
-        name: 'ready_gate',
-        step_type: { type: 'Gate' },
-        gate_message: t('wiz.preset.ticketToPr.readyGateMessage'),
-        gate_request_changes_target: 'implement',
       }),
       // Étape 9 — Notification finale (Slack par défaut, à adapter).
       step({
@@ -717,6 +729,7 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     descKey: 'wiz.preset.feasibilityAutopilot.desc',
     primitives: ['JsonData', 'Agent', 'Gate', 'Exec'],
     execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer', 'grep'],
+    requireIsolation: true,
     steps: [
       // Étape 1 — Source du ticket. Comme `ticket-to-pr`, démarre en
       // JsonData fixture, swap en ApiCall par le wizard quand un

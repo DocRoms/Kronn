@@ -804,37 +804,14 @@ pub fn sync_project_mcps_to_disk(
             tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
         }
 
-        // Auto-create MCP context files from registry defaults (if available).
-        // Writes when: (1) the config was synced (command available) OR the
-        // plugin is API-only (nothing to sync to .mcp.json — its capability
-        // surfaces via prompt injection instead); AND (2) the registry
-        // provides a default_context; AND (3) no file exists yet.
-        // This prevents creating context for a registry server (e.g. Go
-        // binary) when the actually synced server is a different variant
-        // (e.g. npm package), while still seeding API plugins like
-        // Chartbeat whose context is equally valuable to the agent.
-        {
-            let registry = crate::core::registry::builtin_registry();
-            let servers_for_kind = crate::db::mcps::list_servers(conn).unwrap_or_default();
-            for config in &configs {
-                let is_api_only = servers_for_kind.iter()
-                    .find(|s| s.id == config.server_id)
-                    .map(|s| matches!(s.transport, crate::models::McpTransport::ApiOnly))
-                    .unwrap_or(false);
-                if !synced_config_ids.contains(&config.id) && !is_api_only {
-                    continue;
-                }
-                let slug = slugify_label(&config.label);
-                if read_mcp_context(&project.path, &slug).is_none() {
-                    if let Some(def) = registry.iter().find(|d| d.id == config.server_id) {
-                        if let Some(ref ctx) = def.default_context {
-                            let _ = write_mcp_context(&project.path, &slug, ctx);
-                            tracing::info!("Created default MCP context for '{}' in {}", config.label, project.path);
-                        }
-                    }
-                }
-            }
-        }
+        // NOTE: per-MCP usage-context files (`<docs>/operations/mcp-servers/<slug>.md`)
+        // are NO LONGER auto-generated here. The plugin's usage knowledge already
+        // reaches Kronn-launched agents via the injected `=== AVAILABLE APIs ===`
+        // block (built from `api_spec`), so materialising the registry
+        // `default_context` to disk was redundant — and the auto-files cluttered
+        // project docs and drifted from the registry. The per-MCP context remains
+        // MANUALLY editable via the McpPage drawer (read/write_mcp_context API);
+        // we just stop seeding it automatically.
     }
 
     // ── Native skill & profile files (SKILL.md, agent files) ──
@@ -2202,57 +2179,6 @@ pub fn slugify_label(label: &str) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-")
-}
-
-/// Generate a default context file for an MCP.
-fn default_mcp_context(label: &str, server_description: &str) -> String {
-    format!(
-        r#"# {label} — Usage Context
-
-> Instructions for AI agents using **{label}** in this project.
-> Edit this file with project-specific rules.
-
-**Server:** {server_description}
-
-## Rules
-
-<!-- Examples:
-- Always use sender address: contact@example.com
-- Use the "bug-report" template for all issues
-- Never modify the production environment
-- Preferred language: French
--->
-"#
-    )
-}
-
-/// Create default MCP context files for all MCPs linked to a project.
-/// Only creates files that don't already exist (never overwrites).
-pub fn sync_mcp_context_files(
-    project_path: &str,
-    mcp_labels: &[(String, String)], // (label, server_description)
-) {
-    let resolved = resolve_host_path(project_path);
-    let ctx_dir = mcp_context_dir(&resolved);
-
-    // Create directory structure if needed
-    if let Err(e) = std::fs::create_dir_all(&ctx_dir) {
-        tracing::warn!("Failed to create MCP context dir {}: {}", ctx_dir.display(), e);
-        return;
-    }
-
-    for (label, description) in mcp_labels {
-        let slug = slugify_label(label);
-        let file = ctx_dir.join(format!("{}.md", slug));
-        if !file.exists() {
-            let content = default_mcp_context(label, description);
-            if let Err(e) = std::fs::write(&file, content) {
-                tracing::warn!("Failed to create MCP context {}: {}", file.display(), e);
-            } else {
-                tracing::info!("Created MCP context file: {}", file.display());
-            }
-        }
-    }
 }
 
 /// Check if a context file content is the default template (not customized).

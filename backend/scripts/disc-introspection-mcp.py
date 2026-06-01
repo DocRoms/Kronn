@@ -361,7 +361,11 @@ TOOLS = [
             "seconds. Returns `{timed_out, messages, "
             "latest_sort_order}`. Pass back `latest_sort_order` as "
             "the next `since_sort_order` to chain calls without "
-            "re-receiving the same messages."
+            "re-receiving the same messages. IMPORTANT: `timed_out=true` "
+            "(no peer activity in the window) is NORMAL in an active "
+            "collaboration — call this tool AGAIN to keep waiting. A timeout "
+            "is NOT end-of-conversation; only stop/`disc_leave()` when the "
+            "task is done or the user says stop."
         ),
         "inputSchema": {
             "type": "object",
@@ -805,6 +809,11 @@ TOOLS = [
             "WITHOUT seeing the credentials. Kronn handles auth (Bearer, "
             "API key in header/query, OAuth, etc.) per the plugin spec "
             "and returns the canonical envelope `{data, status, summary}`.\n\n"
+            "**Reuse first (cheapest)**: before hand-building a call, run "
+            "`qa_list` — if a saved Quick API matches the action, run it via "
+            "`qa_run` (zero token cost on request construction; same shape "
+            "across agents). Only fall through to a fresh `api_call` when no "
+            "QA fits.\n\n"
             "**Discovery first**: call `mcp_list` to find available "
             "plugins. Each entry has a `hint` field — `READY` plugins "
             "are directly callable; `NEEDS_RESEARCH` ones need you to "
@@ -843,7 +852,13 @@ TOOLS = [
             "Returns `{success, data, status, summary, http_status, "
             "error?}`. `data` is what downstream agent reasoning should "
             "consume; `summary` is the one-liner suitable for echoing "
-            "back to the user."
+            "back to the user.\n\n"
+            "**Persist after (close the loop)**: if you just hand-built a "
+            "call the user will likely run again, PROPOSE saving it as a "
+            "Quick API via `qa_create_draft` (PROBE-then-PERSIST) — next "
+            "time it's a `qa_run` at zero construction cost, deagentified, "
+            "and identical across agents. Don't silently rebuild the same "
+            "payload every session."
         ),
         "inputSchema": {
             "type": "object",
@@ -1865,7 +1880,20 @@ def call_disc_wait_for_peer(args):
         params["exclude_agent_type"] = exclude
     qs = urllib.parse.urlencode(params)
     sep = "?" if qs else ""
-    return _unwrap(_http("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
+    result = _unwrap(_http("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
+    # A timed-out wait (no peer activity in the window) is NORMAL in an ongoing
+    # collaboration — but literal agents (notably Codex) otherwise read the empty
+    # result as "conversation over" and STOP after ~60s. Surface an explicit
+    # next-action hint so the agent keeps waiting instead of leaving.
+    if isinstance(result, dict) and result.get("timed_out"):
+        result["hint"] = (
+            "No peer posted during this window. This is NORMAL — the other "
+            "agent may still be thinking. Call disc_wait_for_peer AGAIN to keep "
+            "waiting (pass latest_sort_order as since_sort_order). Do NOT stop "
+            "or disc_leave() just because the wait timed out — only leave when "
+            "the task is done or the user explicitly says stop."
+        )
+    return result
 
 
 def call_disc_load_other(args):
@@ -2696,6 +2724,24 @@ def _handle(req):
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "kronn-internal", "version": "0.1.0"},
+                # One-shot precedence the client surfaces to the model, so the
+                # token-economy ordering doesn't depend on which tool desc it
+                # happens to read. Reuse > construct > persist.
+                "instructions": (
+                    "External API actions — follow this order to avoid burning "
+                    "tokens rebuilding calls that already exist:\n"
+                    "1. REUSE: `qa_list` → if a saved Quick API matches, run it "
+                    "via `qa_run` (zero construction cost, identical across "
+                    "agents).\n"
+                    "2. CONSTRUCT: else `mcp_list` → `api_call` a configured "
+                    "plugin (never re-specify endpoints from memory; never paste "
+                    "credentials — Kronn injects them server-side).\n"
+                    "3. PERSIST: after a hand-built call the user will rerun, "
+                    "propose `qa_create_draft` (PROBE-then-PERSIST) so next time "
+                    "is a cheap `qa_run`.\n"
+                    "Same idea for prompts/workflows: prefer existing "
+                    "`qp_list` / `workflow_list` entries over rebuilding."
+                ),
             },
         }
     if method == "notifications/initialized":

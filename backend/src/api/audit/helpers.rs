@@ -11,7 +11,7 @@ use crate::core::scanner;
 use crate::models::*;
 
 /// 0.8.7 — Short pointer line injected at the top of every prompt that can
-/// mutate a `docs/` file outside the audit's 10-step pipeline (validation,
+/// mutate a `docs/` file outside the audit's 9-step pipeline (validation,
 /// briefing). Replaces the previous 3-language doctrine block (~150 words ×
 /// 3 langs) — the canonical anti-hallu protocol now lives in the project's
 /// `docs/AGENTS.md` § Anti-Hallucination Protocol section (written by audit
@@ -432,7 +432,7 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
 
     // 0.8.7 anti-hallu: prepend the doc-writer discipline reminder so
     // Phase 1 (auto-fix) and Phase 4 (challenge doc) which both mutate
-    // `docs/` files inherit the same sourcing protocol the 10-step audit
+    // `docs/` files inherit the same sourcing protocol the 9-step audit
     // gets via `PROMPT_PREAMBLE`. Without this, the validation pass was
     // structurally outside the anti-hallucination scope.
     let mut prompt = String::with_capacity(base.len() + 512);

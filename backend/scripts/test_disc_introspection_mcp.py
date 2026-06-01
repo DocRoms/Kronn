@@ -1151,9 +1151,25 @@ class ClientInfoAutoDetectTests(unittest.TestCase):
             },
         })
         self.assertEqual(resp["result"]["serverInfo"]["name"], "kronn-internal")
+        # Server-level precedence guidance (reuse QA → construct → persist) so
+        # the token-economy ordering doesn't depend on which tool desc the model
+        # happens to read.
+        instr = resp["result"]["instructions"]
+        for needle in ("qa_list", "qa_run", "qa_create_draft"):
+            self.assertIn(needle, instr)
         # And the side-effect : clientInfo stashed for downstream tools.
         self.assertEqual(self.mod._CLIENT_INFO["name"], "claude-code")
         self.assertEqual(self.mod._CLIENT_INFO["version"], "1.2.3")
+
+    def test_api_call_description_links_the_qa_reuse_loop(self):
+        # api_call is the hub: it must point BACKWARD (reuse a saved QA before
+        # rebuilding) and FORWARD (persist a hand-built call as a QA), so agents
+        # don't reconstruct the same payload every session.
+        tool = next(t for t in self.mod.TOOLS if t["name"] == "api_call")
+        desc = tool["description"]
+        self.assertIn("qa_list", desc)          # reuse first
+        self.assertIn("qa_run", desc)
+        self.assertIn("qa_create_draft", desc)  # persist after
 
     def test_agent_type_for_session_explicit_env_wins_over_inferred(self):
         # When KRONN_AGENT_TYPE is set explicitly (wrapper script, test
@@ -1406,6 +1422,12 @@ class DiscWaitForPeerTests(unittest.TestCase):
         # latest_sort_order echoes the input on timeout so the agent
         # can keep calling without losing its cursor.
         self.assertEqual(result["latest_sort_order"], 7)
+        # A timeout now carries an explicit next-action hint so literal agents
+        # (notably Codex) keep waiting instead of treating it as end-of-convo
+        # and stopping after ~60s.
+        self.assertIn("hint", result)
+        self.assertIn("again", result["hint"].lower())
+        self.assertIn("disc_wait_for_peer", result["hint"])
 
     def test_unbound_disc_raises_before_http(self):
         with mock.patch.dict(os.environ, {

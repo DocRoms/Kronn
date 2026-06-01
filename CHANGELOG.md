@@ -26,6 +26,47 @@ Agents can propose **durable learnings** (conventions, preferences, facts, pitfa
 
 ## [0.8.7] - 2026-05-28
 
+### Added — Audit depth: deterministic detectors + binding disposition (2026-06-04)
+
+The Full audit was "partially complete" — it always found the deterministic infra/CI baseline but under-explored code-level dimensions (a single LLM pass with no ground-truth anchor). On DOCROMS_WEB this surfaced 9 TDs where a clean-slate audit finds 15. Fix = anchor the LLM pass with deterministic source scans, then make them binding.
+
+- **`core::audit_detectors`** (new) — deterministic source scans complementary to `core::anti_halluc` (which lints output; these scan source). 4 Phase-1 detectors: `zero-tests` (sources ≥5 & 0 tests), `blank-noopener` (`target="_blank"` without `rel=noopener`), `csp-unsafe` (`unsafe-inline`/`unsafe-eval`), `missing-community-files` (README/SECURITY). Test-path fixtures skipped (`is_test_path`). `run_detectors` → `render_signals_block` injected into the Step-8 (tech-debt) prompt.
+- **Detector disposition gate (`validation::check_detector_disposition`)** — every injected detector signal MUST be addressed somewhere in the Step-8 output (a TD, a baseline note, or a matrix citation), else the step is incomplete and re-runs. Orphan-safe: only `TD-*.md` files still referenced in the freshly-written index count toward disposition (via `parse_index_td_ids`), so a stale historical TD can't mask an undisposed signal on an in-place re-audit. The disposition warning is persisted into `audit_run_steps`.
+- **Reconciliation `DeltaKind::Carried`** — a prior whose detail file is unchanged but whose ID is still listed in the new index is a healthy re-emission, not a `Missed` candidate. Fixes "Missed: N" reports for priors that were actually carried over.
+- **Re-audit dedup (Option C)** — when `docs/tech-debt/` already holds entries, a `render_known_debt_block` of prior `(id, severity, title)` digests is injected into Step 8 with a fresh-full-scan contract: keep every still-valid prior listed in the index (Carried-safe), don't duplicate detail files, emit NEW TDs for anything not on the list. "Zero new entries" is acceptable only when the coverage matrix documents a fresh scan and no detector signal is undisposed. Validated in-place on DOCROMS_WEB (run Completed, 15 re-emitted / 0 Missed, fresh-scan documented).
+
+### Fixed — Multi-agent discussions: no more double-responder (2026-06-08)
+
+When an MCP agent was connected to a discussion (joined via `disc_join`), Kronn still auto-spawned its own local runner on a human message → BOTH replied to the same turn (reproduced live on disc ca495847: Kronn's native reply + the CLI peer's MCP reply to one user turn).
+
+- **`send_message` defers to connected agents** — if ≥1 live participant is present, Kronn skips its local runner (the user message is already persisted + broadcast, so the connected agent answers) and emits an informational `skipped_live_agents` SSE event. Scope: only the implicit auto-response; `run_agent` (`/run`) stays unguarded as the manual override.
+- **Session liveness (migration 064)** — `last_seen` column + `touch_session_by_agent` heartbeat bumped on `disc_wait_for_peer` / `disc_append`.
+- **Presence-sticky gate (migration 065)** — `count_live_participants` counts any `status='active'` session with NO per-message staleness window. An earlier 300s window wrongly judged idle turn-based CLI peers as dead (they idle minutes between human turns) → the double-responder returned. Crashed-peer safety is out-of-band: `reap_abandoned_sessions` retires sessions idle > 24h at boot (migration 065 cleans the existing backlog), and `/run` forces a reply when needed.
+
+### Fixed — workflow reliability, multi-agent, git panel, UI (2026-06-03)
+
+- **Cross-agent rooms: Codex no longer stops after ~60s.** A timed-out `disc_wait_for_peer` (no peer activity) now returns an explicit "keep waiting" hint and the orchestration loop spells out that a timeout is normal; default wait raised 60 → 90 s.
+- **Workflow runs never push from the main checkout.** Code-pushing presets (Ticket→PR, AutoDev, PR-Gate, Feasibility) set `workspace_config.require_isolation`; a run aborts if its git worktree can't be created instead of silently falling back to the developer's working tree.
+- **`Ticket → PR` autopilot hardened** (adversarial review): the human Gate runs BEFORE the push/PR (was after, where it only guarded the notification); a SKIPPED `run_tests` is surfaced at the gate and blocks `create_pr`; the review step inspects the real git diff and its verdict is mandatory (doubt → `NEEDS_CHANGES`); `create_pr` aborts on failed/skipped tests, missing `gh auth`, a default-branch HEAD, or an already-open PR. Gate "request changes" feedback now reaches the re-run (`state.last_human_feedback`).
+- **WebSocket ban-storm fixed** behind nginx/desktop: client IP resolves via `X-Real-IP` / `X-Forwarded-For` + a trusted private-range check, so the gateway IP is no longer banned.
+- **Queued messages no longer stick** after an agent finishes (orphaned SSE controller cleared on WS finish/recovery); batch child discussions show the "agent running" spinner.
+- **Git panel**: committed-on-branch files are now clickable and show their committed diff (`<default>...HEAD`) instead of an empty working-tree diff; diff syntax colors are legible in light/sakura themes; the discussions sidebar no longer shows a spurious horizontal scrollbar.
+- **Composer**: pasting multi-line text while the caret is on a `>` blockquote keeps every line quoted.
+- **Workflow card** surfaces a "needs config" badge when a step is unwired (`misconfigured_step_count`).
+- **`ai/ → docs/` migration now rewrites `README.md` too** (it was skipped, leaving a stale `ai/index.md` AI-entry pointer in the most common place).
+- **GitHub plugin**: added the write endpoints (create/update PRs, issues, comments, labels) so agents can open PRs via `api_call`.
+
+### Removed
+
+- **Auto-generated per-MCP usage-context docs.** `docs/operations/mcp-servers/<slug>.md` are no longer materialised on MCP install and the audit's per-MCP step is dropped (the audit is now a **9-step** pipeline). Agents already get MCP capabilities via the injected `=== AVAILABLE APIs ===` block (`api_spec`); per-MCP context stays **manually** editable from the McpPage drawer.
+
+### Changed — docs, infra, prompts (2026-06-03)
+
+- **docker-compose**: optional bind-mount fallbacks (npm/cargo/rustup/bun/extra bin dirs, SSH agent socket) use an empty committed directory instead of `/dev/null` — `/dev/null` crashed container init on WSL2 + Docker Desktop.
+- **`coding-rules` template + Kronn's own docs**: added a "comment sparingly — explain *why*, not *what*" rule (propagates to newly bootstrapped projects).
+- **Triage QP** (`Analyse de ticket Jira`): the exact `ia_framed` audit-comment format + write sequence now live in the QP itself — on Claude Code skills load natively/on-demand, so output-contract formats must be in-prompt, not buried in a skill.
+- **kronn-internal MCP — token-economy precedence wired at the hub.** `api_call` now points BACKWARD (*reuse first*: `qa_list` → `qa_run` a matching saved Quick API at zero construction cost) and FORWARD (*persist after*: propose `qa_create_draft` for a recurring hand-built call), and the server `initialize` exposes an `instructions` precedence chain (reuse → construct → persist). Stops agents rebuilding the same API payload every session.
+
 ### Changed — Anti-hallucination: closed the web-project extension gap (.twig / .xlf) via a 4-conversation linguistic re-pass
 
 A deep, multi-agent forensic re-pass (one linguistic expert per persona → reconciliation against the machine's real verdict → consolidated synthesis) read **every message** of the 4 persona conversations on the Symfony project DOCROMS_WEB and surfaced a single dominant root cause the earlier sampling missed.

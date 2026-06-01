@@ -153,7 +153,17 @@ pub async fn execute_step(
     // Auto-inject on_result signal instructions into the prompt
     let valid_rules: Vec<_> = step.on_result.iter().filter(|r| !r.contains.is_empty()).collect();
     if !valid_rules.is_empty() {
-        prompt.push_str("\n\n---\nIMPORTANT — After your response, you MUST end with a signal line.\n");
+        // Reconcile with the Structured/TypedSchema envelope instruction, which
+        // says the `---STEP_OUTPUT---` block "must be the LAST thing". A step
+        // that is BOTH structured AND branches on a signal would otherwise get
+        // two contradictory "must be last" rules. Spell out the exact order:
+        // envelope first, then the signal as the only trailing line.
+        let structured = !matches!(step.output_format, crate::models::StepOutputFormat::FreeText);
+        if structured {
+            prompt.push_str("\n\n---\nIMPORTANT — output order: FIRST emit the ---STEP_OUTPUT--- envelope exactly as described above, THEN a single signal line as the VERY LAST line (the signal line is the only thing allowed after the envelope).\n");
+        } else {
+            prompt.push_str("\n\n---\nIMPORTANT — After your response, you MUST end with a signal line.\n");
+        }
         prompt.push_str("The signal MUST be the very last line of your response, in this exact format:\n\n");
         for rule in &valid_rules {
             let action_label = match &rule.action {

@@ -8,6 +8,7 @@
 - Follow existing naming in adjacent code. Avoid generic names (`Helper`, `Utils`).
 - No CSS framework. Styling via CSS tokens + utility classes + component classes (`src/styles/`). Inline `style={{}}` only for truly dynamic values (computed colors, transforms, animation).
 - No emojis in code unless user explicitly requests them.
+- **Comment sparingly — explain *why*, never *what*.** A comment earns its place only if it adds what the code can't say: a non-obvious rationale, a real gotcha, or a ticket ref for a *surprising* decision. Do NOT narrate what the code does, restate the line above, or leave "this is now handled by X — see Y" pointers the code/ticket already makes obvious. Match the file's existing comment density; a clear name beats a paragraph.
 
 ## Rust (backend)
 

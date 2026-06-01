@@ -50,12 +50,22 @@ pub struct TdSnapshot {
 /// Outcome of the post-audit comparison for a single pre-existing TD.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaKind {
-    /// File present, content identical to snapshot — agent didn't
-    /// re-emit. Candidate for classification.
+    /// File present, content identical to snapshot, AND the TD id is no
+    /// longer referenced in the freshly-written index
+    /// (`inconsistencies-tech-debt.md`). The agent neither refreshed the
+    /// detail file nor re-listed the finding — a genuine reconciliation
+    /// candidate (Fixed / Stale / Missed / Uncertain).
     Unchanged,
     /// File present, content differs — agent refreshed in place.
     /// Healthy outcome of the priors rule (§ C of Step 9 prompt).
     Updated,
+    /// File present, content identical to snapshot, BUT the TD id is
+    /// still referenced in the freshly-written index. The agent kept the
+    /// prior verbatim and re-listed it — a healthy carried-over
+    /// re-emission, NOT a missed finding. (Fix 2026-06-03: previously
+    /// these collapsed to `Unchanged` → classified `Missed`, producing
+    /// "Missed: N" reports for priors that were actually re-emitted.)
+    Carried,
     /// File gone — agent deleted it (or it was moved). Most likely
     /// "fixed since last audit".
     Deleted,
@@ -143,11 +153,230 @@ pub fn snapshot_tech_debt_dir(docs_dir: &Path) -> Vec<TdSnapshot> {
     out
 }
 
+/// chantier 4 (2026-06-04) — a human-readable digest of ONE pre-existing
+/// TD, used to build the "known debt" dedup-list injected into Step 8 on a
+/// re-audit (Option C: full re-scan + dedup). Distinct from [`TdSnapshot`],
+/// which is hash-only — here the agent needs `id + severity + title` to
+/// decide "is this finding already on the list?", not a content hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PriorDigest {
+    pub id: String,
+    /// Capitalised severity ("Critical"/"High"/"Medium"/"Low") or "" if
+    /// the detail file had no parseable `**Severity**:` line.
+    pub severity: String,
+    /// First `# ` heading, with any leading `TD-...:` id prefix stripped.
+    /// Falls back to the id when the file has no heading.
+    pub title: String,
+}
+
+/// Read every TD detail file in `<docs>/tech-debt/` into a [`PriorDigest`].
+/// Mirrors [`snapshot_tech_debt_dir`]'s dir resolution + scaffolding skip,
+/// but parses id/severity/title instead of hashing. Empty Vec on a fresh
+/// project (no folder yet) — the caller treats empty as "first audit, no
+/// dedup list to inject".
+pub fn digest_prior_tech_debt(docs_dir: &Path) -> Vec<PriorDigest> {
+    let td_dir = docs_dir.join("tech-debt");
+    if !td_dir.is_dir() {
+        return Vec::new();
+    }
+    let entries = match std::fs::read_dir(&td_dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        // Only `TD-*.md` detail files (Codex review 2026-06-04): a future
+        // hand-written note dropped in tech-debt/ shouldn't be injected as
+        // "known debt". `is_scaffolding` already covers README/TEMPLATE/_*.
+        if !name.starts_with("TD-") || !name.ends_with(".md") || is_scaffolding(name) {
+            continue;
+        }
+        let id = name.trim_end_matches(".md").to_string();
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        out.push(digest_one(&id, &content));
+    }
+    // Stable order: highest severity first, then id — so the injected list
+    // reads Critical→Low and is deterministic across runs (tests + diffs).
+    out.sort_by(|a, b| {
+        severity_rank(&a.severity)
+            .cmp(&severity_rank(&b.severity))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    out
+}
+
+/// Parse one TD detail file's content into a digest. Separate fn so it's
+/// unit-testable without touching the filesystem.
+fn digest_one(id: &str, content: &str) -> PriorDigest {
+    let severity = content
+        .lines()
+        .find(|l| {
+            let lc = l.to_ascii_lowercase();
+            lc.contains("**severity**:") || lc.trim_start().starts_with("severity:")
+        })
+        .and_then(|l| l.split(':').nth(1))
+        .map(|s| s.trim().trim_start_matches('*').trim().to_ascii_lowercase())
+        .map(|s| capitalize_severity(&s))
+        .unwrap_or_default();
+
+    let title = content
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| l.starts_with("# "))
+        .map(|l| strip_id_prefix(l.trim_start_matches('#').trim(), id))
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| id.to_string());
+
+    PriorDigest { id: id.to_string(), severity, title }
+}
+
+/// `"# TD-20260603-foo: Real title"` → `"Real title"`. Leaves a heading
+/// with no id prefix untouched.
+fn strip_id_prefix(heading: &str, id: &str) -> String {
+    let h = heading.trim();
+    // Strip a leading "<id>:" or "<id> —" / "<id> -" prefix.
+    if let Some(rest) = h.strip_prefix(id) {
+        return rest
+            .trim_start()
+            .trim_start_matches([':', '—', '-'])
+            .trim()
+            .to_string();
+    }
+    h.to_string()
+}
+
+fn capitalize_severity(s: &str) -> String {
+    match s {
+        x if x.starts_with("critical") => "Critical".to_string(),
+        x if x.starts_with("high") => "High".to_string(),
+        x if x.starts_with("medium") => "Medium".to_string(),
+        x if x.starts_with("low") => "Low".to_string(),
+        _ => String::new(),
+    }
+}
+
+fn severity_rank(s: &str) -> u8 {
+    match s {
+        "Critical" => 0,
+        "High" => 1,
+        "Medium" => 2,
+        "Low" => 3,
+        _ => 4,
+    }
+}
+
+/// Render the RE-AUDIT MODE block injected into Step 8 when priors exist
+/// (chantier 4 / Option C). Flips the implicit in-place behaviour — where
+/// the agent SEES the existing entries in the target file and recopies
+/// them (Carried + anti-repetition) — into an explicit "fresh full pass,
+/// these are just a dedup list" contract. Returns "" when there are no
+/// priors (caller guards on this, but defensive).
+pub fn render_known_debt_block(priors: &[PriorDigest]) -> String {
+    if priors.is_empty() {
+        return String::new();
+    }
+    let mut block = String::new();
+    block.push_str("## RE-AUDIT MODE — fresh full pass, dedup against known debt\n\n");
+    block.push_str(&format!(
+        "This project was audited before — `docs/tech-debt/` already holds {} entr{} (listed below). \
+**This list is NOT a reason to skip scanning.** Re-run the COMPLETE dimensional pass (all dimensions) \
+from the SOURCE CODE, exactly as if auditing from scratch.\n\n",
+        priors.len(),
+        if priors.len() == 1 { "y" } else { "ies" }
+    ));
+    block.push_str(
+        "How to handle the entries below:\n\
+- **KEEP listing every still-valid known TD id in `inconsistencies-tech-debt.md` (the index)** so it is carried over. Do NOT silently drop a prior from the index — that would mark a still-real debt as fixed/missed when it isn't.\n\
+- Do NOT create a duplicate `TD-*` detail file for something already on the list, and do NOT rewrite a prior's detail body unless its evidence actually changed in the code.\n\
+- For genuinely NEW debt that is **NOT** on the list → create a NEW `TD-*` entry.\n\
+- If a prior is genuinely resolved/fixed in the current code, you MAY drop it — but only as an explicit, justified reconciliation outcome, never as a side effect of \"not re-emitting\".\n\n\
+The whole point of a re-audit is to find what the LAST pass MISSED. \
+Adding **zero** new entries is acceptable ONLY if the dimension-coverage matrix documents a fresh full scan of every dimension AND no detector signal is left undisposed. \
+Otherwise this step is INCOMPLETE — it means you re-read the existing files instead of re-scanning the code.\n\n",
+    );
+    block.push_str("### Known debt (id — severity — title) — carry these in the index, don't duplicate\n");
+    for p in priors {
+        let sev = if p.severity.is_empty() { "?" } else { &p.severity };
+        block.push_str(&format!("- `{}` — {} — {}\n", p.id, sev, p.title));
+    }
+    block
+}
+
+/// Extract the set of `TD-<date>-<slug>` ids still referenced in the
+/// freshly-written index (`inconsistencies-tech-debt.md`). A finding is
+/// "still alive" if its id appears anywhere in the index — the
+/// `## Current list` table, the dimension-coverage evidence cells, the
+/// baseline checklist — so a prior re-listed in ANY of those is treated
+/// as re-emitted, not missed.
+///
+/// Pattern: `TD-` followed by 8 digits, `-`, then a lowercase-kebab
+/// slug. Matches the file-stem convention used everywhere else.
+pub fn parse_index_td_ids(index_content: &str) -> std::collections::HashSet<String> {
+    let mut ids = std::collections::HashSet::new();
+    let bytes = index_content.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = index_content[i..].find("TD-") {
+        let start = i + rel;
+        // Scan the id token: TD- then [A-Za-z0-9-] run. We validate the
+        // `<8 digits>-<slug>` shape afterwards.
+        let mut end = start + 3;
+        while end < bytes.len() {
+            let c = bytes[end];
+            if c.is_ascii_alphanumeric() || c == b'-' {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        let token = &index_content[start..end];
+        // Trim a trailing `-` (e.g. matched at a markdown boundary).
+        let token = token.trim_end_matches('-');
+        if is_valid_td_id(token) {
+            ids.insert(token.to_string());
+        }
+        i = end.max(start + 3);
+    }
+    ids
+}
+
+/// `TD-YYYYMMDD-slug` shape check: `TD-`, exactly 8 digits, `-`, then a
+/// non-empty slug. Keeps `parse_index_td_ids` from grabbing prose like
+/// `TD-list` or `TD-` headers.
+fn is_valid_td_id(token: &str) -> bool {
+    let Some(rest) = token.strip_prefix("TD-") else { return false };
+    let mut parts = rest.splitn(2, '-');
+    let date = parts.next().unwrap_or("");
+    let slug = parts.next().unwrap_or("");
+    date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) && !slug.is_empty()
+}
+
 /// Compute the delta between the pre-audit snapshot and the post-audit
 /// state. Returns one entry per snapshot TD (so we know what to report
 /// on); brand-new TDs created by this audit are NOT included — they're
 /// the audit's normal output, not reconciliation candidates.
+///
+/// Back-compat shim (empty index set): an unchanged file with no index
+/// awareness is reported as `Unchanged`. Prefer
+/// [`compute_delta_with_index`] in the audit pipeline so a re-listed
+/// prior is correctly `Carried`, not a `Missed` candidate.
 pub fn compute_delta(snapshot: &[TdSnapshot]) -> Vec<(TdSnapshot, DeltaKind)> {
+    compute_delta_with_index(snapshot, &std::collections::HashSet::new())
+}
+
+/// Index-aware delta. `still_listed` is the set of TD ids still
+/// referenced in the freshly-written index (see [`parse_index_td_ids`]).
+/// A byte-identical detail file whose id is still listed is `Carried`
+/// (healthy re-emission); only a byte-identical file whose id has
+/// DISAPPEARED from the index is an `Unchanged` reconciliation candidate.
+pub fn compute_delta_with_index(
+    snapshot: &[TdSnapshot],
+    still_listed: &std::collections::HashSet<String>,
+) -> Vec<(TdSnapshot, DeltaKind)> {
     snapshot
         .iter()
         .map(|snap| {
@@ -155,7 +384,11 @@ pub fn compute_delta(snapshot: &[TdSnapshot]) -> Vec<(TdSnapshot, DeltaKind)> {
                 Err(_) => DeltaKind::Deleted,
                 Ok(content) => {
                     if sha256_hex(&content) == snap.content_hash {
-                        DeltaKind::Unchanged
+                        if still_listed.contains(&snap.id) {
+                            DeltaKind::Carried
+                        } else {
+                            DeltaKind::Unchanged
+                        }
                     } else {
                         DeltaKind::Updated
                     }
@@ -198,6 +431,18 @@ where
                     delta: delta.clone(),
                     classification: Classification::Uncertain, // unused for Updated
                     reason: "Refreshed by this audit (priors rule).".into(),
+                });
+            }
+            DeltaKind::Carried => {
+                // Healthy outcome — detail file kept verbatim but the id is
+                // still listed in the new index, so the finding was re-emitted
+                // (carried over), not missed. No source_check: presence in the
+                // index is the re-emission signal.
+                out.push(ReconciliationEntry {
+                    id: snap.id.clone(),
+                    delta: delta.clone(),
+                    classification: Classification::Uncertain, // unused for Carried
+                    reason: "Carried over — still listed in the index, detail unchanged.".into(),
                 });
             }
             DeltaKind::Deleted => {
@@ -317,10 +562,13 @@ pub fn render_report(
     audit_kind: &str,
 ) -> String {
     let mut buckets: HashMap<&'static str, Vec<&ReconciliationEntry>> = HashMap::new();
-    let mut updated = Vec::new();
+    let mut reused = Vec::new();
     for e in entries {
-        if e.delta == DeltaKind::Updated {
-            updated.push(e);
+        // `Updated` (refreshed) and `Carried` (re-listed verbatim) are both
+        // healthy re-emissions — group them as "priors reused", never as
+        // reconciliation candidates.
+        if e.delta == DeltaKind::Updated || e.delta == DeltaKind::Carried {
+            reused.push(e);
         } else {
             buckets.entry(e.classification.label()).or_default().push(e);
         }
@@ -337,7 +585,7 @@ audit but was NOT re-emitted by Step 9, this report classifies its likely state 
     // Summary table at the top so the user sees the headlines first.
     let total_candidates: usize = buckets.values().map(|v| v.len()).sum();
     out.push_str("## Summary\n\n");
-    out.push_str(&format!("- **{}** updated in place (priors reused — healthy)\n", updated.len()));
+    out.push_str(&format!("- **{}** re-emitted (priors reused — healthy: refreshed or carried over)\n", reused.len()));
     out.push_str(&format!("- **{total_candidates}** reconciliation candidates :\n"));
     for label in &["Fixed", "Stale", "Missed", "Uncertain"] {
         let count = buckets.get(*label).map(|v| v.len()).unwrap_or(0);
@@ -347,9 +595,9 @@ audit but was NOT re-emitted by Step 9, this report classifies its likely state 
     }
     out.push('\n');
 
-    if !updated.is_empty() {
-        out.push_str("## ✓ Updated in place (priors reused)\n\n");
-        for e in &updated {
+    if !reused.is_empty() {
+        out.push_str("## ✓ Re-emitted (priors reused)\n\n");
+        for e in &reused {
             out.push_str(&format!("- `{}` — {}\n", e.id, e.reason));
         }
         out.push('\n');
@@ -676,7 +924,7 @@ also not interesting (this `path/that:1` should be ignored)
         ];
         let report = render_report(&entries, "2026-05-13", "Full");
         assert!(report.contains("Reconciliation report — 2026-05-13 Full"));
-        assert!(report.contains("**1** updated in place"));
+        assert!(report.contains("**1** re-emitted"));
         assert!(report.contains("**2** reconciliation candidates"));
         assert!(report.contains("## ✅ Fixed"));
         assert!(report.contains("## ⚠️ Missed"));
@@ -872,6 +1120,102 @@ also not interesting (this `path/that:1` should be ignored)
         assert_eq!(snaps[0].id, "TD-real");
     }
 
+    // ── Index-aware reconciliation (chantier 2, 2026-06-03) ─────────────
+    // Regression: a prior re-listed in the new index but kept byte-for-byte
+    // (Step 8 anti-repetition preserves correct detail files) used to be
+    // classified `Missed`. It must now be `Carried` (healthy re-emission).
+
+    #[test]
+    fn parse_index_td_ids_extracts_ids_from_current_list_and_evidence() {
+        let index = "\
+## Current list
+
+| ID | Problem | Area | Severity |
+|----|---------|------|----------|
+| TD-20260603-here-maps-apikey-committed | secret | Security | High |
+| TD-20260603-deploy-no-quality-gate | gate | CI | Medium |
+
+## Dimension coverage
+
+| Security | findings | committed key → TD-20260603-here-maps-apikey-committed |
+";
+        let ids = parse_index_td_ids(index);
+        assert_eq!(ids.len(), 2, "two distinct ids despite one being cited twice");
+        assert!(ids.contains("TD-20260603-here-maps-apikey-committed"));
+        assert!(ids.contains("TD-20260603-deploy-no-quality-gate"));
+    }
+
+    #[test]
+    fn parse_index_td_ids_rejects_malformed_tokens() {
+        // `TD-list`, `TD-` header, and an 8-digit-but-no-slug token must be ignored.
+        let index = "Some prose about TD-list and a bare TD- and TD-20260603- with no slug.";
+        let ids = parse_index_td_ids(index);
+        assert!(ids.is_empty(), "got {ids:?}");
+    }
+
+    #[test]
+    fn compute_delta_with_index_marks_relisted_prior_as_carried() {
+        let tmp = tempfile::tempdir().unwrap();
+        let td = tmp.path().join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        let id = "TD-20260603-still-here";
+        std::fs::write(td.join(format!("{id}.md")), "verbatim body").unwrap();
+        let snap = snapshot_tech_debt_dir(tmp.path());
+        assert_eq!(snap.len(), 1);
+
+        // File untouched, but the id is still listed in the index.
+        let mut listed = std::collections::HashSet::new();
+        listed.insert(id.to_string());
+        let deltas = compute_delta_with_index(&snap, &listed);
+        assert_eq!(deltas[0].1, DeltaKind::Carried, "re-listed verbatim prior must be Carried, not Unchanged");
+
+        // Same file, but the id has dropped from the index → genuine candidate.
+        let empty = std::collections::HashSet::new();
+        let deltas = compute_delta_with_index(&snap, &empty);
+        assert_eq!(deltas[0].1, DeltaKind::Unchanged, "id absent from index → Unchanged candidate");
+    }
+
+    #[test]
+    fn classify_carried_is_healthy_not_a_candidate() {
+        let snap = mk_snap("TD-G", "abc", 5);
+        let deltas = vec![(snap, DeltaKind::Carried)];
+        let entries = classify(&deltas, Utc::now(), 90, |_| {
+            panic!("source_check must not run on Carried entries")
+        });
+        assert_eq!(entries[0].delta, DeltaKind::Carried);
+        assert!(entries[0].reason.to_lowercase().contains("carried"));
+    }
+
+    #[test]
+    fn docroms_scenario_relisted_priors_are_reused_not_missed() {
+        // End-to-end of the 2026-06-03 bug: 3 priors, all kept verbatim by
+        // Step 8 AND all re-listed in the index. Old behavior = "Missed: 3";
+        // fixed behavior = "3 re-emitted, 0 candidates".
+        let tmp = tempfile::tempdir().unwrap();
+        let td = tmp.path().join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        let ids = ["TD-20260603-a", "TD-20260603-b", "TD-20260603-c"];
+        for id in ids {
+            std::fs::write(td.join(format!("{id}.md")), format!("body of {id}")).unwrap();
+        }
+        let snap = snapshot_tech_debt_dir(tmp.path());
+
+        let index = format!(
+            "## Current list\n\n| {} | x | y | Low |\n| {} | x | y | Low |\n| {} | x | y | Low |\n",
+            ids[0], ids[1], ids[2]
+        );
+        let listed = parse_index_td_ids(&index);
+        let deltas = compute_delta_with_index(&snap, &listed);
+        let entries = classify(&deltas, Utc::now(), 90, |_| Some(true)); // signature present
+        let report = render_report(&entries, "2026-06-03", "Full");
+
+        assert!(report.contains("**3** re-emitted"), "report: {report}");
+        // The word "Missed" appears in the heuristics footer; assert no
+        // Missed *section* (no finding bucketed as Missed).
+        assert!(!report.contains("## ⚠️ Missed"), "no finding should be Missed:\n{report}");
+        assert!(report.contains("**0** reconciliation candidates"), "report: {report}");
+    }
+
     #[test]
     fn snapshot_hashes_content_so_identical_files_share_hash() {
         let tmp = tempfile::tempdir().unwrap();
@@ -882,5 +1226,84 @@ also not interesting (this `path/that:1` should be ignored)
         let snaps = snapshot_tech_debt_dir(tmp.path());
         assert_eq!(snaps.len(), 2);
         assert_eq!(snaps[0].content_hash, snaps[1].content_hash);
+    }
+
+    // ─── chantier 4 (2026-06-04) — re-audit dedup list ──────────────────
+
+    #[test]
+    fn digest_one_parses_severity_and_strips_id_prefix() {
+        let body = "# TD-20260603-zero-tests: No automated tests\n\n**Severity**: High\n\nbody";
+        let d = digest_one("TD-20260603-zero-tests", body);
+        assert_eq!(d.id, "TD-20260603-zero-tests");
+        assert_eq!(d.severity, "High");
+        assert_eq!(d.title, "No automated tests");
+    }
+
+    #[test]
+    fn digest_one_falls_back_to_id_when_no_heading_and_blank_severity_when_absent() {
+        let d = digest_one("TD-20260603-foo", "no heading, no severity line here");
+        assert_eq!(d.title, "TD-20260603-foo");
+        assert_eq!(d.severity, "");
+    }
+
+    #[test]
+    fn digest_one_handles_dash_id_separator_and_lowercase_severity() {
+        let body = "# TD-20260603-bar — CSP relaxed\nseverity: critical\n";
+        let d = digest_one("TD-20260603-bar", body);
+        assert_eq!(d.title, "CSP relaxed");
+        assert_eq!(d.severity, "Critical");
+    }
+
+    #[test]
+    fn digest_prior_tech_debt_skips_scaffolding_and_sorts_by_severity() {
+        let tmp = tempfile::tempdir().unwrap();
+        let td = tmp.path().join("docs").join("tech-debt");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("TD-20260101-low.md"), "# Low thing\n**Severity**: Low\n").unwrap();
+        std::fs::write(td.join("TD-20260101-crit.md"), "# Crit thing\n**Severity**: Critical\n").unwrap();
+        // scaffolding must be skipped
+        std::fs::write(td.join("README.md"), "# readme").unwrap();
+        std::fs::write(td.join("_reconciliation-20260101.md"), "x").unwrap();
+        std::fs::write(td.join("TEMPLATE.md"), "# template").unwrap();
+
+        let digests = digest_prior_tech_debt(&tmp.path().join("docs"));
+        assert_eq!(digests.len(), 2, "scaffolding skipped");
+        // Critical sorts before Low.
+        assert_eq!(digests[0].severity, "Critical");
+        assert_eq!(digests[1].severity, "Low");
+    }
+
+    #[test]
+    fn digest_prior_tech_debt_empty_for_fresh_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(digest_prior_tech_debt(&tmp.path().join("docs")).is_empty());
+    }
+
+    #[test]
+    fn render_known_debt_block_lists_priors_and_states_zero_new_is_failure() {
+        let priors = vec![
+            PriorDigest { id: "TD-20260603-csp".into(), severity: "Critical".into(), title: "CSP relaxed".into() },
+            PriorDigest { id: "TD-20260603-blank".into(), severity: "Medium".into(), title: "target=_blank".into() },
+        ];
+        let block = render_known_debt_block(&priors);
+        assert!(block.contains("RE-AUDIT MODE"));
+        // Soft "zero new" pressure: incomplete UNLESS matrix + detectors
+        // justify it (Codex finding 2 — no hallucination incentive).
+        assert!(block.contains("zero"));
+        assert!(block.contains("INCOMPLETE"));
+        // Carried-safe wording (Codex finding 1): priors MUST stay in the
+        // index, only duplication/rewrite is forbidden.
+        assert!(block.contains("KEEP listing"), "priors must stay in the index = carried");
+        assert!(block.contains("Do NOT silently drop"));
+        assert!(block.contains("duplicate"));
+        assert!(!block.contains("do not re-emit these"), "old carried-hostile wording must be gone");
+        assert!(block.contains("TD-20260603-csp"));
+        assert!(block.contains("CSP relaxed"));
+        assert!(block.contains("TD-20260603-blank"));
+    }
+
+    #[test]
+    fn render_known_debt_block_empty_priors_is_empty_string() {
+        assert_eq!(render_known_debt_block(&[]), "");
     }
 }

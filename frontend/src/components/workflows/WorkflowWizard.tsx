@@ -264,6 +264,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // by default = Exec disabled. Editable in the Config tab; the step
   // form's command dropdown is filled from this list.
   const [execAllowlist, setExecAllowlist] = useState<string[]>(editWorkflow?.exec_allowlist ?? []);
+  // #8 — code-pushing workflows abort if their git worktree can't be created
+  // (no silent main-tree fallback). Carried from the preset; persisted in
+  // workspace_config.require_isolation.
+  const [requireIsolation, setRequireIsolation] = useState<boolean>(editWorkflow?.workspace_config?.require_isolation ?? false);
   // 0.6.0 UX pass — workflow-level launch variables (mirrors QP variables).
   // When the user clicks "Lancer" with trigger=Manual + non-empty list,
   // a form asks for one value per variable before the run starts.
@@ -375,6 +379,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     setSteps(transformedSteps);
     if (preset.onFailure) setOnFailureSteps(preset.onFailure);
     if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
+    setRequireIsolation(!!preset.requireIsolation);
     if (preset.variables) setWfVariables(preset.variables);
     if (initialProjectId && projects.some(p => p.id === initialProjectId)) {
       setProjectId(initialProjectId);
@@ -561,6 +566,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         setSteps(p.steps);
         if (p.onFailure) setOnFailureSteps(p.onFailure);
         if (p.execAllowlist) setExecAllowlist(p.execAllowlist);
+        setRequireIsolation(!!p.requireIsolation);
         if (p.variables) setWfVariables(p.variables);
         setWizardMode('advanced');
         setWizardStep(2);
@@ -751,14 +757,17 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
   const buildWorkspaceConfig = (): WorkspaceConfig | null => {
     const hasHooks = wsHookAfterCreate || wsHookBeforeRun || wsHookAfterRun || wsHookBeforeRemove;
-    if (!hasHooks) return null;
+    // Emit a config when there are hooks OR isolation is required — otherwise a
+    // code-pushing preset's require_isolation would be dropped (null config).
+    if (!hasHooks && !requireIsolation) return null;
     return {
       hooks: {
         after_create: wsHookAfterCreate || null,
         before_run: wsHookBeforeRun || null,
         after_run: wsHookAfterRun || null,
         before_remove: wsHookBeforeRemove || null,
-      }
+      },
+      require_isolation: requireIsolation,
     };
   };
 

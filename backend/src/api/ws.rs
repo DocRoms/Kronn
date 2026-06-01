@@ -4,6 +4,7 @@ use axum::{
         ws::{Message, WebSocket},
         State, WebSocketUpgrade,
     },
+    http::HeaderMap,
     response::IntoResponse,
     Extension,
 };
@@ -202,20 +203,83 @@ pub async fn ws_handler(
     // underlying request extension still lives behind `Extension<…>`, which
     // does implement it, so we extract that instead.
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
+    // Behind the nginx gateway (the docker-compose deployment), the socket
+    // peer is ALWAYS the gateway's container IP — never the real client. The
+    // gateway sets `X-Real-IP` to the true client address; we trust it because
+    // in this topology only the gateway can reach the backend port. Without
+    // this, every browser looks like one non-loopback peer (the gateway), so
+    // the local frontend's empty-invite Presence is treated as brute-force and
+    // bans the gateway IP → ALL clients' WS get rejected (reconnect storm).
+    headers: HeaderMap,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
-    let peer_ip = connect_info
+    let socket_ip = connect_info
         .map(|ext| ext.0.0.ip())
         .unwrap_or_else(|| IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+    let peer_ip = resolve_client_ip(&headers, socket_ip);
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip))
+}
+
+/// Resolve the real client IP for rate-limiting/ban decisions.
+///
+/// Order: `X-Real-IP` (set by the nginx gateway) → first hop of
+/// `X-Forwarded-For` → the socket peer IP. Returns the socket IP when no
+/// proxy header is present or parseable (direct connection, e.g. the desktop
+/// app or tests). Pure + exported so the derivation is unit-tested directly —
+/// the bug it fixes (banning the gateway IP for everyone) had zero coverage
+/// precisely because the handler read `ConnectInfo` only.
+pub(crate) fn resolve_client_ip(headers: &HeaderMap, socket_ip: IpAddr) -> IpAddr {
+    if let Some(real) = headers
+        .get("x-real-ip")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+    {
+        return real;
+    }
+    if let Some(fwd) = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+    {
+        return fwd;
+    }
+    socket_ip
+}
+
+/// Is `ip` a TRUSTED client — i.e. the local Kronn UI or a same-host/LAN
+/// caller — for the empty-invite-code shortcut and ban exemption?
+///
+/// Trusted = loopback OR private-range (RFC1918 / IPv6 ULA / link-local).
+/// Rationale: the self-hosted topology is "Kronn behind its own reverse proxy
+/// on a private docker/LAN network". The owner's own browser reaches the
+/// backend through that private network, so its source IP is private, never
+/// loopback. Real cross-internet peers arrive with a PUBLIC IP (preserved via
+/// `resolve_client_ip` / X-Real-IP) → untrusted → must present a valid invite
+/// code, and brute-force attempts are still rate-limited per real IP.
+pub(crate) fn is_trusted_client_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_private() || v4.is_link_local(),
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA   fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+        }
+    }
 }
 
 async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
     // Reject up-front if this peer is currently banned for invite-code
-    // brute-force. Local-loopback IPs (127.0.0.1, ::1) are exempt because
-    // they're the desktop frontend's own connection, which never sends an
-    // invite code anyway.
-    let is_local = peer_ip.is_loopback();
+    // brute-force. TRUSTED clients (loopback OR private-range) are exempt:
+    // the local Kronn UI is the only legitimate caller of the empty-invite
+    // shortcut, and behind the docker/nginx gateway its connection arrives
+    // with a PRIVATE source IP (the bridge gateway, e.g. 172.x / 192.168.x),
+    // never loopback. Treating only loopback as trusted banned that shared
+    // gateway IP for everyone → all WS rejected → reconnect storm. Real
+    // external peers arrive with a PUBLIC IP (via X-Real-IP, see
+    // `resolve_client_ip`) → still untrusted → must send a valid invite, and
+    // brute-force from them is still rate-limited per real IP.
+    let is_local = is_trusted_client_ip(peer_ip);
     if !is_local && rate_limit::is_banned(peer_ip) {
         tracing::warn!("WS: rejecting banned peer {}", peer_ip);
         return;
@@ -647,5 +711,81 @@ mod handshake_tests {
         // of where the peer connects from.
         assert!(!should_reject_empty_invite("kronn:peer@host:9090", false));
         assert!(!should_reject_empty_invite("kronn:peer@host:9090", true));
+    }
+
+    mod resolve_client_ip {
+        use super::super::resolve_client_ip;
+        use axum::http::{HeaderMap, HeaderName};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        const GATEWAY: IpAddr = IpAddr::V4(Ipv4Addr::new(172, 19, 0, 4));
+
+        fn hdr(name: &'static str, val: &str) -> HeaderMap {
+            let mut h = HeaderMap::new();
+            h.insert(HeaderName::from_static(name), val.parse().unwrap());
+            h
+        }
+
+        #[test]
+        fn x_real_ip_wins_over_socket() {
+            // The core regression: behind nginx the socket IP is the gateway,
+            // but X-Real-IP carries the real client (here loopback). Resolving
+            // to loopback is what makes the empty-invite Presence accepted and
+            // stops the gateway-ban reconnect storm.
+            let ip = resolve_client_ip(&hdr("x-real-ip", "127.0.0.1"), GATEWAY);
+            assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert!(ip.is_loopback());
+        }
+
+        #[test]
+        fn x_real_ip_carries_a_lan_peer() {
+            let ip = resolve_client_ip(&hdr("x-real-ip", "10.0.0.42"), GATEWAY);
+            assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(10, 0, 0, 42)));
+        }
+
+        #[test]
+        fn falls_back_to_x_forwarded_for_first_hop() {
+            let ip = resolve_client_ip(&hdr("x-forwarded-for", "203.0.113.7, 172.19.0.4"), GATEWAY);
+            assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)));
+        }
+
+        #[test]
+        fn falls_back_to_socket_when_no_proxy_header() {
+            // Direct connection (desktop app / tests) — keep the socket IP.
+            let ip = resolve_client_ip(&HeaderMap::new(), GATEWAY);
+            assert_eq!(ip, GATEWAY);
+        }
+
+        #[test]
+        fn garbage_header_falls_through_to_socket() {
+            let ip = resolve_client_ip(&hdr("x-real-ip", "not-an-ip"), GATEWAY);
+            assert_eq!(ip, GATEWAY);
+        }
+    }
+
+    mod is_trusted_client_ip {
+        use super::super::is_trusted_client_ip;
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
+
+        #[test]
+        fn loopback_and_private_are_trusted() {
+            assert!(is_trusted_client_ip(v4(127, 0, 0, 1)));            // loopback
+            assert!(is_trusted_client_ip(v4(172, 19, 0, 4)));          // docker bridge (the storm IP)
+            assert!(is_trusted_client_ip(v4(172, 17, 0, 1)));          // docker default gateway
+            assert!(is_trusted_client_ip(v4(10, 0, 0, 5)));            // RFC1918 10/8
+            assert!(is_trusted_client_ip(v4(192, 168, 1, 50)));        // RFC1918 192.168/16
+            assert!(is_trusted_client_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+            assert!(is_trusted_client_ip("fd00::1".parse().unwrap())); // IPv6 ULA
+        }
+
+        #[test]
+        fn public_ips_are_not_trusted() {
+            // A real cross-internet peer: must present a valid invite + is ban-eligible.
+            assert!(!is_trusted_client_ip(v4(8, 8, 8, 8)));
+            assert!(!is_trusted_client_ip(v4(203, 0, 113, 7)));
+            assert!(!is_trusted_client_ip("2001:4860:4860::8888".parse().unwrap()));
+        }
     }
 }

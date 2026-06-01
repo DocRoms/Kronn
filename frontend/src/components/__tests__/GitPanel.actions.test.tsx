@@ -397,7 +397,7 @@ describe('GitPanel — diff', () => {
     renderPanel();
     await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
     fireEvent.click(screen.getByText('src/main.rs'));
-    await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/main.rs'));
+    await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/main.rs', false));
     // Diff header shows path + Back button.
     await waitFor(() => expect(screen.getByLabelText('Back')).toBeDefined());
     await waitFor(() => expect(screen.getByText(/added line/)).toBeDefined());
@@ -424,7 +424,19 @@ describe('GitPanel — diff', () => {
     renderPanel({ projectId: undefined, discussionId: 'd1' });
     await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
     fireEvent.click(screen.getByText('src/main.rs'));
-    await waitFor(() => expect(discussionsApi.gitDiff).toHaveBeenCalledWith('d1', 'src/main.rs'));
+    await waitFor(() => expect(discussionsApi.gitDiff).toHaveBeenCalledWith('d1', 'src/main.rs', false));
+  });
+
+  it('clicks a COMMITTED file → fetches the committed diff (committed=true)', async () => {
+    // Committed files have a clean working tree, so a plain diff is empty — the
+    // click must request the committed diff (`<default>...HEAD`).
+    const withCommitted = baseStatus();
+    withCommitted.committed_files = [{ path: 'src/feature.rs', status: 'A', staged: true }];
+    projectsApi.gitStatus.mockResolvedValue(withCommitted);
+    renderPanel();
+    await waitFor(() => expect(screen.getByText('src/feature.rs')).toBeDefined());
+    fireEvent.click(screen.getByText('src/feature.rs'));
+    await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/feature.rs', true));
   });
 });
 

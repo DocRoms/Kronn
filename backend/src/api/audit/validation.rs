@@ -16,7 +16,7 @@
 //!     (Codex exec-mode) but still exit 0
 //!
 //! In all three cases the next audit's `copy_dir_nondestructive`
-//! sees the 0-byte file, skips it, and Step 9 has nothing to fill —
+//! sees the 0-byte file, skips it, and Step 8 has nothing to fill —
 //! producing 0 TDs even though the step "succeeded".
 //!
 //! This module checks each step's output AFTER the CLI exits:
@@ -149,11 +149,11 @@ pub fn validate_and_repair_step_output(
     // — treat as failure (no auto-repair since the file IS the
     // template; re-running the step is the only path forward).
     //
-    // Note for Step 9 (tech-debt): the index file
+    // Note for Step 8 (tech-debt): the index file
     // `docs/inconsistencies-tech-debt.md` may carry leaked placeholders
     // even when the agent already created several `docs/tech-debt/TD-*.md`
     // detail files (partial success). That's fine: the audit resume
-    // mechanism (#311) re-runs Step 9; the prompt's anti-repetition
+    // mechanism (#311) re-runs Step 8; the prompt's anti-repetition
     // rules preserve the detail files and just finalize the index. So
     // we keep the detection binary — partial progress is recovered by
     // the resume layer, not by relaxing the leak check here.
@@ -171,9 +171,99 @@ pub fn validate_and_repair_step_output(
                 }),
             );
         }
+        // Step 8 — structural gate on the `## Dimension coverage` matrix
+        // (Codex re-review). BLOCKING (`success=false`): a missing/short/
+        // ill-formed matrix marks Step 8 incomplete so the resume layer
+        // re-runs it (anti-repetition preserves the TD detail files). A
+        // non-blocking warning would let `full.rs` mark the step `success`
+        // + advance `last_completed_step` → the "incomplete audit" promise
+        // would be cosmetic. Re-run cost < validating a knowingly-broken run.
+        if target_file.ends_with("inconsistencies-tech-debt.md") {
+            if let Err(reason) = validate_dimension_coverage(&content) {
+                return (
+                    false,
+                    Some(StepValidationWarning {
+                        reason: format!("dimension coverage incomplete in `{}`: {} (Step 8 will be re-run)", target_file, reason),
+                        repaired: false,
+                    }),
+                );
+            }
+        }
     }
 
     (cli_success, None)
+}
+
+/// chantier 1b (2026-06-03) — detector disposition gate.
+///
+/// After Step 8, every deterministic detector signal injected into the
+/// prompt MUST show up addressed somewhere in the Step-8 output surface
+/// (the tech-debt index + the `TD-*.md` detail files): emitted as a TD,
+/// folded into a baseline note, or cited in the coverage matrix. A signal
+/// whose anchor (flagged file / keyword) appears NOWHERE = the agent
+/// silently ignored a ground-truth signal → Step 8 is incomplete.
+///
+/// Returns a blocking `StepValidationWarning` (so the resume layer re-runs
+/// Step 8) when ≥1 signal is undisposed; `None` when all are addressed or
+/// no signals fired. Lenient by design (see `undisposed_signals`): catches
+/// omissions, not mischaracterizations — and never auto-repairs (re-running
+/// is the only path; the file content is the agent's, not the template's).
+pub fn check_detector_disposition(
+    project_path: &Path,
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+) -> Option<StepValidationWarning> {
+    if signals.is_empty() {
+        return None;
+    }
+    // Combined Step-8 output surface = the current index + ONLY the TD
+    // detail files still listed in it. On an in-place re-audit, an orphan
+    // historical `TD-*.md` (no longer referenced in the freshly-written
+    // index) must NOT count as "disposing" a signal — that's exactly the
+    // masking-by-history we're fighting (Codex 1b review 2026-06-04). We
+    // gate the detail files through `parse_index_td_ids` so only the
+    // current run's live findings contribute to disposition.
+    let index_content = std::fs::read_to_string(
+        project_path.join("docs/inconsistencies-tech-debt.md"),
+    )
+    .unwrap_or_default();
+    let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
+    let mut combined = index_content;
+    let td_dir = project_path.join("docs/tech-debt");
+    if let Ok(entries) = std::fs::read_dir(&td_dir) {
+        for e in entries.flatten() {
+            let p = e.path();
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else { continue };
+            if !name.starts_with("TD-") || !name.ends_with(".md") {
+                continue;
+            }
+            let id = name.trim_end_matches(".md");
+            if !listed_ids.contains(id) {
+                continue; // orphan history — not part of this run's output
+            }
+            if let Ok(body) = std::fs::read_to_string(&p) {
+                combined.push('\n');
+                combined.push_str(&body);
+            }
+        }
+    }
+
+    let undisposed = crate::core::audit_detectors::undisposed_signals(signals, &combined);
+    if undisposed.is_empty() {
+        return None;
+    }
+    let list = undisposed
+        .iter()
+        .map(|s| format!("{} (`{}`)", s.title, s.evidence))
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(StepValidationWarning {
+        reason: format!(
+            "{} detector signal(s) injected but never addressed in the tech-debt output: {} — emit a TD, a baseline note, or a matrix citation for each (Step 8 will be re-run)",
+            undisposed.len(),
+            list
+        ),
+        repaired: false,
+    })
 }
 
 /// Count `{{IDENT}}` shaped placeholders in a markdown body. Conservative:
@@ -204,6 +294,84 @@ fn count_raw_placeholders(content: &str) -> usize {
         rest = &after_open[end + 2..];
     }
     count
+}
+
+/// The 10 dimensions Step 8 § B must account for in the coverage matrix.
+const COVERAGE_DIMENSIONS: &[&str] = &[
+    "Dependencies", "Security", "Code quality", "Scalability", "Maintainability",
+    "Accessibility", "Observability", "Compliance", "Performance", "Documentation drift",
+];
+
+/// Structural validation of the `## Dimension coverage` matrix in
+/// `inconsistencies-tech-debt.md` (Codex review #26, 2026-06-03). Cheap, and
+/// does NOT prove the scan actually happened — it just catches a missing /
+/// short / ill-formed matrix so the prompt's "incomplete audit" promise is
+/// mechanically backed (the future detectors anchor ground truth). Returns
+/// `Err(reason)` on the first structural problem found.
+fn validate_dimension_coverage(content: &str) -> Result<(), String> {
+    let Some(sec_start) = content.find("## Dimension coverage") else {
+        return Err("`## Dimension coverage` matrix is missing".to_string());
+    };
+    // Section body = from the heading until the next `## ` heading or EOF.
+    let after = &content[sec_start..];
+    let body = after.find("\n## ").map(|n| &after[..n]).unwrap_or(after);
+
+    // N/A reasons we refuse when they stand alone (no verifiable content).
+    const TRIVIAL: &[&str] = &["not relevant", "pas pertinent", "n/a", "na", "unknown", "none", "-", ""];
+
+    let mut missing: Vec<&str> = Vec::new();
+    for dim in COVERAGE_DIMENSIONS {
+        // Match the row by a case-insensitive PREFIX on the first cell, not an
+        // exact equality: agents naturally embellish the canonical label
+        // (e.g. `Accessibility (a11y)`, `Documentation drift / docs`) and an
+        // exact match would mis-count those as a missing row and FAIL Step 8.
+        // None of the 10 dimension names is a prefix of another, so a prefix
+        // match stays unambiguous. (Fixes the 2026-06-03 self-inflicted
+        // Step-8-red on DOCROMS_WEB: the agent wrote `Accessibility (a11y)`.)
+        let dim_lc = dim.to_ascii_lowercase();
+        let rows: Vec<&str> = body.lines().filter(|l| {
+            let l = l.trim();
+            l.starts_with('|') && {
+                let first = l.trim_start_matches('|').split('|').next().unwrap_or("").trim();
+                first.to_ascii_lowercase().starts_with(&dim_lc)
+            }
+        }).collect();
+        let row = match rows.as_slice() {
+            [] => { missing.push(dim); continue; }
+            [r] => *r,
+            _ => return Err(format!("dimension `{}` appears {} times — exactly one row per dimension", dim, rows.len())),
+        };
+        let cells: Vec<&str> = row.trim().trim_matches('|').split('|').map(|c| c.trim()).collect();
+        let outcome = cells.get(1).copied().unwrap_or("");
+        let evidence = cells.get(2).copied().unwrap_or("");
+        let o = outcome.to_ascii_lowercase();
+        // `scanned` must be the full phrase (em-dash OR plain hyphen tolerated) —
+        // a bare "scanned later" / "scanned?" must NOT pass (Codex re-review).
+        let valid_prefix = o.starts_with("findings")
+            || o.starts_with("scanned — nothing substantiable")
+            || o.starts_with("scanned - nothing substantiable")
+            || o.starts_with("n/a");
+        if outcome.is_empty() || !valid_prefix {
+            return Err(format!(
+                "dimension `{}`: outcome must start with `findings` / `scanned — nothing substantiable` / `N/A:`, got `{}`",
+                dim, outcome
+            ));
+        }
+        if evidence.is_empty() {
+            return Err(format!("dimension `{}`: evidence/reason cell is empty", dim));
+        }
+        if o.starts_with("n/a") {
+            // Reason after `N/A:` (or, failing that, the evidence cell) must be non-trivial.
+            let reason = outcome.split_once(':').map(|(_, r)| r.trim()).filter(|s| !s.is_empty()).unwrap_or(evidence);
+            if TRIVIAL.contains(&reason.to_ascii_lowercase().trim()) {
+                return Err(format!("dimension `{}`: N/A needs a human-verifiable reason, got `{}`", dim, reason));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return Err(format!("coverage matrix missing rows: {}", missing.join(", ")));
+    }
+    Ok(())
 }
 
 /// Resolve the source-of-truth template path for a project-relative
@@ -306,6 +474,181 @@ mod tests {
         assert!(warn.is_none());
     }
 
+    // ── Dimension coverage matrix (Codex review) ──────────────────────────
+    fn valid_coverage_matrix() -> String {
+        let mut s = String::from("## Dimension coverage\n\n| Dimension | Outcome | Evidence / reason |\n|---|---|---|\n");
+        for (dim, outcome, ev) in [
+            ("Dependencies", "findings", "TD-x"),
+            ("Security", "findings", "TD-y"),
+            ("Code quality", "scanned — nothing substantiable", "read src/, clean"),
+            ("Scalability", "N/A: no DB/ORM layer", "grep: no ORM import"),
+            ("Maintainability", "scanned — nothing substantiable", "ok"),
+            ("Accessibility", "N/A: no web surface", "CLI binary only"),
+            ("Observability", "findings", "TD-z"),
+            ("Compliance", "scanned — nothing substantiable", "MIT only"),
+            ("Performance", "N/A: not perf-sensitive per README", "README says batch tool"),
+            ("Documentation drift", "findings", "TD-w"),
+        ] {
+            s.push_str(&format!("| {} | {} | {} |\n", dim, outcome, ev));
+        }
+        s
+    }
+
+    // ── detector disposition gate (chantier 1b) ──
+    use crate::core::audit_detectors::{DetectedSignal, Severity};
+
+    fn mk_signal(id: &'static str, ev: &str, title: &str) -> DetectedSignal {
+        DetectedSignal {
+            detector_id: id,
+            dimension: "Security",
+            severity: Severity::Medium,
+            title: title.into(),
+            evidence: ev.into(),
+        }
+    }
+
+    #[test]
+    fn disposition_gate_empty_signals_is_none() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(check_detector_disposition(tmp.path(), &[]).is_none());
+    }
+
+    #[test]
+    fn disposition_gate_fails_on_unaddressed_signal() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        // Index cites the CSP file but never the _blank template.
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "## Baseline\nCSP in src/Headers.php reviewed.\n",
+        )
+        .unwrap();
+        let signals = vec![
+            mk_signal("csp-unsafe", "src/Headers.php:87", "CSP unsafe-eval"),
+            mk_signal("blank-noopener", "templates/pages/projets.html.twig:12", "_blank w/o noopener"),
+        ];
+        let w = check_detector_disposition(tmp.path(), &signals)
+            .expect("an unaddressed signal must produce a blocking warning");
+        assert!(!w.repaired);
+        assert!(w.reason.contains("projets.html.twig"), "warning names the undisposed file: {}", w.reason);
+        assert!(!w.reason.contains("Headers.php"), "the cited file must NOT be flagged: {}", w.reason);
+    }
+
+    #[test]
+    fn disposition_gate_passes_when_all_addressed() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        // Index LISTS the TD id (a disposed TD is referenced in the index)
+        // so it counts toward the combined surface (Codex 1b #1).
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "## Current list\n- TD-20260603-blank — see detail\n",
+        ).unwrap();
+        // The TD detail file addresses the _blank template (combined surface).
+        std::fs::write(
+            docs.join("tech-debt/TD-20260603-blank.md"),
+            "Tabnabbing in templates/pages/projets.html.twig — add rel=noopener.\n",
+        )
+        .unwrap();
+        let signals = vec![mk_signal("blank-noopener", "templates/pages/projets.html.twig:12", "x")];
+        assert!(
+            check_detector_disposition(tmp.path(), &signals).is_none(),
+            "signal addressed in a TD detail file (listed in the index) must pass the gate"
+        );
+    }
+
+    #[test]
+    fn disposition_gate_orphan_td_not_in_index_does_not_dispose() {
+        // Codex 1b review (2026-06-04): an old TD file left on disk but NO
+        // LONGER referenced in the freshly-written index must NOT satisfy
+        // the gate — otherwise history masks an undisposed signal on an
+        // in-place re-audit. Same content as the passing test above, but
+        // the index does NOT list the TD id → the signal is undisposed.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let docs = tmp.path().join("docs");
+        std::fs::create_dir_all(docs.join("tech-debt")).unwrap();
+        std::fs::write(
+            docs.join("inconsistencies-tech-debt.md"),
+            "## Current list\nsee detail files\n", // no TD id referenced
+        ).unwrap();
+        std::fs::write(
+            docs.join("tech-debt/TD-20260603-blank.md"),
+            "Tabnabbing in templates/pages/projets.html.twig — add rel=noopener.\n",
+        )
+        .unwrap();
+        let signals = vec![mk_signal("blank-noopener", "templates/pages/projets.html.twig:12", "x")];
+        let w = check_detector_disposition(tmp.path(), &signals)
+            .expect("orphan TD not in the index must NOT dispose the signal");
+        assert!(w.reason.contains("projets.html.twig"), "got: {}", w.reason);
+    }
+
+    #[test]
+    fn coverage_matrix_valid_passes() {
+        assert!(validate_dimension_coverage(&valid_coverage_matrix()).is_ok());
+    }
+
+    #[test]
+    fn coverage_matrix_embellished_dimension_label_passes() {
+        // Regression (2026-06-03 self-inflicted Step-8-red on DOCROMS_WEB):
+        // the agent wrote `Accessibility (a11y)` as the row label. An exact
+        // `eq_ignore_ascii_case` match mis-counted it as a missing row and
+        // FAILED Step 8 → resume re-ran → run Interrupted. A prefix match
+        // accepts the natural embellishment while staying unambiguous.
+        let m = valid_coverage_matrix()
+            .replace("| Accessibility |", "| Accessibility (a11y) |")
+            .replace("| Documentation drift |", "| Documentation drift / docs |");
+        assert!(validate_dimension_coverage(&m).is_ok(), "embellished labels must still match");
+    }
+
+    #[test]
+    fn coverage_matrix_missing_section_fails() {
+        let err = validate_dimension_coverage("# tech debt\nno matrix here").unwrap_err();
+        assert!(err.contains("missing"), "{err}");
+    }
+
+    #[test]
+    fn coverage_matrix_missing_a_dimension_fails() {
+        // Drop the "Performance" row.
+        let m = valid_coverage_matrix().replace("| Performance | N/A: not perf-sensitive per README | README says batch tool |\n", "");
+        let err = validate_dimension_coverage(&m).unwrap_err();
+        assert!(err.contains("Performance"), "{err}");
+    }
+
+    #[test]
+    fn coverage_matrix_trivial_na_reason_fails() {
+        let m = valid_coverage_matrix().replace("N/A: no web surface", "N/A: pas pertinent").replace("CLI binary only", "");
+        let err = validate_dimension_coverage(&m).unwrap_err();
+        assert!(err.to_lowercase().contains("verifiable") || err.contains("Accessibility"), "{err}");
+    }
+
+    #[test]
+    fn coverage_matrix_bad_outcome_prefix_fails() {
+        let m = valid_coverage_matrix().replace("| Security | findings | TD-y |", "| Security | maybe later | TD-y |");
+        let err = validate_dimension_coverage(&m).unwrap_err();
+        assert!(err.contains("Security"), "{err}");
+    }
+
+    #[test]
+    fn coverage_matrix_duplicate_dimension_fails() {
+        // Two Security rows — rejected even though all 10 dimensions are present.
+        let m = valid_coverage_matrix() + "| Security | findings | TD-dup |\n";
+        let err = validate_dimension_coverage(&m).unwrap_err();
+        assert!(err.contains("Security") && err.contains("appears"), "{err}");
+    }
+
+    #[test]
+    fn coverage_matrix_vague_scanned_fails() {
+        // `scanned later` must NOT satisfy the `scanned — nothing substantiable` outcome.
+        let m = valid_coverage_matrix().replace(
+            "| Code quality | scanned — nothing substantiable | read src/, clean |",
+            "| Code quality | scanned later | read src/, clean |",
+        );
+        let err = validate_dimension_coverage(&m).unwrap_err();
+        assert!(err.contains("Code quality"), "{err}");
+    }
+
     #[test]
     #[serial(kronn_templates_env)]
     fn empty_dest_flagged_and_repaired() {
@@ -362,7 +705,7 @@ mod tests {
         // 0.8.3 (#310) — DOCROMS_WEB user hit this: claude rate-limited
         // BEFORE writing decisions.md, the file stayed at exact template
         // (1.8K, 100% of template size), validate passed → audit
-        // continued to Step 10 producing nothing → marked Audited
+        // continued to Step 9 producing nothing → marked Audited
         // wrongly. The new placeholder check rejects the step even
         // though the size is right.
         let template_body =

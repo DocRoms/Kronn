@@ -31,26 +31,36 @@ services:
       - ${KRONN_GLOBAL_BIN:-/usr/local/bin}:/host-bin/global:ro
       - ${KRONN_GLOBAL_LIB:-/usr/local/lib}:/host-bin/lib:ro  # npm global node_modules (sibling of /host-bin/global so `../lib/node_modules/...` relative symlinks resolve — fixes Fastly CLI which ships as a JS wrapper when installed via `npm -g`)
       - ${HOME}/.local/bin:/host-bin/local:ro
-      - ${KRONN_NPM_BIN:-/dev/null}:/host-bin/npm:ro  # npm global bin (macOS: ~/.npm/bin or /opt/homebrew/bin)
+      - ${KRONN_NPM_BIN:-./.docker/empty}:/host-bin/npm:ro  # npm global bin (macOS: ~/.npm/bin or /opt/homebrew/bin)
       - /usr/bin:/host-bin/sysbin:ro              # Host system binaries (make, php, etc.)
       - /usr/sbin:/host-bin/syssbin:ro            # Host system admin binaries
       # 0.8.2 — Common version-manager paths so workflow Exec steps can
       # run `cargo` / `bun` / etc. without the user symlinking each tool
       # into ~/.local/bin. Each path goes through env-var indirection with
-      # `/dev/null` fallback so Kronn STARTS even when the user doesn't
-      # have rustup / bun installed. To enable a path, set the env var
-      # in your shell or a `.env` file alongside `docker-compose.yml`:
+      # an EMPTY-DIRECTORY fallback (`./.docker/empty`) so Kronn STARTS even
+      # when the user doesn't have rustup / bun installed.
+      #
+      # ⚠️ The fallback is a real empty directory, NOT `/dev/null`. On WSL2 +
+      # Docker Desktop the daemon runs in a VM whose cross-VM layer cannot relay
+      # the /dev/null character device as a bind SOURCE — runc creates /dev/null
+      # as a directory in the container, `open(/dev/null)` fails with "is a
+      # directory", and container init crashes (`make start`). An empty dir binds
+      # cleanly everywhere and degrades gracefully (empty dir on PATH = no tool).
+      #
+      # To enable a real path, set the env var in your shell or a `.env` file:
       #   KRONN_CARGO_BIN=$HOME/.cargo/bin   (rustup default)
       #   KRONN_BUN_BIN=$HOME/.bun/bin
       #   KRONN_EXTRA_BIN=$HOME/.pyenv/shims (or any other path you need)
-      - ${KRONN_CARGO_BIN:-/dev/null}:/host-bin/cargo:ro        # rustup Rust toolchain (cargo, rustc, clippy, fmt)
-      # rustup's `cargo` and `rustc` are SHIMS — they need `~/.rustup` to
-      # find the actual toolchain. Self-mount at the same absolute path
-      # so the shim's hardcoded `$HOME/.rustup` lookup works inside the
-      # container. Set KRONN_RUSTUP_HOME to enable; falls back to /dev/null.
-      - ${KRONN_RUSTUP_HOME:-/dev/null}:${KRONN_RUSTUP_HOME:-/dev/null/rustup_disabled}:ro
-      - ${KRONN_BUN_BIN:-/dev/null}:/host-bin/bun:ro            # Bun runtime + installer
-      - ${KRONN_EXTRA_BIN:-/dev/null}:/host-bin/extra:ro        # Escape hatch — anything else (asdf shims, pyenv, custom paths)
+      - ${KRONN_CARGO_BIN:-./.docker/empty}:/host-bin/cargo:ro        # rustup Rust toolchain (cargo, rustc, clippy, fmt)
+      # rustup's `cargo` and `rustc` are SHIMS — they need `~/.rustup` to find
+      # the actual toolchain. Self-mount at the same absolute path so the shim's
+      # hardcoded `$HOME/.rustup` lookup works inside the container. Set
+      # KRONN_RUSTUP_HOME to enable. When UNSET, the empty dir is mounted at a
+      # harmless absolute path (the rustup shim simply isn't usable — same as
+      # cargo being absent above).
+      - ${KRONN_RUSTUP_HOME:-./.docker/empty}:${KRONN_RUSTUP_HOME:-/host-bin/rustup-empty}:ro
+      - ${KRONN_BUN_BIN:-./.docker/empty}:/host-bin/bun:ro            # Bun runtime + installer
+      - ${KRONN_EXTRA_BIN:-./.docker/empty}:/host-bin/extra:ro        # Escape hatch — anything else (asdf shims, pyenv, custom paths)
       - /usr/libexec/docker/cli-plugins:/usr/libexec/docker/cli-plugins:ro  # Docker compose plugin
       - /var/run/docker.sock:/var/run/docker.sock  # Docker socket for docker compose
       - ${HOME}/.local/share:/host-home/.local/share:ro  # Symlink targets (claude, vibe)
@@ -66,8 +76,8 @@ services:
       - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
       # SSH auth for git push (forward host SSH keys)
       - ${HOME}/.ssh:/home/kronn/.ssh:ro                    # SSH keys + known_hosts
-      - ${SSH_AUTH_SOCK:-/dev/null}:/run/host-ssh-agent.sock  # SSH agent socket (Linux)
-      - ${KRONN_MACOS_SSH_SOCK:-/dev/null}:/run/host-services/ssh-auth.sock  # SSH agent socket (macOS Docker Desktop)
+      - ${SSH_AUTH_SOCK:-./.docker/empty}:/run/host-ssh-agent.sock  # SSH agent socket (Linux) — empty-dir fallback (see note above; /dev/null crashes WSL2+Docker Desktop). No agent → git push falls back to ~/.ssh keys.
+      - ${KRONN_MACOS_SSH_SOCK:-./.docker/empty}:/run/host-services/ssh-auth.sock  # SSH agent socket (macOS Docker Desktop)
       # Agent auth directories (local subscriptions)
       # 0.7.1 — User-scoped agent context directory (cross-project, multi-CLI).
       # Markdown files here are auto-injected into the system prompt of every

@@ -40,6 +40,7 @@ pub mod log_buffer;
 pub mod rtk_detect;
 pub mod versions;
 pub mod run_eta;
+pub mod audit_detectors;
 
 #[cfg(test)]
 #[path = "crypto_test.rs"]

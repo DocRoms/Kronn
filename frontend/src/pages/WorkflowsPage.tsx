@@ -1238,6 +1238,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         {TRIGGER_LABELS[wf.trigger_type] ?? wf.trigger_type}
                       </span>
                       <span>{wf.step_count} step{wf.step_count > 1 ? 's' : ''}</span>
+                      {wf.misconfigured_step_count > 0 && (
+                        <span
+                          className="wf-needs-config-badge"
+                          style={{ color: 'var(--kr-warning)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
+                          title={t('wf.needsConfigTip')}
+                        >
+                          <AlertTriangle size={10} />
+                          {t('wf.needsConfig').replace('{0}', String(wf.misconfigured_step_count))}
+                        </span>
+                      )}
                     </div>
 
                     {wf.last_run && (

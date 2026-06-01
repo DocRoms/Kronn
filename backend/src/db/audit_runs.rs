@@ -30,6 +30,15 @@ pub fn insert_running(
     Ok(())
 }
 
+pub fn has_running_for_project(conn: &Connection, project_id: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM audit_runs WHERE project_id = ?1 AND status = 'Running'",
+        [project_id],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
+}
+
 /// Final update for a completed run. Computes the duration from the
 /// stored `started_at` so callers don't have to round-trip the value.
 #[allow(clippy::too_many_arguments)]
@@ -484,6 +493,7 @@ mod tests {
         let conn = fresh_conn();
         let start = Utc::now();
         insert_running(&conn, "run-1", "p1", "Full", "ClaudeCode", start).unwrap();
+        assert!(has_running_for_project(&conn, "p1").unwrap());
         let runs = list_recent(&conn, "p1", 5).unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "Running");
@@ -502,6 +512,7 @@ mod tests {
         .unwrap();
 
         let runs = list_recent(&conn, "p1", 5).unwrap();
+        assert!(!has_running_for_project(&conn, "p1").unwrap());
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, "Completed");
         assert_eq!(runs[0].td_total, 18);
@@ -514,6 +525,21 @@ mod tests {
             Some("docs/tech-debt/_reconciliation-2026-05-13.md")
         );
         assert!(runs[0].recommendations_json.is_some());
+    }
+
+    #[test]
+    fn has_running_for_project_is_project_scoped() {
+        let conn = fresh_conn();
+        conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'Test 2', '/tmp/test2')", [])
+            .unwrap();
+        let start = Utc::now();
+        insert_running(&conn, "run-1", "p1", "Full", "ClaudeCode", start).unwrap();
+        insert_running(&conn, "run-2", "p2", "Full", "ClaudeCode", start).unwrap();
+        complete(&conn, "run-1", start + chrono::Duration::seconds(1), "Completed",
+                 0, 0, 0, 0, 0, 0, 0, 100, None, None).unwrap();
+
+        assert!(!has_running_for_project(&conn, "p1").unwrap());
+        assert!(has_running_for_project(&conn, "p2").unwrap());
     }
 
     #[test]

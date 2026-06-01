@@ -33,6 +33,7 @@ const runningWf = (over: Partial<WorkflowSummary> & { runId?: string }): Workflo
   project_name: over.project_name ?? 'ProjectA',
   trigger_type: 'manual',
   step_count: 2,
+  misconfigured_step_count: 0,
   enabled: true,
   last_run: {
     id: over.runId ?? 'run-1',
@@ -51,6 +52,7 @@ const idleWf = (id: string): WorkflowSummary => ({
   project_name: null,
   trigger_type: 'manual',
   step_count: 1,
+  misconfigured_step_count: 0,
   enabled: true,
   last_run: {
     id: `run-${id}`,
