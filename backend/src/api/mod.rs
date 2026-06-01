@@ -35,3 +35,4 @@ pub mod user_context;
 pub mod version;
 pub mod mcp_remote;
 pub mod usage;
+pub mod learnings;

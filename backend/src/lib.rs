@@ -445,6 +445,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/global-context-mode", get(api::setup::get_global_context_mode).post(api::setup::save_global_context_mode))
         // 0.8.7 anti-hallucination mode (off | warn | enforce).
         .route("/api/config/anti-hallucination-mode", get(api::setup::get_anti_hallucination_mode).post(api::setup::save_anti_hallucination_mode))
+        .route("/api/config/continual-learning-enabled", get(api::setup::get_continual_learning_enabled).post(api::setup::save_continual_learning_enabled))
         // 0.8.7 — spec doc served from include_str! (linked from Settings → Sourcing).
         .route("/api/conventions/agents-md-format-v1", get(api::setup::get_agents_md_spec_v1))
         .route("/api/config/scan-paths", get(api::setup::get_scan_paths).post(api::setup::set_scan_paths))
@@ -641,6 +642,14 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/api-call-logs", get(api::api_call_logs::list_api_call_logs))
         .route("/api/api-call-logs/purge", post(api::api_call_logs::purge_api_call_logs))
         .route("/api/api-call-logs/{id}", get(api::api_call_logs::get_api_call_log))
+        // 0.9.0 — Continual Learning (spec docs/research/continual-learning-0.9.0-spec.md)
+        .route("/api/learnings/propose", post(api::learnings::propose_learning))
+        .route("/api/learnings", get(api::learnings::list_learnings))
+        .route("/api/learnings/pending", get(api::learnings::pending_count))
+        .route("/api/learnings/{id}/validate", post(api::learnings::validate_learning))
+        .route("/api/learnings/{id}/reject", post(api::learnings::reject_learning))
+        .route("/api/discussions/{id}/learnings", get(api::learnings::disc_learnings))
+        .route("/api/projects/{id}/learnings/sync", post(api::learnings::sync_learnings_doc))
         .route("/api/workflows/{id}/trigger", post(api::workflows::trigger))
         .route("/api/workflows/{id}/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
         .route("/api/workflows/{id}/runs/{run_id}", get(api::workflows::get_run).delete(api::workflows::delete_run))

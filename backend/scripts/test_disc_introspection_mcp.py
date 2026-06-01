@@ -2690,5 +2690,71 @@ class ConventionGetTests(unittest.TestCase):
         m.assert_not_called()
 
 
+class CallLearningProposeTests(unittest.TestCase):
+    """0.9.0 — `learning_propose` client-side guards + auto-inheritance + the
+    POST body it sends to `/api/learnings/propose`."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._CURRENT_DISC_META_CACHE.update({
+            "checked": True,
+            "value": {"id": "disc-parent", "project_id": "proj-eu", "agent": "ClaudeCode"},
+        })
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"accepted": True, "warnings": [], "evidence_checks": []},
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def _ev(self):
+        return [{"kind": "file", "ref": "src/foo.rs:42", "quote": "fn foo() {}"}]
+
+    def test_empty_evidence_raises_before_http(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_learning_propose({"claim": "x", "kind": "fact", "evidence": []})
+        self.fake_http.assert_not_called()
+
+    def test_blank_claim_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_learning_propose({"claim": "   ", "kind": "fact", "evidence": self._ev()})
+        self.fake_http.assert_not_called()
+
+    def test_bad_kind_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_learning_propose({"claim": "x", "kind": "guess", "evidence": self._ev()})
+        self.fake_http.assert_not_called()
+
+    def test_evidence_without_ref_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_learning_propose(
+                {"claim": "x", "kind": "fact", "evidence": [{"kind": "file", "ref": "  "}]}
+            )
+        self.fake_http.assert_not_called()
+
+    def test_posts_to_endpoint_with_inherited_context(self):
+        self.mod.call_learning_propose({"claim": "uses pnpm", "kind": "fact", "evidence": self._ev()})
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(method, "POST")
+        self.assertEqual(path, "/api/learnings/propose")
+        self.assertEqual(body["claim"], "uses pnpm")
+        self.assertEqual(body["kind"], "fact")
+        self.assertEqual(len(body["evidence"]), 1)
+        # auto-inherited from the parent disc
+        self.assertEqual(body["discussion_id"], "disc-parent")
+        self.assertEqual(body["project_id"], "proj-eu")
+        self.assertEqual(body["source_agent"], "ClaudeCode")
+
+    def test_explicit_context_overrides_inheritance(self):
+        self.mod.call_learning_propose({
+            "claim": "x", "kind": "preference", "evidence": self._ev(),
+            "project_id": "proj-other", "source_agent": "Codex",
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertEqual(body["project_id"], "proj-other")
+        self.assertEqual(body["source_agent"], "Codex")
+
+
 if __name__ == "__main__":
     unittest.main()

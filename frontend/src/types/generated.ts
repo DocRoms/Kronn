@@ -1388,6 +1388,62 @@ export type SourceKind = "file" | "url" | "user" | "commit" | "api" | "code_comm
 
 export type SourceStatus = "verified" | "not_found" | "out_of_bounds" | "empty_ref" | "outside_project" | "unchecked" | "rejected";
 
+// ─── Continual Learning (0.9.0) ─────────────────────────────────────────────
+export type LearningKind = "fact" | "preference" | "inference";
+export type LearningStatus = "pending" | "validated" | "rejected" | "stale" | "promoted" | "promoting";
+export type LearningScope = "user" | "project";
+export type Faithfulness = "entailment" | "neutral" | "contradiction";
+
+export interface Evidence {
+  kind: string;
+  ref: string;
+  quote?: string | null;
+}
+
+export interface Learning {
+  id: string;
+  claim: string;
+  evidence: Evidence[];
+  kind: LearningKind;
+  status: LearningStatus;
+  scope?: LearningScope | null;
+  confidence?: number | null;
+  faithfulness?: Faithfulness | null;
+  discussion_id?: string | null;
+  project_id?: string | null;
+  source_agent?: string | null;
+  promoted_target?: string | null;
+  created_at: string;
+  last_validated_at?: string | null;
+  validated_by?: string | null;
+}
+
+/** Gate-1 verdict per evidence row (rendered in the validation modal). */
+export interface EvidenceCheck {
+  reference: string;
+  status: string;
+  fabricated: boolean;
+}
+
+/** Response of POST /api/learnings/propose (the validation pipeline result). */
+export interface ProposeResult {
+  accepted: boolean;
+  reason?: string | null;
+  warnings: string[];
+  evidence_checks: EvidenceCheck[];
+  learning?: Learning | null;
+}
+
+export interface LearningProposeRequest {
+  claim: string;
+  evidence: Evidence[];
+  kind: LearningKind;
+  discussion_id?: string | null;
+  project_id?: string | null;
+  source_agent?: string | null;
+  confidence?: number | null;
+}
+
 // ─── MCP Context ───────────────────────────────────────────────────────────
 
 export interface McpContextEntry {

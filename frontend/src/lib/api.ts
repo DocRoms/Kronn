@@ -90,6 +90,10 @@ import type {
   VersionCheck,
   DbBackupResponse,
   UsageReport,
+  Learning,
+  LearningStatus,
+  LearningProposeRequest,
+  ProposeResult,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -388,6 +392,9 @@ export const config = {
   /** 0.8.7 anti-hallucination mode: "off" | "warn" | "enforce". */
   getAntiHallucinationMode: () => api<string>('GET', '/config/anti-hallucination-mode'),
   saveAntiHallucinationMode: (mode: string) => api<void>('POST', '/config/anti-hallucination-mode', mode),
+  getContinualLearningEnabled: () => api<boolean>('GET', '/config/continual-learning-enabled'),
+  saveContinualLearningEnabled: (enabled: boolean) =>
+    api<void>('POST', '/config/continual-learning-enabled', enabled),
   getScanPaths: () => api<string[]>('GET', '/config/scan-paths'),
   setScanPaths: (paths: string[]) => api<void>('POST', '/config/scan-paths', { paths }),
   getScanIgnore: () => api<string[]>('GET', '/config/scan-ignore'),
@@ -1748,4 +1755,24 @@ export const userContext = {
     api<UserContextFile>('PUT', `/user-context/${encodeURIComponent(name)}`, { content }),
   delete: (name: string) =>
     api<void>('DELETE', `/user-context/${encodeURIComponent(name)}`),
+};
+
+// ─── Continual Learning (0.9.0) ───────────────────────────────────────────────
+export const learnings = {
+  /** Run the validation pipeline (spec §6). Returns accept/reject + per-evidence
+   *  Gate-1 checks + warnings. The agent path is the MCP tool; this is the HTTP face. */
+  propose: (req: LearningProposeRequest) => api<ProposeResult>('POST', '/learnings/propose', req),
+  list: (status?: LearningStatus, projectId?: string) => {
+    const p = new URLSearchParams();
+    if (status) p.set('status', status);
+    if (projectId) p.set('project_id', projectId);
+    const qs = p.toString();
+    return api<Learning[]>('GET', `/learnings${qs ? `?${qs}` : ''}`);
+  },
+  pending: () => api<{ count: number }>('GET', '/learnings/pending'),
+  /** Human gate: route scope → promote to the dedicated learnings file → mark promoted. */
+  validate: (id: string) => api<Learning>('POST', `/learnings/${encodeURIComponent(id)}/validate`),
+  reject: (id: string) => api<void>('POST', `/learnings/${encodeURIComponent(id)}/reject`),
+  forDiscussion: (discId: string) =>
+    api<Learning[]>('GET', `/discussions/${encodeURIComponent(discId)}/learnings`),
 };

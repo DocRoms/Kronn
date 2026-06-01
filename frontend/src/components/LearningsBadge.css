@@ -1,0 +1,20 @@
+.learnings-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  border-radius: 999px;
+  border: 1px solid var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+}
+.learnings-badge:hover {
+  background: var(--kr-accent-bg-hover);
+}
+.learnings-badge-count {
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}

@@ -514,6 +514,52 @@ pub async fn save_anti_hallucination_mode(
     }
 }
 
+/// GET /api/config/continual-learning-enabled — 0.9.0 master toggle (default OFF/beta).
+pub async fn get_continual_learning_enabled(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<bool>> {
+    Json(ApiResponse::ok(state.config.read().await.server.continual_learning_enabled))
+}
+
+/// POST /api/config/continual-learning-enabled — flip the master toggle.
+/// Per-project doc-wiring (`learnings` section) is synced separately via
+/// `POST /api/projects/{id}/learnings/sync` (on audit / per project).
+pub async fn save_continual_learning_enabled(
+    State(state): State<AppState>,
+    Json(enabled): Json<bool>,
+) -> Json<ApiResponse<()>> {
+    {
+        let mut config = state.config.write().await;
+        config.server.continual_learning_enabled = enabled;
+        if let Err(e) = config::save(&config).await {
+            return Json(ApiResponse::err(format!("Failed to save: {}", e)));
+        }
+    }
+    // Doc-wiring: flipping the toggle syncs every project's `docs/AGENTS.md`
+    // `learnings` pointer section (inject when ON / remove when OFF). Without
+    // this, ON would write project learnings that agents never load (the pointer
+    // wouldn't exist). Best-effort per project — a failure on one doesn't block.
+    let projects = state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+        .unwrap_or_default();
+    let mut synced = 0usize;
+    for p in &projects {
+        match crate::core::learning_doc::sync(std::path::Path::new(&p.path), enabled) {
+            Ok(crate::core::learning_doc::LearningDocOutcome::Inserted)
+            | Ok(crate::core::learning_doc::LearningDocOutcome::Removed) => synced += 1,
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                target: "continual_learning",
+                "doc-wiring sync failed for project {}: {e}", p.id
+            ),
+        }
+    }
+    tracing::info!(target: "continual_learning", "toggle={enabled} → doc-wiring synced {synced} project(s)");
+    Json(ApiResponse::ok(()))
+}
+
 /// GET /api/conventions/agents-md-format-v1
 ///
 /// Returns the Phase 2 spec embedded in the binary (`include_str!`) as

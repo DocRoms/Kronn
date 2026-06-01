@@ -24,6 +24,15 @@ class MockUtterance {
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
+  // 0.9.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
+  learnings: {
+    pending: vi.fn().mockResolvedValue({ count: 0 }),
+    list: vi.fn().mockResolvedValue([]),
+    validate: vi.fn().mockResolvedValue({}),
+    reject: vi.fn().mockResolvedValue(undefined),
+    propose: vi.fn().mockResolvedValue({ accepted: true, warnings: [], evidence_checks: [], learning: null }),
+    forDiscussion: vi.fn().mockResolvedValue([]),
+  },
   discussions: {
     list: vi.fn().mockResolvedValue([]),
     get: vi.fn().mockResolvedValue(null),

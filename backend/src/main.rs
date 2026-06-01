@@ -316,6 +316,13 @@ async fn main() -> anyhow::Result<()> {
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
 
+    // 0.9.0 — Continual Learning staleness sweep (hourly). Spawn mirrored in
+    // desktop/src-tauri/src/main.rs — the feature is in the lib, the spawn is
+    // per-binary.
+    let learning_sweep =
+        std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(state.db.clone()));
+    tokio::spawn(async move { learning_sweep.start().await });
+
     // Start WebSocket client manager (outbound connections to contacts)
     let ws_state = state.clone();
     tokio::spawn(async move { kronn::core::ws_client::run(ws_state).await });

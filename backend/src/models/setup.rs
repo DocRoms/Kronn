@@ -129,6 +129,15 @@ pub struct ServerConfig {
     /// See `core::anti_halluc`. Mirrored into the process-global flag at load + save.
     #[serde(default = "default_anti_hallucination_mode")]
     pub anti_hallucination_mode: String,
+    /// 0.9.0 — Continual Learning master toggle. **Default OFF (beta)**: the
+    /// feature writes agent-proposed learnings into injected truth files
+    /// (`docs/learnings.md` / user-context), so it ships opt-in to avoid a bug
+    /// polluting a user's docs. Gates capture (`learning_propose`), the
+    /// `kronn:section name="learnings"` doc pointer, and the UI badge/modal.
+    /// Validating/rejecting EXISTING pending candidates stays allowed when off
+    /// (drain, don't capture). See docs/research/continual-learning-0.9.0-spec.md §0.
+    #[serde(default)]
+    pub continual_learning_enabled: bool,
     /// Debug mode — when true, the tracing subscriber is initialized at
     /// `debug` level instead of `info`, producing significantly more
     /// output on stdout. Lets users diagnose agent detection / project

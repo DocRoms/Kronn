@@ -6,6 +6,9 @@ import { I18nProvider } from '../../lib/I18nContext';
 vi.mock('../../lib/api', () => ({
   setAuthToken: vi.fn(),
   config: {
+    // 0.9.0 — SettingsPage renders <ContinualLearningSection> which reads this.
+    getContinualLearningEnabled: vi.fn().mockResolvedValue(false),
+    saveContinualLearningEnabled: vi.fn().mockResolvedValue(undefined),
     getTokens: vi.fn().mockResolvedValue({ keys: [], overrides: {} }),
     dbInfo: vi.fn().mockResolvedValue({
       size_bytes: 1024,

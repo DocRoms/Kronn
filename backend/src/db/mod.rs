@@ -5,6 +5,7 @@ pub mod contacts;
 pub mod disc_source;
 pub mod discussion_sessions;
 pub mod discussions;
+pub mod learnings;
 pub mod mcps;
 pub mod migrations;
 pub mod projects;
