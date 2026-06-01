@@ -8,7 +8,7 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck, ListChecks,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -59,6 +59,9 @@ export interface DiscussionSidebarProps {
    *  (top-level manual batches; nested workflow batches need a different
    *  surface). Tya's audit on 2026-05-09 flagged the missing retry. */
   onRetryBatch?: (runId: string, qpId: string, discIds: string[]) => void;
+  /** Opens the batch review cockpit. Parent loads the child messages on
+   *  demand so the sidebar list stays cheap. */
+  onReviewBatch?: (runId: string, label: string, discIds: string[]) => void;
   /** Ref-setter so parent can expand groups when navigating to a discussion */
   collapsedGroups: Set<string>;
   onToggleGroup: (key: string) => void;
@@ -116,6 +119,7 @@ export function DiscussionSidebar({
   onNavigateWorkflow,
   onDeleteBatch,
   onRetryBatch,
+  onReviewBatch,
   collapsedGroups,
   onToggleGroup,
   onCollapse,
@@ -723,6 +727,20 @@ export function DiscussionSidebar({
                                         }}
                                       >
                                         ↻
+                                      </button>
+                                    )}
+                                    {onReviewBatch && (
+                                      <button
+                                        type="button"
+                                        className="disc-batch-review"
+                                        title={t('disc.batchReviewHint', bg.total)}
+                                        aria-label={t('disc.batchReviewHint', bg.total)}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          onReviewBatch(bg.runId, label, bg.discs.map(d => d.id));
+                                        }}
+                                      >
+                                        <ListChecks size={11} />
                                       </button>
                                     )}
                                     {onDeleteBatch && (

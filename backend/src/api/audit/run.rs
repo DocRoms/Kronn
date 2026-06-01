@@ -1,4 +1,4 @@
-// `POST /api/projects/:id/ai-audit` — original 10-step audit (SSE),
+// `POST /api/projects/:id/ai-audit` — original 9-step audit (SSE),
 // + `GET /api/projects/:id/audit-status` for the polling UI to resume
 // the progress bar after navigating away.
 
@@ -20,7 +20,7 @@ use super::helpers::remove_bootstrap_block;
 use super::{SseStream, ANALYSIS_STEPS, PROMPT_PREAMBLE};
 
 /// POST /api/projects/:id/ai-audit
-/// Runs a 10-step AI audit, streaming progress via SSE.
+/// Runs a 9-step AI audit, streaming progress via SSE.
 pub async fn run_audit(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -43,6 +43,26 @@ pub async fn run_audit(
 
     // Safety: early return above guarantees project is Some
     let project = project.expect("project is Some after early return");
+    let active_in_tracker = state.audit_tracker
+        .lock()
+        .map(|t| t.get_progress(&project.id).is_some())
+        .unwrap_or(true);
+    let active_in_db = state.db.with_conn({
+        let project_id = project.id.clone();
+        move |conn| crate::db::audit_runs::has_running_for_project(conn, &project_id)
+    }).await.unwrap_or(true);
+    if active_in_tracker || active_in_db {
+        let stream: SseStream = Box::pin(futures::stream::once(async {
+            Ok::<_, Infallible>(
+                Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": "Audit already running for this project; wait for it to finish or use the cleanup action before launching another audit."
+                    }).to_string(),
+                )
+            )
+        }));
+        return Sse::new(stream);
+    }
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);

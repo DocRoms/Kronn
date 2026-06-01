@@ -119,15 +119,15 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
-  const openDiff = async (path: string) => {
+  const openDiff = async (path: string, committed = false) => {
     setDiffPath(path);
     setDiffLoading(true);
     try {
       let res;
       if (discussionId) {
-        res = await discussionsApi.gitDiff(discussionId, path);
+        res = await discussionsApi.gitDiff(discussionId, path, committed);
       } else if (projectId) {
-        res = await projectsApi.gitDiff(projectId, path);
+        res = await projectsApi.gitDiff(projectId, path, committed);
       } else {
         return; // GitPanel always mounted with one or the other; defensive.
       }
@@ -625,9 +625,14 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
                   return (
                     <div key={`committed-${file.path}`} className="git-file-row git-file-row-committed">
                       <Icon size={12} style={{ color }} className="flex-shrink-0" />
-                      <span className="git-file-btn git-file-btn-readonly" title={file.path}>
+                      <button
+                        type="button"
+                        className="git-file-btn"
+                        title={t('git.viewCommittedDiff', file.path)}
+                        onClick={() => openDiff(file.path, true)}
+                      >
                         {file.path}
-                      </span>
+                      </button>
                       <span className="git-file-status" style={{ color }}>{file.status}</span>
                     </div>
                   );

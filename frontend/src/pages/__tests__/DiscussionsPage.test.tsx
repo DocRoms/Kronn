@@ -354,6 +354,45 @@ describe('DiscussionsPage', () => {
     expect(abortSpy).not.toHaveBeenCalled();
   });
 
+  it('clears the orphaned SSE controller when a partial_response_recovered WS event arrives', async () => {
+    // Regression: a backend restart mid-stream flips sending=false via this WS
+    // event but used to leave abortControllers[disc] set. That orphaned
+    // controller kept handleSendMessage's re-entry guard armed forever, so
+    // every queued follow-up re-enqueued instead of firing — the queue got
+    // permanently stuck. The handler must drop the controller to restore the
+    // "sending=false ⟺ no controller" invariant.
+    const controller = new AbortController();
+    const lifted = liftedProps();
+    lifted.abortControllers = { current: { d1: controller } };
+
+    vi.mocked(discussionsApi.get).mockResolvedValue(makeListDiscussion('d1', 2));
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      setTimeout(() => onMessage({ type: 'partial_response_recovered', discussion_ids: ['d1'] }), 10);
+      return { connected: true };
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...lifted}
+      />
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+
+    expect(lifted.abortControllers.current.d1).toBeUndefined();
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+  });
+
   it('refetches discussion when sending finishes (activeSending changes)', async () => {
     const discWithResponse: Discussion = {
       ...makeListDiscussion('d1', 2),
@@ -1517,6 +1556,45 @@ describe('DiscussionsPage', () => {
     vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
   });
 
+  it('flips sendingMap[disc] ON when a batch_run_child_started WS event arrives', async () => {
+    // Batch children run server-side with no SSE consumer on the client, so
+    // this WS event is the ONLY signal that an agent began — it must set the
+    // per-disc spinner indicator on (sidebar pill + open chat view).
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      setTimeout(() => {
+        onMessage({ type: 'batch_run_child_started', run_id: 'run-1', discussion_id: 'd1' });
+      }, 10);
+      return { connected: true };
+    });
+
+    const setSendingMap = vi.fn();
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...liftedProps()}
+        setSendingMap={setSendingMap}
+      />
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+
+    // At least one setSendingMap updater must turn d1 on.
+    const turnedOnD1 = setSendingMap.mock.calls.some(
+      ([arg]) => typeof arg === 'function' && arg({}).d1 === true,
+    );
+    expect(turnedOnD1).toBe(true);
+
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+  });
+
   it('shows contacts section with add button even when no contacts exist', async () => {
     await wrap(
       <DiscussionsPage
@@ -1688,7 +1766,7 @@ describe('DiscussionsPage', () => {
 
   it('unaudited banner: shows on Bootstrapped state too', async () => {
     // Bootstrapped means the AI did Phase 1 (template + briefing-style
-    // intro) but didn't run the 10-step audit — the user still needs
+    // intro) but didn't run the 9-step audit — the user still needs
     // to launch it to load real project context.
     const proj = makeProject('p3', 'Bootstrapped', 'context');
     const disc = makeProjectDisc('d-unaud-3', 'p3');

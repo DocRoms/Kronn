@@ -255,6 +255,36 @@ pub async fn disc_append(
         appended += 1;
     }
 
+    // Liveness heartbeat (migration 064). Posting is proof the agent is
+    // alive — bump last_seen for each distinct agent_type that appended,
+    // so `count_live_participants` (the double-responder guard) keeps
+    // counting it as a live responder. Best-effort; a failure here must
+    // not fail the append.
+    if appended > 0 {
+        let mut seen_agents = std::collections::HashSet::new();
+        for incoming in req.messages.iter() {
+            if let Some(at) = incoming.agent_type.clone() {
+                let agent_type = format!("{at:?}");
+                if seen_agents.insert(agent_type.clone()) {
+                    let did_touch = req.disc_id.clone();
+                    if let Err(e) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussion_sessions::touch_session_by_agent(
+                                conn,
+                                &did_touch,
+                                &agent_type,
+                            )
+                        })
+                        .await
+                    {
+                        tracing::warn!("disc_append: failed to bump session heartbeat: {e}");
+                    }
+                }
+            }
+        }
+    }
+
     Json(ApiResponse::ok(DiscAppendResponse {
         appended,
         skipped_as_duplicates: skipped,

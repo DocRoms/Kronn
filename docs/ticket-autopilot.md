@@ -33,18 +33,21 @@ what's happening under the hood.
 🔴 implement (Agent — TDD + debugging + verification + receiving-code-review)
      │  ←─── reads state.last_review if a previous review left feedback
      ▼
-⚙ run_tests (Exec — cargo test by default)
-     │  ── ERROR ──→ goto implement (max 5 cycles)
+⚙ run_tests (Exec — generic bash auto-detect: cargo/npm/pnpm/yarn/pytest/make/composer)
+     │  ── ERROR ──→ goto implement (max 2 cycles)
+     │  ── SKIPPED (no runner / fresh worktree) ──→ continue, but surfaced at ready_gate
      ▼
 🔎 review (Agent — requesting-code-review + verification)
-     │  ── NEEDS_CHANGES ──→ writes state.last_review, goto implement (max 5)
+     │  inspects the real git diff; verdict is MANDATORY (doubt → NEEDS_CHANGES)
+     │  ── NEEDS_CHANGES ──→ writes state.last_review, goto implement (max 2)
      │  ── APPROVED ──→ continue
      ▼
-🏁 create_pr (Agent — finishing-a-development-branch + verification)
-     │  produces state.pr_url, state.pr_number
+✋ ready_gate (you validate BEFORE the push — sees plan + impl + test result)
+     │  ── request changes ──→ goto implement (your comment reaches it via state)
      ▼
-✋ ready_gate (you validate the PR before merge)
-     │
+🏁 create_pr (Agent — push + PR, ONLY after your approval; aborts if tests skipped/failed,
+     │  gh auth missing, on default branch, or PR already open)
+     │  produces state.pr_url, state.pr_number
      ▼
 🔔 notify_done (Notify webhook — Slack by default)
 
@@ -102,15 +105,13 @@ The agent:
 
 ### 5. `run_tests` (Exec)
 
-Runs `cargo test` by default. **Adapt to your stack** :
-- Rust: `cargo` `test`
-- Node: `npm` `test`
-- Python: `pytest`
-- Make: `make` `test`
+Runs a **generic bash auto-detect** script that probes the worktree and runs the matching
+runner (Cargo / npm / pnpm / yarn / pytest / make / composer) — no per-stack editing needed.
+The preset's `exec_allowlist` is `bash, cargo, pnpm, npm, yarn, pytest, make, composer`.
 
-The binary must be in `Workflow.exec_allowlist` (the preset declares `cargo`, `npm`, `pytest`,
-`make`). If tests fail (non-zero exit code), the step emits `[SIGNAL: ERROR]` and the workflow
-loops back to `implement` (capped at 5 cycles).
+- Tests fail (non-zero exit) → `[SIGNAL: ERROR]` → loop back to `implement` (capped at **2** cycles).
+- No runner matches, or a fresh worktree has no installed deps → `[SIGNAL: SKIPPED]` (the run
+  continues, but the skip is **surfaced at `ready_gate`** and **blocks `create_pr`** — see below).
 
 ### 6. `review` (Agent)
 
@@ -122,33 +123,41 @@ preset defaults to ClaudeCode for both (so it works out-of-the-box), but a diffe
 the implementer agent assumed.
 
 The agent:
+- **Inspects the real git diff** (`git status` / `git diff --stat` / `git diff`) — it does not
+  trust the recap, and flags any out-of-scope file change.
 - Verifies the implementation covers ALL plan subtasks (not partial)
 - YAGNI check: did the implementer add unrequested complexity?
 - Security check: injections, secret leaks, input validation
 - Edge cases: null, empty, unicode, large input
-- On approval: ends with `[SIGNAL: APPROVED]`
+- **Verdict is MANDATORY** (never by omission): `data.verdict` = `APPROVED` | `NEEDS_CHANGES`.
+  Skipped tests, an unreadable diff, or any doubt → `NEEDS_CHANGES`. It never defaults to APPROVED.
 - On rejection: writes `state.last_review=<feedback>` + `[SIGNAL: NEEDS_CHANGES]` →
-  loops back to `implement` (capped at 5)
+  loops back to `implement` (capped at **2**)
 
-### 7. `create_pr` (Agent)
+### 7. `ready_gate` (Gate) — BEFORE the push
 
-Loads `finishing-a-development-branch` + `verification-before-completion`.
+⚠️ The gate sits **before** `create_pr` on purpose: pushing a branch + opening a PR are ~irreversible
+external effects. The gate shows you the **plan + implementation + test result** (including a
+`SKIPPED`). You either:
+- **Approve** → proceeds to `create_pr` (push + PR).
+- **Request changes** → loops back to `implement`. Your comment is carried to the re-run via
+  `state.last_human_feedback` (runtime-injected — works on every preset and hand-built workflow,
+  no `{{...}}` placeholder needed).
 
-The agent:
-- Verifies one last time that all tests pass
-- Pushes the current branch
-- Creates the PR via `gh pr create` (or equivalent) with structured body (Summary + Test Plan)
-- Stores the PR URL in `state.pr_url`
+Nothing is pushed until you approve. (Earlier versions placed the gate AFTER `create_pr`, where it
+only protected the final notification — the PR was already created.)
 
-### 8. `ready_gate` (Gate)
+### 8. `create_pr` (Agent) — only after approval
 
-The PR URL is shown. You either:
-- **Approve** → workflow finalizes (notify)
-- **Request changes** → loops back to `implement` with your feedback (which the agent picks
-  up via `state.last_review`)
+Loads `finishing-a-development-branch` + `verification-before-completion`. In this workflow the
+finishing option is **already decided = push + PR** — the agent does not stop to ask.
 
-This is your **last chance** to block before any merge action. The default preset doesn't
-auto-merge — that's intentional in v1 (Sprint 1). Auto-merge via ApiCall lands in v2.
+It **aborts with `[SIGNAL: ERROR]`** (no push) if: tests failed or were `SKIPPED`, `gh auth status`
+fails, HEAD is the default branch, a PR is already open for the branch, or it can't emit `pr_url`.
+Otherwise it pushes, runs `gh pr create` (structured body: Summary + Test Plan), and stores
+`state.pr_url` / `state.pr_number`.
+
+The default preset doesn't auto-merge — intentional in v1 (Sprint 1). Auto-merge via ApiCall lands in v2.
 
 ### 9. `notify_done` (Notify)
 
@@ -165,7 +174,7 @@ After clicking the preset card, **all fields are editable**. Common customizatio
 | Different test runner | Change `run_tests.exec_command` (and update `exec_allowlist` if needed) |
 | Different review agent | Change `review.agent` from `ClaudeCode` to `Codex` / `GeminiCli` |
 | Different webhook | Change `notify_done.notify_config.url` |
-| Stricter loops (less retries) | Change `max_iterations: 5` to `2` or `3` on the on_result rules |
+| Looser loops (more retries) | Raise `max_iterations: 2` to `3`–`5` on the on_result rules |
 | Skip the plan gate on simple tickets | Sprint 2 ships `skip_if` — use it with `skip_if: "{{steps.analyze.data.complexity}} == 'low'"` |
 
 ## Limitations (v1 — Sprint 1, May 2026)
@@ -212,14 +221,16 @@ agent may declare done after one subtask.
 
 ### "The review never approves, infinite loop"
 
-The on_result rules cap at `max_iterations: 5` — after that, the workflow status becomes
+The on_result rules cap at `max_iterations: 2` — after that, the workflow status becomes
 `StoppedByGuard` (orange in the UI, distinct from Failed). Review the captured runs in the
 RunDetail page to understand what the reviewer agent keeps requesting.
 
-### "The PR creation failed because the branch wasn't pushed"
+### "create_pr aborted with [SIGNAL: ERROR] / no PR was created"
 
-The agent uses Bash + `gh` CLI. Ensure your project has `gh` installed and authenticated. Check
-the `create_pr` step's stdout in RunDetail for the exact error.
+`create_pr` refuses to push unless every guard passes. Check the step stdout in RunDetail — the
+common causes are: tests failed or `SKIPPED` (run them green first), `gh auth status` failing
+(authenticate the `gh` CLI), HEAD sitting on the default branch (work on a feature branch), or a
+PR already open for the branch. This is by design — it never pushes from an unsafe state.
 
 ### "I want to use a custom Quick API instead of the JsonData fixture"
 

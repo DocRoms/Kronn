@@ -65,6 +65,30 @@ pub(crate) fn next_step_index_for_resume(
     }
 }
 
+/// Gate feedback, runtime injection (approach B). When a human Gate sends a run
+/// back with "request changes", `decide_run` stashes the comment in
+/// `state["last_human_feedback"]`. This prepends it to the re-run target step's
+/// prompt and CONSUMES it (removes from state) so only that one step gets it —
+/// every preset and every hand-built workflow surfaces the feedback without a
+/// `{{state.last_human_feedback}}` placeholder. Returns true when injected.
+/// Extracted from the run loop so the consume-once contract is unit-testable.
+pub(crate) fn inject_and_consume_gate_feedback(
+    prompt_template: &mut String,
+    state: &mut std::collections::HashMap<String, String>,
+) -> bool {
+    match state.remove("last_human_feedback") {
+        Some(fb) if !fb.trim().is_empty() => {
+            *prompt_template = format!(
+                "⚠️ L'humain a relu et demandé ces changements — adresse-les EN PRIORITÉ avant le reste :\n{}\n\n---\n\n{}",
+                fb.trim(),
+                prompt_template
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Execute a complete workflow run.
 pub async fn execute_run(
     state: AppState,
@@ -167,6 +191,46 @@ pub async fn execute_run(
                         Some(ws)
                     }
                     Err(e) => {
+                        // #8 — worktree fallback is DANGEROUS for code-pushing
+                        // workflows: silently running agents that `git push` /
+                        // mutate files in the developer's MAIN checkout. When
+                        // the workflow declares `require_isolation`, abort the
+                        // run instead of falling back (mirror the preflight
+                        // failure pattern). Read-only workflows keep the legacy
+                        // warn-and-continue behaviour.
+                        let requires_isolation = workflow.workspace_config
+                            .as_ref()
+                            .map(|c| c.require_isolation)
+                            .unwrap_or(false);
+                        if requires_isolation {
+                            let msg = format!(
+                                "Workflow requires an isolated git worktree but it could not be created: {}. \
+                                 Refusing to run in the main checkout — this workflow pushes/mutates code. \
+                                 Check the repo (is it a clean git repo? disk space?), or clear `require_isolation` \
+                                 to allow main-tree runs.",
+                                e
+                            );
+                            run.status = RunStatus::Failed;
+                            run.step_results.push(StepResult {
+                                step_name: "__workspace__".to_string(),
+                                status: RunStatus::Failed,
+                                output: msg.clone(),
+                                tokens_used: 0,
+                                duration_ms: 0,
+                                started_at: None,
+                                condition_result: None,
+                                envelope_detected: None,
+                                step_kind: Some("Preflight".into()),
+                                step_api_plugin_slug: None,
+                                step_api_endpoint_path: None,
+                                step_agent: None,
+                            });
+                            let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                            let db_w = db.clone();
+                            db_w.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+                            emit(RunEvent::RunError { error: msg }).await;
+                            return Ok(());
+                        }
                         tracing::warn!("Failed to create worktree, running in main tree: {}", e);
                         None
                     }
@@ -573,6 +637,14 @@ pub async fn execute_run(
                             condition_action: None,
                         }
                     } else {
+                    // Gate feedback, runtime injection (global, approach B):
+                    // a human Gate "request changes" persisted its comment to
+                    // run.state["last_human_feedback"] before the truncate
+                    // (see decide_run). Prepend it to THIS step's prompt (the
+                    // re-run target) and consume it once — so every preset AND
+                    // every hand-built workflow surfaces the feedback with NO
+                    // `{{state.last_human_feedback}}` placeholder needed.
+                    inject_and_consume_gate_feedback(&mut hydrated.prompt_template, &mut run.state);
                     let step = &hydrated;
                     let full_access = agents_config.full_access_for(&step.agent);
                     // Live-progress wiring — without this the user gets a
@@ -1475,6 +1547,26 @@ pub async fn resume_run(
             }
         }
     }
+
+    // Persist the human's gate comment into `run.state` BEFORE the (later)
+    // `truncate` drops the gate step result. The comment was only ever
+    // appended to the gate result's footer via `append_decision_footer`; on a
+    // RequestChanges the run truncates step_results down to the target step
+    // (e.g. `analyze`/`implement`), which removes the gate result entirely —
+    // so the re-run never saw the feedback. `run.state` survives truncate and
+    // is seeded into the template ctx, so the target step can read
+    // `{{state.last_human_feedback}}`. (Same mechanism as `state.last_review`
+    // from the review→implement loop, but for the HUMAN gate path.)
+    match &decision {
+        GateDecision::RequestChanges { comment } if !comment.trim().is_empty() => {
+            run.state.insert("last_human_feedback".into(), comment.clone());
+        }
+        GateDecision::Approve { comment: Some(c) } if !c.trim().is_empty() => {
+            run.state.insert("last_human_feedback".into(), c.clone());
+        }
+        _ => {}
+    }
+
     let gate_step_name = run.step_results[gate_step_idx].step_name.clone();
 
     // Reject is terminal — no need to re-spawn execute_run.
@@ -1770,6 +1862,41 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── inject_and_consume_gate_feedback — gate feedback, approach B ───
+    #[test]
+    fn gate_feedback_is_injected_and_consumed_once() {
+        let mut state = std::collections::HashMap::new();
+        state.insert("last_human_feedback".to_string(), "Use the existing CircuitBreaker, don't add a new one".to_string());
+        let mut prompt = "Implémente le plan validé.".to_string();
+
+        // First step after the gate: injected + feedback present in prompt.
+        let injected = inject_and_consume_gate_feedback(&mut prompt, &mut state);
+        assert!(injected);
+        assert!(prompt.contains("Use the existing CircuitBreaker"), "feedback must be prepended");
+        assert!(prompt.contains("Implémente le plan validé."), "original prompt preserved");
+        // Consumed — no longer in state.
+        assert!(!state.contains_key("last_human_feedback"));
+
+        // Subsequent step in the same run: nothing left → no-op, prompt untouched.
+        let mut prompt2 = "Run the tests.".to_string();
+        let injected2 = inject_and_consume_gate_feedback(&mut prompt2, &mut state);
+        assert!(!injected2);
+        assert_eq!(prompt2, "Run the tests.");
+    }
+
+    #[test]
+    fn gate_feedback_noop_when_absent_or_blank() {
+        let mut state = std::collections::HashMap::new();
+        let mut prompt = "do work".to_string();
+        assert!(!inject_and_consume_gate_feedback(&mut prompt, &mut state));
+        assert_eq!(prompt, "do work");
+
+        // Blank comment is treated as no feedback (still consumed, not injected).
+        state.insert("last_human_feedback".to_string(), "   ".to_string());
+        assert!(!inject_and_consume_gate_feedback(&mut prompt, &mut state));
+        assert_eq!(prompt, "do work");
+    }
 
     // ─── next_step_index_for_resume — Goto-loop bug fix (0.7.0) ─────────
 

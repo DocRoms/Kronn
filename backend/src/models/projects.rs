@@ -154,7 +154,7 @@ pub enum AiAuditStatus {
 #[ts(export)]
 pub struct AuditProgress {
     pub project_id: String,
-    /// `"installing"` during template install, `"auditing"` during the 10-step
+    /// `"installing"` during template install, `"auditing"` during the 9-step
     /// loop, `"validating"` during phase 3 (validation discussion creation),
     /// `"done"` briefly before the tracker clears the entry.
     pub phase: String,
@@ -165,7 +165,7 @@ pub struct AuditProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_file: Option<String>,
     pub started_at: DateTime<Utc>,
-    /// `"full"` for the 10-step audit, `"partial"` for drift-triggered
+    /// `"full"` for the 9-step audit, `"partial"` for drift-triggered
     /// sub-audits, `"full_audit"` for the end-to-end variant. Kept as a
     /// string so future audit kinds don't force a schema migration.
     pub kind: String,
@@ -258,7 +258,7 @@ pub struct AuditRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_path: Option<String>,
     /// Raw JSON string of `Vec<AuditRecommendation>`, populated by the
-    /// cluster detector in Step 10 (Full audits only). Kept as String
+    /// cluster detector in Step 9 (Full audits only). Kept as String
     /// in the model to avoid forcing schema migrations on every
     /// recommendation-shape tweak.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -301,7 +301,7 @@ pub struct AuditRunStep {
     pub step_repaired_from_template: bool,
 }
 
-/// Recommendation emitted by the Step 10 cluster detector. Lives in
+/// Recommendation emitted by the Step 9 cluster detector. Lives in
 /// `AuditRun.recommendations_json` as a JSON-encoded list.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -373,7 +373,7 @@ mod health_score_tests {
 
 /// 0.8.2 — Specialized audit types ("Design C").
 ///
-/// `Full` runs the canonical 10-step pipeline. The other variants run
+/// `Full` runs the canonical 9-step pipeline. The other variants run
 /// a focused subset that only re-audits one dimension. They share the
 /// reconciliation + audit_runs row machinery; only the step list differs.
 ///

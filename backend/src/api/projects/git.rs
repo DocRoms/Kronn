@@ -76,8 +76,13 @@ pub async fn git_diff(
     };
 
     let file_path = query.path.clone();
+    let committed = query.committed.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_git_diff(&repo_path, &file_path)
+        if committed {
+            crate::api::git_ops::run_git_diff_committed(&repo_path, &file_path)
+        } else {
+            crate::api::git_ops::run_git_diff(&repo_path, &file_path)
+        }
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {

@@ -213,6 +213,45 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
 }
 
 /// Run `git diff` for a specific file in the given repo directory.
+/// Resolve the repo's default branch (main/master, local then remote refs).
+/// Worktrees often lack a local `main`, so we fall back to `origin/*`.
+/// Returns an empty string when none resolves (detached / fresh repo).
+pub fn resolve_default_branch(repo_path: &Path) -> String {
+    let ok = |args: &[&str]| -> bool {
+        sync_cmd("git").args(args).current_dir(repo_path).output()
+            .map(|o| o.status.success()).unwrap_or(false)
+    };
+    for (refname, branch) in [
+        ("main", "main"), ("master", "master"),
+        ("origin/main", "main"), ("origin/master", "master"),
+    ] {
+        if ok(&["rev-parse", "--verify", refname]) {
+            return branch.to_string();
+        }
+    }
+    String::new()
+}
+
+/// Committed diff for a single path: `git diff <default>...HEAD -- <path>`
+/// (triple-dot = vs the merge-base, so unrelated default-branch commits don't
+/// leak in). Falls back to the last commit's change when no default branch
+/// resolves. Used by the GitPanel "committed on branch" section.
+pub fn run_git_diff_committed(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
+    let git_stdout = |args: &[&str]| -> String {
+        sync_cmd("git").args(args).current_dir(repo_path).output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    };
+    let default_branch = resolve_default_branch(repo_path);
+    let diff = if !default_branch.is_empty() {
+        git_stdout(&["diff", &format!("{}...HEAD", default_branch), "--", file_path])
+    } else {
+        // No default branch (detached / fresh): show the file's last-commit change.
+        git_stdout(&["diff", "HEAD~1", "HEAD", "--", file_path])
+    };
+    Ok(GitDiffResponse { path: file_path.to_string(), diff })
+}
+
 pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
     let run_diff = |args: &[&str]| -> String {
         sync_cmd("git")
@@ -928,6 +967,25 @@ mod tests {
         for f in &status.committed_files {
             assert!(f.staged, "committed files should be marked staged: {:?}", f);
         }
+    }
+
+    #[test]
+    fn resolve_default_branch_resolves_main_on_a_feature_branch() {
+        let repo = make_branch_repo("default-branch");
+        assert_eq!(resolve_default_branch(repo.path()), "main");
+    }
+
+    #[test]
+    fn run_git_diff_committed_shows_the_branch_diff_for_a_committed_file() {
+        // Regression for the GitPanel "committed on branch" bug: the file is
+        // committed (clean working tree), so a plain `git diff` is useless —
+        // the committed diff (`main...HEAD`) must surface the change.
+        let repo = make_branch_repo("committed-diff");
+        let res = run_git_diff_committed(repo.path(), "added.txt").unwrap();
+        assert!(res.diff.contains("added.txt"),
+            "committed diff must reference the file, got: {:?}", res.diff);
+        assert!(res.diff.contains("@@"),
+            "committed diff must contain a hunk header, got: {:?}", res.diff);
     }
 
     #[test]

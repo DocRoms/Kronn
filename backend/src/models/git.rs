@@ -44,6 +44,12 @@ pub struct GitDiffResponse {
 #[ts(export)]
 pub struct GitDiffQuery {
     pub path: String,
+    /// When true, return the COMMITTED diff for this path (`<default>...HEAD`)
+    /// instead of the working-tree diff. Used by the GitPanel "committed on
+    /// branch" section, where the working tree is clean so a plain `git diff`
+    /// would be empty.
+    #[serde(default)]
+    pub committed: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, TS)]

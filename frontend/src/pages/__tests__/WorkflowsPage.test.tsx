@@ -218,6 +218,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 2,
+      misconfigured_step_count: 0,
       enabled: true,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
@@ -255,6 +256,54 @@ describe('WorkflowsPage', () => {
     expect(screen.getByDisplayValue('fix')).toBeDefined();
     expect(screen.getByDisplayValue('Analyse this bug')).toBeDefined();
     expect(screen.getByDisplayValue('Fix: {{previous_step.output}}')).toBeDefined();
+  });
+
+  it('shows a "needs config" badge on the card when misconfigured_step_count > 0', async () => {
+    // A freshly AI-generated workflow with an unwired API step: the backend
+    // reports misconfigured_step_count > 0 and the card must surface it so the
+    // user knows there's wiring left before the workflow can run.
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-bad',
+      name: 'Ticket → PR',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 4,
+      misconfigured_step_count: 3,
+      enabled: true,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    }]);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    await waitFor(() => expect(screen.getByText('Ticket → PR')).toBeDefined());
+    // i18n: 'wf.needsConfig' = '{0} à configurer' → "3 à configurer"
+    expect(screen.getByText('3 à configurer')).toBeDefined();
+  });
+
+  it('hides the "needs config" badge when misconfigured_step_count is 0', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-ok',
+      name: 'Clean WF',
+      project_id: null,
+      project_name: null,
+      trigger_type: 'manual',
+      step_count: 2,
+      misconfigured_step_count: 0,
+      enabled: true,
+      last_run: null,
+      created_at: '2026-01-01T00:00:00Z',
+    }]);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    await waitFor(() => expect(screen.getByText('Clean WF')).toBeDefined());
+    expect(screen.queryByText(/à configurer/)).toBeNull();
   });
 
   // ─── Wizard validation errors on summary page ───────────────────────────
@@ -405,6 +454,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
+      misconfigured_step_count: 0,
       enabled: true,
       last_run: {
         id: 'run-abc',
@@ -422,6 +472,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
+      misconfigured_step_count: 0,
       enabled: true,
       last_run: {
         id: 'run-xyz',
@@ -457,6 +508,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
+      misconfigured_step_count: 0,
       enabled: true,
       last_run: {
         id: 'run-abc',
@@ -497,6 +549,7 @@ describe('WorkflowsPage', () => {
       project_name: null,
       trigger_type: 'manual',
       step_count: 1,
+      misconfigured_step_count: 0,
       enabled: true,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',

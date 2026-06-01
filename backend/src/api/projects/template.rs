@@ -324,19 +324,16 @@ pub(crate) fn inject_bootstrap_prompt(index_file: &std::path::Path) {
 >
 > 7. **`docs/operations/debug-operations.md`** — Common commands, Docker services, troubleshooting.
 >
-> 8. **`docs/operations/mcp-servers.md`** — MCP servers if .mcp.json exists.
->    Only create `docs/operations/mcp-servers/<slug>.md` if there are project-specific rules to document.
->
-> 9. **`docs/inconsistencies-tech-debt.md`** — Scan source code across: dependencies (EOL/deprecated),
+> 8. **`docs/inconsistencies-tech-debt.md`** — Scan source code across: dependencies (EOL/deprecated),
 >    security (secrets, injection, auth), code quality (complexity, SRP, dead code), scalability (N+1, leaks),
 >    maintainability (coupling, missing tests), compliance (GDPR, licenses), infrastructure (Docker, CI).
 >    Create `docs/tech-debt/TD-*.md` detail files for each entry. Cite file paths.
 >
-> 10. **Review** — Check all files for consistency, completeness, no remaining placeholders.
+> 9. **Review** — Check all files for consistency, completeness, no remaining placeholders.
 >
-> 11. **DELETE THIS ENTIRE BLOCK** (from `KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
+> 10. **DELETE THIS ENTIRE BLOCK** (from `KRONN:BOOTSTRAP:START` to `KRONN:BOOTSTRAP:END`).
 >
-> 12. **Signal completion** — Write exactly `KRONN:BOOTSTRAP_COMPLETE` in your final message.
+> 11. **Signal completion** — Write exactly `KRONN:BOOTSTRAP_COMPLETE` in your final message.
 >
 > When done, summarize: files filled, items needing human input, suggested deep-dives.
 

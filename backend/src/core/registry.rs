@@ -93,6 +93,14 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/repos/{owner}/{repo}/releases".into(),                 method: "GET".into(),  description: "[RELEASES] Releases for a repo (paginated, latest first).".into() },
                     // ── Notifications ──
                     ApiEndpoint { path: "/notifications".into(),                                  method: "GET".into(),  description: "[NOTIFS] Authenticated user's notifications. Query: `all=true|false`, `participating=true|false`, `since=ISO8601`.".into() },
+                    // ── Write endpoints (require a token with `repo` scope) ──
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/pulls".into(),                     method: "POST".into(), description: "[PRs · create] Open a pull request. Body: `{title, head, base, body?, draft?}`. `head` = source branch (or `owner:branch` for forks), `base` = target branch. Returns the created PR incl. `number` and `head.sha`.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/pulls/{pull_number}".into(),       method: "PATCH".into(), description: "[PRs · update] Edit a PR. Body: `{title?, body?, state?, base?}`. `state: \"closed\"` closes it (no merge). Replace `{pull_number}`.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/pulls/{pull_number}/comments".into(), method: "POST".into(), description: "[PRs · review comment] Comment on a specific line of a PR diff. Body: `{body, commit_id, path, line, side?}`. `commit_id` = head SHA, `path` = file, `line` = line in the diff. For a plain top-level PR comment use the issues/comments endpoint instead.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/issues".into(),                    method: "POST".into(), description: "[ISSUES · create] Create an issue. Body: `{title, body?, labels?, assignees?, milestone?}`. (PRs are issues, but create PRs via /pulls.)".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}".into(),      method: "PATCH".into(), description: "[ISSUES · update] Edit an issue/PR. Body: `{title?, body?, state?, labels?, assignees?}`. `state: \"closed\"` closes. Works on PR numbers too (PRs are issues).".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}/comments".into(), method: "POST".into(), description: "[ISSUES · comment] Add a comment to an issue or PR (top-level, not line-bound). Body: `{body}`.".into() },
+                    ApiEndpoint { path: "/repos/{owner}/{repo}/issues/{issue_number}/labels".into(), method: "POST".into(), description: "[ISSUES · add labels] Add labels to an issue/PR (additive — does not remove existing). Body: `{labels: [\"ci-test\"]}`. Replace `{issue_number}`.".into() },
                 ],
             }),
         },

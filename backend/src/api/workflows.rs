@@ -267,6 +267,17 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
 ///     dedicated validators; this function is a no-op for them.
 fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), String> {
     for s in steps {
+        validate_step_required_fields(s)?;
+    }
+    Ok(())
+}
+
+/// Per-step required-field check, extracted from the loop above so the
+/// workflow-card "needs config" count reuses the EXACT same rules (no drift
+/// between what blocks a save and what the card flags). Exec/JsonData are
+/// intentionally no-ops here — they have dedicated validators
+/// (`validate_exec_steps`, `validate_json_data_steps`).
+fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
         match s.step_type {
             StepType::Agent => {
                 let has_inline = !s.prompt_template.trim().is_empty();
@@ -337,8 +348,20 @@ fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), Strin
             //   JsonData   → validate_json_data_steps
             StepType::Exec | StepType::JsonData => {}
         }
-    }
     Ok(())
+}
+
+/// Count steps missing required config — same per-step rules as
+/// `validate_step_required_fields`. Powers the workflow-card "N étapes à
+/// configurer" badge so a freshly AI-generated workflow surfaces its unwired
+/// API plugins / endpoints up-front, without re-fetching each workflow's full
+/// step list. (Exec/JsonData config issues are NOT counted here — they're
+/// validated separately and rarely the architect's gap.)
+pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
+    steps
+        .iter()
+        .filter(|s| validate_step_required_fields(s).is_err())
+        .count() as u32
 }
 
 /// Helper for `ApiCall` + `BatchApiCall`. `is_batch` adds the
@@ -534,6 +557,7 @@ pub async fn list(
                 project_name,
                 trigger_type,
                 step_count: wf.steps.len() as u32,
+                misconfigured_step_count: count_misconfigured_steps(&wf.steps),
                 enabled: wf.enabled,
                 last_run,
                 created_at: wf.created_at,
@@ -2333,12 +2357,14 @@ pub async fn suggestions(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
 ) -> Json<ApiResponse<Vec<WorkflowSuggestion>>> {
-    // 1. Get project
-    let project = match state.db.with_conn({
+    // 1. Ensure the project exists (else no suggestions). We don't need the
+    //    row itself anymore — the per-MCP `mcp-servers.md` hints read was
+    //    removed with the per-MCP doc auto-gen.
+    match state.db.with_conn({
         let pid = project_id.clone();
         move |conn| crate::db::projects::get_project(conn, &pid)
     }).await {
-        Ok(Some(p)) => p,
+        Ok(Some(_)) => {}
         _ => return Json(ApiResponse::ok(vec![])),
     };
 
@@ -2361,14 +2387,6 @@ pub async fn suggestions(
     if mcp_names.is_empty() {
         return Json(ApiResponse::ok(vec![]));
     }
-
-    // 3. Also try to read workflow hints from <docs>/operations/mcp-servers.md (if audited).
-    // Path-agnostic — works for docs/ post-pivot and legacy ai/.
-    let project_path = crate::core::scanner::resolve_host_path(&project.path);
-    let _hints_path = crate::core::scanner::detect_docs_dir(&project_path)
-        .join("operations/mcp-servers.md");
-    // Future: parse the hints table for project-specific suggestions.
-    // For now, we use only the static catalogue.
 
     // 4. Detect language (fr default)
     let lang = state.config.read().await.language.clone();
@@ -2671,6 +2689,42 @@ pub async fn test_api_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn count_misconfigured_steps_flags_unwired_api_and_clears_when_fixed() {
+        // Mirrors the user's AI-generated "Ticket → PR" workflow: an ApiCall
+        // step the architect left without a plugin/config. The card badge must
+        // count it, and drop to 0 once the step is wired.
+        let mut api_step = WorkflowStep {
+            name: "fetch-ticket".into(),
+            step_type: StepType::ApiCall,
+            ..Default::default()
+        };
+        let agent_ok = WorkflowStep {
+            name: "plan".into(),
+            step_type: StepType::Agent,
+            prompt_template: "Plan the work".into(),
+            ..Default::default()
+        };
+
+        // ApiCall with no plugin/endpoint AND no quick_api_id → misconfigured.
+        assert_eq!(count_misconfigured_steps(&[api_step.clone(), agent_ok.clone()]), 1);
+
+        // Wire the API step (plugin + config + endpoint) → clears.
+        api_step.api_plugin_slug = Some("atlassian".into());
+        api_step.api_endpoint_path = Some("/rest/api/2/issue/{issueKey}".into());
+        assert_eq!(count_misconfigured_steps(&[api_step, agent_ok]), 0);
+    }
+
+    #[test]
+    fn count_misconfigured_steps_flags_agent_without_prompt() {
+        let bare_agent = WorkflowStep {
+            name: "implement".into(),
+            step_type: StepType::Agent,
+            ..Default::default()
+        };
+        assert_eq!(count_misconfigured_steps(&[bare_agent]), 1);
+    }
 
     // Regression test: 0.6.0 added a trailing `\n[SIGNAL: OK]` line to ApiCall
     // success outputs so workflows can branch via on_result without parsing JSON.

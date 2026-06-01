@@ -2,9 +2,10 @@
 // + the API capability declaration (REST endpoints) that lets a plugin
 // expose curl-based access alongside (or instead of) an MCP transport.
 //
-// Also hosts the small MCP context-files types — the Kronn-managed
-// `<docs>/operations/mcp-servers/<slug>.md` content read by the agent
-// runner and edited from the MCP page UI.
+// Also hosts the small MCP context-files types — the optional, manually
+// editable `<docs>/operations/mcp-servers/<slug>.md` notes managed from the
+// MCP page UI. (No longer auto-generated; agents get MCP capabilities via the
+// injected `=== AVAILABLE APIs ===` block built from `api_spec`.)
 
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -348,7 +349,9 @@ pub struct McpDefinition {
     #[ts(skip)]
     pub alt_packages: Vec<String>,
     /// Pre-filled MCP context content (best practices, token-saving tips).
-    /// Written to <docs>/operations/mcp-servers/<slug>.md on first install instead of empty template.
+    /// NOTE: no longer auto-materialised to disk (the per-MCP doc auto-gen was
+    /// removed — agents get capabilities via the injected `api_spec` block).
+    /// Currently unused; kept as reference data / potential manual-edit seed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(skip)]
     pub default_context: Option<String>,

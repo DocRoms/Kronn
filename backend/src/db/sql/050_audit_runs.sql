@@ -13,7 +13,7 @@ CREATE TABLE audit_runs (
     id TEXT PRIMARY KEY,             -- UUID
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
 
-    -- Type of audit. 'Full' is the existing 10-step generic pass; the
+    -- Type of audit. 'Full' is the existing 9-step generic pass; the
     -- specialized variants land in 0.8.2 S2 (Security/Docker/etc.) but
     -- the column is forward-compatible.
     kind TEXT NOT NULL DEFAULT 'Full',
@@ -52,7 +52,7 @@ CREATE TABLE audit_runs (
     report_path TEXT,
 
     -- JSON list of `{ kind, reason, cluster_size }` items emitted by
-    -- Step 10's cluster detector. Read by the frontend to populate the
+    -- Step 9's cluster detector. Read by the frontend to populate the
     -- "Audits recommandés" dropdown on the ProjectCard.
     recommendations_json TEXT
 );

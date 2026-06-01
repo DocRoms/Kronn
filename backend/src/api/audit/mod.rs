@@ -312,84 +312,9 @@ Fill docs/operations/debug-operations.md — replace ALL {{PLACEHOLDERS}}:\n\
         sources: &["docker-compose.yml", "Makefile", "Dockerfile"],
     },
 
-    // Step 8: MCP servers overview + (conditional) capability introspection.
+    // Step 8: Inconsistencies & tech debt
     //
-    // 0.8.4 (#331) — short-circuit when only Kronn helper MCPs are
-    // configured. Pre-fix this step took 5-12 min on every audit,
-    // dominated by tool_list + tool_call probes on `Memory`,
-    // `Sequential Thinking`, `context7`, `kronn-internal` — all
-    // generic helpers with NO project-specific data to extract.
-    // Result on DOCROMS_WEB (Playwright session 2026-05-16):
-    // 11 min on Step 8 producing a near-empty mcp-servers.md that
-    // every other project also generates.
-    //
-    // New gate: if the MCP list is a subset of HELPERS_ONLY, the
-    // agent SKIPS sections B/C/D and writes a minimal template. The
-    // saved time goes back to the user — Step 8 drops from ~10 min
-    // to ~30s in the helper-only case (the common case on personal
-    // projects without Jira/GitHub/Linear MCPs).
-    AnalysisStep {
-        target_file: "docs/operations/mcp-servers.md",
-        prompt: "\
-Read docs/AGENTS.md for context. Check if .mcp.json or .mcp.json.example or .env.mcp.example exists in the repo.\n\n\
-\
-# Helper-only short-circuit (read FIRST)\n\n\
-\
-Some MCP servers are **Kronn helpers** with no project-specific data to extract:\n\
-- `Memory` (mcp-memory) — generic key/value scratchpad\n\
-- `Sequential Thinking` / `Sequential_Thinking` — reasoning aid\n\
-- `context7` — public library docs lookup\n\
-- `kronn-internal` — Kronn introspection of the current discussion\n\n\
-\
-If the project's `.mcp.json` contains ONLY servers from the helper list above (or is empty / missing), do the following and STOP:\n\
-1. Replace `docs/operations/mcp-servers.md` content with:\n\
-```\n\
-# MCP Servers\n\n\
-No project-specific (vendor) MCP server is configured.\n\n\
-The audit runtime ships generic helpers (Memory, Sequential Thinking, context7, kronn-internal). \
-They support the agent but carry no project data, so they're not documented in detail here.\n\n\
-> To add a vendor MCP (Jira, GitHub, Linear, Slack, …) and benefit from project-context introspection on the next audit, configure it in `.mcp.json` and re-run the audit.\n\
-```\n\
-2. Do NOT call `tools/list` or any other MCP tool. Do NOT create per-MCP context files. Do NOT fill the workflow automation hints table.\n\
-3. Move on to step 9.\n\n\
-\
-# Vendor MCP path (only if at least ONE non-helper MCP is configured)\n\n\
-\
-### A) Document each server in docs/operations/mcp-servers.md\n\
-Fill the table with: name, package, purpose, key capabilities (3-5 main tools), credentials.\n\n\
-### B) Introspect capabilities\n\
-For each VENDOR MCP server (skip helpers), use the MCP tools to discover:\n\
-1. **Tool inventory**: list the main tools exposed (via tools/list if available). \
-For each tool: name, one-line description, whether it is read-only or mutating, and a use-case.\n\
-**Cold-start note**: npx-launched servers can take 5-10s to download + boot on first call. \
-If a tools/list call returns empty on the FIRST attempt, retry ONCE after a short wait before concluding the server exposes no tools. \
-Distinguish \"server not configured / credentials missing\" (configured: skip; no creds: note and move on) from \"server is configured but slow to start\" (retry once).\n\
-2. **Project context**: call read-only tools to discover real project data. Examples:\n\
-   - Jira/Linear: project keys, open ticket count, labels in use, sprint cadence\n\
-   - GitHub/GitLab: repo names, open PRs count, branch strategy, CI status\n\
-   - Slack: channel names relevant to the project\n\
-   - CloudWatch: log groups, active alarms\n\
-   - Confluence: spaces, recent pages\n\
-   Only call read-only/list operations — never create, update, or delete anything.\n\
-   If a tool call fails or credentials are missing, note it and move on.\n\n\
-### C) Create per-MCP context files\n\
-For each VENDOR server where you discovered capabilities or project context, \
-create docs/operations/mcp-servers/<slug>.md following the TEMPLATE.md structure:\n\
-- Fill the Capabilities table with discovered tools\n\
-- Fill Project context with real identifiers found via introspection\n\
-- Add rules and gotchas based on what you observed\n\
-Do NOT create empty or boilerplate context files — only if you have real data.\n\
-Do NOT create context files for helper MCPs (Memory/Sequential Thinking/context7/kronn-internal).\n\n\
-### D) Fill the workflow automation hints table\n\
-Based on the VENDOR MCP combinations present, suggest 2-5 possible automated workflows.\n\
-For each: which MCPs are combined, what the workflow does, and who benefits (Dev/PM/Ops).\n\
-Only suggest workflows where all required vendor MCPs are actually configured.",
-        sources: &[".mcp.json"],
-    },
-
-    // Step 9: Inconsistencies & tech debt
-    //
-    // 0.8.2 — Step 9 is the load-bearing step of the audit. It must be
+    // 0.8.2 — Step 8 is the load-bearing step of the audit. It must be
     // intransigent on baseline issues (the 0.8.1 regression on DOCROMS_WEB
     // missed 5 well-known Docker/CI security defaults because the agent
     // prioritized novelty over baseline coverage). The prompt below is
@@ -466,9 +391,16 @@ For OSS-intent projects, each missing item below emits a TD at **Low or Medium**
 \n\
 The 6 categories above are MANDATORY when their gating condition matches. Even if you find 30 other findings, you MUST scan them. \
 The cap in § D point 5 applies AFTER these baseline findings are emitted.\n\n\
-# B. DIMENSIONAL SCAN (free-form, on top of the baseline)\n\
+# B. DIMENSIONAL SCAN — every dimension is ACCOUNTABLE (on top of the baseline)\n\
 \n\
-Systematically audit across these 10 dimensions:\n\
+This is where audits silently under-deliver: the baseline (§ A) is easy + deterministic, so the model finds it and STOPS. \
+You MUST account for EACH of the 10 dimensions below — none may be silently skipped. \
+For EVERY dimension, record exactly ONE outcome in the `## Dimension coverage` matrix of the index file:\n\
+  - **findings** — one or more TDs (each with `[src: file:…]` evidence), OR\n\
+  - **scanned — nothing substantiable** — you actually opened the relevant code and found nothing you can anchor (this is NOT \"I didn't look\"), OR\n\
+  - **N/A: <verifiable reason>** — the dimension cannot apply, with a reason a human can CHECK (\"no Dockerfile\", \"no DB/ORM layer\", \"no web surface\", \"no CI config\") — NEVER a vague \"not relevant\".\n\
+A dimension absent from the matrix, or marked with an unverifiable reason, = **incomplete audit**: a cheap structural validator FAILS this step (it gets re-run) on a missing / short / ill-formed matrix. The matrix **records** breadth + makes it reviewable (it is a declaration, not proof the scan happened — the detectors will anchor that); the TDs carry the depth.\n\n\
+The 10 dimensions:\n\
 - **Dependencies**: EOL/deprecated runtimes, frameworks, packages, or versions significantly behind stable.\n\
 - **Security**: hardcoded secrets (regex: API keys, tokens, OAuth client_secret), missing auth checks, injection vectors (SQL/XSS/command), insecure defaults, exposed debug endpoints, default credentials.\n\
 - **Code quality**: functions >50 lines, god classes, SRP violations, dead code, error swallowing (empty catch / let _ = / unwrap_or_default on Result).\n\
@@ -478,7 +410,11 @@ Systematically audit across these 10 dimensions:\n\
 - **Observability**: missing logging in hot paths (auth, payment, write endpoints), no error tracker (Sentry/Glitchtip/equivalent), no health/readiness endpoints, no metrics on critical SLI.\n\
 - **Compliance**: GDPR issues (external resources, data retention), license incompatibilities (`composer licenses` / `cargo deny` / `license-checker`).\n\
 - **Performance** (if perf-sensitive per `docs/briefing.md` or repo README): CWV regression risk, bundle size, image optim missing, cache headers weak, no CDN.\n\
-- **Documentation drift**: cross-check the docs/ files you just wrote (steps 1-8) against the source code. Flag concrete contradictions (e.g. `coding-rules.md` says X is enforced but no linter rule exists, `testing-quality.md` claims N tests but actual count differs, `mcp-servers.md` lists a server not in `.mcp.json`).\n\n\
+- **Documentation drift**: cross-check the docs/ files you just wrote (steps 1-7) against the source code. Flag concrete contradictions (e.g. `coding-rules.md` says X is enforced but no linter rule exists, `testing-quality.md` claims N tests but actual count differs, `repo-map.md` points to a path that no longer exists).\n\n\
+**Self-critic before you finish § B** (cheap, catches the usual misses — do it, don't skip):\n\
+- Any dimension marked \"scanned — nothing substantiable\" on a non-trivial codebase is SUSPICIOUS: did you actually open files for it, or did you skip? If you skipped, go scan it now.\n\
+- Any mechanically-obvious signal you passed over? e.g. a committed secret/API key, a `target=\"_blank\"` without `rel=\"noopener\"`, `0` test files for N source files (a distinct TD from \"no CI gate\"), an `unsafe-eval`/`unsafe-inline` CSP, a god-file >500 lines. If it's real → add the TD; if intentional → say so in the matrix evidence column. Don't leave it silently undetected.\n\
+- The 10-row coverage matrix is the CONTRACT for this step: a reviewer must be able to see, per dimension, that you looked and what you concluded.\n\n\
 # C. ANTI-REPETITION (priors from previous audits)\n\
 \n\
 Before emitting findings, list existing files under `docs/tech-debt/` (excluding README.md, TEMPLATE.md, _template.md, and any file starting with `_`). \
@@ -497,7 +433,7 @@ These are TDs from previous audits. For each finding you would emit:\n\
 4. **Previously-existing TDs you did NOT re-emit** (because the problem is gone or not visible):\n\
    → LIST them in your output as a separate `## Reconciliation candidates` markdown section. \
 For each: TD ID + your best guess (`fixed in commit X`, `no longer visible in source`, `out of scope this audit`, `uncertain`). \
-The pipeline will run a reconciliation pass after Step 9 to classify them definitively.\n\
+The pipeline will run a reconciliation pass after Step 8 to classify them definitively.\n\
 \n\
 This rule is critical: the user wiped TDs once to evaluate a fresh audit, but most users don't. Re-discovery under a new slug breaks their workflow.\n\n\
 # D. OUTPUT FORMAT\n\
@@ -527,6 +463,8 @@ Fill `docs/inconsistencies-tech-debt.md` — replace ALL `{{PLACEHOLDERS}}` and 
 6. **Tracker MCP dedup**: if a ticket tracker MCP is configured (Jira/Linear/GitHub Issues), before creating a NEW TD file, do a read-only search for an existing open ticket with a matching title fragment. If found: set `Next step: link existing ticket <URL>` instead of `create ticket`. Avoid duplicating tracked work.\n\
 \n\
 7. **No issues found**: single row in the index: `'None identified during initial audit'`. (Almost never happens on a real repo — even a green-field has baseline checklist gaps.)\n\
+\n\
+8. **Dimension coverage matrix — MANDATORY**: fill the `## Dimension coverage` table in the index — ALL 10 rows, each with an outcome per § B (`findings` / `scanned — nothing substantiable` / `N/A: <verifiable reason>`) and an evidence/reason cell. A blank row, or an `N/A` whose reason a human can't verify, = incomplete audit. **If the `## Dimension coverage` section is absent** (project installed before this section existed), CREATE it with the 10 dimensions. This is the breadth contract that stops the scan from silently skipping dimensions.\n\
 \n\
 **Detail file format** (YAML frontmatter + markdown sections, ENFORCE THIS SHAPE):\n\
 ```\n\
@@ -569,20 +507,20 @@ metadata:\n\
 \n\
 For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not replace previous entries. The chronological list is the value.\n\n\
 \
-**Scope reminder**: this step ONLY fills `docs/inconsistencies-tech-debt.md` + creates/updates `docs/tech-debt/TD-*.md` detail files. The companion `docs/decisions.md` is intentionally filled in Step 10 (not here) so the agent has the full audit picture before recording positive choices.",
+**Scope reminder**: this step ONLY fills `docs/inconsistencies-tech-debt.md` + creates/updates `docs/tech-debt/TD-*.md` detail files. The companion `docs/decisions.md` is intentionally filled in Step 9 (not here) so the agent has the full audit picture before recording positive choices.",
         sources: &["__GIT_HEAD__"],
     },
 
-    // Step 10: Final review + fill decisions.md
+    // Step 9: Final review + fill decisions.md
     //
-    // 0.8.3 — Step 10 now has a *real* target_file (`docs/decisions.md`)
-    // so the validate_and_repair_step_output guard catches the case
-    // where the agent forgets it. The prompt is a TWO-PHASE pass:
-    //   (1) Final quality review across all docs/ files (was Step 10).
+    // Step 9 has a *real* target_file (`docs/decisions.md`) so the
+    // validate_and_repair_step_output guard catches the case where the
+    // agent forgets it. The prompt is a TWO-PHASE pass:
+    //   (1) Final quality review across all docs/ files.
     //   (2) Fill docs/decisions.md with intentional architectural
-    //       choices observed during steps 1-9 (was Step 9 § E,
-    //       systematically forgotten because it was 200 lines deep
-    //       in the tech-debt prompt).
+    //       choices observed during steps 1-8 (kept out of the tech-debt
+    //       prompt, where it sat 200 lines deep and was systematically
+    //       forgotten).
     //
     // The two phases are deliberately ordered: review first (catches
     // contradictions + cleans up markers), then decisions.md (last
@@ -639,8 +577,8 @@ Quality rules:\n\
 
 // ─── Specialized audit kinds (0.8.2 "Design C") ──────────────────────────
 //
-// Each focused kind reuses Step 9's prompt scaffolding but narrows the
-// scope. The Full pipeline keeps all 10 steps. Specialized kinds skip
+// Each focused kind reuses Step 8's prompt scaffolding but narrows the
+// scope. The Full pipeline keeps all 9 steps. Specialized kinds skip
 // the docs-generation steps (1-8) because the user only wants a focused
 // re-scan, and they emit findings into a *named* tech-debt index file
 // per kind (e.g. `docs/inconsistencies-security.md`) so they don't
@@ -973,7 +911,7 @@ Read existing `docs/inconsistencies-rgaa.md` if present (anti-repetition: don't 
 \
 # F. ANTI-REPETITION + OUTPUT FORMAT\n\
 \n\
-Same rules as the Full audit Step 9: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-rgaa.md`. For each finding, the detail file at `docs/tech-debt/TD-<date>-<slug>.md` carries:\n\
+Same rules as the Full audit Step 8: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-rgaa.md`. For each finding, the detail file at `docs/tech-debt/TD-<date>-<slug>.md` carries:\n\
 - `**Category**: rgaa`\n\
 - `**RGAA Criterion**: <thématique>.<critère>` (e.g. `3.2`, `11.10`)\n\
 - `**WCAG mapping**: <reference>` if applicable (e.g. `1.4.3`)\n\
@@ -1053,7 +991,7 @@ DATABASE AUDIT (0.8.4) — focused re-scan on data-layer hygiene. Read existing 
 \
 # E. ANTI-REPETITION + OUTPUT FORMAT\n\
 \n\
-Same rules as the Full audit Step 9 (§ C and § D): scan `docs/tech-debt/` for existing TDs; for each finding, decide REUSE / REFINE / NEW per § C; create `docs/tech-debt/TD-<date>-<slug>.md` for new ones; UPDATE `audit_history` for existing. Detail file schema = the Full audit's. Index file = `docs/inconsistencies-database.md` (not `inconsistencies-tech-debt.md`). Severity calibration is the same.\n\n\
+Same rules as the Full audit Step 8 (§ C and § D): scan `docs/tech-debt/` for existing TDs; for each finding, decide REUSE / REFINE / NEW per § C; create `docs/tech-debt/TD-<date>-<slug>.md` for new ones; UPDATE `audit_history` for existing. Detail file schema = the Full audit's. Index file = `docs/inconsistencies-database.md` (not `inconsistencies-tech-debt.md`). Severity calibration is the same.\n\n\
 \
 Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions). If no findings, the index reads `'None identified during this database audit pass'`.",
         sources: &["__GIT_HEAD__"],
@@ -1094,47 +1032,12 @@ API DESIGN AUDIT (0.8.4) — focused re-scan on the public-facing contract. Read
 \
 # F. ANTI-REPETITION + OUTPUT FORMAT\n\
 \n\
-Same rules as the Full audit Step 9: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-api.md`. If no findings, the index reads `'None identified during this API design audit pass'`.\n\n\
+Same rules as the Full audit Step 8: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-api.md`. If no findings, the index reads `'None identified during this API design audit pass'`.\n\n\
 \
 Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions).",
         sources: &[],
     },
 ];
-
-/// 0.8.4 (#331) — MCP server names that ship as "Kronn helpers" with
-/// no project-specific data to introspect. Match is case-insensitive
-/// and tolerates the underscore/space variants the agent runtimes
-/// expose (`Sequential Thinking` vs `Sequential_Thinking`).
-///
-/// Used by the Step 8 prompt + a Rust-side helper that lets us
-/// short-circuit the LLM call entirely on helper-only setups in
-/// future iterations (today the prompt itself does the short-circuit
-/// — the Rust helper is kept for unit tests + future use).
-#[allow(dead_code)]
-pub(crate) const HELPER_MCP_NAMES: &[&str] = &[
-    "memory",
-    "sequential thinking",
-    "sequential_thinking",
-    "sequentialthinking",
-    "context7",
-    "kronn-internal",
-    "kronn_internal",
-];
-
-/// True when ALL the configured MCP server names belong to the
-/// helper list (or the list is empty). False when at least one
-/// vendor MCP is configured. Case-insensitive.
-#[allow(dead_code)]
-pub(crate) fn is_helper_only_mcp_setup(mcp_names: &[String]) -> bool {
-    if mcp_names.is_empty() {
-        return true; // no MCP at all = no vendor MCP either
-    }
-    let helpers: std::collections::HashSet<String> = HELPER_MCP_NAMES
-        .iter()
-        .map(|s| s.to_lowercase())
-        .collect();
-    mcp_names.iter().all(|name| helpers.contains(&name.to_lowercase()))
-}
 
 /// Dispatch table for `LaunchAuditRequest.kind`. Returns the step
 /// slice to drive the agent through. For `Custom`, callers should
@@ -1170,11 +1073,11 @@ mod kind_dispatch_tests {
     use crate::models::AuditKind;
 
     #[test]
-    fn full_kind_returns_canonical_10_steps() {
+    fn full_kind_returns_canonical_9_steps() {
         let steps = kind_to_steps(AuditKind::Full);
         assert_eq!(steps.len(), ANALYSIS_STEPS.len(),
             "Full kind must return the canonical step list, not a subset");
-        assert_eq!(steps.len(), 10, "Full audit is the documented 10-step pipeline");
+        assert_eq!(steps.len(), 9, "Full audit is the documented 9-step pipeline");
     }
 
     #[test]
@@ -1256,86 +1159,6 @@ mod kind_dispatch_tests {
         for (kind, label) in expected {
             assert_eq!(kind.as_label(), label, "label drift on {:?}", kind);
         }
-    }
-
-    // ─── 0.8.4 (#331) Step 8 helper-only short-circuit ──────────────
-
-    #[test]
-    fn is_helper_only_mcp_setup_handles_canonical_helpers() {
-        use super::is_helper_only_mcp_setup;
-        // Empty MCP list — no vendor MCP either.
-        assert!(is_helper_only_mcp_setup(&[]));
-        // Single canonical helper.
-        assert!(is_helper_only_mcp_setup(&["Memory".to_string()]));
-        // All four Kronn helpers — common case on personal projects.
-        assert!(is_helper_only_mcp_setup(&[
-            "Memory".to_string(),
-            "Sequential Thinking".to_string(),
-            "context7".to_string(),
-            "kronn-internal".to_string(),
-        ]));
-        // Case-insensitive — DOCROMS_WEB sample uses "MEMORY".
-        assert!(is_helper_only_mcp_setup(&[
-            "MEMORY".to_string(),
-            "Context7".to_string(),
-        ]));
-        // Underscore variant (the agent runtime sometimes substitutes).
-        assert!(is_helper_only_mcp_setup(&[
-            "Sequential_Thinking".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn is_helper_only_mcp_setup_detects_vendor_mcps() {
-        use super::is_helper_only_mcp_setup;
-        // Single vendor MCP.
-        assert!(!is_helper_only_mcp_setup(&["github".to_string()]));
-        // Helper + vendor mix — not helper-only.
-        assert!(!is_helper_only_mcp_setup(&[
-            "Memory".to_string(),
-            "Atlassian".to_string(),
-        ]));
-        // All vendors.
-        assert!(!is_helper_only_mcp_setup(&[
-            "Jira".to_string(),
-            "GitHub".to_string(),
-            "Linear".to_string(),
-        ]));
-    }
-
-    #[test]
-    fn step_8_prompt_documents_helper_short_circuit() {
-        // The Step 8 prompt MUST contain the helper-only escape hatch
-        // at the top of the prompt body (read FIRST). Otherwise the
-        // agent walks through tools/list + tool_call probes on each
-        // helper MCP and burns 10 min on a personal project with no
-        // vendor MCP — the exact pattern that triggered #331.
-        let step = super::ANALYSIS_STEPS.iter()
-            .find(|s| s.target_file == "docs/operations/mcp-servers.md")
-            .expect("Step 8 mcp-servers.md must exist");
-        let prompt = step.prompt;
-        // The short-circuit header must appear BEFORE the vendor path.
-        let helper_idx = prompt.find("Helper-only short-circuit")
-            .expect("Step 8 must document the helper short-circuit");
-        let vendor_idx = prompt.find("Vendor MCP path")
-            .expect("Step 8 must document the vendor path");
-        assert!(helper_idx < vendor_idx,
-            "helper short-circuit must come BEFORE vendor instructions \
-             so the agent reads the escape hatch first");
-        // Cites every canonical helper so the agent recognizes them.
-        assert!(prompt.contains("Memory"), "must list Memory helper");
-        assert!(prompt.contains("Sequential Thinking"), "must list Sequential Thinking helper");
-        assert!(prompt.contains("context7"), "must list context7 helper");
-        assert!(prompt.contains("kronn-internal"), "must list kronn-internal helper");
-        // And tells the agent to STOP without B/C/D when the list is helper-only.
-        let lower = prompt.to_lowercase();
-        assert!(lower.contains("do not call") || lower.contains("do not"),
-            "Step 8 must instruct the agent to skip tools/list calls in the helper-only path");
-        assert!(prompt.contains("no project-specific")
-                || prompt.contains("No project-specific")
-                || prompt.contains("No vendor")
-                || prompt.contains("no vendor"),
-            "Step 8's short-circuit body must explain why introspection is skipped");
     }
 
     #[test]
@@ -1465,28 +1288,28 @@ mod prompt_tests {
     }
 
     #[test]
-    fn step10_target_is_decisions_md_for_validate_and_repair_guard() {
+    fn step9_target_is_decisions_md_for_validate_and_repair_guard() {
         // 0.8.3 FIX — decisions.md was getting forgotten because it was
-        // a *secondary* output of Step 9 (tech-debt) buried 200 lines
+        // a *secondary* output of Step 8 (tech-debt) buried 200 lines
         // deep in the prompt. `validate_and_repair_step_output` only
         // checks `target_file`, so a missed decisions.md produced no
-        // step_warning. Step 10 now PROMOTES decisions.md to its own
+        // step_warning. Step 9 now PROMOTES decisions.md to its own
         // target_file so the guard fires when it's not filled, AND
         // the prompt is short + focused (2 phases: review + decisions).
-        let step10 = ANALYSIS_STEPS.last().expect("at least one step");
+        let step9 = ANALYSIS_STEPS.last().expect("at least one step");
         assert_eq!(
-            step10.target_file,
+            step9.target_file,
             "docs/decisions.md",
-            "Step 10 must target decisions.md so validate_and_repair_step_output catches an unfilled file"
+            "Step 9 must target decisions.md so validate_and_repair_step_output catches an unfilled file"
         );
         // The prompt must still cover the original "final review" duty.
-        assert!(step10.prompt.contains("PHASE 1"), "Step 10 must keep the final-review phase");
-        assert!(step10.prompt.contains("PHASE 2"), "Step 10 must include the decisions.md fill phase");
+        assert!(step9.prompt.contains("PHASE 1"), "Step 9 must keep the final-review phase");
+        assert!(step9.prompt.contains("PHASE 2"), "Step 9 must include the decisions.md fill phase");
         // And explicitly mention all 3 marker types so the agent
         // applies the discipline rules added in #303 (F2).
         for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
-            assert!(step10.prompt.contains(marker),
-                "Step 10 prompt must mention `{marker}` so the agent disambiguates marker types");
+            assert!(step9.prompt.contains(marker),
+                "Step 9 prompt must mention `{marker}` so the agent disambiguates marker types");
         }
     }
 
@@ -1551,7 +1374,7 @@ mod prompt_tests {
                 step.target_file,
             );
             // Step prompts can be long (some are 400+ words for legit
-            // task-specific reasons like Step 9's TD discipline). The
+            // task-specific reasons like Step 8's TD discipline). The
             // anti-duplication test is structural, not size-based.
         }
     }
@@ -1595,20 +1418,20 @@ mod prompt_tests {
     }
 
     #[test]
-    fn step9_does_not_duplicate_decisions_md_instruction() {
-        // 0.8.3 FIX — before, Step 9 also had a `# E. ALSO FILL
+    fn step8_does_not_duplicate_decisions_md_instruction() {
+        // 0.8.3 FIX — before, Step 8 also had a `# E. ALSO FILL
         // docs/decisions.md` section that the agent routinely
-        // forgot (buried in 200 lines). We moved the duty to Step 10
-        // and replaced the Step 9 mention with a scope reminder. Pin
+        // forgot (buried in 200 lines). We moved the duty to Step 9
+        // and replaced the Step 8 mention with a scope reminder. Pin
         // the no-duplicate state so a future "let's also fill it here"
         // drift gets caught.
-        let step9 = ANALYSIS_STEPS
+        let step8 = ANALYSIS_STEPS
             .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
-            .expect("Step 9 must exist");
+            .expect("Step 8 must exist");
         // The "ALSO FILL" pattern is the regex marker for the bug.
-        assert!(!step9.prompt.contains("ALSO FILL docs/decisions.md"),
-            "Step 9 must NOT instruct decisions.md fill anymore — Step 10 owns it now");
+        assert!(!step8.prompt.contains("ALSO FILL docs/decisions.md"),
+            "Step 8 must NOT instruct decisions.md fill anymore — Step 9 owns it now");
     }
 
     #[test]
@@ -1674,17 +1497,17 @@ mod prompt_tests {
     }
 
     #[test]
-    fn step9_baseline_includes_community_standards_gate() {
-        // The Step 9 prompt grew an OSS-intent-gated community standards
+    fn step8_baseline_includes_community_standards_gate() {
+        // The Step 8 prompt grew an OSS-intent-gated community standards
         // section (LICENSE / README description / issue+PR templates /
         // SECURITY / CONTRIBUTING / CODE_OF_CONDUCT). Regress against
         // any future cleanup that accidentally strips it.
-        let step9 = ANALYSIS_STEPS.iter()
+        let step8 = ANALYSIS_STEPS.iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
-            .expect("Step 9 prompt must target docs/inconsistencies-tech-debt.md");
-        let prompt = step9.prompt;
+            .expect("Step 8 prompt must target docs/inconsistencies-tech-debt.md");
+        let prompt = step8.prompt;
         assert!(prompt.contains("Community standards"),
-            "Step 9 must include the 'Community standards' section header");
+            "Step 8 must include the 'Community standards' section header");
         assert!(prompt.contains("OSS intent"),
             "Section must be gated on OSS intent (private projects skipped)");
         for needle in ["LICENSE", "ISSUE_TEMPLATE", "pull_request_template",
@@ -1692,6 +1515,27 @@ mod prompt_tests {
             assert!(prompt.contains(needle),
                 "Community-standards block must check `{}`", needle);
         }
+    }
+
+    #[test]
+    fn step8_dimensional_scan_forces_per_dimension_coverage() {
+        // The drastic improvement: every dimension is ACCOUNTABLE via the
+        // `## Dimension coverage` matrix — a dimension can't be silently
+        // skipped (the root cause of the "partially complete" audit).
+        let step = ANALYSIS_STEPS.iter()
+            .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
+            .expect("Step 8 must target docs/inconsistencies-tech-debt.md");
+        let p = step.prompt;
+        assert!(p.contains("Dimension coverage"),
+            "Step 8 must require the `## Dimension coverage` matrix");
+        assert!(p.contains("scanned — nothing substantiable"),
+            "must offer the explicit 'scanned, nothing' outcome (≠ 'didn't look')");
+        assert!(p.contains("verifiable reason"),
+            "an N/A dimension must carry a human-verifiable reason");
+        assert!(p.contains("incomplete audit"),
+            "a dimension absent from the matrix must mark the audit incomplete");
+        assert!(p.contains("Self-critic"),
+            "must include the pre-finish self-critic pass");
     }
 
     #[test]
@@ -1798,11 +1642,11 @@ mod prompt_tests {
     }
 
     #[test]
-    fn analysis_steps_count_is_10() {
+    fn analysis_steps_count_is_9() {
         assert_eq!(
             ANALYSIS_STEPS.len(),
-            10,
-            "Expected exactly 10 analysis steps, got {}",
+            9,
+            "Expected exactly 9 analysis steps, got {}",
             ANALYSIS_STEPS.len()
         );
     }

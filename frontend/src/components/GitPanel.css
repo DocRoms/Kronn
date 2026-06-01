@@ -542,6 +542,62 @@
 .hljs-strong                              { font-weight: bold; }
 .hljs-deletion                            { color: var(--kr-error); }
 
+/* Light themes — the One-Dark palette above is white-on-dark and turns
+   unreadable on the pale green/red diff backgrounds (e.g. #98c379 green text
+   on a light-green addition line). Override with a dark-on-light syntax palette
+   (One-Light / GitHub-light inspired) so additions stay legible in light mode.
+   `sakura` is also a light background, so it gets the same treatment. */
+:root[data-theme="light"] .hljs-comment,
+:root[data-theme="light"] .hljs-quote,
+:root[data-theme="sakura"] .hljs-comment,
+:root[data-theme="sakura"] .hljs-quote                { color: #6a737d; }
+:root[data-theme="light"] .hljs-keyword,
+:root[data-theme="light"] .hljs-selector-tag,
+:root[data-theme="light"] .hljs-addition,
+:root[data-theme="light"] .hljs-type,
+:root[data-theme="light"] .hljs-built_in,
+:root[data-theme="sakura"] .hljs-keyword,
+:root[data-theme="sakura"] .hljs-selector-tag,
+:root[data-theme="sakura"] .hljs-addition,
+:root[data-theme="sakura"] .hljs-type,
+:root[data-theme="sakura"] .hljs-built_in             { color: #6f42c1; }
+:root[data-theme="light"] .hljs-string,
+:root[data-theme="light"] .hljs-regexp,
+:root[data-theme="light"] .hljs-attr,
+:root[data-theme="light"] .hljs-meta,
+:root[data-theme="sakura"] .hljs-string,
+:root[data-theme="sakura"] .hljs-regexp,
+:root[data-theme="sakura"] .hljs-attr,
+:root[data-theme="sakura"] .hljs-meta                 { color: #22863a; }
+:root[data-theme="light"] .hljs-number,
+:root[data-theme="light"] .hljs-literal,
+:root[data-theme="light"] .hljs-doctag,
+:root[data-theme="light"] .hljs-variable.language_,
+:root[data-theme="sakura"] .hljs-number,
+:root[data-theme="sakura"] .hljs-literal,
+:root[data-theme="sakura"] .hljs-doctag,
+:root[data-theme="sakura"] .hljs-variable.language_   { color: #b76b01; }
+:root[data-theme="light"] .hljs-title,
+:root[data-theme="light"] .hljs-title.function_,
+:root[data-theme="light"] .hljs-section,
+:root[data-theme="light"] .hljs-name,
+:root[data-theme="sakura"] .hljs-title,
+:root[data-theme="sakura"] .hljs-title.function_,
+:root[data-theme="sakura"] .hljs-section,
+:root[data-theme="sakura"] .hljs-name                 { color: #005cc5; }
+:root[data-theme="light"] .hljs-params,
+:root[data-theme="light"] .hljs-variable,
+:root[data-theme="sakura"] .hljs-params,
+:root[data-theme="sakura"] .hljs-variable             { color: #d73a49; }
+:root[data-theme="light"] .hljs-symbol,
+:root[data-theme="light"] .hljs-bullet,
+:root[data-theme="light"] .hljs-link,
+:root[data-theme="light"] .hljs-meta-string,
+:root[data-theme="sakura"] .hljs-symbol,
+:root[data-theme="sakura"] .hljs-bullet,
+:root[data-theme="sakura"] .hljs-link,
+:root[data-theme="sakura"] .hljs-meta-string          { color: #1b7c83; }
+
 /* ── Status messages ─────────────────────────────────── */
 .git-empty {
   padding: 24px;

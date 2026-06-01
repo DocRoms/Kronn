@@ -132,6 +132,54 @@ pub async fn send_message(
         });
     }
 
+    // Double-responder guard (2026-06-04, flagged by Romuald; made
+    // presence-sticky 2026-06-08) — if ≥1 MCP agent is connected to this
+    // disc (joined via disc_join, status 'active'), it answers itself.
+    // Spawning the local runner too made BOTH reply to the same message
+    // (reproduced on disc ca495847: Kronn's native reply + the CLI peer's
+    // MCP reply to one user turn). The user message is already persisted
+    // + broadcast above, so the connected agent picks it up — we simply
+    // don't spawn. Emit one informational SSE event and let the stream end:
+    // `parseSSEStream` fires onDone on stream-close, so the frontend's
+    // "sending" state clears with no empty agent bubble (the peer's reply
+    // arrives separately via the disc message list / WS).
+    //
+    // PRESENCE-STICKY: `count_live_participants` counts any 'active' session
+    // regardless of how long ago it last heartbeated — a turn-based CLI peer
+    // idles minutes between human turns and must NOT be judged dead (the old
+    // 300s window was the double-responder bug). Crashed-peer escape hatch:
+    // `run_agent` (/run) is unguarded, so the user forces a Kronn reply with
+    // one click; and abandoned sessions (idle > 24h) are reaped at boot.
+    // `paused` agents are NOT counted (they won't reply → Kronn answers).
+    let live_check_id = id.clone();
+    // Fail-OPEN on a DB error (count → 0 → Kronn answers as usual): a
+    // transient error must not leave the human with no reply at all. The
+    // worst case is a one-off double-response, far less bad than silence —
+    // but log it so a persistent error is visible (Codex review 2026-06-04).
+    let live_agents = match state.db.with_conn(move |conn| {
+        crate::db::discussion_sessions::count_live_participants(conn, &live_check_id)
+    }).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("send_message: count_live_participants failed for disc {id}, falling back to local runner: {e}");
+            0
+        }
+    };
+    if live_agents > 0 {
+        tracing::info!(
+            "send_message: {live_agents} live MCP agent(s) on disc {id} — skipping local runner (connected agents respond)"
+        );
+        let payload = serde_json::json!({
+            "skipped": true,
+            "reason": "live_mcp_agents",
+            "live_agents": live_agents,
+        }).to_string();
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("skipped_live_agents").data(payload))
+        }));
+        return Sse::new(stream);
+    }
+
     make_agent_stream(state, id, target).await
 }
 
@@ -203,4 +251,123 @@ pub async fn stop_agent(
         }
     };
     Json(ApiResponse::ok(serde_json::json!({ "cancelled": cancelled })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::default_config;
+    use crate::db::Database;
+    use crate::DEFAULT_MAX_CONCURRENT_AGENTS;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    /// State with one project + one disc, mirroring the disc_invite test
+    /// harness. `send_message` is a free function over extractors, so we
+    /// drive it directly without spinning up axum.
+    async fn make_state_with_disc(disc_id: &str) -> AppState {
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let disc_id = disc_id.to_string();
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-test', 'Test', '/tmp', ?1, ?1)",
+                rusqlite::params![now],
+            )?;
+            conn.execute(
+                "INSERT INTO discussions (id, project_id, title, created_at, updated_at)
+                 VALUES (?1, 'p-test', 'Test disc', ?2, ?2)",
+                rusqlite::params![disc_id, now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let cfg = Arc::new(RwLock::new(default_config()));
+        AppState::new_defaults(cfg, db, DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    async fn sse_body_to_string(resp: Sse<SseStream>) -> String {
+        let response = resp.into_response();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("collect SSE body");
+        String::from_utf8_lossy(&bytes).to_string()
+    }
+
+    /// The double-responder fix (2026-06-04): with a LIVE MCP agent on the
+    /// disc, send_message must persist the human message + broadcast, then
+    /// SKIP the local runner (emit `skipped_live_agents`) so the connected
+    /// agent is the sole responder. We assert: (a) the skip event is on the
+    /// wire, (b) the User message is persisted, (c) NO Agent reply was added
+    /// (the runner never ran).
+    #[tokio::test]
+    async fn send_message_skips_local_runner_when_live_agent_connected() {
+        let disc = "d-live-1";
+        let state = make_state_with_disc(disc).await;
+        // A live MCP agent is connected (status='active', fresh last_seen
+        // from create_session).
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::create_session(conn, disc, "Codex", Some("sess-x"), "peer")
+            })
+            .await
+            .unwrap();
+
+        let resp = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest { content: "hello peers".into(), target_agent: None }),
+        )
+        .await;
+        let body = sse_body_to_string(resp).await;
+        assert!(body.contains("skipped_live_agents"), "expected skip event, got: {body}");
+        assert!(body.contains("live_mcp_agents"), "skip reason present");
+
+        // User message persisted, and NO Agent message (runner never ran).
+        let msgs = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, disc))
+            .await
+            .unwrap();
+        assert_eq!(msgs.len(), 1, "only the human message is persisted");
+        assert_eq!(msgs[0].role, MessageRole::User);
+        assert!(
+            !msgs.iter().any(|m| m.role == MessageRole::Agent),
+            "no agent reply — the connected agent answers, not Kronn's runner"
+        );
+    }
+
+    /// A `paused` session is NOT a live responder, so send_message must
+    /// NOT skip. We can't drive make_agent_stream (it launches a real CLI)
+    /// in a unit test, so we assert the decision input directly: with only
+    /// a paused session, count_live_participants is 0 → the guard is not
+    /// taken. (The skip-path behaviour itself is covered above.)
+    #[tokio::test]
+    async fn send_message_does_not_skip_when_only_paused_agent() {
+        let disc = "d-paused-1";
+        let state = make_state_with_disc(disc).await;
+        let pk = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::create_session(conn, disc, "Codex", Some("sess-p"), "peer")
+            })
+            .await
+            .unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussion_sessions::set_session_status(conn, pk, "paused"))
+            .await
+            .unwrap();
+
+        let live = state
+            .db
+            .with_conn(move |conn| crate::db::discussion_sessions::count_live_participants(conn, disc))
+            .await
+            .unwrap();
+        assert_eq!(live, 0, "paused agent is not a live responder → Kronn would still answer");
+    }
 }

@@ -16,6 +16,7 @@
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  overflow-x: hidden; /* belt-and-suspenders: never let a wide child push a h-scrollbar */
 }
 
 .disc-sidebar[data-mobile="true"] {
@@ -67,6 +68,12 @@
 .disc-sidebar-list {
   flex: 1;
   overflow-y: auto;
+  /* MUST be explicit: per the CSS overflow spec, when one axis is `auto` and
+     the other is `visible`, the `visible` axis is forced to `auto` too — so
+     `overflow-y: auto` alone silently enables a HORIZONTAL scrollbar whenever
+     a child is too wide (a long unbroken disc title, a wide badge row). Clip
+     it instead; titles already ellipsize. (Fixes the intermittent h-scrollbar.) */
+  overflow-x: hidden;
   padding: var(--kr-sp-4) 0;
 }
 
@@ -227,7 +234,8 @@
 }
 
 /* ── Retry batch button — same shape as delete, accent-coloured ─── */
-.disc-batch-retry {
+.disc-batch-retry,
+.disc-batch-review {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -246,11 +254,15 @@
 
 .disc-batch-header:hover .disc-batch-retry,
 .disc-batch-header:focus-within .disc-batch-retry,
-.disc-batch-retry:focus {
+.disc-batch-retry:focus,
+.disc-batch-header:hover .disc-batch-review,
+.disc-batch-header:focus-within .disc-batch-review,
+.disc-batch-review:focus {
   opacity: 1;
 }
 
-.disc-batch-retry:hover {
+.disc-batch-retry:hover,
+.disc-batch-review:hover {
   background: rgba(var(--kr-accent-rgb), 0.12);
   border-color: rgba(var(--kr-accent-rgb), 0.5);
   color: var(--kr-accent);
@@ -320,6 +332,126 @@
      eye notice the boundary at a glance. */
   background: rgba(var(--kr-accent-rgb), 0.015);
   border-radius: 0 0 var(--kr-r-sm) 0;
+}
+
+.disc-batch-review-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.disc-batch-review-panel {
+  width: min(980px, 100%);
+  max-height: min(760px, calc(100vh - 48px));
+  display: flex;
+  flex-direction: column;
+  background: var(--kr-bg-surface);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  box-shadow: var(--kr-shadow-lg);
+  overflow: hidden;
+}
+
+.disc-batch-review-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--kr-border);
+}
+
+.disc-batch-review-head h2 {
+  margin: 0;
+  font-size: var(--kr-fs-lg);
+}
+
+.disc-batch-review-head p {
+  margin: 4px 0 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.disc-batch-review-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 18px;
+  color: var(--kr-text-secondary);
+}
+
+.disc-batch-review-state[data-kind="error"] {
+  color: var(--kr-error);
+}
+
+.disc-batch-review-table {
+  overflow: auto;
+  padding: 8px 0;
+}
+
+.disc-batch-review-row {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--kr-border-subtle);
+}
+
+.disc-batch-review-main {
+  min-width: 0;
+}
+
+.disc-batch-review-ticket {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.disc-batch-review-ticket:hover {
+  color: var(--kr-accent);
+}
+
+.disc-batch-review-main p {
+  margin: 3px 0 0;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.35;
+}
+
+.disc-batch-review-meta,
+.disc-batch-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.disc-batch-review-actions {
+  justify-content: flex-end;
+}
+
+@media (max-width: 760px) {
+  .disc-batch-review-backdrop {
+    padding: 8px;
+  }
+  .disc-batch-review-row {
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+  .disc-batch-review-actions {
+    justify-content: flex-start;
+  }
 }
 
 .disc-chevron {

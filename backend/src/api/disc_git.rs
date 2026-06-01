@@ -93,8 +93,13 @@ pub async fn disc_git_diff(
     };
 
     let file_path = query.path.clone();
+    let committed = query.committed.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_git_diff(&work_dir, &file_path)
+        if committed {
+            super::git_ops::run_git_diff_committed(&work_dir, &file_path)
+        } else {
+            super::git_ops::run_git_diff(&work_dir, &file_path)
+        }
     }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
