@@ -696,6 +696,7 @@ describe('McpPage', () => {
 
   it('Modifier le plugin: opens the form pre-filled with spec values', async () => {
     vi.useRealTimers();
+    (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockClear();
     await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
 
     // Name + Base URL pre-filled.
@@ -716,11 +717,42 @@ describe('McpPage', () => {
     expect(endpointPathValues).toContain('/users');
     expect(endpointPathValues).toContain('/users/{id}');
 
-    // revealSecrets MUST have been called so the user can see/edit stored creds.
-    expect(mcpsApi.revealSecrets).toHaveBeenCalledWith('cfg-example-1');
+    // 2026-06-09 UX fix: a stored secret renders as a read-only masked
+    // indicator + "Remplacer" — NOT a pre-filled (un-round-trippable) nor a
+    // blank (looks-wiped) input. So the user always sees a key exists. No
+    // value input until they click Remplacer; revealSecrets is never called.
+    expect(screen.getByText('Remplacer')).toBeTruthy();
+    expect(screen.queryByPlaceholderText('Valeur')).toBeNull();
+    expect(mcpsApi.revealSecrets).not.toHaveBeenCalled();
   });
 
-  it('Modifier le plugin: submit fires PUT updateCustomSpec then PATCH updateConfig', async () => {
+  it('Modifier le plugin: the 👁 reveals the stored value read-only (coherent with the card)', async () => {
+    // Coherence with the card: a stored field can be peeked via the eye —
+    // fetched on demand (read-only display, never round-tripped on save).
+    vi.useRealTimers();
+    (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockClear();
+    (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { key: 'API_KEY', masked_value: 'sk-secret-123', secret: true },
+    ]);
+    await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
+
+    // Hidden by default — no plaintext on screen, no reveal call yet.
+    expect(screen.queryByDisplayValue('sk-secret-123')).toBeNull();
+    expect(mcpsApi.revealSecrets).not.toHaveBeenCalled();
+
+    // Click the eye on the stored field → fetch + show the value read-only.
+    fireEvent.click(screen.getByLabelText('Afficher'));
+    await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+
+    expect(mcpsApi.revealSecrets).toHaveBeenCalledWith('cfg-example-1');
+    const revealed = screen.getByDisplayValue('sk-secret-123') as HTMLInputElement;
+    expect(revealed.readOnly).toBe(true);
+  });
+
+  it('Modifier le plugin: Remplacer → typing a new value PATCHes the env', async () => {
+    // "Modifier le plugin" is THE one place to edit structure AND
+    // credentials (the card is read-only). Clicking "Remplacer" reveals an
+    // empty input; typing a value replaces the stored key on save.
     vi.useRealTimers();
     (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
     (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
@@ -729,11 +761,13 @@ describe('McpPage', () => {
 
     await openEditDrawer('custom-example-abc12345', 'cfg-example-1');
 
-    // Change the field value (the credential the user is updating).
-    const valueInputs = screen.getAllByPlaceholderText(/Valeur/) as HTMLInputElement[];
-    fireEvent.change(valueInputs[0], { target: { value: 'sk-NEW-rotation' } });
+    // No value input until the user explicitly chooses to replace.
+    expect(screen.queryByPlaceholderText('Valeur')).toBeNull();
+    fireEvent.click(screen.getByText('Remplacer'));
+    const valueInput = screen.getByPlaceholderText('Valeur') as HTMLInputElement;
+    expect(valueInput.value).toBe('');
+    fireEvent.change(valueInput, { target: { value: 'sk-NEW-rotation' } });
 
-    // Save.
     const saveBtn = screen.getByText(/Enregistrer les modifications/);
     fireEvent.click(saveBtn);
     await act(async () => {
@@ -741,42 +775,25 @@ describe('McpPage', () => {
       await Promise.resolve();
     });
 
-    // PUT spec called with full payload.
+    // PUT spec + PATCH env (slugged env_key) both fire.
     expect(mcpsApi.updateCustomSpec).toHaveBeenCalledTimes(1);
-    const [serverId, specPayload] = (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(serverId).toBe('custom-example-abc12345');
-    expect(specPayload.name).toBe('ExampleAPI');
-    expect(specPayload.base_url).toBe('https://api.example.com/v1');
-    expect(specPayload.endpoints).toHaveLength(2);
-    expect(specPayload.endpoints[0].path).toBe('/users');
-    expect(specPayload.auth).toBe('None');
-    expect(specPayload.fields).toEqual([{ label: 'API Key', value: 'sk-NEW-rotation' }]);
-
-    // PATCH env called with the slugged env_key.
     expect(mcpsApi.updateConfig).toHaveBeenCalledTimes(1);
     const [cfgId, envPayload] = (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mock.calls[0];
     expect(cfgId).toBe('cfg-example-1');
     expect(envPayload.env).toEqual({ API_KEY: 'sk-NEW-rotation' });
   });
 
-  it('Modifier le plugin: empty field values are SKIPPED on env PATCH (no wipe)', async () => {
+  it('Modifier le plugin: not replacing keeps the stored key — no env PATCH (no wipe)', async () => {
+    // The desync-killer: if the user doesn't click "Remplacer", the stored
+    // secret is untouched — the save skips the env PATCH entirely.
     vi.useRealTimers();
-    // Regression guard 2026-05-20 : if revealSecrets glitched and we
-    // pre-filled with empty values, hitting Save must NOT wipe the
-    // stored creds. The handler filters f.value === '' before
-    // building newEnv.
     (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockClear();
     (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockClear();
     (mcpsApi.updateCustomSpec as ReturnType<typeof vi.fn>).mockResolvedValue({});
-    (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mockResolvedValue({});
-    // revealSecrets returns empty value (the glitch scenario).
-    (mcpsApi.revealSecrets as ReturnType<typeof vi.fn>).mockResolvedValueOnce([
-      { key: 'API_KEY', masked_value: '', secret: true },
-    ]);
 
     await openEditDrawer('custom-example-abc12345', 'cfg-example-2');
 
-    // Don't touch the value field — submit straight away.
+    // Don't click Remplacer — submit straight away.
     const saveBtn = screen.getByText(/Enregistrer les modifications/);
     fireEvent.click(saveBtn);
     await act(async () => {
@@ -784,16 +801,9 @@ describe('McpPage', () => {
       await Promise.resolve();
     });
 
-    // PUT spec still fires.
     expect(mcpsApi.updateCustomSpec).toHaveBeenCalledTimes(1);
-    // PATCH env fires with EMPTY env map — the existing stored creds
-    // stay since wholesale {} would NOT match a destructive PATCH that
-    // wipes; the backend interprets {} as "no changes to env" here.
-    // (If the backend semantics change to "wipe everything", this test
-    // becomes the canary.)
-    expect(mcpsApi.updateConfig).toHaveBeenCalledTimes(1);
-    const [, envPayload] = (mcpsApi.updateConfig as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(envPayload.env).toEqual({});
+    // Stored key untouched → env never patched.
+    expect(mcpsApi.updateConfig).not.toHaveBeenCalled();
   });
 
   // ─── 0.8.6 (#60) Orphan env warning ──────────────────────────────────

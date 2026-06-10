@@ -43,16 +43,26 @@ describe('TICKET_TO_PR preset', () => {
     return p;
   };
 
-  it('ships the expected 9-step pipeline + on_failure', () => {
+  // 2026-06-11 — DECOMPOSED: the implement↔test↔review loop now lives in a
+  // child workflow (`implement-verify`), referenced by the parent's
+  // `implement_verify` SubWorkflow step via `@bundle:implement-verify`. The
+  // child shares the parent's worktree (Phase 2 handoff) so `create_pr` (parent)
+  // sees the implementation. See docs/design/decomposed-autopilot-presets.md.
+  const findChild = () => {
+    const p = findTicketToPr();
+    const child = p.childWorkflows?.find(c => c.bundleId === 'implement-verify');
+    if (!child) throw new Error('implement-verify child workflow not found');
+    return child;
+  };
+
+  it('parent ships the decomposed 7-step pipeline + on_failure', () => {
     const p = findTicketToPr();
     const stepNames = p.steps.map(s => s.name);
     expect(stepNames).toEqual([
       'fetch_issue',
       'analyze',
       'plan_gate',
-      'implement',
-      'run_tests',
-      'review',
+      'implement_verify',
       'ready_gate',
       'create_pr',
       'notify_done',
@@ -60,6 +70,37 @@ describe('TICKET_TO_PR preset', () => {
     expect(p.onFailure).toBeDefined();
     expect(p.onFailure!.length).toBe(1);
     expect(p.onFailure![0].name).toBe('rollback_notify');
+  });
+
+  it('implement_verify is a SubWorkflow referencing the @bundle child', () => {
+    const p = findTicketToPr();
+    const sub = p.steps.find(s => s.name === 'implement_verify')!;
+    expect(sub.step_type).toEqual({ type: 'SubWorkflow' });
+    expect(sub.sub_workflow_id).toBe('@bundle:implement-verify');
+    // On child failure, re-run the whole child once, else fall through to on_failure.
+    const failRule = sub.on_result?.find(r => r.contains === 'SUBWF_FAILED');
+    expect(failRule!.action).toEqual({
+      type: 'Goto', step_name: 'implement_verify', max_iterations: 1,
+    });
+  });
+
+  it('ships the implement-verify child workflow (loop, no Gate inside)', () => {
+    const child = findChild();
+    expect(child.steps.map(s => s.name)).toEqual(['implement', 'run_tests', 'review', 'commit']);
+    // `commit` (Exec) persists the reviewed work to the parent branch so create_pr can push it.
+    expect((child.steps.at(-1)!.step_type as { type: string }).type).toBe('Exec');
+    // Gate is forbidden inside a sub-workflow (validated server-side); the
+    // preset must never ship one in the child.
+    expect(child.steps.some(s => s.step_type?.type === 'Gate')).toBe(false);
+    // Internal Gotos stay inside the child (target `implement`, which exists here).
+    const runTests = child.steps.find(s => s.name === 'run_tests')!;
+    expect(runTests.on_result?.find(r => r.contains === 'ERROR')!.action).toEqual({
+      type: 'Goto', step_name: 'implement', max_iterations: 2,
+    });
+    const review = child.steps.find(s => s.name === 'review')!;
+    expect(review.on_result?.find(r => r.contains === 'NEEDS_CHANGES')!.action).toEqual({
+      type: 'Goto', step_name: 'implement', max_iterations: 2,
+    });
   });
 
   it('starts with a JsonData fixture (testable without tracker plugin)', () => {
@@ -77,56 +118,29 @@ describe('TICKET_TO_PR preset', () => {
 
   it('Agent steps reference vendored external skills', () => {
     const p = findTicketToPr();
-    const byName = (n: string) => p.steps.find(s => s.name === n)!;
+    const parent = (n: string) => p.steps.find(s => s.name === n)!;
+    const child = findChild();
+    const childStep = (n: string) => child.steps.find(s => s.name === n)!;
 
-    // analyze: writing-plans + brainstorming + verification
-    expect(byName('analyze').skill_ids).toEqual(expect.arrayContaining([
+    // analyze (parent): writing-plans + brainstorming + verification
+    expect(parent('analyze').skill_ids).toEqual(expect.arrayContaining([
       'writing-plans', 'brainstorming', 'verification-before-completion',
     ]));
-    // implement: tdd + debugging + verification + receiving-code-review
-    expect(byName('implement').skill_ids).toEqual(expect.arrayContaining([
+    // create_pr (parent): finishing-a-development-branch + verification
+    expect(parent('create_pr').skill_ids).toEqual(expect.arrayContaining([
+      'finishing-a-development-branch', 'verification-before-completion',
+    ]));
+    // implement (child): tdd + debugging + verification + receiving-code-review
+    expect(childStep('implement').skill_ids).toEqual(expect.arrayContaining([
       'test-driven-development',
       'systematic-debugging',
       'verification-before-completion',
       'receiving-code-review',
     ]));
-    // review: requesting-code-review + verification
-    expect(byName('review').skill_ids).toEqual(expect.arrayContaining([
+    // review (child): requesting-code-review + verification
+    expect(childStep('review').skill_ids).toEqual(expect.arrayContaining([
       'requesting-code-review', 'verification-before-completion',
     ]));
-    // create_pr: finishing-a-development-branch + verification
-    expect(byName('create_pr').skill_ids).toEqual(expect.arrayContaining([
-      'finishing-a-development-branch', 'verification-before-completion',
-    ]));
-  });
-
-  it('implement → run_tests loop is wired with Goto + max_iterations=2', () => {
-    // 0.7.0 — lowered from 5 to 2 to bound token burn on heavy tickets.
-    // Two retries on test failure is enough for typical TDD red-green
-    // recoveries; beyond that something deeper is wrong and the loop
-    // would just rack up Claude tokens for nothing.
-    const p = findTicketToPr();
-    const runTests = p.steps.find(s => s.name === 'run_tests')!;
-    const errorRule = runTests.on_result?.find(r => r.contains === 'ERROR');
-    expect(errorRule).toBeDefined();
-    expect(errorRule!.action).toEqual({
-      type: 'Goto', step_name: 'implement', max_iterations: 2,
-    });
-  });
-
-  it('review → implement loop on NEEDS_CHANGES, fall-through on APPROVED', () => {
-    // 0.7.0 — APPROVED no longer has an explicit Stop rule.
-    // The natural fall-through to the next step (`create_pr`) is what we
-    // want; the prior `APPROVED → Stop` action terminated the workflow
-    // prematurely so create_pr / ready_gate / notify_done never ran.
-    const p = findTicketToPr();
-    const review = p.steps.find(s => s.name === 'review')!;
-    const needsChanges = review.on_result?.find(r => r.contains === 'NEEDS_CHANGES');
-    const approved = review.on_result?.find(r => r.contains === 'APPROVED');
-    expect(needsChanges?.action).toEqual({
-      type: 'Goto', step_name: 'implement', max_iterations: 2,
-    });
-    expect(approved).toBeUndefined();
   });
 
   it('Gates point back to recoverable steps (no dead-ends)', () => {
@@ -134,29 +148,28 @@ describe('TICKET_TO_PR preset', () => {
     const planGate = p.steps.find(s => s.name === 'plan_gate')!;
     const readyGate = p.steps.find(s => s.name === 'ready_gate')!;
     expect(planGate.gate_request_changes_target).toBe('analyze');
-    expect(readyGate.gate_request_changes_target).toBe('implement');
+    // INV-1: a parent Gate cannot target a step INSIDE the child — request
+    // changes re-runs the whole SubWorkflow step (which re-enters its loop).
+    expect(readyGate.gate_request_changes_target).toBe('implement_verify');
   });
 
-  it('exec_allowlist covers common test runners', () => {
-    // 0.7.0 — added bash (for the generic test-detect script) plus pnpm,
-    // yarn, composer so the preset works on any project, not only Rust.
-    const p = findTicketToPr();
-    expect(p.execAllowlist).toEqual(expect.arrayContaining([
+  it('child exec_allowlist covers common test runners (parent has none)', () => {
+    const child = findChild();
+    expect(child.execAllowlist).toEqual(expect.arrayContaining([
       'bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer',
     ]));
+    // The parent no longer runs Exec — the test loop is in the child.
+    const p = findTicketToPr();
+    expect(p.steps.some(s => s.step_type?.type === 'Exec')).toBe(false);
   });
 
-  it('run_tests step uses the generic auto-detect bash script', () => {
-    // 0.7.0 — replaces hardcoded `cargo test` with a bash probe that adapts
-    // to whatever stack the worktree carries. Without this, the preset
-    // only worked on Rust projects (front_euronews regressed silently).
-    const p = findTicketToPr();
-    const runTests = p.steps.find(s => s.name === 'run_tests')!;
+  it('child run_tests uses the generic auto-detect bash script', () => {
+    const child = findChild();
+    const runTests = child.steps.find(s => s.name === 'run_tests')!;
     expect(runTests.exec_command).toBe('bash');
     const args = runTests.exec_args ?? [];
     expect(args[0]).toBe('-c');
     const script = args[1] ?? '';
-    // Sanity: each major framework probe is present.
     expect(script).toContain('Makefile');
     expect(script).toContain('Cargo.toml');
     expect(script).toContain('package.json');
@@ -165,17 +178,12 @@ describe('TICKET_TO_PR preset', () => {
     expect(script).toContain('[SIGNAL: SKIPPED]');
   });
 
-  it('implement and review steps carry an auto-retry on transient CLI exits', () => {
-    // 0.7.0 — Claude Code CLI sometimes silently exits 1 mid-stream on
-    // long sessions (~25 min mark, no stderr). Retrying once almost
-    // always recovers since the failure is transient.
-    const p = findTicketToPr();
-    const implement = p.steps.find(s => s.name === 'implement')!;
-    const review = p.steps.find(s => s.name === 'review')!;
+  it('child implement and review steps carry an auto-retry on transient CLI exits', () => {
+    const child = findChild();
+    const implement = child.steps.find(s => s.name === 'implement')!;
+    const review = child.steps.find(s => s.name === 'review')!;
     expect(implement.retry).toEqual({ max_retries: 1, backoff: 'exponential' });
     expect(review.retry).toEqual({ max_retries: 1, backoff: 'exponential' });
-    // 30 min stall ceiling on these two — heavy enterprise tickets
-    // routinely hit 20-25 min of streamed activity.
     expect(implement.stall_timeout_secs).toBe(1800);
     expect(review.stall_timeout_secs).toBe(1800);
   });
@@ -193,36 +201,72 @@ describe('FEASIBILITY_AUTOPILOT preset', () => {
     return p;
   };
 
-  it('ships the expected 7-step pipeline (mixed primitives)', () => {
+  // 2026-06-11 (PR-C) — DECOMPOSED, mirror of the Rust split (parent +
+  // build_feasibility_child). Parent keeps the human-gated triage; the
+  // implement/test/drift loop is a child sub-workflow sharing the worktree.
+  const findFAChild = () => {
+    const child = findFA().childWorkflows?.find(c => c.bundleId === 'fa-implement-verify');
+    if (!child) throw new Error('fa-implement-verify child not found');
+    return child;
+  };
+
+  it('parent ships the two-brains 9-step pipeline (mirror of the Rust endpoint)', () => {
     const p = findFA();
     expect(p.steps.map(s => s.name)).toEqual([
       'fetch_issue',
       'triage',
+      'plan_lint',
       'review_triage',
-      'implement',
+      'test_baseline',
+      'feasibility_impl',
       'run_tests',
       'drift_check',
       'pr_draft',
     ]);
   });
 
-  it('only triage / implement / pr_draft are Agent — désagentification rule', () => {
-    // [[feedback_kronn_deagentify_first]] — never let this preset
-    // regress to all-Agent. Token cost = 0 on fetch_issue (JsonData),
-    // review_triage (Gate), run_tests (Exec), drift_check (Exec).
+  it('two-brains: triage debates with a Codex reviewer (multi_agent_review), no separate plan_review step', () => {
     const p = findFA();
-    const agentSteps = p.steps
+    const triage = p.steps.find(s => s.name === 'triage')!;
+    expect(triage.agent_settings?.tier).toBe('reasoning');
+    expect(triage.multi_agent_review?.reviewer_agent).toBe('Codex');
+    expect(triage.multi_agent_review?.reviewer_tier).toBe('reasoning');
+    expect(p.steps.some(s => s.name === 'plan_review')).toBe(false);
+  });
+
+  it('plan_lint is a 0-token Exec surfacing the engine-written lint report', () => {
+    const lint = findFA().steps.find(s => s.name === 'plan_lint')!;
+    expect((lint.step_type as { type: string }).type).toBe('Exec');
+    expect(lint.exec_args?.[1]).toContain('plan_lint.txt');
+  });
+
+  it('child = implement → static_checks → scope_check → completeness_check → commit (no Gate, suites at parent)', () => {
+    const child = findFAChild();
+    expect(child.steps.map(s => s.name)).toEqual(['implement', 'item_tests', 'scope_check', 'completeness_check', 'commit']);
+    expect(child.steps.some(s => (s.step_type as { type: string }).type === 'Gate')).toBe(false);
+    // commit (Exec) persists the Phase-0 work to the parent branch (survives cleanup).
+    expect((child.steps.at(-1)!.step_type as { type: string }).type).toBe('Exec');
+    // completeness_check (Exec, 0 token) loops back to implement on a missing marker.
+    const cc = child.steps.find(s => s.name === 'completeness_check')!;
+    expect((cc.step_type as { type: string }).type).toBe('Exec');
+    const rule = cc.on_result?.find(r => r.contains === 'exit_3');
+    expect((rule?.action as { step_name: string }).step_name).toBe('implement');
+  });
+
+  it('désagentification preserved across the split (triage/pr_draft parent, implement child)', () => {
+    // [[feedback_kronn_deagentify_first]] — never regress to all-Agent.
+    const p = findFA();
+    const parentAgents = p.steps
       .filter(s => (s.step_type as { type: string }).type === 'Agent')
       .map(s => s.name);
-    expect(agentSteps).toEqual(['triage', 'implement', 'pr_draft']);
+    expect(parentAgents).toEqual(['triage', 'pr_draft']);
+    const childAgents = findFAChild().steps
+      .filter(s => (s.step_type as { type: string }).type === 'Agent')
+      .map(s => s.name);
+    expect(childAgents).toEqual(['implement']);
   });
 
   it('triage step uses TypedSchema with on_invalid=Fail', () => {
-    // The `[TRIAGE]` marker prefix lives in the i18n string at runtime
-    // (see `wiz.preset.feasibilityAutopilot.triageDesc` in i18n.ts).
-    // This test only asserts the structural contract — the literal
-    // marker substring is checked by `i18n.test.ts` and by
-    // `triage::is_triage_step` on the backend.
     const p = findFA();
     const triage = p.steps.find(s => s.name === 'triage')!;
     expect(triage.description).toBe('wiz.preset.feasibilityAutopilot.triageDesc');
@@ -237,50 +281,92 @@ describe('FEASIBILITY_AUTOPILOT preset', () => {
     expect(gate.gate_request_changes_target).toBe('triage');
   });
 
-  it('implement signals BLOCKED → Goto(triage) capped at 3', () => {
+  it('feasibility_impl is a SubWorkflow re-triaging on SUBWF_FAILED (cap 3)', () => {
+    // The old `implement BLOCKED → Goto(triage)` is reconstructed at the
+    // parent: a failed child run re-triages.
     const p = findFA();
-    const impl = p.steps.find(s => s.name === 'implement')!;
-    const rule = impl.on_result?.[0];
-    expect(rule?.contains).toBe('BLOCKED');
+    const sub = p.steps.find(s => s.name === 'feasibility_impl')!;
+    expect((sub.step_type as { type: string }).type).toBe('SubWorkflow');
+    expect(sub.sub_workflow_id).toBe('@bundle:fa-implement-verify');
+    const rule = sub.on_result?.[0];
+    expect(rule?.contains).toBe('SUBWF_FAILED');
     expect((rule?.action as { step_name: string }).step_name).toBe('triage');
     expect((rule?.action as { max_iterations: number }).max_iterations).toBe(3);
   });
 
-  it('run_tests is Exec bash with auto-detect across stacks', () => {
-    const p = findFA();
-    const rt = p.steps.find(s => s.name === 'run_tests')!;
-    expect((rt.step_type as { type: string }).type).toBe('Exec');
-    expect(rt.exec_command).toBe('bash');
-    const script = rt.exec_args?.[1] ?? '';
-    for (const needle of ['make test', 'cargo test', 'pnpm test', 'composer test', 'pytest']) {
-      expect(script).toContain(needle);
-    }
+  it('child item_tests runs scoped tests, loops back to implement until green (cap 3)', () => {
+    const sc = findFAChild().steps.find(s => s.name === 'item_tests')!;
+    expect((sc.step_type as { type: string }).type).toBe('Exec');
+    expect(sc.exec_command).toBe('bash');
+    const script = sc.exec_args?.[1] ?? '';
+    expect(script).toContain('php -l');
+    expect(script).toContain('jest --findRelatedTests'); // JS scoped to changed files
+    expect(script).toContain('--filter'); // PHP scoped to changed test classes
+    expect(script).toContain('item-test-failures.txt'); // failures fed back to implement
+    // Exec inline [SIGNAL] is swallowed by the envelope — exit codes branch (run-4 lesson): exit 2 → `exit_2`.
+    expect(script).toContain('exit 2');
+    const rule = sc.on_result?.find(r => r.contains === 'exit_2');
+    expect((rule?.action as { step_name: string }).step_name).toBe('implement');
+    expect((rule?.action as { max_iterations: number }).max_iterations).toBe(3); // "until green", bounded
   });
 
-  it('drift_check is Exec greping KRONN markers, skipping heavy dirs', () => {
+  it('parent run_tests v3: JS in-container (coverage≠fail) + PHP via project docker stack', () => {
+    const rt = findFA().steps.find(s => s.name === 'run_tests')!;
+    expect((rt.step_type as { type: string }).type).toBe('Exec');
+    const script = rt.exec_args?.[1] ?? '';
+    // JS: jest in the Kronn container; a coverage-gate exit is NOT a test failure (run-10)
+    expect(script).toContain('--coverage=false');
+    expect(script).toContain('lint/coverage gate');
+    // PHP: project's dockerized php service, worktree-mounted (no local install)
+    expect(script).toContain('docker compose -f');
+    expect(script).toContain('vendor/bin/phpunit -c phpunit.xml.dist');
+    expect(script).toContain('hosttr'); // container→host path translation for bind mounts
+    expect(script).toContain('no dockerized php stack'); // honest SKIP fallback, not a false FAIL
+    // verdict quoted by pr_draft; exit 0 always (failures documented, not fatal)
+    expect(script).toContain('TEST VERDICT — JS: $js | PHP: $php_v');
+    expect(script.trimEnd().endsWith('exit 0')).toBe(true);
+    // read-only integration verdict — no parent fix loop (the test→fix loop is in the child item_tests)
+    expect(rt.on_result ?? []).toHaveLength(0);
+    expect(findFA().steps.some(s => s.name === 'fix_tests')).toBe(false);
+  });
+
+  it('test_baseline records the pre-existing failures before the fan-out', () => {
     const p = findFA();
-    const dc = p.steps.find(s => s.name === 'drift_check')!;
+    const tb = p.steps.find(s => s.name === 'test_baseline')!;
+    expect((tb.step_type as { type: string }).type).toBe('Exec');
+    expect(tb.exec_args?.[1]).toContain('known-failing.txt');
+    const pos = (n: string) => p.steps.findIndex(s => s.name === n);
+    expect(pos('test_baseline')).toBeLessThan(pos('feasibility_impl'));
+    // child item_tests is baseline-aware (loops only on net-new)
+    const it = findFAChild().steps.find(s => s.name === 'item_tests')!;
+    expect(it.exec_args?.[1]).toContain('known-failing.txt');
+    expect(it.exec_args?.[1]).toContain('NET-NEW');
+  });
+
+  it('parent drift_check greps KRONN markers over the FINAL worktree, skipping heavy dirs', () => {
+    const dc = findFA().steps.find(s => s.name === 'drift_check')!;
     expect((dc.step_type as { type: string }).type).toBe('Exec');
     const script = dc.exec_args?.[1] ?? '';
     expect(script).toContain('KRONN-(ASSUMED|MOCKED|TODO)');
     expect(script).toContain('--exclude-dir=node_modules');
     expect(script).toContain('--exclude-dir=vendor');
+    expect(findFAChild().steps.some(s => s.name === 'drift_check')).toBe(false);
   });
 
   it('pr_draft wires prompt + description i18n keys', () => {
-    // Content is in i18n.ts; here we just guard the wiring contract.
-    // A drift between the key emitted by the preset and what the
-    // wizard renders breaks the run silently — surfacing the key
-    // here lets a CI search match the actual i18n.ts entry.
     const p = findFA();
     const pr = p.steps.find(s => s.name === 'pr_draft')!;
     expect(pr.prompt_template).toBe('wiz.preset.feasibilityAutopilot.prDraftPrompt');
     expect(pr.description).toBe('wiz.preset.feasibilityAutopilot.prDraftDesc');
   });
 
-  it('exec_allowlist covers every runner the Exec steps may need', () => {
+  it('exec allowlists: child covers the checkers, parent covers the suites', () => {
+    const child = findFAChild();
+    for (const bin of ['bash', 'grep', 'git']) {
+      expect(child.execAllowlist).toContain(bin);
+    }
     const p = findFA();
-    for (const bin of ['bash', 'grep', 'make', 'cargo', 'pnpm', 'composer', 'pytest']) {
+    for (const bin of ['bash', 'grep', 'git', 'yarn', 'npm', 'php']) {
       expect(p.execAllowlist).toContain(bin);
     }
   });

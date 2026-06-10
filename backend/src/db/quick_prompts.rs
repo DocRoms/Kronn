@@ -340,6 +340,7 @@ mod tests {
                 placeholder: String::new(),
                 description: None,
                 required: true,
+                pattern: None,
             }],
             agent: AgentType::ClaudeCode,
             project_id: None,

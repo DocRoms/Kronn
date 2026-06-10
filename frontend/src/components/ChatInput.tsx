@@ -613,6 +613,49 @@ export function ChatInput({
     onOrchestrate(debateAgents, debateRounds, debateSkillIds, debateDirectiveIds);
   };
 
+  // Chain-QP picker — shared by both composer states. While the agent
+  // streams, `onPick` queues the QP (auto-fires after the turn). When idle,
+  // `onPick` launches it now by sending its prompt. Same markup either way.
+  const qpChainPicker = (onPick: (qp: QuickPrompt) => void) => (
+    <div className="relative">
+      <button
+        type="button"
+        className="disc-chain-qp-btn"
+        onClick={() => setShowQPPicker(prev => !prev)}
+        title={t('disc.chainQP')}
+        aria-label={t('disc.chainQP')}
+      >
+        <Zap size={13} />
+      </button>
+      {showQPPicker && (
+        <div className="disc-qp-picker" role="menu">
+          <div className="disc-qp-picker-header">{t('disc.chainQP')}</div>
+          {chainableQPs.map(qp => (
+            <button
+              key={qp.id}
+              type="button"
+              role="menuitem"
+              className="disc-qp-picker-item"
+              onMouseDown={e => {
+                e.preventDefault();
+                onPick(qp);
+                setShowQPPicker(false);
+              }}
+            >
+              <span className="disc-qp-picker-icon">{qp.icon}</span>
+              <span className="disc-qp-picker-meta">
+                <span className="disc-qp-picker-name">{qp.name}</span>
+                {qp.description && (
+                  <span className="disc-qp-picker-desc">{qp.description}</span>
+                )}
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+
   // ─── Render ──────────────────────────────────────────────────────────────
   return (
     <div className="disc-composer-wrap" data-disabled={disabled}>
@@ -1173,45 +1216,7 @@ export function ChatInput({
                 </button>
               )}
               {/* Queue a QP picker — only QPs without variables */}
-              {!queuedQP && onQueueQP && chainableQPs.length > 0 && (
-                <div className="relative">
-                  <button
-                    type="button"
-                    className="disc-chain-qp-btn"
-                    onClick={() => setShowQPPicker(prev => !prev)}
-                    title={t('disc.chainQP')}
-                    aria-label={t('disc.chainQP')}
-                  >
-                    <Zap size={13} />
-                  </button>
-                  {showQPPicker && (
-                    <div className="disc-qp-picker" role="menu">
-                      <div className="disc-qp-picker-header">{t('disc.chainQP')}</div>
-                      {chainableQPs.map(qp => (
-                        <button
-                          key={qp.id}
-                          type="button"
-                          role="menuitem"
-                          className="disc-qp-picker-item"
-                          onMouseDown={e => {
-                            e.preventDefault();
-                            onQueueQP(qp);
-                            setShowQPPicker(false);
-                          }}
-                        >
-                          <span className="disc-qp-picker-icon">{qp.icon}</span>
-                          <span className="disc-qp-picker-meta">
-                            <span className="disc-qp-picker-name">{qp.name}</span>
-                            {qp.description && (
-                              <span className="disc-qp-picker-desc">{qp.description}</span>
-                            )}
-                          </span>
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
+              {!queuedQP && onQueueQP && chainableQPs.length > 0 && qpChainPicker(onQueueQP)}
               {/* Queue-send: while the agent streams, a message with text can
                   be added to the queue by mouse (Enter does it from the
                   textarea). Only shown when there's something to queue. */}
@@ -1263,6 +1268,9 @@ export function ChatInput({
                   </button>
                 </>
               )}
+              {/* Chain picker while idle: launches the QP now (sends its
+                  prompt into this discussion). Variable-free QPs only. */}
+              {discussion && chainableQPs.length > 0 && qpChainPicker(qp => onSend(qp.prompt_template))}
               <button
                 className="disc-send-btn"
                 data-active={chatInputHasText}

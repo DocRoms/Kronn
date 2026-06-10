@@ -8,7 +8,7 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType } from '../types/generated';
+import type { DiscussionMessage, AgentType, QuickPrompt } from '../types/generated';
 import { agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
@@ -123,15 +123,31 @@ export interface MessageBubbleProps {
    * jumps the user to the project card with the docs/tech-debt
    * section pre-expanded. Saves N clicks at end-of-validation. */
   projectId?: string | null;
+  /** Variable-free QPs a `KRONN:CHAIN_QP:<id>` agent signal can reference.
+   * When an Agent message carries that signal AND the id matches one of
+   * these, a "launch this QP" CTA renders under the bubble — the agent
+   * proposes the hand-off, the human stays the gate. */
+  chainableQPs?: QuickPrompt[];
+  /** Fires the referenced QP in this discussion (sends its prompt). */
+  onLaunchQp?: (qp: QuickPrompt) => void;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
+
+  // KRONN:CHAIN_QP:<id> — agent-proposed QP hand-off. Agent messages only:
+  // the batch seed (User role) quotes the signal inside its instructions
+  // ("termine par KRONN:CHAIN_QP:…"), which must not raise the CTA.
+  const chainQp = useMemo(() => {
+    if (msg.role !== 'Agent' || !chainableQPs?.length) return null;
+    const m = msg.content.match(/KRONN:CHAIN_QP:([0-9a-fA-F-]{8,})/);
+    return m ? chainableQPs.find(q => q.id === m[1]) ?? null : null;
+  }, [msg.role, msg.content, chainableQPs]);
 
   // Matrix theme — when the discussion first loads, decode the user's
   // LAST message as plain scrambled text before swapping to the normal
@@ -351,7 +367,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             // keeps the agent-bound full content intact in the DB while the UI
             // only renders the visible prefix.
             const { visible, seed } = splitMessageSeed(msg.content);
-            const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY)/gi, '').trim();
+            const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY|CHAIN_QP:[0-9a-fA-F-]+)/gi, '').trim();
             return (
               <>
                 <MarkdownContent content={cleaned} discussionId={discussionId} />
@@ -416,6 +432,22 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               }}
             >
               <ShieldCheck size={11} /> {t('audit.viewTechDebtsAfterValidation')}
+            </button>
+          </div>
+        )}
+        {/* KRONN:CHAIN_QP:<id> — agent proposes a QP hand-off (e.g. triage →
+            apply-framing). One click launches the QP in THIS discussion; the
+            human click IS the gate, so no auto-fire. Disabled mid-stream so
+            the launch can't race the in-flight turn. */}
+        {chainQp && onLaunchQp && (
+          <div className="disc-auth-error-cta">
+            <button
+              className="disc-scan-btn"
+              style={{ fontSize: 11, padding: '5px 12px' }}
+              disabled={sending}
+              onClick={() => onLaunchQp(chainQp)}
+            >
+              <Zap size={11} /> {t('disc.launchProposedQp', `${chainQp.icon ?? '⚡'} ${chainQp.name}`)}
             </button>
           </div>
         )}

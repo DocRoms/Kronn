@@ -3955,6 +3955,15 @@
   border-radius: var(--kr-r-sm);
   background: rgba(var(--kr-accent-rgb), 0.08);
 }
+/* Card description (QP + QA lists). Was an unstyled <p> → inherited the
+ * base paragraph size and rendered BIGGER than the title (.qp-card-name).
+ * Secondary text: smaller + muted, under the header. */
+.qp-card-desc {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  margin: var(--kr-sp-2) 0 0;
+  line-height: 1.5;
+}
 
 /* Agent identity badge in the QP card header. Color comes from
  * `agentColor()` so a Codex QP is visually distinguishable from a
@@ -4452,4 +4461,72 @@
 .wf-quickstart-loading {
   padding: var(--kr-sp-2);
   text-align: center;
+}
+
+/* 2026-06-10 — on_failure compensation fence in the run step list. A green
+   rollback step right after the failed one used to read as "the run
+   continued"; this banner + the row tint make compensation unmistakable. */
+.wf-rollback-separator {
+  margin: 10px 0 6px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+  border-radius: var(--kr-r-md);
+}
+.wf-step-result[data-rollback='true'] .wf-step-result-btn {
+  opacity: 0.92;
+  background: rgba(var(--kr-warning-rgb), 0.04);
+}
+
+/* 2026-06-12 — per-task table of a SubWorkflow fan-out (RunDetail) */
+.wf-foreach-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--kr-fs-xs);
+  margin-bottom: var(--kr-sp-3);
+}
+.wf-foreach-table th {
+  text-align: left;
+  color: var(--kr-text-muted);
+  font-weight: 600;
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+.wf-foreach-table td {
+  padding: var(--kr-sp-1) var(--kr-sp-2);
+  border-bottom: 1px solid var(--kr-border-light);
+  vertical-align: top;
+}
+
+/* 2026-06-13 — clickable sub-run link in the fan-out per-task table */
+.wf-subrun-link {
+  background: none;
+  border: none;
+  padding: 0;
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-accent);
+  cursor: pointer;
+  text-decoration: none;
+}
+.wf-subrun-link:hover { text-decoration: underline; }
+
+/* 2026-06-13 — model/reasoning-tier badge on Agent step cards */
+.wf-tier-badge {
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono);
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-subtle, rgba(255,255,255,0.04));
+  border: 1px solid var(--kr-border-light);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+/* 2026-06-13 — live fan-out progress on a Running SubWorkflow step */
+.wf-fanout-live {
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono);
 }

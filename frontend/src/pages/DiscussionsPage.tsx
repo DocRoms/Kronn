@@ -1997,6 +1997,8 @@ export function DiscussionsPage({
                       onNavigate={onNavigate}
                       discussionId={activeDiscussion.id}
                       projectId={activeDiscussion.project_id ?? null}
+                      chainableQPs={chainableQPs}
+                      onLaunchQp={qp => handleSendMessage(qp.prompt_template)}
                       t={t}
                     />
                   );

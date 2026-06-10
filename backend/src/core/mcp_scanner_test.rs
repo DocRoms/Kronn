@@ -1171,14 +1171,14 @@ args = ["@example/old-mcp"]
             transport: McpTransport::Stdio { command: "x".into(), args: vec![] },
             source: McpSource::Registry, api_spec: None,
         };
-        let out = build_api_context_block(&[(mcp, HashMap::new())]);
+        let out = build_api_context_block(&[(mcp, "cfg-1".into(), HashMap::new())]);
         assert!(out.is_empty(), "pure MCP plugin must not emit API block");
     }
 
     #[test]
     fn build_api_context_block_emits_curl_example_with_credentials() {
         let (server, env) = api_server("api-test", "https://api.example.com");
-        let out = build_api_context_block(&[(server, env)]);
+        let out = build_api_context_block(&[(server, "cfg-1".into(), env)]);
         assert!(out.contains("REST APIs available"), "header present");
         assert!(out.contains("https://api.example.com"), "base URL rendered");
         assert!(out.contains("/hello"), "endpoint path listed");
@@ -1209,7 +1209,7 @@ args = ["@example/old-mcp"]
                 config_keys: vec![],
             }),
         };
-        let out = build_api_context_block(&[(server, HashMap::new())]);
+        let out = build_api_context_block(&[(server, "cfg-1".into(), HashMap::new())]);
         assert!(out.contains("<MISSING>"), "missing credential flagged");
     }
 
@@ -1217,9 +1217,65 @@ args = ["@example/old-mcp"]
     fn build_api_context_block_lists_multiple_plugins() {
         let (s1, e1) = api_server("api-1", "https://a.example.com");
         let (s2, e2) = api_server("api-2", "https://b.example.com");
-        let out = build_api_context_block(&[(s1, e1), (s2, e2)]);
+        let out = build_api_context_block(&[(s1, "cfg-1".into(), e1), (s2, "cfg-2".into(), e2)]);
         assert!(out.contains("https://a.example.com"));
         assert!(out.contains("https://b.example.com"));
+    }
+
+    /// Regression (2026-06-10, ex-`matches_config` TODO P0.5b): TWO configs
+    /// of the SAME server on one project must surface as two distinct
+    /// entries, each carrying ITS OWN config_id and decrypted env. Pre-fix
+    /// the collector dropped the config_id, so downstream lookups (ApiCall
+    /// executor, OAuth2 cache key) silently took the FIRST instance —
+    /// injecting the wrong credential for the second one.
+    #[test]
+    fn collect_active_api_plugins_disambiguates_multiple_configs_of_one_server() {
+        use std::collections::HashMap;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        // encrypt_env expects a hex-encoded secret (same generator prod uses).
+        let secret = crate::core::crypto::generate_secret();
+        let secret = secret.as_str();
+
+        // config.project_ids has a FK to projects — seed the project row.
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('proj-1', 'Test', '/tmp/test', datetime('now'), datetime('now'))",
+            [],
+        ).unwrap();
+
+        let (server, _) = api_server("api-multi", "https://multi.example.com");
+        crate::db::mcps::upsert_server(&conn, &server).unwrap();
+
+        let mk_cfg = |id: &str, key_val: &str| {
+            let mut env = HashMap::new();
+            env.insert("TEST_API_KEY".to_string(), key_val.to_string());
+            crate::models::McpConfig {
+                id: id.into(),
+                server_id: "api-multi".into(),
+                label: format!("Instance {id}"),
+                env_keys: vec!["TEST_API_KEY".into()],
+                env_encrypted: crate::db::mcps::encrypt_env(&env, secret).unwrap(),
+                args_override: None,
+                is_global: false,
+                include_general: false,
+                config_hash: format!("hash-{id}"),
+                project_ids: vec!["proj-1".into()],
+                host_sync: crate::models::HostSyncMode::None,
+            }
+        };
+        crate::db::mcps::insert_config(&conn, &mk_cfg("cfg-A", "key-of-A")).unwrap();
+        crate::db::mcps::insert_config(&conn, &mk_cfg("cfg-B", "key-of-B")).unwrap();
+
+        let plugins = collect_active_api_plugins(&conn, "proj-1", secret).unwrap();
+        assert_eq!(plugins.len(), 2, "both instances must surface");
+
+        let env_of = |cid: &str| plugins.iter()
+            .find(|(_, c, _)| c == cid)
+            .map(|(_, _, env)| env.get("TEST_API_KEY").cloned().unwrap())
+            .unwrap_or_else(|| panic!("config {cid} missing from collector output"));
+        assert_eq!(env_of("cfg-A"), "key-of-A", "cfg-A must carry ITS key, not the first one found");
+        assert_eq!(env_of("cfg-B"), "key-of-B", "cfg-B must carry ITS key, not cfg-A's");
     }
 
     #[test]
@@ -1469,7 +1525,7 @@ args = ["@example/old-mcp"]
         };
         let mut env_with_token = env.clone();
         env_with_token.insert("__access_token__".into(), "access-xyz".into());
-        let out = build_api_context_block(&[(srv.clone(), env_with_token.clone())]);
+        let out = build_api_context_block(&[(srv.clone(), "cfg-1".into(), env_with_token.clone())]);
         // Base URL should be interpolated (no remaining `{` from the tpl).
         assert!(out.contains("https://ex.com/api/examplecorp"),
             "base_url interpolation failed: {}", out);
@@ -1503,7 +1559,7 @@ args = ["@example/old-mcp"]
         };
         let mut env = std::collections::HashMap::new();
         env.insert("TOK".to_string(), "t".to_string());
-        let out = build_api_context_block(&[(srv, env)]);
+        let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
         assert!(out.contains("<NOT_CONFIGURED:MISSING_KEY>"),
             "missing key should be flagged in output: {}", out);
     }
@@ -1536,7 +1592,7 @@ args = ["@example/old-mcp"]
         };
         let mut env = std::collections::HashMap::new();
         env.insert("__token_error__".into(), "token exchange failed (401): invalid_client".into());
-        let out = build_api_context_block(&[(srv, env)]);
+        let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
         assert!(out.contains("TOKEN UNAVAILABLE"));
         assert!(out.contains("invalid_client"));
     }
@@ -1595,7 +1651,7 @@ args = ["@example/old-mcp"]
         let mut env = std::collections::HashMap::new();
         env.insert("CID".into(), "client-xyz".into());
         env.insert("__access_token__".into(), "tok-123".into());
-        let out = build_api_context_block(&[(srv, env)]);
+        let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
         assert!(out.contains("Authorization: Bearer tok-123"));
         assert!(out.contains("x-api-key: client-xyz"),
             "extra_header must render with the interpolated secret: {}", out);
@@ -1634,7 +1690,7 @@ args = ["@example/old-mcp"]
         let mut env_broken = std::collections::HashMap::new();
         env_broken.insert("__token_error__".into(), "invalid_client".into());
 
-        let out = build_api_context_block(&[(srv_ok, env_ok), (srv_broken, env_broken)]);
+        let out = build_api_context_block(&[(srv_ok, "cfg-1".into(), env_ok), (srv_broken, "cfg-2".into(), env_broken)]);
         // Healthy plugin renders its bearer normally.
         assert!(out.contains("Authorization: Bearer valid-token"));
         // Broken one renders TOKEN UNAVAILABLE WITHOUT leaking the good token.

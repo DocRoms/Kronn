@@ -552,6 +552,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn phase2_inherited_child_attach_then_drop_without_cleanup_keeps_worktree() {
+        // Phase 2 (worktree handoff) invariant: a sub-workflow CHILD that
+        // INHERITS the parent's worktree attaches to it, commits there, then
+        // is dropped WITHOUT cleanup (the runner skips cleanup for inherited
+        // runs). The worktree + the child's commit MUST survive so the PARENT
+        // can keep working (e.g. `create_pr` sees the implementation), and the
+        // PARENT — not the child — owns final cleanup/branch preservation.
+        let (_dir, repo) = make_test_repo().await;
+
+        // Parent creates the worktree (its own branch).
+        let parent_ws = Workspace::create(&repo, "ticket-to-pr", "11223344-parent", None)
+            .await
+            .expect("create parent worktree");
+        let path = parent_ws.path.clone();
+        assert!(path.exists());
+
+        // Child ATTACHES the same path (different run_id → cosmetic branch
+        // field; commits land on the branch actually checked out in `path`,
+        // i.e. the parent's branch).
+        let child_ws = Workspace::attach(path.clone(), repo.clone(), "implement-verify", "99887766-child", None);
+        std::fs::write(child_ws.path.join("IMPL.md"), "child implementation\n").unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&child_ws.path).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "feat: child work"]).current_dir(&child_ws.path).output().await.unwrap();
+
+        // The child is dropped WITHOUT cleanup (the inherited-workspace path
+        // in execute_run skips `ws.cleanup()`). No async Drop → no removal.
+        drop(child_ws);
+
+        // Worktree + the child's file must still be there for the parent.
+        assert!(path.exists(), "inherited child must NOT remove the shared worktree");
+        assert!(path.join("IMPL.md").exists(), "child's commit/files must survive for the parent");
+
+        // The PARENT owns cleanup → its branch is preserved WITH the child's commit.
+        let outcome = parent_ws.cleanup().await.expect("parent cleanup");
+        let preserved = outcome.preserved.expect("parent branch carries the child's commit → preserved");
+        assert_eq!(preserved.branch_name, "kronn/ticket-to-pr/11223344");
+        assert_eq!(preserved.ahead, 1, "the single child commit is one ahead of main");
+    }
+
+    #[tokio::test]
     async fn workspace_hook_runs_when_command_set() {
         // Hook output goes to a sentinel file we can read back.
         let (_dir, repo) = make_test_repo().await;

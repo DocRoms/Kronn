@@ -1123,13 +1123,15 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
             // On macOS Docker, workspace-write can block shell/apply_patch writes
             // despite rw mounts; prefer danger-full-access there.
             if std::env::var("KRONN_HOST_HOME").is_ok() {
-                let host_os = std::env::var("KRONN_HOST_OS").unwrap_or_default();
-                let force_full_access = host_os.eq_ignore_ascii_case("macOS");
-                if full_access || force_full_access {
-                    args.push("--sandbox=danger-full-access".into());
-                } else {
-                    args.push("--sandbox=workspace-write".into());
-                }
+                // Inside the Docker container, Codex's bwrap sandbox can NEVER
+                // initialize: unprivileged user namespaces are blocked
+                // (`bwrap: No permissions to create new namespace`, verified
+                // 2026-06-13 — run-9's plan review couldn't read ANY file and
+                // emitted a false NEEDS_RETRIAGE). workspace-write is therefore
+                // structurally broken in Docker on every OS, not just macOS;
+                // the container + git worktree ARE the isolation boundary.
+                args.push("--sandbox=danger-full-access".into());
+                let _ = full_access; // access level is enforced by the container
             }
             // Codex has no system prompt flag — prepend context to the prompt
             let full_prompt = if mcp_context.is_empty() {

@@ -112,6 +112,11 @@ pub async fn execute_step(
     ctx: &TemplateContext,
     extra_context: &str,
     progress_tx: Option<ProgressSender>,
+    // 2026-06-12 (run-9 finding) — the user's [agents.model_tiers] overrides
+    // never reached workflow agent spawns: a step pinned to Reasoning ran on
+    // the BUILT-IN fallback (opus) instead of the configured model (fable).
+    // Discussions already plumb this (streaming.rs:484); workflows now do too.
+    model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
 ) -> StepOutcome {
     let start = Instant::now();
 
@@ -132,8 +137,11 @@ pub async fn execute_step(
                     envelope_detected: None,
                     step_kind: None,
                     step_agent: None,
+                    step_model: None,
                     step_api_plugin_slug: None,
                     step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
                 },
                 condition_action: None,
             };
@@ -186,13 +194,18 @@ pub async fn execute_step(
 
     for attempt in 0..max_attempts {
         if attempt > 0 {
-            // Exponential backoff: 2^attempt seconds (2s, 4s, 8s...)
-            let delay = Duration::from_secs(2u64.pow(attempt));
+            // Rate-limit-aware backoff. The empirical failure mode (run-10,
+            // 2026-06-13) is the provider rate-limit / transient auth blip —
+            // an agent exits 1 with no output. The old 2^attempt (2s/4s/8s)
+            // rarely outlived a 429 window; 15s·attempt (15s/30s/45s, capped
+            // 90s) gives a per-minute limit time to clear without stalling a
+            // legitimate transient retry for minutes.
+            let delay = Duration::from_secs((15 * attempt as u64).min(90));
             tracing::info!("Step '{}' retry {}/{} after {:?}", step.name, attempt, max_attempts - 1, delay);
             tokio::time::sleep(delay).await;
         }
 
-        match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access, progress_tx.as_ref()).await {
+        match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, progress_tx.as_ref()).await {
             Ok(agent_output) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let mut final_output = agent_output.text.clone();
@@ -242,7 +255,7 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
-                        if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, None).await {
+                        if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, model_tiers, None).await {
                             total_tokens += repair_output.tokens_used;
                             let repaired_env = crate::workflows::template::extract_step_envelope(&repair_output.text);
                             let repaired_error = match (&step.output_format, &repaired_env) {
@@ -297,13 +310,64 @@ pub async fn execute_step(
                                         envelope_detected: Some(false),
                                         step_kind: None,
                                         step_agent: None,
+                                        step_model: None,
                                         step_api_plugin_slug: None,
                                         step_api_endpoint_path: None,
+                                        is_rollback: false,
+                                        child_run_id: None,
                                     },
                                     condition_action: None,
                                 };
                             }
                         }
+                    }
+                }
+
+                // 2026-06-13 — Multi-agent review: instead of a successive
+                // `Goto` re-run loop (each round re-reads everything from
+                // scratch), debate the output with a SECOND agent (different
+                // model family) in a shared transcript until they agree. The
+                // reviewer reads the artifact once, then only the conversation
+                // delta — cheaper AND a real back-and-forth. The converged
+                // output replaces this step's result before signal evaluation.
+                if let Some(mar) = step.multi_agent_review.clone() {
+                    let pre_debate = final_output.clone();
+                    match run_multi_agent_debate(
+                        step, &mar, &final_output, project_path, work_dir,
+                        tokens_config, full_access, model_tiers, progress_tx.as_ref(),
+                    ).await {
+                        Ok((converged, debate_tokens)) => {
+                            total_tokens += debate_tokens;
+                            // Envelope safety: on a Structured/TypedSchema step
+                            // the converged output MUST still carry a valid
+                            // envelope (the debate author re-emits it). If the
+                            // author dropped/broke it, keep the pre-debate
+                            // (already-validated) output so ingestion never
+                            // sees a corrupted manifest.
+                            let ok = if needs_envelope {
+                                match crate::workflows::template::extract_step_envelope(&converged) {
+                                    None => false,
+                                    Some(env) => match &step.output_format {
+                                        crate::models::StepOutputFormat::TypedSchema { schema, .. } =>
+                                            crate::workflows::template::validate_envelope_against_schema(&env.data_json, schema).is_ok(),
+                                        _ => true,
+                                    },
+                                }
+                            } else { true };
+                            if ok {
+                                final_output = converged;
+                            } else {
+                                tracing::warn!(
+                                    "Step '{}': debate output lacks a valid envelope — keeping the pre-debate manifest",
+                                    step.name
+                                );
+                                final_output = pre_debate;
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "Step '{}' multi_agent_review debate errored ({}) — keeping the pre-debate output",
+                            step.name, e
+                        ),
                     }
                 }
 
@@ -351,8 +415,11 @@ pub async fn execute_step(
                         envelope_detected,
                         step_kind: None,
                         step_agent: None,
+                        step_model: None,
                         step_api_plugin_slug: None,
                         step_api_endpoint_path: None,
+                        is_rollback: false,
+                        child_run_id: None,
                     },
                     condition_action,
                 };
@@ -377,8 +444,11 @@ pub async fn execute_step(
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action: None,
     }
@@ -418,6 +488,7 @@ fn format_tool_input_suffix(raw_input: &str) -> String {
 ///
 /// - `project_path`: original project path for MCP context resolution
 /// - `work_dir`: agent's working directory (may be a worktree)
+#[allow(clippy::too_many_arguments)]
 async fn run_agent_with_timeout(
     step: &WorkflowStep,
     project_path: &str,
@@ -425,6 +496,7 @@ async fn run_agent_with_timeout(
     prompt: &str,
     tokens_config: &TokensConfig,
     full_access: bool,
+    model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
     progress_tx: Option<&ProgressSender>,
 ) -> Result<AgentOutput> {
     // 30 min default — generous safety net rather than aggressive ceiling.
@@ -447,6 +519,7 @@ async fn run_agent_with_timeout(
         tier: step.agent_settings.as_ref()
             .and_then(|s| s.tier)
             .unwrap_or_default(),
+        model_tiers,
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
@@ -460,6 +533,32 @@ async fn run_agent_with_timeout(
         &step.agent,
         &step.name,
     ).await
+}
+
+/// 2026-06-10 — format a useful error when an agent process fails with an
+/// EMPTY stderr (the worst diagnostic case: a 23-min `implement` on a huge
+/// ticket exited 1 silently, and all we used to say was "killed by signal
+/// or sandbox"). Two cheap signals salvage it: whether the process was
+/// killed by a SIGNAL (no exit code ⇒ OOM/timeout), and the tail of the
+/// agent's STDOUT (the streamed reply — usually non-empty even when stderr
+/// is: a partial answer, a rate-limit line, a "context too long" message
+/// right before death). Pure + tested; the caller just `bail!`s the string.
+fn format_silent_exit_error(exit_desc: &str, killed_by_signal: bool, stdout: &str) -> String {
+    let stdout_tail = {
+        let lines: Vec<&str> = stdout.lines().collect();
+        let start = lines.len().saturating_sub(15);
+        lines[start..].join("\n")
+    };
+    let hint = if killed_by_signal {
+        "killed by a SIGNAL (no exit code) — most often the OOM killer (the agent + backend share the container memory limit) or a host-level timeout. Lower the step's blast radius (split a big `implement` into atomic sub-tasks) or raise the container memory."
+    } else {
+        "exited non-zero with no stderr — usually a rate-limit, an auth expiry, or a context-length overflow surfaced on stdout below, not stderr."
+    };
+    if stdout_tail.trim().is_empty() {
+        format!("Agent exited with {exit_desc} and produced NO output at all — {hint}")
+    } else {
+        format!("Agent exited with {exit_desc} and no stderr — {hint}\n\n── last stdout (agent stream) ──\n{stdout_tail}")
+    }
 }
 
 /// Consume an agent process to completion : stream output (with live
@@ -575,11 +674,20 @@ async fn drive_agent_to_output(
         // the message.
         let tail: Vec<&String> = stderr_lines.iter().rev().take(20).collect();
         let stderr_tail = tail.iter().rev().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
-        if stderr_tail.is_empty() {
-            anyhow::bail!("Agent exited with {} but produced no stderr (likely killed by signal or sandbox). Check the host's container logs (`docker logs kronn-backend` or journald) for the underlying cause.", exit_desc);
-        } else {
+        if !stderr_tail.is_empty() {
             anyhow::bail!("Agent exited with {}:\n{}", exit_desc, stderr_tail);
         }
+        // 2026-06-10 — empty stderr is the WORST diagnostic: a 23-min
+        // `implement` on a huge ticket exited 1 silently and all we said
+        // was "killed by signal or sandbox". Two cheap signals salvage it:
+        //  1. `code: None` ⇒ the process was killed by a SIGNAL (SIGKILL on
+        //     OOM, SIGTERM on a host timeout) — say so explicitly.
+        //  2. The agent's STDOUT (the streamed response, accumulated in
+        //     `output`) is usually NON-empty even when stderr is: a partial
+        //     reply, a rate-limit line, a "context too long" message right
+        //     before it died. Surface its tail.
+        let killed_by_signal = matches!(status, Some(ref s) if s.code.is_none());
+        anyhow::bail!("{}", format_silent_exit_error(&exit_desc, killed_by_signal, &output));
     }
 
     // Extract token usage — same logic as discussions:
@@ -603,12 +711,124 @@ async fn drive_agent_to_output(
     })
 }
 
+/// 2026-06-13 — "Multi-agent review" debate (see `WorkflowStep.multi_agent_review`).
+/// The step's own agent has just produced `planner_output`; now a SECOND agent
+/// (the reviewer, ideally a different model family) challenges it in a shared
+/// transcript. Rounds alternate reviewer → author until the reviewer emits
+/// `[CONSENSUS: APPROVED]` (or the author does), or `max_rounds` is hit. Returns
+/// the converged output (the author's final turn — or the original if the very
+/// first reviewer already approved) + the debate's token cost.
+///
+/// Why a transcript loop and not the `Goto`-to-review loop it replaces: each
+/// turn reads only the DELTA (the growing transcript), not the whole codebase
+/// from scratch every round — the dominant cost of the old loop. Reuses
+/// `run_agent_with_timeout`, so tiers / MCP / worktree all behave identically.
+#[allow(clippy::too_many_arguments)]
+async fn run_multi_agent_debate(
+    step: &WorkflowStep,
+    cfg: &crate::models::MultiAgentReviewConfig,
+    planner_output: &str,
+    project_path: &str,
+    work_dir: &str,
+    tokens_config: &TokensConfig,
+    full_access: bool,
+    model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+    progress_tx: Option<&ProgressSender>,
+) -> Result<(String, u64)> {
+    let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
+    let approved = |t: &str| t.lines().rev().take(4).any(|l| l.contains("[CONSENSUS: APPROVED]"));
+
+    let mut transcript = format!(
+        "=== PLAN / OUTPUT (authored by {:?}) ===\n{}",
+        step.agent, planner_output
+    );
+    let mut converged = planner_output.to_string();
+    let mut tokens = 0u64;
+
+    // A reviewer turn: a synthetic step running the reviewer agent (different
+    // family + its own tier), FreeText, no nested debate / on_result.
+    let reviewer_step = {
+        let mut s = step.clone();
+        s.agent = cfg.reviewer_agent.clone();
+        s.multi_agent_review = None;
+        s.on_result = vec![];
+        s.output_format = crate::models::StepOutputFormat::FreeText;
+        s.agent_settings = Some(AgentSettings {
+            model: None, tier: cfg.reviewer_tier, reasoning_effort: None, max_tokens: None,
+        });
+        s
+    };
+    // An author turn: the original step's agent (keep its tier) AND its
+    // output_format — so on a TypedSchema/Structured step the author re-emits
+    // the FULL envelope (the converged manifest must stay valid for the
+    // downstream ingestion). No nested debate / on_result.
+    let author_step = {
+        let mut s = step.clone();
+        s.multi_agent_review = None;
+        s.on_result = vec![];
+        s
+    };
+
+    for round in 0..max_rounds {
+        // ---- reviewer challenges ----
+        let rprompt = format!(
+            "{debate}\n\n=== DEBATE TRANSCRIPT ===\n{transcript}\n\n\
+             You are the REVIEWER (round {n}/{max}). Read the relevant project files, then challenge the plan/output above on relevance, completeness, correctness and scope. Be concrete and actionable — do NOT rewrite it yourself. If, and ONLY if, you genuinely judge it ready, end your reply with a line containing exactly [CONSENSUS: APPROVED].",
+            debate = cfg.debate_prompt, transcript = transcript, n = round + 1, max = max_rounds
+        );
+        let rev = run_agent_with_timeout(&reviewer_step, project_path, work_dir, &rprompt, tokens_config, full_access, model_tiers, progress_tx).await?;
+        tokens += rev.tokens_used;
+        transcript.push_str(&format!("\n\n=== REVIEWER ({:?}, round {}) ===\n{}", cfg.reviewer_agent, round + 1, rev.text));
+        if approved(&rev.text) {
+            tracing::info!("multi_agent_review: reviewer approved at round {}", round + 1);
+            break;
+        }
+
+        // ---- author addresses the critique + re-emits the full output ----
+        // When the step is Structured/TypedSchema, append the SAME envelope
+        // instruction `build_step_prompt` would (we bypass it here by passing
+        // a raw prompt), so the author re-emits a valid envelope — otherwise
+        // the envelope-safety guard would discard the refinement.
+        let envelope_addendum = match &step.output_format {
+            crate::models::StepOutputFormat::Structured =>
+                crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS.to_string(),
+            crate::models::StepOutputFormat::TypedSchema { schema, .. } =>
+                crate::workflows::template::build_typed_schema_instruction(schema),
+            crate::models::StepOutputFormat::FreeText => String::new(),
+        };
+        let aprompt = format!(
+            "=== DEBATE TRANSCRIPT ===\n{transcript}\n\n\
+             You are the PLAN AUTHOR ({author:?}). Address the reviewer's critique above: revise your plan/output accordingly. Re-emit your COMPLETE updated output in the SAME format you used originally. If you have addressed everything and now agree the result is ready, additionally end with a line containing exactly [CONSENSUS: APPROVED].{addendum}",
+            transcript = transcript, author = step.agent, addendum = envelope_addendum
+        );
+        let auth = run_agent_with_timeout(&author_step, project_path, work_dir, &aprompt, tokens_config, full_access, model_tiers, progress_tx).await?;
+        tokens += auth.tokens_used;
+        transcript.push_str(&format!("\n\n=== AUTHOR ({:?}, round {}) ===\n{}", step.agent, round + 1, auth.text));
+        converged = auth.text.clone();
+        if approved(&auth.text) {
+            tracing::info!("multi_agent_review: author+reviewer converged at round {}", round + 1);
+            break;
+        }
+    }
+    Ok((converged, tokens))
+}
+
 /// Evaluate on_result conditions against the step output.
 /// Only checks the last 5 lines for `[SIGNAL: keyword]` to avoid false positives
 /// from the agent quoting instruction text in its response.
 ///
 /// `pub(crate)` so non-Agent step types (Exec, ApiCall) can also branch on
 /// signals they emit themselves (e.g. `[SIGNAL: ERROR]` on cargo test exit≠0).
+///
+/// 2026-06-10 audit P2 — a signal must be at the **end of a line**
+/// (`line.trim().ends_with("[SIGNAL: X]")`), not anywhere as a substring.
+/// `format_step_output` emits each signal alone on its line, and presets
+/// instruct agents to end their response with the `[SIGNAL: …]` line — both
+/// satisfy `ends_with`, including a content-then-signal line ("Done.
+/// [SIGNAL: OK]"). But an API body excerpt or an instruction recap that
+/// *quotes* `[SIGNAL: ERROR]` in the MIDDLE of a sentence in the last 5
+/// lines no longer triggers a false Stop/Goto. (`contains` did; strict
+/// equality would have regressed content-then-signal lines.)
 pub(crate) fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<ConditionAction> {
     // Look at the last 5 lines for a signal
     let tail: Vec<&str> = output.lines().rev().take(5).collect();
@@ -618,7 +838,7 @@ pub(crate) fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> 
             continue;
         }
         let signal = format!("[SIGNAL: {}]", rule.contains);
-        if tail.iter().any(|line| line.contains(&signal)) {
+        if tail.iter().any(|line| line.trim().ends_with(&signal)) {
             return Some(rule.action.clone());
         }
     }
@@ -659,8 +879,11 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action: None,
     })
@@ -806,6 +1029,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 
@@ -1064,9 +1290,36 @@ mod drive_agent_to_output_tests {
     //! tool-call progress breadcrumbs, raw-vs-stream-json handling, and the
     //! non-zero-exit error path — without spawning a CLI or burning tokens.
     use super::drive_agent_to_output;
+    use super::format_silent_exit_error;
     use crate::agents::runner::ScriptedProcess;
     use crate::models::AgentType;
     use std::time::Duration;
+
+    // ── format_silent_exit_error (2026-06-10, the silent `implement` crash) ──
+
+    #[test]
+    fn silent_exit_signal_kill_names_oom_and_atomicity() {
+        let msg = format_silent_exit_error("exit code None", true, "");
+        assert!(msg.contains("SIGNAL"), "signal kill must be named: {msg}");
+        assert!(msg.contains("OOM"), "OOM hint expected: {msg}");
+        assert!(msg.contains("atomic"), "atomicity remediation expected: {msg}");
+    }
+
+    #[test]
+    fn silent_exit_surfaces_stdout_tail_when_stderr_empty() {
+        let stdout = (1..=30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let msg = format_silent_exit_error("exit code Some(1)", false, &stdout);
+        // Tail (last 15 lines) is surfaced; an early line is dropped.
+        assert!(msg.contains("line 30"), "must surface the stdout tail: {msg}");
+        assert!(msg.contains("last stdout"), "must label the stdout block: {msg}");
+        assert!(!msg.contains("line 1\n"), "old lines beyond the 15-tail are trimmed: {msg}");
+    }
+
+    #[test]
+    fn silent_exit_no_output_at_all_is_explicit() {
+        let msg = format_silent_exit_error("exit code Some(1)", false, "   \n  ");
+        assert!(msg.contains("NO output at all"), "blank stdout must be called out: {msg}");
+    }
 
     fn text_delta(s: &str) -> String {
         format!(

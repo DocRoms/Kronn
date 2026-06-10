@@ -62,8 +62,11 @@ pub fn execute_gate_step(
                     envelope_detected: None,
                     step_kind: None,
                     step_agent: None,
+                    step_model: None,
                     step_api_plugin_slug: None,
                     step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
                 },
                 condition_action: None,
             };
@@ -82,8 +85,11 @@ pub fn execute_gate_step(
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action: None,
     }
@@ -145,6 +151,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 

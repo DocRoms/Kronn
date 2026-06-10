@@ -42,6 +42,26 @@ export interface WorkflowPreset {
    *  link, etc.). The wizard will populate the workflow's `variables`
    *  field, which surfaces a form when the user clicks Run. */
   variables?: PromptVariable[];
+  /** 2026-06-11 — child workflows shipped alongside the parent as a bundle.
+   *  When set, the wizard routes the save to `POST /api/workflows/bundle`:
+   *  the children are created first, then the parent whose `SubWorkflow`
+   *  steps reference them via `sub_workflow_id: "@bundle:<bundleId>"`.
+   *  Children inherit the parent's `project_id` AND its git worktree
+   *  (Phase 2 handoff), so a parent step like `create_pr` sees the child's
+   *  implementation. See `docs/design/decomposed-autopilot-presets.md`. */
+  childWorkflows?: ChildWorkflowPreset[];
+}
+
+/** A child workflow declared by a decomposed preset (see `childWorkflows`). */
+export interface ChildWorkflowPreset {
+  /** Sentinel referenced by the parent's `sub_workflow_id: "@bundle:<bundleId>"`. */
+  bundleId: string;
+  /** i18n'd display name of the child workflow. */
+  name: string;
+  /** The child's steps (its own internal loop — no Gate allowed in a child). */
+  steps: WorkflowStep[];
+  /** Exec allowlist for the child (it runs the tests). */
+  execAllowlist?: string[];
 }
 
 type Translator = (key: string, ...args: (string | number)[]) => string;
@@ -91,6 +111,106 @@ function step(over: Partial<WorkflowStep> & { name: string; step_type: WorkflowS
     exec_timeout_secs: null,
     ...over,
   };
+}
+
+/** 2026-06-11 — deterministic `commit` step (0 token) for a sub-workflow
+ *  child. Runs LAST so the validated implementation is committed to the
+ *  parent's branch (the child shares it via Phase 2 handoff) and therefore
+ *  SURVIVES worktree cleanup — without this, the agent's files stay
+ *  uncommitted and are deleted when the run ends. Idempotent: a no-op commit
+ *  (nothing staged) soft-skips. `git` runs as a bash subprocess (bash is in
+ *  the allowlist) + `git` is added to the child allowlist for clarity. */
+function commitStep(t: Translator): WorkflowStep {
+  return step({
+    name: 'commit',
+    step_type: { type: 'Exec' },
+    description: t('wiz.preset.shared.commitStepDesc'),
+    exec_command: 'bash',
+    exec_args: [
+      '-c',
+      [
+        'set -e',
+        'git add -A',
+        'if git diff --cached --quiet; then echo "nothing to commit"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+        "tid=''",
+        'if [ -f .kronn/current_task.json ]; then tid="$(grep -o \'"id"[[:space:]]*:[[:space:]]*"[^"]*"\' .kronn/current_task.json | head -1 | sed \'s/.*: *"//; s/"$//\')"; fi',
+        'subject="Kronn AutoPilot${tid:+ [$tid]} — implementation (KRONN-traced)"',
+        'body="$(git diff --cached --name-only)"',
+        'git -c user.email="autopilot@kronn.local" -c user.name="Kronn AutoPilot" commit --no-verify -m "$subject" -m "$body"',
+        'echo "→ committed $(git rev-parse --short HEAD) ${tid:+[$tid]}"',
+        'echo "[SIGNAL: OK]"',
+      ].join('\n'),
+    ],
+    exec_timeout_secs: 120,
+  });
+}
+
+/** 2026-06-11 (Phase 3a) — deterministic `scope_check` (0 token, ADVISORY).
+ *  Flags files changed outside the manifest's declared scope
+ *  (`.kronn/files_touched.txt`) into `.kronn/decisions.md`. The run-2 live
+ *  audit proved a prompt alone doesn't constrain scope — this makes drift
+ *  VISIBLE without an agent. Mirror of the Rust `build_scope_check_step`. */
+function scopeCheckStep(t: Translator): WorkflowStep {
+  return step({
+    name: 'scope_check',
+    step_type: { type: 'Exec' },
+    description: t('wiz.preset.shared.scopeCheckDesc'),
+    exec_command: 'bash',
+    exec_args: ['-c', [
+      'set -e',
+      "allow='.kronn/files_touched.txt'",
+      'if [ ! -f "$allow" ]; then echo "no files_touched.txt — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+      'base="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD 2>/dev/null)"',
+      'changed="$( { git diff --name-only "$base" 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | sort -u )"',
+      "extra=''",
+      'while IFS= read -r f; do',
+      '  [ -z "$f" ] && continue',
+      '  if ! grep -qF -- "$f" "$allow" 2>/dev/null && ! awk -v p="$f" \'index(p,$0)==1{found=1} END{exit !found}\' "$allow" 2>/dev/null; then extra="$extra- $f\\n"; fi',
+      'done <<EOF\n$changed\nEOF',
+      'if [ -n "$extra" ]; then',
+      "  { echo ''; echo '## Out-of-scope files (changed but NOT in manifest files_touched — review)'; printf '%b' \"$extra\"; } >> .kronn/decisions.md",
+      '  echo "scope: out-of-scope files flagged in .kronn/decisions.md"',
+      'else echo "scope: all changes within declared files_touched"; fi',
+      'echo "[SIGNAL: OK]"',
+      'exit 0',
+    ].join('\n')],
+    exec_timeout_secs: 60,
+  });
+}
+
+/** 2026-06-11 (Phase 3a) — deterministic `completeness_check` (0 token,
+ *  ENFORCING). For each id in `.kronn/decision_ids.txt`, greps for its
+ *  `KRONN-*(<id>)` marker; a missing one ⇒ `[SIGNAL: MISSING]` ⇒ loop back to
+ *  `implement` (capped). 0-token anti-skip replacing an agent review. Mirror
+ *  of the Rust `build_completeness_check_step`. */
+function completenessCheckStep(t: Translator): WorkflowStep {
+  return step({
+    name: 'completeness_check',
+    step_type: { type: 'Exec' },
+    description: t('wiz.preset.shared.completenessCheckDesc'),
+    exec_command: 'bash',
+    exec_args: ['-c', [
+      'set -e',
+      "ids='.kronn/decision_ids.txt'",
+      'if [ ! -f "$ids" ]; then echo "no decision_ids.txt — skip"; echo "[SIGNAL: OK]"; exit 0; fi',
+      "missing=''",
+      'while IFS= read -r id; do',
+      '  [ -z "$id" ] && continue',
+      '  if ! grep -rqE "KRONN-(ASSUMED|MOCKED|TODO)\\($id\\)" --include=\'*.php\' --include=\'*.ts\' --include=\'*.tsx\' --include=\'*.js\' --include=\'*.scss\' --include=\'*.css\' --include=\'*.twig\' --include=\'*.yaml\' --include=\'*.yml\' --exclude-dir=node_modules --exclude-dir=vendor --exclude-dir=.git . 2>/dev/null; then missing="$missing $id"; fi',
+      'done < "$ids"',
+      'if [ -n "$missing" ]; then',
+      "  { echo ''; echo \"## Missing markers — sub-tasks possibly skipped:$missing\"; } >> .kronn/decisions.md",
+      '  echo "completeness: MISSING markers for:$missing"; exit 3',
+      'fi',
+      'echo "completeness: every decision id has its KRONN-* marker"',
+      'echo "[SIGNAL: OK]"',
+      'exit 0',
+    ].join('\n')],
+    exec_timeout_secs: 120,
+    on_result: [
+      { contains: 'exit_3', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+    ],
+  });
 }
 
 /** 0.6.0 — build the 3 presets in the user's UI language.
@@ -496,11 +616,10 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     icon: '🎫',
     titleKey: 'wiz.preset.ticketToPr.title',
     descKey: 'wiz.preset.ticketToPr.desc',
-    primitives: ['JsonData', 'Agent', 'Exec', 'Gate', 'Loop', 'State', 'Notify'],
-    // `bash` lets `run_tests` use a generic detection script that adapts to
-    // any project (Cargo / npm-pnpm-yarn / composer / pytest / make).
-    // Without it, the preset would only work on Rust projects.
-    execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer'],
+    primitives: ['JsonData', 'Agent', 'SubWorkflow', 'Gate', 'Loop', 'State', 'Notify'],
+    // The parent has no Exec step (the test loop lives in the child workflow,
+    // which carries its own execAllowlist). requireIsolation = true so the
+    // parent creates the git worktree that the child INHERITS (Phase 2 handoff).
     requireIsolation: true,
     steps: [
       // Étape 1 — Source du ticket. JsonData fixture par défaut, swap
@@ -541,117 +660,23 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         gate_message: t('wiz.preset.ticketToPr.planGateMessage'),
         gate_request_changes_target: 'analyze',
       }),
-      // Étape 4 — Implémentation. Combo de 4 skills méthodologiques :
-      //   - tdd : red-green-refactor strict, no production code without
-      //     a failing test first
-      //   - systematic-debugging : root-cause à 4 phases quand un test
-      //     casse en milieu de loop
-      //   - verification-before-completion : interdit les "ça devrait
-      //     marcher" sans evidence
-      //   - receiving-code-review : si on revient ici depuis le step
-      //     `review` avec NEEDS_CHANGES, l'agent sait quoi faire de
-      //     `state.last_review` (technique pour appliquer feedback).
+      // Étape 4 — Sous-workflow « implement-verify » : la boucle
+      // implement ↔ run_tests ↔ review tourne dans un RUN ENFANT qui
+      // PARTAGE le worktree du parent (handoff Phase 2). L'enfant lit le
+      // plan validé dans `.kronn/plan.md` (écrit par analyze) et journalise
+      // ses écarts dans `.kronn/decisions.md` — deux fichiers que parent ET
+      // enfant voient via le worktree partagé (pas de canal de données
+      // backend). Les Gotos internes (test ERROR → implement, review
+      // NEEDS_CHANGES → implement) vivent ENTIÈREMENT dans l'enfant ; aucun
+      // Gate dedans (interdit en sous-workflow). Sur échec du run enfant,
+      // SUBWF_FAILED → on relance le sous-workflow une fois, puis on_failure.
       step({
-        name: 'implement',
-        step_type: { type: 'Agent' },
-        output_format: { type: 'Structured' },
-        prompt_template: t('wiz.preset.ticketToPr.implementPrompt'),
-        skill_ids: [
-          'test-driven-development',
-          'systematic-debugging',
-          'verification-before-completion',
-          'receiving-code-review',
-        ],
-        // One auto-retry on heavy implements. Claude Code CLI can exit
-        // silently (`exit 1`, no stderr) on long-running streamed sessions
-        // — the failure mode looks deterministic from Kronn's side but is
-        // intermittent from the CLI's, so a fresh retry typically gets
-        // through. The agent sees the partial worktree state from the
-        // first attempt; the prompt's "if review left feedback" branch
-        // doubles as a "if a previous attempt left files modified" cue.
-        retry: { max_retries: 1, backoff: 'exponential' },
-        stall_timeout_secs: 1800,
-      }),
-      // Étape 5 — Tests. Generic auto-detect: probes the worktree for the
-      // most likely test framework (Make / Cargo / pnpm-yarn-npm / composer /
-      // pytest) and runs it. Falls back to a soft skip with `[SIGNAL: SKIPPED]`
-      // when no framework matches OR the worktree's deps aren't installed —
-      // this keeps the workflow alive on fresh worktrees rather than blocking
-      // every run on an environment problem the workflow can't solve itself.
-      // Sur ERROR, retour à implement (max 2 cycles — tokens count up).
-      step({
-        name: 'run_tests',
-        step_type: { type: 'Exec' },
-        description: t('wiz.preset.shared.runTestsDesc'),
-        exec_command: 'bash',
-        exec_args: [
-          '-c',
-          [
-            'set -e',
-            // Make has highest priority — projects with a Makefile usually
-            // have an opinionated `test` target that already wires up linters,
-            // type-checks, the right test runner with the right env vars.
-            "if [ -f Makefile ] && grep -qE '^test:' Makefile; then echo '→ make test'; exec make test; fi",
-            // Rust: cargo test --lib (skip integration crate tests by default
-            // — they often need extra setup; the workflow author can edit).
-            "if [ -f Cargo.toml ]; then echo '→ cargo test --lib'; exec cargo test --lib; fi",
-            // JS/TS: respect the lockfile to pick the package manager. If the
-            // worktree is fresh (no node_modules), skip rather than fail —
-            // installing deps is project-specific and out of scope here.
-            'if [ -f package.json ] && grep -q \'"test"\' package.json; then',
-            '  if [ ! -d node_modules ]; then echo "⚠ node_modules absent dans le worktree — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
-            "  if [ -f pnpm-lock.yaml ]; then echo '→ pnpm test'; exec pnpm test",
-            "  elif [ -f yarn.lock ]; then echo '→ yarn test'; exec yarn test",
-            "  else echo '→ npm test'; exec npm test; fi",
-            'fi',
-            // PHP: composer test (or vendor/bin/phpunit fallback).
-            'if [ -f composer.json ]; then',
-            '  if [ ! -d vendor ]; then echo "⚠ vendor/ absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
-            '  if grep -q \'"test"\' composer.json; then echo "→ composer test"; exec composer test',
-            "  elif [ -x vendor/bin/phpunit ]; then echo '→ vendor/bin/phpunit'; exec vendor/bin/phpunit",
-            "  else echo 'no PHP test runner'; echo '[SIGNAL: SKIPPED]'; exit 0; fi",
-            'fi',
-            // Python: pytest if pyproject/setup.py exists.
-            "if [ -f pyproject.toml ] || [ -f setup.py ]; then echo '→ pytest'; exec pytest; fi",
-            // Nothing matched — soft skip.
-            "echo '→ aucun framework de tests détecté — skip'",
-            "echo '[SIGNAL: SKIPPED]'",
-            'exit 0',
-          ].join('\n'),
-        ],
-        exec_timeout_secs: 900,
+        name: 'implement_verify',
+        step_type: { type: 'SubWorkflow' },
+        sub_workflow_id: '@bundle:implement-verify',
+        description: t('wiz.preset.ticketToPr.implementVerifyDesc'),
         on_result: [
-          { contains: 'ERROR', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
-        ],
-      }),
-      // Étape 6 — Review par un agent (idéalement DIFFÉRENT de celui
-      // qui a implémenté, anti confirmation-bias). Le user peut
-      // changer `agent` après création du préset. `requesting-code-review`
-      // structure la review (priorité, blocking issues, YAGNI check).
-      // Sur NEEDS_CHANGES, écrit `state.last_review` puis Goto implement.
-      step({
-        name: 'review',
-        step_type: { type: 'Agent' },
-        output_format: { type: 'Structured' },
-        prompt_template: t('wiz.preset.ticketToPr.reviewPrompt'),
-        skill_ids: [
-          'requesting-code-review',
-          'verification-before-completion',
-        ],
-        // Same auto-retry as `implement` — review on a heavy implementation
-        // also runs long enough to hit the Claude Code CLI silent-exit
-        // pattern. One retry is cheap insurance; subsequent attempts read
-        // the same artifacts so the verdict converges.
-        retry: { max_retries: 1, backoff: 'exponential' },
-        stall_timeout_secs: 1800,
-        // Only NEEDS_CHANGES has an explicit action (loop back to implement).
-        // APPROVED has no rule because the natural fall-through (continue to
-        // the next step `create_pr`) is exactly what we want — adding a Stop
-        // rule here would terminate the workflow prematurely. Earlier preset
-        // versions had `APPROVED → Stop` which silently skipped create_pr,
-        // ready_gate and notify_done.
-        on_result: [
-          { contains: 'NEEDS_CHANGES', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+          { contains: 'SUBWF_FAILED', action: { type: 'Goto', step_name: 'implement_verify', max_iterations: 1 } },
         ],
       }),
       // Étape 7 — Validation humaine AVANT le push + PR (gate-before-effect).
@@ -666,7 +691,11 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         name: 'ready_gate',
         step_type: { type: 'Gate' },
         gate_message: t('wiz.preset.ticketToPr.readyGateMessage'),
-        gate_request_changes_target: 'implement',
+        // INV-1 : un Gate parent ne peut pas cibler un step INTERNE à
+        // l'enfant. « Demander des changements » relance donc tout le
+        // sous-workflow `implement_verify` (qui ré-entre dans sa boucle
+        // implement→test→review, en relisant decisions.md).
+        gate_request_changes_target: 'implement_verify',
       }),
       // Étape 8 — Création de la PR, UNIQUEMENT après l'approbation humaine.
       // `finishing-a-development-branch` guide le pattern push + PR. Le prompt
@@ -708,6 +737,97 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         },
       }),
     ],
+    // 2026-06-11 — the implement↔test↔review loop is a CHILD workflow. The
+    // parent's `implement_verify` SubWorkflow step references it via
+    // `@bundle:implement-verify`; the bundle endpoint creates it first and the
+    // child inherits the parent's project_id + worktree (Phase 2 handoff).
+    // No Gate inside (forbidden in a child) — both human gates stay in the
+    // parent. The internal Gotos target `implement` (child-internal, valid).
+    childWorkflows: [
+      {
+        bundleId: 'implement-verify',
+        name: t('wiz.preset.ticketToPr.childName'),
+        // `bash` lets `run_tests` use a generic detection script that adapts
+        // to any project (Cargo / npm-pnpm-yarn / composer / pytest / make).
+        // `git` for the final commit step.
+        execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer', 'git'],
+        steps: [
+          // implement — lit le plan validé dans `.kronn/plan.md` (écrit par
+          // analyze côté parent, visible via le worktree partagé) et journalise
+          // ses écarts dans `.kronn/decisions.md`.
+          step({
+            name: 'implement',
+            step_type: { type: 'Agent' },
+            output_format: { type: 'Structured' },
+            prompt_template: t('wiz.preset.ticketToPr.implementPrompt'),
+            skill_ids: [
+              'test-driven-development',
+              'systematic-debugging',
+              'verification-before-completion',
+              'receiving-code-review',
+            ],
+            retry: { max_retries: 1, backoff: 'exponential' },
+            stall_timeout_secs: 1800,
+          }),
+          // run_tests — auto-détecte le framework (Make / Cargo / pnpm-yarn-npm
+          // / composer / pytest). Sur ERROR → retour implement (max 2).
+          step({
+            name: 'run_tests',
+            step_type: { type: 'Exec' },
+            description: t('wiz.preset.shared.runTestsDesc'),
+            exec_command: 'bash',
+            exec_args: [
+              '-c',
+              [
+                'set -e',
+                "if [ -f Makefile ] && grep -qE '^test:' Makefile; then echo '→ make test'; exec make test; fi",
+                "if [ -f Cargo.toml ]; then echo '→ cargo test --lib'; exec cargo test --lib; fi",
+                'if [ -f package.json ] && grep -q \'"test"\' package.json; then',
+                '  if [ ! -d node_modules ]; then echo "⚠ node_modules absent dans le worktree — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+                "  if [ -f pnpm-lock.yaml ]; then echo '→ pnpm test'; exec pnpm test",
+                "  elif [ -f yarn.lock ]; then echo '→ yarn test'; exec yarn test",
+                "  else echo '→ npm test'; exec npm test; fi",
+                'fi',
+                'if [ -f composer.json ]; then',
+                '  if [ ! -d vendor ]; then echo "⚠ vendor/ absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
+                '  if grep -q \'"test"\' composer.json; then echo "→ composer test"; exec composer test',
+                "  elif [ -x vendor/bin/phpunit ]; then echo '→ vendor/bin/phpunit'; exec vendor/bin/phpunit",
+                "  else echo 'no PHP test runner'; echo '[SIGNAL: SKIPPED]'; exit 0; fi",
+                'fi',
+                "if [ -f pyproject.toml ] || [ -f setup.py ]; then echo '→ pytest'; exec pytest; fi",
+                "echo '→ aucun framework de tests détecté — skip'",
+                "echo '[SIGNAL: SKIPPED]'",
+                'exit 0',
+              ].join('\n'),
+            ],
+            exec_timeout_secs: 900,
+            on_result: [
+              { contains: 'ERROR', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+            ],
+          }),
+          // review — lit le DIFF réel + `.kronn/plan.md` + `.kronn/decisions.md`.
+          // Sur NEEDS_CHANGES → écrit state.last_review puis Goto implement.
+          step({
+            name: 'review',
+            step_type: { type: 'Agent' },
+            output_format: { type: 'Structured' },
+            prompt_template: t('wiz.preset.ticketToPr.reviewPrompt'),
+            skill_ids: [
+              'requesting-code-review',
+              'verification-before-completion',
+            ],
+            retry: { max_retries: 1, backoff: 'exponential' },
+            stall_timeout_secs: 1800,
+            on_result: [
+              { contains: 'NEEDS_CHANGES', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+            ],
+          }),
+          // commit the reviewed implementation to the parent branch so the
+          // parent's create_pr step has something to push.
+          commitStep(t),
+        ],
+      },
+    ],
   };
 
   // 0.8.3 — Feasibility-Gated AutoPilot. 7-step mixed-primitives
@@ -727,9 +847,14 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
     icon: '🎯',
     titleKey: 'wiz.preset.feasibilityAutopilot.title',
     descKey: 'wiz.preset.feasibilityAutopilot.desc',
-    primitives: ['JsonData', 'Agent', 'Gate', 'Exec'],
-    execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer', 'grep'],
+    primitives: ['JsonData', 'Agent', 'Gate', 'Exec', 'SubWorkflow'],
+    // Two-brains pipeline (2026-06-12) : plan_lint + plan_review challengent
+    // le plan AVANT la gate ; les suites de tests complètes + l'audit drift
+    // tournent au PARENT sur le worktree mergé (l'enfant ne fait qu'un check
+    // syntaxique par tâche). requireIsolation = true so the parent creates
+    // the worktree the child INHERITS (Phase 2 handoff).
     requireIsolation: true,
+    execAllowlist: ['bash', 'grep', 'git', 'yarn', 'npm', 'php'],
     steps: [
       // Étape 1 — Source du ticket. Comme `ticket-to-pr`, démarre en
       // JsonData fixture, swap en ApiCall par le wizard quand un
@@ -769,10 +894,32 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
               mocked: { type: 'array' },
               blocked: { type: 'array' },
               files_touched: { type: 'array' },
+              unchanged: { type: 'array' },
             },
           },
         },
+        // « Deux cerveaux » via DÉBAT (2026-06-13) — le PLAN sort du tier
+        // reasoning, PUIS un reviewer (autre famille de modèle) le challenge
+        // dans une discussion partagée jusqu'à accord. Remplace l'ancienne
+        // boucle plan_review→Goto (relais de fichiers).
+        agent_settings: { model: null, tier: 'reasoning', reasoning_effort: null, max_tokens: null },
+        multi_agent_review: {
+          reviewer_agent: 'Codex',
+          reviewer_tier: 'reasoning',
+          debate_prompt: t('wiz.preset.feasibilityAutopilot.triageDebatePrompt'),
+          max_rounds: 2,
+        },
         stall_timeout_secs: 900,
+      }),
+      // plan_lint (Exec, 0 token) : rapport de forme du plan écrit par le
+      // moteur depuis l'envelope validée (plan_lint.txt) — garde déterministe.
+      step({
+        name: 'plan_lint',
+        step_type: { type: 'Exec' },
+        description: t('wiz.preset.feasibilityAutopilot.planLintDesc'),
+        exec_command: 'bash',
+        exec_args: ['-c', "cat .kronn/plan_lint.txt 2>/dev/null || echo 'no lint report (manifest derive missing?)'"],
+        exec_timeout_secs: 30,
       }),
       // Étape 3 — Gate humain. Le manifest s'affiche dans
       // gate_message via {{steps.triage.data}}. Sur RequestChanges,
@@ -784,59 +931,122 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         gate_message: t('wiz.preset.feasibilityAutopilot.gateMessage'),
         gate_request_changes_target: 'triage',
       }),
-      // Étape 4 — Implémentation. Contraint par le manifest validé.
-      // [SIGNAL: BLOCKED <id>] → Goto(triage) si l'agent découvre
-      // une impossibilité en cours (cap 3 itérations).
+      // Étape 4 — Sous-workflow « fa-implement-verify » : implement →
+      // run_tests → drift_check, exécuté comme run ENFANT partageant le
+      // worktree du parent (Phase 2). L'enfant lit le manifeste validé
+      // dans `.kronn/triage-manifest.md` (écrit par triage côté parent),
+      // journalise ses écarts dans `.kronn/decisions.md` et insère les
+      // marqueurs KRONN-*. Boucle interne test ERROR → implement. Aucun
+      // Gate dedans (le Gate humain reste au parent). Si le run enfant
+      // échoue (tests non verts après retries, ou blocage dur),
+      // SUBWF_FAILED → re-triage parent (cap 3).
+      // test_baseline (2026-06-13) — records tests already RED on the approved
+      // base (.kronn/known-failing.txt) so per-task item_tests only loops on
+      // NET-NEW failures, never on the repo's pre-existing test debt.
       step({
-        name: 'implement',
-        step_type: { type: 'Agent' },
-        description: t('wiz.preset.feasibilityAutopilot.implementDesc'),
-        prompt_template: t('wiz.preset.feasibilityAutopilot.implementPrompt'),
-        stall_timeout_secs: 1800,
-        on_result: [
-          { contains: 'BLOCKED', action: { type: 'Goto', step_name: 'triage', max_iterations: 3 } },
-        ],
-      }),
-      // Étape 5 — run_tests Exec. Réutilise le pattern auto-detect
-      // de ticket-to-pr. 0 token, vrai verdict. ERROR → Goto
-      // implement (cap 2 itérations).
-      step({
-        name: 'run_tests',
+        name: 'test_baseline',
         step_type: { type: 'Exec' },
-        description: t('wiz.preset.shared.runTestsDesc'),
+        description: t('wiz.preset.feasibilityAutopilot.testBaselineDesc'),
         exec_command: 'bash',
         exec_args: [
           '-c',
           [
-            'set -e',
-            "if [ -f Makefile ] && grep -qE '^test:' Makefile; then echo '→ make test'; exec make test; fi",
-            "if [ -f Cargo.toml ]; then echo '→ cargo test --lib'; exec cargo test --lib; fi",
-            'if [ -f package.json ] && grep -q \'"test"\' package.json; then',
-            '  if [ ! -d node_modules ]; then echo "⚠ node_modules absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
-            "  if [ -f pnpm-lock.yaml ]; then echo '→ pnpm test'; exec pnpm test",
-            "  elif [ -f yarn.lock ]; then echo '→ yarn test'; exec yarn test",
-            "  else echo '→ npm test'; exec npm test; fi",
+            'set +e',
+            'main="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")"',
+            'wt="$(git rev-parse --show-toplevel 2>/dev/null)"',
+            'hosttr() { printf \'%s\' "${1/#\\/host-home/${KRONN_HOST_HOME:-/host-home}}"; }',
+            'mkdir -p .kronn; : > .kronn/known-failing.txt',
+            '[ ! -e node_modules ] && [ -d "$main/node_modules" ] && ln -s "$main/node_modules" node_modules 2>/dev/null',
+            'if [ -f package.json ] && grep -q \'"test"\' package.json && [ -e node_modules ]; then',
+            '  npx --no-install jest --coverage=false >/tmp/base_js.out 2>&1',
+            "  grep -oE '●[^\\n]+' /tmp/base_js.out | sed 's/[[:space:]]*$//' | sort -u >> .kronn/known-failing.txt",
             'fi',
-            'if [ -f composer.json ]; then',
-            '  if [ ! -d vendor ]; then echo "⚠ vendor/ absent — skip"; echo "[SIGNAL: SKIPPED]"; exit 0; fi',
-            '  if grep -q \'"test"\' composer.json; then echo "→ composer test"; exec composer test',
-            "  elif [ -x vendor/bin/phpunit ]; then echo '→ vendor/bin/phpunit'; exec vendor/bin/phpunit",
-            "  else echo 'no PHP test runner'; echo '[SIGNAL: SKIPPED]'; exit 0; fi",
+            "phpdir=''; for d in . application app; do [ -f \"$d/phpunit.xml.dist\" ] && { phpdir=\"$d\"; break; }; done",
+            "compose=''; for c in \"$main/docker-compose.yml\" \"$main/docker-compose.yaml\" \"$main/compose.yml\"; do [ -f \"$c\" ] && { compose=\"$c\"; break; }; done",
+            'if [ -n "$phpdir" ] && [ -n "$compose" ] && command -v docker >/dev/null 2>&1; then',
+            "  svc=\"$(grep -oE '^  [a-zA-Z0-9_-]+:' \"$compose\" | tr -d ' :' | grep -iE '^php' | head -1)\"; [ -z \"$svc\" ] && svc='php'",
+            '  sub="${phpdir#./}"; if [ "$sub" = \'.\' ] || [ -z "$sub" ]; then mnt="$(hosttr "$wt")"; vend="$(hosttr "$main")/vendor"; else mnt="$(hosttr "$wt")/$sub"; vend="$(hosttr "$main")/$sub/vendor"; fi',
+            '  docker compose -f "$compose" run --rm --no-deps -T -v "$mnt:/app" -v "$vend:/app/vendor" -w /app "$svc" vendor/bin/phpunit -c phpunit.xml.dist >/tmp/base_php.out 2>&1',
+            "  grep -oE '[A-Za-z\\\\]+Test::[a-zA-Z0-9_]+' /tmp/base_php.out | sort -u >> .kronn/known-failing.txt",
             'fi',
-            "if [ -f pyproject.toml ] || [ -f setup.py ]; then echo '→ pytest'; exec pytest; fi",
-            "echo '→ aucun framework de tests détecté — skip'",
-            "echo '[SIGNAL: SKIPPED]'",
-            'exit 0',
+            'n=$(wc -l < .kronn/known-failing.txt 2>/dev/null || echo 0)',
+            'echo "baseline: $n pre-existing failing test(s) recorded → item_tests will ignore these"',
+            "echo '[SIGNAL: OK]'; exit 0",
           ].join('\n'),
         ],
         exec_timeout_secs: 900,
+      }),
+      step({
+        name: 'feasibility_impl',
+        step_type: { type: 'SubWorkflow' },
+        sub_workflow_id: '@bundle:fa-implement-verify',
+        description: t('wiz.preset.feasibilityAutopilot.implStepDesc'),
         on_result: [
-          { contains: 'ERROR', action: { type: 'Goto', step_name: 'implement', max_iterations: 2 } },
+          { contains: 'SUBWF_FAILED', action: { type: 'Goto', step_name: 'triage', max_iterations: 3 } },
         ],
       }),
-      // Étape 6 — drift_check Exec. Grep des markers KRONN-* sur le
-      // worktree. 0 token. Sortie embarquée verbatim dans la PR
-      // par pr_draft via {{steps.drift_check.output}}.
+      // run_tests v3 (parent, 0 token) — JS dans le container Kronn (node
+      // présent ; --coverage=false car la couverture qui dippe sur les
+      // nouveaux fichiers n'est PAS un échec de test, c'est un gate CI) +
+      // PHP dans le stack Docker DU PROJET (service php éphémère monté sur le
+      // worktree, vendor emprunté au checkout principal — on n'installe rien
+      // localement). Verdict honnête par suite, jamais d'early-exit.
+      step({
+        name: 'run_tests',
+        step_type: { type: 'Exec' },
+        description: t('wiz.preset.feasibilityAutopilot.runTestsParentDesc'),
+        exec_command: 'bash',
+        exec_args: [
+          '-c',
+          [
+            'set +e',
+            'main="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")"',
+            'wt="$(git rev-parse --show-toplevel 2>/dev/null)"',
+            '# bind mounts resolve on the docker HOST — map container path → host path',
+            'hosttr() { printf \'%s\' "${1/#\\/host-home/${KRONN_HOST_HOME:-/host-home}}"; }',
+            "js='NOT-RUN'; php_v='NOT-RUN'",
+            '# ---- JS: node in the Kronn container, jest on the worktree ----',
+            'if [ -f package.json ] && grep -q \'"test"\' package.json; then',
+            "  [ ! -e node_modules ] && [ -d \"$main/node_modules\" ] && ln -s \"$main/node_modules\" node_modules && echo '→ node_modules symlinked from main checkout'",
+            '  if [ -e node_modules ]; then',
+            '    if [ -f yarn.lock ] && command -v yarn >/dev/null 2>&1; then yarn test --coverage=false --silent >/tmp/js.out 2>&1; else npm test -- --coverage=false >/tmp/js.out 2>&1; fi',
+            '    rc=$?; tail -15 /tmp/js.out',
+            "    if grep -qE 'Tests:[^,]*[1-9][0-9]* failed' /tmp/js.out; then js='FAIL'",
+            "    elif [ $rc -eq 0 ]; then js='PASS'",
+            "    elif grep -qE 'Tests:[^,]*[0-9]+ passed' /tmp/js.out; then js='PASS(non-test exit — lint/coverage gate, CI-enforced)'",
+            "    else js='FAIL'; fi",
+            "  else js='SKIP(no node_modules — run yarn install in the main checkout)'; fi",
+            'fi',
+            '# ---- PHP: run in the project dockerized php service, on the worktree ----',
+            "phpdir=''; for d in . application app; do [ -f \"$d/phpunit.xml.dist\" ] && { phpdir=\"$d\"; break; }; done",
+            "compose=''; for c in \"$main/docker-compose.yml\" \"$main/docker-compose.yaml\" \"$main/compose.yml\"; do [ -f \"$c\" ] && { compose=\"$c\"; break; }; done",
+            'if [ -n "$phpdir" ] && [ -n "$compose" ] && command -v docker >/dev/null 2>&1; then',
+            "  svc=\"$(grep -oE '^  [a-zA-Z0-9_-]+:' \"$compose\" | tr -d ' :' | grep -iE '^php' | head -1)\"; [ -z \"$svc\" ] && svc='php'",
+            '  sub="${phpdir#./}"',
+            '  if [ "$sub" = \'.\' ] || [ -z "$sub" ]; then mnt="$(hosttr "$wt")"; vend="$(hosttr "$main")/vendor"; else mnt="$(hosttr "$wt")/$sub"; vend="$(hosttr "$main")/$sub/vendor"; fi',
+            '  echo "→ PHP via docker compose service \'$svc\' (worktree mounted, main vendor borrowed)"',
+            '  docker compose -f "$compose" run --rm --no-deps -T -v "$mnt:/app" -v "$vend:/app/vendor" -w /app "$svc" vendor/bin/phpunit -c phpunit.xml.dist >/tmp/php.out 2>&1',
+            '  rc=$?; tail -20 /tmp/php.out',
+            "  # a phpunit 'Tests: N' summary means the suite RAN: rc!=0 = real FAIL;",
+            "  # no summary + rc!=0 = harness/boot error (run-11b mis-tag fix)",
+            "  if [ $rc -eq 0 ]; then php_v='PASS'",
+            "  elif grep -qE 'Tests: [0-9]+' /tmp/php.out; then fails=\"$(grep -oE '(Failures|Errors): [0-9]+' /tmp/php.out | paste -sd, -)\"; php_v=\"FAIL($fails)\"",
+            "  elif grep -qE '(No tests executed|Cannot open|could not open|Fatal error|Class .* not found|bootstrap)' /tmp/php.out; then php_v='ERROR(php harness — not a code failure)'",
+            "  else php_v='FAIL'; fi",
+            'else',
+            "  php_v='SKIP(no dockerized php stack at repo root — run \\`make test\\` in the project)'",
+            'fi',
+            'echo "TEST VERDICT — JS: $js | PHP: $php_v"',
+            // Read-only integration verdict: exit 0 always, document in the PR.
+            // The per-task test→fix loop is in the CHILD (item_tests), not here.
+            "case \"$js$php_v\" in *FAIL*) echo '[SIGNAL: TESTS_FAILED]';; *PASS*) echo '[SIGNAL: OK]';; *) echo '[SIGNAL: SKIPPED]';; esac",
+            'exit 0',
+          ].join('\n'),
+        ],
+        exec_timeout_secs: 1500,
+      }),
+      // drift_check (parent, 0 token) — l'audit des marqueurs tourne sur le
+      // worktree FINAL (post fan-out), pas dans l'enfant.
       step({
         name: 'drift_check',
         step_type: { type: 'Exec' },
@@ -868,8 +1078,9 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         ],
         exec_timeout_secs: 60,
       }),
-      // Étape 7 — pr_draft. Génère la PR body en agrégeant manifest +
-      // run_tests + drift_check.
+      // Étape finale — pr_draft. Agrège le manifest ({{steps.triage.data}}),
+      // le TEST VERDICT (run_tests parent, cité verbatim), l'audit drift
+      // (parent, worktree final) et `.kronn/decisions.md`.
       step({
         name: 'pr_draft',
         step_type: { type: 'Agent' },
@@ -877,6 +1088,96 @@ export function buildV07Presets(t: Translator): WorkflowPreset[] {
         prompt_template: t('wiz.preset.feasibilityAutopilot.prDraftPrompt'),
         stall_timeout_secs: 600,
       }),
+    ],
+    // 2026-06-11 (PR-C) — implement/test/drift loop as a CHILD workflow,
+    // referenced by `feasibility_impl` via @bundle. Child inherits the
+    // parent's project_id + worktree (Phase 2 handoff) so triage's manifest
+    // file + the implementation are visible across the boundary. No Gate
+    // (forbidden in a child); the review_triage Gate stays in the parent.
+    childWorkflows: [
+      {
+        bundleId: 'fa-implement-verify',
+        name: t('wiz.preset.feasibilityAutopilot.childName'),
+        execAllowlist: ['bash', 'cargo', 'pnpm', 'npm', 'yarn', 'pytest', 'make', 'composer', 'grep', 'git'],
+        steps: [
+          step({
+            name: 'implement',
+            step_type: { type: 'Agent' },
+            description: t('wiz.preset.feasibilityAutopilot.implementDesc'),
+            prompt_template: t('wiz.preset.feasibilityAutopilot.implementPrompt'),
+            stall_timeout_secs: 1800,
+          }),
+          // item_tests (per-task) — re-runs the tests scoped to what THIS item
+          // changed (php -l + jest --findRelatedTests + scoped phpunit via the
+          // project docker stack); red → loops back to implement until green
+          // (cap 3). Failures fed back via .kronn/item-test-failures.txt.
+          step({
+            name: 'item_tests',
+            step_type: { type: 'Exec' },
+            description: t('wiz.preset.feasibilityAutopilot.itemTestsDesc'),
+            exec_command: 'bash',
+            exec_args: [
+              '-c',
+              [
+                'set +e',
+                'main="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")"',
+                'wt="$(git rev-parse --show-toplevel 2>/dev/null)"',
+                'hosttr() { printf \'%s\' "${1/#\\/host-home/${KRONN_HOST_HOME:-/host-home}}"; }',
+                'base="$(git merge-base HEAD origin/main 2>/dev/null || git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)"',
+                'changed="$( { git diff --name-only "$base" 2>/dev/null; git diff --name-only 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null; } | sort -u )"',
+                '[ ! -e node_modules ] && [ -d "$main/node_modules" ] && ln -s "$main/node_modules" node_modules 2>/dev/null',
+                "fail=0; ts_files=''; php_filter=''",
+                'while IFS= read -r f; do',
+                '  [ -z "$f" ] && continue',
+                '  case "$f" in',
+                '    *.php) [ -f "$f" ] && command -v php >/dev/null 2>&1 && { php -l "$f" >/dev/null 2>/tmp/phpl.err || { echo "✗ PHP syntax: $f"; cat /tmp/phpl.err; fail=1; }; }; b=$(basename "$f" .php); case "$f" in *test*|*Test*) php_filter="${php_filter:+$php_filter|}$b";; esac ;;',
+                '    *.ts|*.tsx) [ -f "$f" ] && ts_files="$ts_files $f" ;;',
+                '    *.json) [ -f "$f" ] && { python3 -m json.tool "$f" >/dev/null 2>&1 || { echo "✗ invalid JSON: $f"; fail=1; }; } ;;',
+                '  esac',
+                'done <<EOF\n$changed\nEOF',
+                'if [ -n "$ts_files" ] && [ -f package.json ] && [ -e node_modules ]; then',
+                '  echo "→ jest --findRelatedTests$ts_files"',
+                '  npx --no-install jest --findRelatedTests $ts_files --coverage=false --passWithNoTests >/tmp/js.out 2>&1',
+                "  [ $? -ne 0 ] && { echo '✗ JS tests red'; tail -25 /tmp/js.out; fail=1; }",
+                'fi',
+                "phpdir=''; for d in . application app; do [ -f \"$d/phpunit.xml.dist\" ] && { phpdir=\"$d\"; break; }; done",
+                "compose=''; for c in \"$main/docker-compose.yml\" \"$main/docker-compose.yaml\" \"$main/compose.yml\"; do [ -f \"$c\" ] && { compose=\"$c\"; break; }; done",
+                'if [ -n "$php_filter" ] && [ -n "$phpdir" ] && [ -n "$compose" ] && command -v docker >/dev/null 2>&1; then',
+                "  svc=\"$(grep -oE '^  [a-zA-Z0-9_-]+:' \"$compose\" | tr -d ' :' | grep -iE '^php' | head -1)\"; [ -z \"$svc\" ] && svc='php'",
+                '  sub="${phpdir#./}"; if [ "$sub" = \'.\' ] || [ -z "$sub" ]; then mnt="$(hosttr "$wt")"; vend="$(hosttr "$main")/vendor"; else mnt="$(hosttr "$wt")/$sub"; vend="$(hosttr "$main")/$sub/vendor"; fi',
+                '  echo "→ scoped phpunit --filter ($php_filter) via docker ($svc)"',
+                '  docker compose -f "$compose" run --rm --no-deps -T -v "$mnt:/app" -v "$vend:/app/vendor" -w /app "$svc" vendor/bin/phpunit -c phpunit.xml.dist --filter "($php_filter)" >/tmp/php.out 2>&1',
+                "  rc=$?; if [ $rc -ne 0 ] && grep -qE 'Tests: [0-9]+' /tmp/php.out; then echo '✗ PHP tests red'; tail -30 /tmp/php.out; fail=1; fi",
+                'fi',
+                '# baseline-aware: loop to implement ONLY on NET-NEW failures (not the repo pre-existing debt in .kronn/known-failing.txt)',
+                'if [ "$fail" = 1 ]; then',
+                "  { grep -oE '●[^\\n]+' /tmp/js.out 2>/dev/null | sed 's/[[:space:]]*$//'; grep -oE '[A-Za-z\\\\]+Test::[a-zA-Z0-9_]+' /tmp/php.out 2>/dev/null; } | sort -u > /tmp/cur_fail.txt",
+                '  if [ -s .kronn/known-failing.txt ]; then netnew="$(grep -vxF -f .kronn/known-failing.txt /tmp/cur_fail.txt)"; else netnew="$(cat /tmp/cur_fail.txt)"; fi',
+                '  if [ -n "$netnew" ]; then',
+                "    { echo '=== YOUR change broke these tests — FIX them ==='; echo \"$netnew\"; echo; echo '=== pre-existing failures (NOT yours — do NOT chase) ==='; grep -xF -f .kronn/known-failing.txt /tmp/cur_fail.txt 2>/dev/null; echo; echo '--- JS tail ---'; tail -25 /tmp/js.out 2>/dev/null; echo '--- PHP tail ---'; tail -30 /tmp/php.out 2>/dev/null; } > .kronn/item-test-failures.txt",
+                '    echo "item_tests FAILED — $(printf \'%s\\n\' "$netnew" | grep -c .) NET-NEW failure(s) — looping back to implement"; exit 2',
+                '  fi',
+                "  echo 'item_tests: all failures are PRE-EXISTING repo debt — not looping'",
+                'fi',
+                'rm -f .kronn/item-test-failures.txt 2>/dev/null',
+                "echo '[SIGNAL: OK]'; exit 0",
+              ].join('\n'),
+            ],
+            exec_timeout_secs: 600,
+            on_result: [
+              { contains: 'exit_2', action: { type: 'Goto', step_name: 'implement', max_iterations: 3 } },
+            ],
+          }),
+          // Phase 3a — deterministic verification layer (0 token):
+          // scope_check (advisory) flags out-of-scope edits; completeness_check
+          // (enforcing) loops back to implement if a manifest id has no marker.
+          scopeCheckStep(t),
+          completenessCheckStep(t),
+          // commit the validated Phase-0 implementation to the parent branch
+          // (survives worktree cleanup) — last step of the child.
+          commitStep(t),
+        ],
+      },
     ],
   };
 

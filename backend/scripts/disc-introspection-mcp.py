@@ -421,6 +421,20 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "workflow_active_runs",
+        "description": (
+            "In-flight board: list every workflow run that is NOT finished "
+            "right now (status Running / WaitingApproval / Pending), across "
+            "ALL workflows — so you can see what else is happening before "
+            "you act (avoid stepping on a run another agent started, or "
+            "wait on a gate). Returns [{workflow_id, workflow_name, "
+            "project_id, run_id, status, started_at}]. For the live step of "
+            "a given run, drill down with `workflow_run_status(run_id)`. "
+            "(Shows the latest run per workflow.)"
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "qp_list",
         "description": (
             "List every Quick Prompt in the user's library — compact "
@@ -1934,6 +1948,29 @@ def call_workflow_list(_args):
     return out
 
 
+def call_workflow_active_runs(_args):
+    # In-flight board (2026-06-11). Reuses `GET /api/workflows` (each summary
+    # carries its latest run) and keeps only the ones whose last run is still
+    # in flight — zero extra endpoint. The agent gets "what is running /
+    # awaiting approval right now" in one call; for the live step of a run it
+    # drills down via `workflow_run_status(run_id)`.
+    active = {"Running", "WaitingApproval", "Pending"}
+    data = _unwrap(_http("GET", "/api/workflows")) or []
+    out = []
+    for w in data:
+        lr = w.get("last_run") or {}
+        if lr.get("status") in active:
+            out.append({
+                "workflow_id": w.get("id"),
+                "workflow_name": w.get("name"),
+                "project_id": w.get("project_id"),
+                "run_id": lr.get("id"),
+                "status": lr.get("status"),
+                "started_at": lr.get("started_at"),
+            })
+    return out
+
+
 def call_qp_list(_args):
     # 0.8.5 — compact list. Keeps variable names so the agent can decide
     # if an existing QP fits the user's use case before drafting a new
@@ -2404,6 +2441,20 @@ def call_api_call(args):
         if v is not None:
             body[k] = v
 
+    # 2026-06-10 — normalize a stringified JSON `body`. Some MCP client
+    # stacks serialize the object tool-arg as a JSON STRING; forwarded
+    # as-is, the upstream request goes out double-encoded and the target
+    # API silently no-ops (caught on Slides.com via an httpbin echo).
+    # The backend broker normalizes too — this is defense-in-depth and
+    # takes effect without a backend rebuild (the script is bind-mounted).
+    if isinstance(body.get("body"), str):
+        try:
+            parsed = json.loads(body["body"])
+            if isinstance(parsed, (dict, list)):
+                body["body"] = parsed
+        except (ValueError, TypeError):
+            pass  # a plain-string body is legit for some APIs — keep it
+
     return _unwrap(_http("POST", "/api/agent-api/call", body))
 
 
@@ -2652,6 +2703,7 @@ DISPATCH = {
     # agent avoid duplicates + reference existing QP/QA ids from a
     # new workflow without asking the user to paste them.
     "workflow_list": call_workflow_list,
+    "workflow_active_runs": call_workflow_active_runs,
     "qp_list": call_qp_list,
     "qa_list": call_qa_list,
     "mcp_list": call_mcp_list,

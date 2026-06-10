@@ -116,6 +116,14 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(screen.getByText(/mcp-github · \/repos\/anthropics\/cookbook\/issues/)).toBeInTheDocument();
   });
 
+  it('shows the resolved model/tier badge on an Agent step (step_model)', () => {
+    const run = mkRun({
+      step_results: [mkResult({ step_kind: 'Agent', step_agent: 'ClaudeCode', step_model: 'sonnet · reasoning' })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.getByText('sonnet · reasoning')).toBeInTheDocument();
+  });
+
   it('renders the agent label for a snapshotted Agent step', () => {
     const run = mkRun({
       step_results: [mkResult({ step_kind: 'Agent', step_agent: 'Codex' })],
@@ -130,6 +138,69 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     });
     render(<RunDetail run={run} onDelete={() => {}} />);
     expect(screen.getByText('NOTIFY')).toBeInTheDocument();
+  });
+
+  it('surfaces a foreach fan-out: chip on the row, per-task table when expanded', async () => {
+    const envelope = JSON.stringify({
+      data: {
+        mode: 'foreach', total: 3, succeeded: 2, failed: 1,
+        items: [
+          { item: 0, id: 'scss-tokens', status: 'MechanicalApplied', child_run_id: null, files: 1 },
+          { item: 1, id: 'brand-context', status: 'Success', child_run_id: 'aaaabbbb-1111' },
+          { item: 2, id: 'twig-loader', status: 'Failed', child_run_id: 'ccccdddd-2222' },
+        ],
+      },
+      status: 'OK', summary: 'partial',
+    });
+    const run = mkRun({
+      step_results: [mkResult({
+        step_name: 'feasibility_impl',
+        step_kind: 'SubWorkflow',
+        output: `---STEP_OUTPUT---\n${envelope}\n---END_STEP_OUTPUT---`,
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    // PARTIAL surfacing: the engine keeps the step Success, the chip warns.
+    expect(screen.getByTestId('wf-foreach-chip').textContent).toContain('2/3');
+    expect(screen.getByTestId('wf-foreach-chip').textContent).toContain('1 wf.foreachFailedChip');
+    // expand → per-task table with ids, statuses (0 tk hint) and child runs
+    await act(async () => { screen.getByText('feasibility_impl').click(); });
+    const table = screen.getByTestId('wf-foreach-table');
+    expect(table).toBeInTheDocument();
+    expect(screen.getByText('scss-tokens')).toBeInTheDocument();
+    expect(screen.getByText('MechanicalApplied · 0 tk')).toBeInTheDocument();
+    expect(screen.getByText('Failed')).toBeInTheDocument();
+    expect(screen.getByText('aaaabbbb…')).toBeInTheDocument();
+  });
+
+  it('per-task child_run_id links to the child sub-workflow when nav + steps provided', async () => {
+    const envelope = JSON.stringify({
+      data: { mode: 'foreach', total: 1, succeeded: 1, failed: 0,
+        items: [{ item: 0, id: 'brand-enum', status: 'Success', child_run_id: 'aaaabbbb-1111' }] },
+      status: 'OK', summary: 'ok',
+    });
+    const run = mkRun({
+      step_results: [mkResult({ step_name: 'feasibility_impl', step_kind: 'SubWorkflow',
+        output: `---STEP_OUTPUT---\n${envelope}\n---END_STEP_OUTPUT---` })],
+    });
+    const steps = [mkStep({ name: 'feasibility_impl', step_type: { type: 'SubWorkflow' }, sub_workflow_id: 'child-wf-99' })];
+    const onNav = vi.fn();
+    render(<RunDetail run={run} workflowSteps={steps} onNavigateToWorkflow={onNav} onDelete={() => {}} />);
+    await act(async () => { screen.getByText('feasibility_impl').click(); });
+    const link = screen.getByTitle('wf.openSubRun');
+    link.click();
+    expect(onNav).toHaveBeenCalledWith('child-wf-99');
+  });
+
+  it('shows no foreach chip for a single-child SubWorkflow envelope', () => {
+    const run = mkRun({
+      step_results: [mkResult({
+        step_kind: 'SubWorkflow',
+        output: `---STEP_OUTPUT---\n${JSON.stringify({ data: { child_run_id: 'x', child_status: 'Success' }, status: 'OK', summary: 's' })}\n---END_STEP_OUTPUT---`,
+      })],
+    });
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    expect(screen.queryByTestId('wf-foreach-chip')).not.toBeInTheDocument();
   });
 
   it('renders nothing extra for legacy rows (step_kind absent) — no crash, graceful fallback', () => {

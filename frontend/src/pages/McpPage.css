@@ -825,6 +825,17 @@
   gap: var(--kr-sp-6);
 }
 
+/* Plugin detail/edit modal (refonte Phase 2, 2026-06-10). The inner panel
+   reuses .mcp-detail-inline (surface/border/padding); this modifier sizes it
+   as a centered, scrollable modal instead of a full-width grid row. */
+.mcp-plugin-modal {
+  grid-column: auto;
+  width: 90%;
+  max-width: 760px;
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
 .mcp-modal-title {
   margin: 0;
   font-size: 15px;

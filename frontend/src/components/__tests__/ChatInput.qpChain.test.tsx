@@ -96,11 +96,20 @@ describe('ChatInput — QP chain picker', () => {
     expect(screen.queryByLabelText('disc.chainQP')).toBeNull();
   });
 
-  it('does NOT render the chain button while the agent is idle (sending=false)', () => {
-    // The picker is specifically for the "while streaming" state so the user
-    // can queue the next prompt before the current one finishes.
-    render(<ChatInput {...baseProps({ sending: false, chainableQPs: [makeQP()], onQueueQP: vi.fn() })} />);
-    expect(screen.queryByLabelText('disc.chainQP')).toBeNull();
+  it('while idle (sending=false) the picker LAUNCHES the QP now instead of queueing it', () => {
+    // The picker lives in both composer states: streaming → queue for after
+    // the turn (onQueueQP), idle → fire immediately by sending the QP's
+    // prompt into the discussion (onSend). Same button, different handler.
+    const onQueue = vi.fn();
+    const onSend = vi.fn();
+    const qp = makeQP();
+    render(<ChatInput {...baseProps({ sending: false, chainableQPs: [qp], onQueueQP: onQueue, onSend })} />);
+
+    fireEvent.click(screen.getByLabelText('disc.chainQP'));
+    fireEvent.mouseDown(screen.getByText('Review code'));
+
+    expect(onSend).toHaveBeenCalledWith(qp.prompt_template);
+    expect(onQueue).not.toHaveBeenCalled();
   });
 
   it('clicking a QP in the picker calls onQueueQP with the full QP', () => {

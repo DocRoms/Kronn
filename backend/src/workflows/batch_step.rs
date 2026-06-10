@@ -71,7 +71,7 @@ pub async fn execute_batch_quick_prompt_step(
         Err(e) => return fail(step, start, format!("Template render error on items_from: {}", e)),
     };
 
-    let items = parse_items(&rendered);
+    let items = parse_items_rich(&rendered);
     if items.is_empty() {
         return fail(step, start, "BatchQuickPrompt: `batch_items_from` resolved to an empty list");
     }
@@ -105,18 +105,31 @@ pub async fn execute_batch_quick_prompt_step(
         );
     }
 
-    // Render the QP template for each item. The first variable of the QP is
-    // the substitution slot — each item fills it. If the QP has no variables,
-    // the same static prompt is used for every disc (unusual but valid).
+    // Render the QP template for each item. Two item shapes are supported:
+    //   • JSON object — its fields map onto the QP's `{{var}}` placeholders by
+    //     NAME (multi-variable, mirroring the MCP `qp_batch_run` path), and the
+    //     disc title comes from a dedicated field (`_title` / `id` / `key` /
+    //     `number`) so the sidebar stays readable instead of showing the whole
+    //     payload.
+    //   • Scalar string — fills the QP's FIRST variable and doubles as the disc
+    //     title (back-compat with `["EW-1","EW-2"]`-style item lists).
+    // `item_titles` mirrors `batch_items` by index: it carries the clean
+    // identifier (the disc title — `id` for objects, the string itself for
+    // scalars) that is later handed to each child as its chain-QP first
+    // variable (`batch_item`), so a chained apply-framing QP receives the
+    // ticket id rather than the whole payload.
     let first_var_name = qp.variables.first().map(|v| v.name.clone());
-    let batch_items: Vec<crate::db::workflows::BatchItemInput> = items.iter().map(|item| {
-        let prompt = render_qp_prompt(&qp.prompt_template, first_var_name.as_deref(), item);
-        crate::db::workflows::BatchItemInput {
-            title: item.clone(),
-            prompt,
+    let mut batch_items: Vec<crate::db::workflows::BatchItemInput> = Vec::with_capacity(items.len());
+    let mut item_titles: Vec<String> = Vec::with_capacity(items.len());
+    for (idx, item) in items.iter().enumerate() {
+        let (vars, title) = item_to_vars_and_title(item, first_var_name.as_deref(), &qp.name, idx);
+        item_titles.push(title.clone());
+        batch_items.push(crate::db::workflows::BatchItemInput {
+            title,
+            prompt: render_qp_template_vars(&qp.prompt_template, &vars),
             agent_override: None, // workflow-step batch keeps the QP's default agent
-        }
-    }).collect();
+        });
+    }
 
     // ── Pseudo/avatar for message attribution ───────────────────────────
     let (author_pseudo, author_avatar_email) = {
@@ -187,6 +200,21 @@ pub async fn execute_batch_quick_prompt_step(
         step.name, outcome.run_id, outcome.batch_total, parent_run_id
     );
 
+    // ── Pending spinner for EVERY child, up front ───────────────────────
+    // The semaphore below throttles agents, so most children sit QUEUED
+    // (created but not yet streaming) for a while. The per-stream
+    // `BatchRunChildStarted` (discussions/streaming.rs) only fires when a
+    // child's agent actually begins — so a queued child would show NO
+    // "agent working" spinner and look crashed in the sidebar + chat view.
+    // Broadcast the start signal for all children NOW; each is cleared by
+    // its own BatchRunProgress / BatchRunFinished event on completion.
+    for disc_id in &outcome.discussion_ids {
+        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
+            run_id: outcome.run_id.clone(),
+            discussion_id: disc_id.clone(),
+        });
+    }
+
     // ── Subscribe to ws_broadcast BEFORE firing the agents ──────────────
     // Ordering matters: if we subscribed after spawning, a fast disc could
     // finish before we're listening and we'd miss its BatchRunFinished event.
@@ -220,7 +248,7 @@ pub async fn execute_batch_quick_prompt_step(
     // `outcome.discussion_ids` is ordered identically to `items` (see
     // `create_batch_run` in db/workflows.rs), so zipping by index is safe.
     for (idx, disc_id) in outcome.discussion_ids.iter().enumerate() {
-        let batch_item = items.get(idx).cloned();
+        let batch_item = item_titles.get(idx).cloned();
         let permit_holder = batch_semaphore.clone();
         let state_for_spawn = state.clone();
         let chain_for_spawn = chain_ids.clone();
@@ -273,8 +301,11 @@ pub async fn execute_batch_quick_prompt_step(
                 envelope_detected: Some(true),
                 step_kind: None,
                 step_agent: None,
+                step_model: None,
                 step_api_plugin_slug: None,
                 step_api_endpoint_path: None,
+                is_rollback: false,
+                child_run_id: None,
             },
             condition_action: None,
         };
@@ -344,6 +375,10 @@ pub async fn execute_batch_quick_prompt_step(
     // itself. A 0/N batch propagates failure to the linear run.
     let step_status = if final_ok > 0 { RunStatus::Success } else { RunStatus::Failed };
 
+    // 2026-06-10 audit P1 — honour declared `on_result` rules (the runner
+    // only acts on `outcome.condition_action`; None = rules silently dead).
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(condition_label);
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
@@ -352,35 +387,55 @@ pub async fn execute_batch_quick_prompt_step(
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
-            condition_result: None,
+            condition_result,
             envelope_detected: Some(true),
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
-        condition_action: None,
+        condition_action,
+    }
+}
+
+/// Human label for a fired condition (same convention as ApiCall/Notify).
+fn condition_label(a: &crate::models::ConditionAction) -> String {
+    use crate::models::ConditionAction;
+    match a {
+        ConditionAction::Stop => "Stop".to_string(),
+        ConditionAction::Skip => "Skip".to_string(),
+        ConditionAction::Goto { step_name, .. } => format!("Goto:{step_name}"),
     }
 }
 
 /// Produce a `StepOutcome` in the failed state with the given error text.
 fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutcome {
+    let output: String = msg.into();
+    // Failures honour `on_result` recovery rules too (audit P1).
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(condition_label);
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
             status: RunStatus::Failed,
-            output: msg.into(),
+            output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
-        condition_action: None,
+        condition_action,
     }
 }
 
@@ -484,6 +539,90 @@ fn parse_items(rendered: &str) -> Vec<String> {
     out
 }
 
+/// Like [`parse_items`] but PRESERVES each item's structure: a JSON array of
+/// objects stays a list of objects (so the batch step can map their fields onto
+/// the QP's variables and pick a clean title), a JSON array of strings stays
+/// strings, and plain text degrades to one string per line/comma/semicolon.
+/// Envelope/object-wrapping shapes (`{data:[...]}`, `{tickets:[...]}`) are
+/// unwrapped exactly like [`parse_items`]. Duplicates are removed in order
+/// (objects keyed by `_title`/`id`/`key`/`number`, scalars by their string).
+fn parse_items_rich(rendered: &str) -> Vec<serde_json::Value> {
+    use serde_json::Value;
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    fn dedup_key(v: &Value) -> String {
+        match v {
+            Value::Object(m) => ["_title", "id", "key", "number"]
+                .iter()
+                .find_map(|k| m.get(*k).map(json_scalar_to_string))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| serde_json::to_string(v).unwrap_or_default()),
+            Value::String(s) => s.trim().to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    fn collect(arr: &[Value]) -> Vec<Value> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for v in arr {
+            let empty = matches!(v, Value::String(s) if s.trim().is_empty())
+                || matches!(v, Value::Null);
+            if empty {
+                continue;
+            }
+            if seen.insert(dedup_key(v)) {
+                match v {
+                    Value::String(s) => out.push(Value::String(s.trim().to_string())),
+                    _ => out.push(v.clone()),
+                }
+            }
+        }
+        out
+    }
+
+    fn first_array_in_object(m: &serde_json::Map<String, Value>) -> Option<&Vec<Value>> {
+        m.values().find_map(|v| v.as_array())
+    }
+
+    if let Ok(json) = serde_json::from_str::<Value>(trimmed) {
+        match &json {
+            Value::Array(arr) => return collect(arr),
+            Value::Object(m) => {
+                // Shape 4: full envelope `{data:{...array...}}`.
+                if let Some(Value::Object(data_obj)) = m.get("data") {
+                    if let Some(arr) = first_array_in_object(data_obj) {
+                        return collect(arr);
+                    }
+                }
+                // `{data:[...]}`.
+                if let Some(Value::Array(arr)) = m.get("data") {
+                    return collect(arr);
+                }
+                // Shape 3: bare object with one array field, e.g. `{"tickets":[...]}`.
+                if let Some(arr) = first_array_in_object(m) {
+                    return collect(arr);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Plain-text fallback — one scalar string per line / comma / semicolon.
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for chunk in trimmed.split(['\n', ',', ';']) {
+        let item = chunk.trim();
+        if !item.is_empty() && seen.insert(item.to_string()) {
+            out.push(Value::String(item.to_string()));
+        }
+    }
+    out
+}
+
 /// Render a Quick Prompt template by filling its first variable with `value`.
 /// Uses the same `{{var_name}}` pattern as the frontend `renderTemplate`.
 fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -> String {
@@ -493,6 +632,68 @@ fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -
         out = out.replace(&placeholder, value);
     }
     out
+}
+
+/// Fill EVERY `{{var}}` placeholder in `template` from the `vars` map. Mirrors
+/// the MCP `qp_batch_run` renderer (`render_qp_template`) so the workflow batch
+/// step and the MCP batch path produce identical prompts from the same vars.
+fn render_qp_template_vars(template: &str, vars: &HashMap<String, String>) -> String {
+    let mut out = template.to_string();
+    for (k, v) in vars {
+        out = out.replace(&format!("{{{{{}}}}}", k), v);
+    }
+    out
+}
+
+/// Stringify a JSON value for use as a template substitution / title: strings
+/// verbatim, numbers/bools via their literal form, null → empty, nested
+/// arrays/objects compact-JSON.
+fn json_scalar_to_string(v: &serde_json::Value) -> String {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::Bool(_) | Value::Number(_) => v.to_string(),
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+/// Turn one parsed batch item into `(vars, disc_title)`.
+///
+/// * Object → every field becomes a `{{field}}` substitution (the reserved
+///   `_title` key excepted); the title is the first present & non-empty of
+///   `_title` / `id` / `key` / `number`, else `"<qp> #<n>"`.
+/// * String / scalar → fills the QP's first variable and is also the title
+///   (legacy `["EW-1", ...]` behaviour).
+fn item_to_vars_and_title(
+    item: &serde_json::Value,
+    first_var_name: Option<&str>,
+    qp_name: &str,
+    idx: usize,
+) -> (HashMap<String, String>, String) {
+    use serde_json::Value;
+    let mut vars = HashMap::new();
+    match item {
+        Value::Object(map) => {
+            for (k, v) in map {
+                if k == "_title" { continue; }
+                vars.insert(k.clone(), json_scalar_to_string(v));
+            }
+            let title = ["_title", "id", "key", "number"]
+                .iter()
+                .find_map(|k| map.get(*k).map(json_scalar_to_string))
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| format!("{} #{}", qp_name, idx + 1));
+            (vars, title)
+        }
+        other => {
+            let s = json_scalar_to_string(other);
+            if let Some(name) = first_var_name {
+                vars.insert(name.to_string(), s.clone());
+            }
+            (vars, s)
+        }
+    }
 }
 
 /// Build the structured JSON envelope used as the step's `output` field so
@@ -634,6 +835,74 @@ mod tests {
         assert_eq!(out, "Static template");
     }
 
+    // ── Multi-variable batch items (object shape) ───────────────────────
+
+    #[test]
+    fn parse_items_rich_preserves_objects() {
+        let items = parse_items_rich(r#"[{"id":"EW-1","summary":"S1"},{"id":"EW-2","summary":"S2"}]"#);
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["id"], "EW-1");
+        assert_eq!(items[0]["summary"], "S1");
+        assert_eq!(items[1]["id"], "EW-2");
+    }
+
+    #[test]
+    fn parse_items_rich_unwraps_envelope_of_objects() {
+        let items = parse_items_rich(r#"{"data":{"items":[{"id":"EW-9","x":1}]},"status":"OK"}"#);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["id"], "EW-9");
+    }
+
+    #[test]
+    fn parse_items_rich_string_array_back_compat() {
+        let items = parse_items_rich(r#"["EW-1","EW-2"]"#);
+        assert_eq!(items, vec![serde_json::json!("EW-1"), serde_json::json!("EW-2")]);
+    }
+
+    #[test]
+    fn item_object_maps_fields_to_vars_and_picks_id_title() {
+        let item = serde_json::json!({"id":"EW-1234","descriptionWiki":"h2. Hi","summary":"Sum"});
+        let (vars, title) = item_to_vars_and_title(&item, Some("ticketId"), "Triage", 0);
+        assert_eq!(title, "EW-1234"); // clean title from `id`, not the whole payload
+        assert_eq!(vars.get("descriptionWiki").unwrap(), "h2. Hi");
+        assert_eq!(vars.get("summary").unwrap(), "Sum");
+        let prompt = render_qp_template_vars("## {{id}}\n{{descriptionWiki}} — {{summary}}", &vars);
+        assert_eq!(prompt, "## EW-1234\nh2. Hi — Sum");
+    }
+
+    #[test]
+    fn item_object_explicit_title_overrides_id() {
+        let item = serde_json::json!({"_title":"Joli titre","id":"EW-1","v":"x"});
+        let (vars, title) = item_to_vars_and_title(&item, Some("first"), "Triage", 2);
+        assert_eq!(title, "Joli titre");
+        assert!(!vars.contains_key("_title")); // reserved, not injected as a var
+        assert_eq!(vars.get("id").unwrap(), "EW-1");
+    }
+
+    #[test]
+    fn item_object_without_id_falls_back_to_indexed_title() {
+        let item = serde_json::json!({"foo":"bar"});
+        let (_vars, title) = item_to_vars_and_title(&item, None, "Triage", 4);
+        assert_eq!(title, "Triage #5");
+    }
+
+    #[test]
+    fn item_string_fills_first_var_and_is_title() {
+        let item = serde_json::json!("EW-777");
+        let (vars, title) = item_to_vars_and_title(&item, Some("ticketId"), "Triage", 0);
+        assert_eq!(title, "EW-777");
+        assert_eq!(vars.get("ticketId").unwrap(), "EW-777");
+    }
+
+    #[test]
+    fn json_scalar_to_string_handles_kinds() {
+        assert_eq!(json_scalar_to_string(&serde_json::json!("s")), "s");
+        assert_eq!(json_scalar_to_string(&serde_json::json!(42)), "42");
+        assert_eq!(json_scalar_to_string(&serde_json::json!(true)), "true");
+        assert_eq!(json_scalar_to_string(&serde_json::Value::Null), "");
+        assert_eq!(json_scalar_to_string(&serde_json::json!(["a","b"])), r#"["a","b"]"#);
+    }
+
     // 0.8.5 — outputs go through the canonical Kronn envelope
     // (markers + signal). These tests parse via `parse_envelope_for_test`
     // so a future format tweak only changes the helper, not 20 tests.
@@ -721,6 +990,7 @@ mod tests {
                 placeholder: "EW-1234".into(),
                 description: Some("Ticket ID".into()),
                 required: true,
+                pattern: None,
             }],
             agent: AgentType::ClaudeCode,
             project_id: None,
@@ -849,6 +1119,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 

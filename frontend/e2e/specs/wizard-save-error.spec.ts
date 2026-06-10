@@ -7,9 +7,12 @@
  * silently). Without this, the user clicks Create and nothing happens —
  * the original "dead button" bug we fixed in 0.7+.
  *
- * Strategy : intercept `POST /api/workflows` at the network layer and
+ * Strategy : intercept the workflow SAVE call at the network layer and
  * fulfill it with a simulated backend rejection. The frontend's
- * `handleSave` catches the thrown error and renders the banner.
+ * `handleSave` catches the thrown error and renders the banner. Since the
+ * decomposed-presets work (0.8.6), a preset carrying `childWorkflows`
+ * (e.g. 🎫 Ticket Autopilot) routes the save to `POST /api/workflows/bundle`
+ * instead of `POST /api/workflows`, so we intercept BOTH endpoints.
  */
 
 import { test, expect } from '../fixtures/kronn-fixture';
@@ -21,8 +24,10 @@ test.describe('Wizard — save error banner', () => {
   test('backend reject surfaces the error banner', async ({ page }) => {
     // Intercept the workflow create endpoint and simulate a backend
     // validation rejection. Done BEFORE goto so the route is registered
-    // when the request fires.
-    await page.route('**/api/workflows', async (route, request) => {
+    // when the request fires. Matches both the flat create endpoint
+    // (`/api/workflows`) and the decomposed-preset bundle endpoint
+    // (`/api/workflows/bundle`) — Ticket Autopilot now saves via the latter.
+    await page.route(/\/api\/workflows(\/bundle)?(\?.*)?$/, async (route, request) => {
       if (request.method() === 'POST') {
         await route.fulfill({
           status: 400,

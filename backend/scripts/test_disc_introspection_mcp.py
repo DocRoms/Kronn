@@ -1683,6 +1683,51 @@ class WorkflowTriggerTests(unittest.TestCase):
         self.assertNotIn("variables", body)
 
 
+class WorkflowActiveRunsTests(unittest.TestCase):
+    """`workflow_active_runs` — in-flight board over GET /api/workflows.
+
+    Keeps only workflows whose latest run is still in flight
+    (Running / WaitingApproval / Pending); finished + never-run drop out.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": [
+                {"id": "wf-run", "name": "Running one", "project_id": "p1",
+                 "last_run": {"id": "r1", "status": "Running", "started_at": "2026-06-11T10:00:00Z"}},
+                {"id": "wf-gate", "name": "Awaiting gate", "project_id": None,
+                 "last_run": {"id": "r2", "status": "WaitingApproval", "started_at": "2026-06-11T09:00:00Z"}},
+                {"id": "wf-done", "name": "Finished", "project_id": "p2",
+                 "last_run": {"id": "r3", "status": "Success", "started_at": "2026-06-11T08:00:00Z"}},
+                {"id": "wf-never", "name": "Never run", "project_id": None, "last_run": None},
+            ],
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_lists_only_in_flight_runs(self):
+        out = self.mod.call_workflow_active_runs({})
+        ids = [r["workflow_id"] for r in out]
+        self.assertEqual(ids, ["wf-run", "wf-gate"])
+
+    def test_surfaces_run_id_status_started_at(self):
+        out = self.mod.call_workflow_active_runs({})
+        first = out[0]
+        self.assertEqual(first["run_id"], "r1")
+        self.assertEqual(first["status"], "Running")
+        self.assertEqual(first["workflow_name"], "Running one")
+        self.assertEqual(first["started_at"], "2026-06-11T10:00:00Z")
+
+    def test_hits_workflows_list_endpoint_with_get(self):
+        self.mod.call_workflow_active_runs({})
+        method, path = self.fake_http.call_args.args[:2]
+        self.assertEqual(method, "GET")
+        self.assertEqual(path, "/api/workflows")
+
+
 class WorkflowRunStatusTests(unittest.TestCase):
     """`workflow_run_status` MCP wrapper.
 

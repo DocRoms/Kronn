@@ -138,6 +138,7 @@ mod tests {
                 placeholder: "fr.example.com".to_string(),
                 description: None,
                 required: true,
+                pattern: None,
             }],
             agent: AgentType::ClaudeCode,
             project_id: None,
@@ -203,6 +204,9 @@ mod tests {
             exec_setup_command: None,
             exec_setup_args: vec![],
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 

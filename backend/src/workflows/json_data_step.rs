@@ -77,6 +77,14 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
         &summary,
     );
 
+    // 2026-06-10 audit P1 — honour `on_result` rules here too (the runner
+    // only acts on `outcome.condition_action`; None = declared rules dead).
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(|a| match a {
+        crate::models::ConditionAction::Stop => "Stop".to_string(),
+        crate::models::ConditionAction::Skip => "Skip".to_string(),
+        crate::models::ConditionAction::Goto { step_name, .. } => format!("Goto:{step_name}"),
+    });
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
@@ -85,14 +93,17 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
-        condition_action: None,
+        condition_action,
     }
 }
 
@@ -122,8 +133,11 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action: None,
     }
@@ -186,6 +200,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: payload,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 

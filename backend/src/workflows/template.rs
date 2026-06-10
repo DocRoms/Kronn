@@ -270,7 +270,10 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             | StepType::Exec
             | StepType::BatchApiCall
             | StepType::BatchQuickPrompt
-            | StepType::JsonData => true,
+            | StepType::JsonData
+            // SubWorkflow's output is the child run's final envelope
+            // (standardised) → `{{steps.<subwf>.data}}` is valid.
+            | StepType::SubWorkflow => true,
         }
     }
 
@@ -1300,6 +1303,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 

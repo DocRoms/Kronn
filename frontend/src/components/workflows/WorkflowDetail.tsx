@@ -143,6 +143,9 @@ export interface WorkflowDetailProps {
   /** Click on a "📋 N conversations" chip → jump to the discussions tab and
    *  expand+scroll to the matching batch group. */
   onNavigateToBatch?: (batchRunId: string) => void;
+  /** 2026-06-13 — open another workflow's detail (e.g. jump from a fan-out
+   *  per-task row to the child sub-workflow that ran it). */
+  onNavigateToWorkflow?: (workflowId: string) => void;
   /** 0.7.0 UX pass — export the workflow as a JSON file. The handler
    *  is wired in the parent page (it has the api binding + toast). */
   onExport?: () => void;
@@ -292,7 +295,7 @@ export function BatchItemsList({
   );
 }
 
-function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps }: {
+function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, nested = false }: {
   step: WorkflowStep; index: number; agentAccess?: AgentsConfig | null;
   projectId?: string | null; t: (key: string, ...args: (string | number)[]) => string;
   quickPromptsById?: Map<string, QuickPrompt>;
@@ -302,6 +305,11 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   /** Full step list — lets StepCard look up the previous step's cached test
    *  result to auto-fill the mock input when the user opens the test panel. */
   allSteps: WorkflowStep[];
+  /** 2026-06-11 — true when this card is rendered INSIDE a SubWorkflow step's
+   *  expansion (a child step). Suppresses the dry-run test panel and stops
+   *  the SubWorkflow body from recursing further (a nested sub-WF shows a
+   *  compact list instead of another level of cards). Bounds recursion. */
+  nested?: boolean;
 }) {
   const isBatch = step.step_type?.type === 'BatchQuickPrompt';
   const isApi = step.step_type?.type === 'ApiCall';
@@ -310,6 +318,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   const isExec = step.step_type?.type === 'Exec';
   const isBatchApi = step.step_type?.type === 'BatchApiCall';
   const isJsonData = step.step_type?.type === 'JsonData';
+  const isSubWorkflow = step.step_type?.type === 'SubWorkflow';
   // Only the Agent step type actually consumes the `agent` field; every
   // other type delegates: Batch → QP, ApiCall / BatchApiCall → HTTP, Notify
   // → webhook, Gate → human pause, Exec → shell binary, JsonData → static
@@ -339,6 +348,19 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
   useEffect(() => {
     return subscribeStepTest(cacheKey, () => forceRender(n => n + 1));
   }, [cacheKey]);
+
+  // 2026-06-11 — for a SubWorkflow step, load the referenced child workflow
+  // so we can show its steps decomposed (like a normal WF) instead of an
+  // opaque box. `@bundle:` sentinels (un-saved decomposed presets) have no
+  // real id yet → we skip the fetch and show a "created on save" note.
+  const [childWf, setChildWf] = useState<Workflow | null>(null);
+  const subRefIsBundle = !!step.sub_workflow_id?.startsWith('@bundle:');
+  useEffect(() => {
+    if (!isSubWorkflow || !step.sub_workflow_id || subRefIsBundle) { setChildWf(null); return; }
+    let alive = true;
+    workflowsApi.get(step.sub_workflow_id).then(w => { if (alive) setChildWf(w); }).catch(() => {});
+    return () => { alive = false; };
+  }, [isSubWorkflow, step.sub_workflow_id, subRefIsBundle]);
 
   const current = getStepTest(cacheKey);
   const testMockInput = current?.mockInput ?? '';
@@ -596,6 +618,14 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             })()}
           </span>
         )}
+        {isSubWorkflow && (
+          <span className="wf-step-kind-badge" data-kind="subworkflow" title={t('wiz.subWorkflowHint')}>
+            <GitBranch size={10} /> {t('wiz.stepTypeSubWorkflow')}
+            <span className="text-xs text-ghost" style={{ fontWeight: 400, marginLeft: 6 }}>
+              {subRefIsBundle ? (step.sub_workflow_id ?? '').replace('@bundle:', '↳ ') : (childWf?.name ?? '…')}
+            </span>
+          </span>
+        )}
         {isAgentLike && (
           <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}>
             {AGENT_LABELS[step.agent] ?? step.agent}
@@ -618,7 +648,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
                 actually exec the binary — UX feedback 2026-04-29),
               - Gate (a human-pause step has nothing to test).
             Hiding it on those types keeps the row clean. */}
-        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && (
+        {!isApi && !isNotify && !isExec && !isGate && !isBatchApi && !isJsonData && !isSubWorkflow && !nested && (
           <button
             className="wf-test-btn"
             onClick={() => { if (!testRunning) setTestOpen(!testOpen); }}
@@ -710,6 +740,57 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
                 })}
               </div>
             </div>
+          )}
+        </div>
+      ) : isSubWorkflow ? (
+        <div className="wf-subworkflow-steps" style={{ marginTop: 6 }}>
+          {subRefIsBundle ? (
+            <p className="text-xs text-ghost" style={{ margin: 0 }}>
+              {t('wiz.subWorkflowBundleNew')}
+            </p>
+          ) : childWf ? (
+            <>
+              <div className="text-2xs text-ghost" style={{ marginBottom: 6 }}>
+                {t('wf.subWorkflowChildSteps', childWf.name, childWf.steps.length)}
+              </div>
+              {nested ? (
+                // Already inside a sub-workflow expansion — don't recurse a
+                // 3rd level of cards; show a compact list to bound depth.
+                childWf.steps.map((cs, ci) => (
+                  <div key={ci} className="flex-row gap-2" style={{ alignItems: 'center', padding: '2px 0' }}>
+                    <span className="text-2xs text-ghost" style={{ minWidth: 14 }}>{ci + 1}.</span>
+                    <span className="wf-step-kind-badge" data-kind={(cs.step_type?.type ?? 'Agent').toLowerCase()} style={{ fontSize: 10 }}>
+                      {cs.step_type?.type ?? 'Agent'}
+                    </span>
+                    <span className="text-xs">{cs.name}</span>
+                  </div>
+                ))
+              ) : (
+                // Top level — render each child step as a FULL StepCard, like
+                // a normal workflow, indented to show it lives in the child.
+                <div
+                  className="wf-subworkflow-nested"
+                  style={{ borderLeft: '2px solid var(--kr-border-medium)', paddingLeft: 12, marginLeft: 2, display: 'flex', flexDirection: 'column', gap: 8 }}
+                >
+                  {childWf.steps.map((cs, ci) => (
+                    <StepCard
+                      key={ci}
+                      step={cs}
+                      index={ci}
+                      nested
+                      agentAccess={agentAccess}
+                      projectId={childWf.project_id}
+                      t={t}
+                      quickPromptsById={quickPromptsById}
+                      workflowId={childWf.id}
+                      allSteps={childWf.steps}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
+          ) : (
+            <p className="text-xs text-ghost" style={{ margin: 0 }}>…</p>
           )}
         </div>
       ) : (
@@ -1033,7 +1114,7 @@ function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug;
   }
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onExport, onGateDecided }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onExport, onGateDecided }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   // Steps panel collapses to a compact pipeline by default — the full
@@ -1561,6 +1642,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
             <RunDetail
               run={run}
               workflowSteps={workflow.steps}
+              onNavigateToWorkflow={onNavigateToWorkflow}
               onDelete={() => onDeleteRun(run.id)}
               onCancel={async () => {
                 try {

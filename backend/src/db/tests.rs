@@ -1143,6 +1143,9 @@ fn sample_workflow(id: &str) -> Workflow {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }],
         actions: vec![],
         safety: WorkflowSafety {
@@ -1267,8 +1270,11 @@ fn workflow_runs_update() {
         envelope_detected: None,
         step_kind: None,
         step_agent: None,
+        step_model: None,
         step_api_plugin_slug: None,
         step_api_endpoint_path: None,
+        is_rollback: false,
+        child_run_id: None,
     }];
     crate::db::workflows::update_run(&conn, &run).unwrap();
 
@@ -1683,6 +1689,7 @@ fn sample_qp_for_batch(id: &str) -> QuickPrompt {
             placeholder: "EW-123".into(),
             description: None,
             required: true,
+            pattern: None,
         }],
         agent: crate::models::AgentType::ClaudeCode,
         project_id: None,
@@ -2313,6 +2320,9 @@ fn workflow_multi_step_roundtrip() {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -2368,6 +2378,9 @@ fn workflow_multi_step_roundtrip() {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -2420,6 +2433,9 @@ fn workflow_multi_step_roundtrip() {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
             },
         ],
         actions: vec![],
@@ -2514,6 +2530,9 @@ fn workflow_update_steps_count() {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 
@@ -2789,11 +2808,11 @@ fn quick_prompt_crud() {
         variables: vec![
             crate::models::PromptVariable {
                 name: "ticket".into(), label: "Ticket".into(), placeholder: "PROJ-123".into(),
-                description: Some("Identifiant Jira du ticket à analyser".into()), required: true,
+                description: Some("Identifiant Jira du ticket à analyser".into()), required: true, pattern: None,
             },
             crate::models::PromptVariable {
                 name: "project".into(), label: "Projet".into(), placeholder: "acme-frontend".into(),
-                description: None, required: true,
+                description: None, required: true, pattern: None,
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,
@@ -3204,11 +3223,11 @@ fn quick_prompt_variables_roundtrip() {
         variables: vec![
             crate::models::PromptVariable {
                 name: "jira".into(), label: "Ticket Jira".into(), placeholder: "PROJ-123".into(),
-                description: None, required: false,
+                description: None, required: false, pattern: None,
             },
             crate::models::PromptVariable {
                 name: "pr".into(), label: "PR".into(), placeholder: "42".into(),
-                description: None, required: false,
+                description: None, required: false, pattern: None,
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,

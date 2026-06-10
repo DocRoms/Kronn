@@ -318,27 +318,17 @@ pub(crate) async fn make_agent_stream(
                     // sync context builder can read them without knowing
                     // the auth flow. Per-plugin isolation: one bad token
                     // doesn't hide the others.
-                    for (server, env) in plugins.iter_mut() {
+                    for (server, config_id, env) in plugins.iter_mut() {
                         if let Some(ref spec) = server.api_spec {
                             if matches!(spec.auth, crate::models::ApiAuthKind::OAuth2ClientCredentials { .. }) {
-                                // Look up the config id from the server id +
-                                // the project — we need it as the cache key.
-                                // `server.id` is stable per registry entry;
-                                // multiple configs on the same server would
-                                // overwrite each other if we keyed on it.
-                                // Find the actual config id via the DB.
-                                let server_id = server.id.clone();
-                                let pid2 = disc.project_id.clone().unwrap_or_default();
-                                let config_id = state.db.with_conn(move |conn| {
-                                    let configs = crate::db::mcps::list_configs(conn)?;
-                                    let id = configs.iter()
-                                        .find(|c| c.server_id == server_id
-                                            && (c.is_global || c.project_ids.iter().any(|p| p == &pid2)))
-                                        .map(|c| c.id.clone());
-                                    Ok(id)
-                                }).await.ok().flatten().unwrap_or_else(|| server.id.clone());
+                                // 2026-06-10 — the cache key is the EXACT
+                                // config id surfaced by the collector. The
+                                // previous DB re-derive matched the FIRST
+                                // config of the server on the project, so
+                                // two instances with different credentials
+                                // shared (and corrupted) one cached token.
                                 match crate::core::oauth2_cache::resolve_token(
-                                    &state.oauth2_cache, &config_id, &spec.auth, env,
+                                    &state.oauth2_cache, config_id, &spec.auth, env,
                                 ).await {
                                     Ok(tok) => { env.insert("__access_token__".into(), tok); }
                                     Err(e) => {

@@ -3,7 +3,7 @@ import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
-import { buildV07Presets } from '../../lib/workflow-templates/v07-presets';
+import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
 import { WorkflowQuickStartPicker } from './WorkflowQuickStartPicker';
 import { buildQuickStartCatalogue, type UnifiedQuickStart } from '../../lib/workflow-quick-start';
 import { parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../../lib/constants';
@@ -14,7 +14,7 @@ import type {
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
-  PromptVariable,
+  PromptVariable, WorkflowSummary,
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
@@ -272,6 +272,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // When the user clicks "Lancer" with trigger=Manual + non-empty list,
   // a form asks for one value per variable before the run starts.
   const [wfVariables, setWfVariables] = useState<PromptVariable[]>(editWorkflow?.variables ?? []);
+  // 2026-06-11 — when a DECOMPOSED preset (e.g. ticket-to-pr) is applied, its
+  // child workflows ride here. On save, a non-empty list routes the create to
+  // `POST /api/workflows/bundle` (children created first, parent's
+  // `sub_workflow_id: "@bundle:<id>"` substituted) instead of plain create.
+  const [pendingChildWorkflows, setPendingChildWorkflows] = useState<ChildWorkflowPreset[]>([]);
 
   // 0.8.2 — Deep-link from the audit-validation CTA: if `initialPresetId`
   // is supplied (and we're not editing an existing workflow), apply the
@@ -378,6 +383,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
     setSteps(transformedSteps);
     if (preset.onFailure) setOnFailureSteps(preset.onFailure);
+    if (preset.childWorkflows) setPendingChildWorkflows(preset.childWorkflows);
     if (preset.execAllowlist) setExecAllowlist(preset.execAllowlist);
     setRequireIsolation(!!preset.requireIsolation);
     if (preset.variables) setWfVariables(preset.variables);
@@ -420,6 +426,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [availableDirectives, setAvailableDirectives] = useState<Directive[]>([]);
   const [availableQuickPrompts, setAvailableQuickPrompts] = useState<QuickPrompt[]>([]);
   const [availableQuickApis, setAvailableQuickApis] = useState<QuickApi[]>([]);
+  // 2026-06-11 (Phase 1c) — other workflows, for the SubWorkflow step picker.
+  const [availableWorkflows, setAvailableWorkflows] = useState<WorkflowSummary[]>([]);
   // API plugins available on the project — filtered to those with `api_spec != null`
   // and a matching config. Consumed by ApiCallStepCard's plugin picker.
   const [availableApiPlugins, setAvailableApiPlugins] = useState<ApiPluginOption[]>([]);
@@ -477,6 +485,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
     directivesApi.list().then(setAvailableDirectives).catch(e => console.warn('Failed to load directives:', e));
     quickPromptsApi.list().then(setAvailableQuickPrompts).catch(e => console.warn('Failed to load quick prompts:', e));
     quickApisApi.list().then(setAvailableQuickApis).catch(e => console.warn('Failed to load quick apis:', e));
+    workflowsApi.list().then(setAvailableWorkflows).catch(e => console.warn('Failed to load workflows:', e));
     // Load API plugins once at mount — the list is refreshed if the user
     // comes back to the wizard, cheap call + rare delta.
     mcpsApi.overview()
@@ -566,6 +575,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         setSteps(p.steps);
         if (p.onFailure) setOnFailureSteps(p.onFailure);
         if (p.execAllowlist) setExecAllowlist(p.execAllowlist);
+        // 2026-06-11 — decomposed presets (ticket-to-pr, feasibility-autopilot)
+        // ship child workflows; without this the parent's `@bundle:` SubWorkflow
+        // ref would be unresolved at save (bundle 400). Mirror of the deep-link
+        // preset-apply effect above.
+        setPendingChildWorkflows(p.childWorkflows ?? []);
         setRequireIsolation(!!p.requireIsolation);
         if (p.variables) setWfVariables(p.variables);
         setWizardMode('advanced');
@@ -812,7 +826,28 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
           exec_allowlist: execAllowlist,
           variables: wfVariables,
         };
-        await workflowsApi.create(req);
+        if (pendingChildWorkflows.length > 0) {
+          // Decomposed preset: create children first (they inherit the
+          // parent's project_id server-side), then the parent whose
+          // `sub_workflow_id: "@bundle:<id>"` is substituted. Atomic.
+          await workflowsApi.createBundle({
+            quick_prompts: [],
+            quick_apis: [],
+            custom_apis: [],
+            child_workflows: pendingChildWorkflows.map(cw => ({
+              bundle_id: cw.bundleId,
+              name: cw.name,
+              project_id: projectId || null,
+              trigger: { type: 'Manual' },
+              steps: cw.steps,
+              actions: [],
+              exec_allowlist: cw.execAllowlist ?? [],
+            })),
+            workflow: req,
+          });
+        } else {
+          await workflowsApi.create(req);
+        }
       }
       onDone();
     } catch (e) {
@@ -1552,6 +1587,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     onClick={() => swapStepType(i, 'JsonData')}
                     title={t('wiz.stepTypeJsonDataHint')}
                   ><Braces size={11} /> {t('wiz.stepTypeJsonData')}</button>
+                  <button
+                    className="wf-step-type-btn"
+                    data-type="sub-workflow"
+                    data-selected={step.step_type?.type === 'SubWorkflow'}
+                    onClick={() => swapStepType(i, 'SubWorkflow')}
+                    title={t('wiz.stepTypeSubWorkflowHint')}
+                  ><GitBranch size={11} /> {t('wiz.stepTypeSubWorkflow')}</button>
                 </div>
                 {/* Caption sous la rangée — résume en 1 phrase ce que fait
                     le type sélectionné. Évite au user de devoir hover pour
@@ -2342,6 +2384,64 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       <p className="text-2xs text-ghost mt-2">{t('wiz.jsonDataNoTemplating')}</p>
                     </div>
                   );
+                })() : step.step_type?.type === 'SubWorkflow' ? (() => {
+                  // Phase 1c — pick the workflow to run as a nested child run.
+                  // Self is excluded (the most obvious cycle); deeper cycles +
+                  // "no Gate inside" + depth are enforced server-side at save.
+                  const selectableWfs = availableWorkflows.filter(w => w.id !== editWorkflow?.id);
+                  const selected = availableWorkflows.find(w => w.id === step.sub_workflow_id) ?? null;
+                  // Decomposed-preset case: the child doesn't exist yet — the
+                  // step carries an `@bundle:<id>` sentinel resolved at save by
+                  // the bundle endpoint. Surface it as a synthetic, selected
+                  // option (not "unset") matching the pending child's name.
+                  const bundleRef = step.sub_workflow_id?.startsWith('@bundle:')
+                    ? step.sub_workflow_id.slice('@bundle:'.length) : null;
+                  const pendingChild = bundleRef
+                    ? pendingChildWorkflows.find(c => c.bundleId === bundleRef) ?? null : null;
+                  return (
+                    <div className="wf-sub-workflow-form">
+                      <div className="wf-batch-intro">
+                        <GitBranch size={14} />
+                        <div>
+                          <strong>{t('wiz.subWorkflowTitle')}</strong>
+                          <p className="text-xs text-muted">{t('wiz.subWorkflowHint')}</p>
+                        </div>
+                      </div>
+                      <label className="text-xs text-muted mb-1">
+                        {t('wiz.subWorkflowPicker')} <span className="wf-required">*</span>
+                      </label>
+                      <select
+                        className="wf-select text-sm"
+                        value={step.sub_workflow_id ?? ''}
+                        data-invalid={!step.sub_workflow_id}
+                        onChange={e => updateStep(i, { sub_workflow_id: e.target.value || null })}
+                      >
+                        <option value="">{t('wiz.subWorkflowPickerPlaceholder')}</option>
+                        {bundleRef && (
+                          <option value={step.sub_workflow_id ?? ''}>
+                            ↳ {pendingChild ? pendingChild.name : bundleRef} {t('wiz.subWorkflowBundleNew')}
+                          </option>
+                        )}
+                        {selectableWfs.map(w => (
+                          <option key={w.id} value={w.id}>{w.name}</option>
+                        ))}
+                      </select>
+                      {selectableWfs.length === 0 && !bundleRef && (
+                        <p className="text-2xs text-ghost mt-1">{t('wiz.subWorkflowNone')}</p>
+                      )}
+                      {pendingChild && (
+                        <p className="text-2xs text-ghost mt-2">
+                          {t('wiz.subWorkflowBundleNote', String(pendingChild.steps.length))}
+                        </p>
+                      )}
+                      {selected && (
+                        <p className="text-2xs text-ghost mt-2">
+                          {t('wiz.subWorkflowSelected', selected.name, String(selected.step_count))}
+                        </p>
+                      )}
+                      <p className="text-2xs text-ghost mt-2">{t('wiz.subWorkflowConstraints')}</p>
+                    </div>
+                  );
                 })() : (() => {
                   // 0.7+ — Quick Prompt reference UX. Quand un QP est sélectionné,
                   // le textarea + les hints sont cachés derrière un <details>
@@ -2810,6 +2910,90 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             />
                           </div>
                         </div>
+                      </div>
+                    )}
+
+                    {/* Multi-agent review (2026-06-13) — debate the step's
+                        output with a second agent in a shared discussion until
+                        agreement, instead of a successive re-run loop. */}
+                    {(!step.step_type || step.step_type.type === 'Agent') && (
+                      <div className="mb-5">
+                        <label className="wf-label flex-row gap-2" style={{ alignItems: 'center' }}>
+                          <input
+                            type="checkbox"
+                            checked={!!step.multi_agent_review}
+                            onChange={e => updateStep(i, {
+                              multi_agent_review: e.target.checked
+                                ? (step.multi_agent_review ?? {
+                                    reviewer_agent: availableAgents.find(a => a.type !== step.agent)?.type ?? 'Codex',
+                                    reviewer_tier: 'reasoning',
+                                    debate_prompt: t('wiz.multiReview.defaultPrompt'),
+                                    max_rounds: 3,
+                                  })
+                                : null,
+                            })}
+                          />
+                          {t('wiz.multiReview.toggle')}
+                        </label>
+                        {step.multi_agent_review && (
+                          <div className="wf-subpanel mt-2" style={{ borderLeft: '2px solid var(--kr-accent-border)', paddingLeft: 'var(--kr-sp-3)' }}>
+                            <p className="text-2xs text-muted" style={{ margin: '0 0 var(--kr-sp-2)' }}>
+                              {t('wiz.multiReview.hint')}
+                            </p>
+                            <div className="flex-row gap-3">
+                              <div className="flex-1">
+                                <label className="wf-label text-2xs">{t('wiz.multiReview.reviewer')}</label>
+                                <select
+                                  className="wf-select"
+                                  value={step.multi_agent_review.reviewer_agent}
+                                  onChange={e => updateStep(i, {
+                                    multi_agent_review: { ...step.multi_agent_review!, reviewer_agent: e.target.value as AgentType },
+                                  })}
+                                >
+                                  {availableAgents.map(a => (
+                                    <option key={a.type} value={a.type}>{a.label}</option>
+                                  ))}
+                                </select>
+                              </div>
+                              <div className="flex-1">
+                                <label className="wf-label text-2xs">{t('wiz.multiReview.tier')}</label>
+                                <select
+                                  className="wf-select"
+                                  value={step.multi_agent_review.reviewer_tier ?? ''}
+                                  onChange={e => updateStep(i, {
+                                    multi_agent_review: { ...step.multi_agent_review!, reviewer_tier: (e.target.value || null) as typeof step.multi_agent_review.reviewer_tier },
+                                  })}
+                                >
+                                  <option value="">default</option>
+                                  <option value="economy">economy</option>
+                                  <option value="reasoning">reasoning</option>
+                                </select>
+                              </div>
+                              <div style={{ width: 90 }}>
+                                <label className="wf-label text-2xs">{t('wiz.multiReview.rounds')}</label>
+                                <input
+                                  type="number" min={1} max={5}
+                                  className="wf-input"
+                                  value={step.multi_agent_review.max_rounds ?? 3}
+                                  onChange={e => updateStep(i, {
+                                    multi_agent_review: { ...step.multi_agent_review!, max_rounds: e.target.value ? parseInt(e.target.value) : null },
+                                  })}
+                                />
+                              </div>
+                            </div>
+                            <div className="mt-2">
+                              <label className="wf-label text-2xs">{t('wiz.multiReview.prompt')}</label>
+                              <textarea
+                                className="wf-textarea"
+                                rows={3}
+                                value={step.multi_agent_review.debate_prompt}
+                                onChange={e => updateStep(i, {
+                                  multi_agent_review: { ...step.multi_agent_review!, debate_prompt: e.target.value },
+                                })}
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -3390,6 +3574,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'Exec' ? 'EXEC'
               : typeKind === 'BatchApiCall' ? 'BATCH API'
               : typeKind === 'JsonData' ? 'JSON'
+              : typeKind === 'SubWorkflow' ? 'SOUS-WF'
               : 'AGENT';
             const typeData = typeKind === 'ApiCall' ? 'api'
               : typeKind === 'BatchQuickPrompt' ? 'batch-qp'
@@ -3398,6 +3583,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               : typeKind === 'Exec' ? 'exec'
               : typeKind === 'BatchApiCall' ? 'batch-api'
               : typeKind === 'JsonData' ? 'json-data'
+              : typeKind === 'SubWorkflow' ? 'subworkflow'
               : 'agent';
             const isBatch = typeKind === 'BatchQuickPrompt';
             const isApi = typeKind === 'ApiCall';
@@ -3479,7 +3665,8 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 if (typeof p === 'object') return t('wiz.jsonDataSummaryObject', Object.keys(p as object).length);
                                 return t('wiz.jsonDataSummaryScalar');
                               })()})</span>
-                            : <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
+                            : typeKind === 'Agent' ? <> ({AGENT_LABELS[s.agent] ?? s.agent})</>
+                            : null
               }
               {s.description && <span className="text-faint text-xs" style={{ fontStyle: 'italic' }}> &mdash; {s.description}</span>}
               {s.on_result && s.on_result.length > 0 && <span className="text-dim text-xs"> [{s.on_result.length} condition{s.on_result.length > 1 ? 's' : ''}]</span>}
@@ -3588,6 +3775,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             if (s.json_data_payload === null || s.json_data_payload === undefined) {
               errors.push(t('wiz.errorJsonDataNoPayload').replace('{0}', label));
             }
+          } else if (s.step_type?.type === 'SubWorkflow') {
+            // SubWorkflow steps run a child workflow — no prompt. They need a
+            // `sub_workflow_id` (a saved-workflow id, or an `@bundle:<id>`
+            // sentinel resolved at save when shipped as a decomposed preset).
+            if (!s.sub_workflow_id || !s.sub_workflow_id.trim()) {
+              errors.push(t('wiz.errorSubWorkflowNoTarget').replace('{0}', label));
+            }
           } else if (!s.prompt_template && !s.quick_prompt_id) {
             // Agent step needs SOIT un prompt_template, SOIT une référence
             // vers un QuickPrompt. Le runner hydrate le second au run-time.
@@ -3680,6 +3874,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               } else if (s.step_type?.type === 'JsonData') {
                 // 0.7+ — payload obligatoire, sinon le runner failera au lancement.
                 if (s.json_data_payload === null || s.json_data_payload === undefined) return true;
+              } else if (s.step_type?.type === 'SubWorkflow') {
+                // SubWorkflow : pas de prompt — un workflow cible (id réel ou
+                // sentinelle @bundle:<id> résolue au save) est requis.
+                if (!s.sub_workflow_id || !s.sub_workflow_id.trim()) return true;
               } else if (!s.prompt_template && !s.quick_prompt_id) {
                 // Agent step (default) : prompt_template OU quick_prompt_id requis.
                 return true;

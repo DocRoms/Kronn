@@ -37,7 +37,7 @@ export function AgentsSection({
   const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
-  const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; reasoning: string }>>({});
+  const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
   // When set to an agent name, the per-agent update modal is shown. The
   // modal is small + global to the section (rather than per-row state) so
   // we never re-render rows on its open/close — keeps the agent grid
@@ -99,9 +99,9 @@ export function AgentsSection({
   useEffect(() => {
     configApi.getModelTiers().then(tiers => {
       if (tiers) {
-        const editing: Record<string, { economy: string; reasoning: string }> = {};
+        const editing: Record<string, { economy: string; default: string; reasoning: string }> = {};
         for (const key of ['claude_code', 'codex', 'gemini_cli', 'kiro', 'vibe', 'copilot_cli', 'ollama'] as const) {
-          editing[key] = { economy: tiers[key]?.economy ?? '', reasoning: tiers[key]?.reasoning ?? '' };
+          editing[key] = { economy: tiers[key]?.economy ?? '', default: tiers[key]?.default ?? '', reasoning: tiers[key]?.reasoning ?? '' };
         }
         setTierEditing(editing);
       }
@@ -699,49 +699,76 @@ export function AgentsSection({
               const editing = tierEditing[agentKey];
               if (!editing) return null;
 
-              const knownModels: Record<string, { economy: string[]; reasoning: string[]; modelsUrl: string }> = {
+              // `fallback*` = the backend's BUILT-IN model when no override is
+              // set (runner.rs::resolve_model_flag) — shown in the empty-value
+              // option label so "Par défaut (…)" never lies about what actually
+              // runs. `null` = the agent's own default (no --model flag).
+              const knownModels: Record<string, {
+                economy: string[]; default: string[]; reasoning: string[];
+                fallbackEconomy: string | null; fallbackDefault: string | null; fallbackReasoning: string | null;
+                modelsUrl: string;
+              }> = {
                 claude_code: {
                   economy: ['haiku', 'sonnet'],
-                  reasoning: ['opus', 'sonnet'],
+                  default: ['sonnet', 'fable', 'opus', 'haiku'],
+                  // Fable 5 (released 2026) is the new top model. Listed
+                  // first so it surfaces for new tier picks; the built-in
+                  // fallback stays `opus` (label below stays truthful via
+                  // fallbackReasoning). Verified: the claude CLI accepts
+                  // the `fable` alias for --model (tested 2026-06-10).
+                  reasoning: ['fable', 'opus', 'sonnet'],
+                  fallbackEconomy: 'haiku', fallbackDefault: 'sonnet', fallbackReasoning: 'opus',
                   modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
                 },
                 codex: {
                   economy: ['gpt-5-codex-mini', 'gpt-5.1-codex', 'gpt-5-codex'],
-                  // GPT-5.5 (released 2026-05) is the new top reasoning model.
-                  // Listed first so it surfaces above the older 5.4 default
-                  // for new tier picks. Existing users with `gpt-5.4`
-                  // selected stay on 5.4 — the dropdown picks via the
-                  // current saved value, no auto-migration.
+                  default: ['gpt-5.5', 'gpt-5.4', 'gpt-5.1-codex'],
                   reasoning: ['gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max'],
+                  fallbackEconomy: 'gpt-5-codex-mini', fallbackDefault: null, fallbackReasoning: 'gpt-5.4',
                   modelsUrl: 'https://developers.openai.com/codex/models',
                 },
                 gemini_cli: {
                   economy: ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-3-flash-preview'],
+                  default: ['gemini-3.1-pro-preview', 'gemini-2.5-flash'],
                   reasoning: ['gemini-3.1-pro-preview', 'gemini-2.5-pro'],
+                  fallbackEconomy: 'gemini-2.5-flash', fallbackDefault: null, fallbackReasoning: 'gemini-3.1-pro-preview',
                   modelsUrl: 'https://ai.google.dev/gemini-api/docs/models',
                 },
-                kiro: { economy: [], reasoning: [], modelsUrl: '' },
-                vibe: { economy: [], reasoning: [], modelsUrl: '' },
-                copilot_cli: { economy: ['gpt-4o-mini'], reasoning: ['o4-mini'], modelsUrl: 'https://docs.github.com/en/copilot' },
+                kiro: { economy: [], default: [], reasoning: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+                vibe: { economy: [], default: [], reasoning: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
+                copilot_cli: {
+                  economy: ['gpt-4o-mini'], default: ['o4-mini', 'gpt-4o-mini'], reasoning: ['o4-mini'],
+                  fallbackEconomy: 'gpt-4o-mini', fallbackDefault: null, fallbackReasoning: 'o4-mini',
+                  modelsUrl: 'https://docs.github.com/en/copilot',
+                },
               };
               const models = knownModels[agentKey];
 
-              const saveTiers = async (field: 'economy' | 'reasoning', value: string) => {
+              const saveTiers = async (field: 'economy' | 'default' | 'reasoning', value: string) => {
                 const newEditing = { ...tierEditing, [agentKey]: { ...editing, [field]: value } };
                 setTierEditing(newEditing);
+                // `default` is included for EVERY agent — pre-fix it was
+                // omitted from this payload, so any save here silently wiped
+                // the Default-tier override (e.g. the Ollama model picked
+                // via OllamaCard, which writes the same field).
+                const tierOf = (k: string) => ({
+                  economy: newEditing[k]?.economy || null,
+                  default: newEditing[k]?.default || null,
+                  reasoning: newEditing[k]?.reasoning || null,
+                });
                 const newTiers: ModelTiersConfig = {
-                  claude_code: { economy: newEditing.claude_code?.economy || null, reasoning: newEditing.claude_code?.reasoning || null },
-                  codex: { economy: newEditing.codex?.economy || null, reasoning: newEditing.codex?.reasoning || null },
-                  gemini_cli: { economy: newEditing.gemini_cli?.economy || null, reasoning: newEditing.gemini_cli?.reasoning || null },
-                  kiro: { economy: newEditing.kiro?.economy || null, reasoning: newEditing.kiro?.reasoning || null },
-                  vibe: { economy: newEditing.vibe?.economy || null, reasoning: newEditing.vibe?.reasoning || null },
-                  copilot_cli: { economy: newEditing.copilot_cli?.economy || null, reasoning: newEditing.copilot_cli?.reasoning || null },
-                  ollama: { economy: newEditing.ollama?.economy || null, reasoning: newEditing.ollama?.reasoning || null },
+                  claude_code: tierOf('claude_code'),
+                  codex: tierOf('codex'),
+                  gemini_cli: tierOf('gemini_cli'),
+                  kiro: tierOf('kiro'),
+                  vibe: tierOf('vibe'),
+                  copilot_cli: tierOf('copilot_cli'),
+                  ollama: tierOf('ollama'),
                 };
                 try { await configApi.setModelTiers(newTiers); toast(t('config.saved'), 'success'); } catch { toast(t('config.saveError'), 'error'); }
               };
 
-              const renderSelect = (field: 'economy' | 'reasoning', options: string[], icon: string, iconColor: string) => {
+              const renderSelect = (field: 'economy' | 'default' | 'reasoning', options: string[], icon: string, iconColor: string, fallback: string | null) => {
                 if (options.length === 0) return (
                   <span className="text-2xs text-ghost" style={{ padding: '2px 6px' }}>{icon} N/A</span>
                 );
@@ -754,7 +781,10 @@ export function AgentsSection({
                       onChange={e => saveTiers(field, e.target.value)}
                       aria-label={t('disc.modelTier') + ' ' + field}
                     >
-                      <option value="">{t('config.defaultModel')} ({options[0]})</option>
+                      {/* Empty value = the backend built-in fallback (passed in
+                          so the label matches runner.rs, not just options[0]).
+                          No fallback = the agent's own default model. */}
+                      <option value="">{t('config.defaultModel')}{fallback ? ` (${fallback})` : ''}</option>
                       {options.map(m => (
                         <option key={m} value={m}>{m}</option>
                       ))}
@@ -777,8 +807,9 @@ export function AgentsSection({
                     )}
                   </div>
                   <div className="flex-row gap-5">
-                    {renderSelect('economy', models.economy, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)')}
-                    {renderSelect('reasoning', models.reasoning, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)')}
+                    {renderSelect('economy', models.economy, '\u26A1', 'rgba(var(--kr-success-rgb), 0.6)', models.fallbackEconomy)}
+                    {renderSelect('default', models.default, '\uD83C\uDFAF', 'rgba(var(--kr-info-rgb), 0.6)', models.fallbackDefault)}
+                    {renderSelect('reasoning', models.reasoning, '\uD83E\uDDE0', 'rgba(var(--kr-warning-amber-rgb), 0.6)', models.fallbackReasoning)}
                   </div>
                 </div>
               );

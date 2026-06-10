@@ -739,6 +739,34 @@ export interface WorkflowStep {
    *  taille raisonnable). Aucun templating au runtime — la valeur est
    *  retournée telle quelle. Voir `StepType.JsonData`. */
   json_data_payload?: unknown | null;
+
+  // ─── SubWorkflow field (Phase 1, 2026-06-11) ────────────────────────
+  /** For `StepType.SubWorkflow`: the id of the workflow to run as a nested
+   *  child run. Required for that step type (enforced at save). Absent for
+   *  every other step type. */
+  sub_workflow_id?: string | null;
+  /** Phase 3b (2026-06-12) — for `StepType.SubWorkflow`: workspace-relative
+   *  JSON-array file (e.g. `.kronn/tasks.json`); when set, the child runs
+   *  once per item (sequential fan-out in the shared worktree, each item
+   *  exposed to the child via `.kronn/current_task.json`). */
+  sub_workflow_foreach_file?: string | null;
+  /** 2026-06-13 — "Multi-agent review" advanced option on an Agent step: after
+   *  the step's agent runs, a shared discussion is opened and a second agent is
+   *  invited to debate the output until agreement. */
+  multi_agent_review?: MultiAgentReviewConfig | null;
+}
+
+/** Config for the "Multi-agent review" option on an Agent step. */
+export interface MultiAgentReviewConfig {
+  /** Second agent invited to challenge the step's output (pick a different
+   *  model family to avoid same-model blind spots). */
+  reviewer_agent: AgentType;
+  /** Reasoning tier for the reviewer (null = the agent's default). */
+  reviewer_tier?: ModelTier | null;
+  /** Debate framing posted to open the exchange. */
+  debate_prompt: string;
+  /** Max debate rounds before falling through with the best result (default 3). */
+  max_rounds?: number | null;
 }
 
 /** Configuration for a Notify webhook step (zero agent tokens). */
@@ -775,7 +803,8 @@ export type StepType =
   | { type: "Gate" }
   | { type: "Exec" }
   | { type: "BatchApiCall" }
-  | { type: "JsonData" };
+  | { type: "JsonData" }
+  | { type: "SubWorkflow" };
 
 export type StepMode =
   | { type: "Normal" };
@@ -869,10 +898,13 @@ export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelle
 
 /** 0.7.0 Phase 4 — payload for POST /api/workflows/:id/runs/:run_id/decide. */
 export interface DecideRunRequest {
-  /** "approve" | "request_changes" | "reject" */
+  /** "approve" | "request_changes" | "reject" (case-insensitive) */
   decision: string;
   /** Operator's free-text comment. Required for request_changes. */
   comment?: string | null;
+  /** Optional gate identity (step name): the decision only applies if the
+   *  run is still waiting on THAT gate. Protects stale callers. */
+  gate_step?: string | null;
 }
 
 export interface DecideRunResponse {
@@ -905,10 +937,22 @@ export interface StepResult {
   step_kind?: string | null;
   /** Snapshot of `step.agent` for Agent steps. */
   step_agent?: AgentType | null;
+  /** 2026-06-13 — model/tier actually resolved for this Agent step (e.g.
+   *  "opus", "sonnet · reasoning", "haiku · economy"). Shown on every agent
+   *  step card, including per-item fan-out routing. */
+  step_model?: string | null;
   /** Snapshot of `step.api_plugin_slug` for ApiCall steps. */
   step_api_plugin_slug?: string | null;
   /** Snapshot of `step.api_endpoint_path` for ApiCall steps. */
   step_api_endpoint_path?: string | null;
+  /** 2026-06-10 — true when this result came from the on_failure
+   *  compensation chain (rendered under a dedicated ROLLBACK section,
+   *  never as a nominal next step). Absent on legacy rows = false. */
+  is_rollback?: boolean;
+  /** 2026-06-11 (Phase 1) — for a SubWorkflow step: the id of the child run
+   *  it spawned, for drilling into the nested run. The inverse of
+   *  `WorkflowRun.parent_run_id`. Absent for other step types / legacy rows. */
+  child_run_id?: string | null;
 }
 
 export interface WorkflowSummary {
@@ -1000,6 +1044,8 @@ export interface BundleResponse {
   quick_prompts: BundleCreated[];
   quick_apis: BundleCreated[];
   custom_apis: BundleCreated[];
+  /** Child workflows created before the parent (2026-06-11, decomposed presets). */
+  child_workflows?: BundleCreated[];
   workflow: BundleWorkflowCreated;
 }
 
@@ -1694,6 +1740,10 @@ export interface PromptVariable {
   description?: string | null;
   /** Must be filled before the prompt can run. Defaults to true. */
   required?: boolean;
+  /** 2026-06-10 — optional regex the value must full-match (anchored) at
+   *  launch, e.g. `[A-Z]+-\d+` for a Jira key. Rejects typos like `7152`
+   *  before they reach the API. Absent = no shape constraint. */
+  pattern?: string | null;
 }
 
 // 0.8.5 — QP version history snapshot. One row written per

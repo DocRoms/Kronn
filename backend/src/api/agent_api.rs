@@ -128,6 +128,27 @@ pub struct AgentApiCallResponse {
     pub error: Option<String>,
 }
 
+/// Normalize a stringified JSON `body` (2026-06-10). Some MCP client
+/// stacks serialize the `body` tool-arg as a STRING containing JSON
+/// instead of a JSON object — the request then goes out double-encoded
+/// (`"{\"title\":…}"`), the upstream API parses a string, finds no
+/// fields, and **silently no-ops with a 200**. Caught red-handed via an
+/// httpbin echo on the Slides.com plugin ("writes ignored" for days).
+/// If the string parses to an object/array we unwrap it; a plain string
+/// body (legit for some APIs) stays as-is. The MCP bridge applies the
+/// same normalization (defense-in-depth).
+fn normalize_body(b: serde_json::Value) -> serde_json::Value {
+    if let serde_json::Value::String(ref s) = b {
+        if let Ok(parsed @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
+            serde_json::from_str::<serde_json::Value>(s)
+        {
+            tracing::debug!("agent-api: unwrapped a stringified JSON body ({} chars)", s.len());
+            return parsed;
+        }
+    }
+    b
+}
+
 /// `POST /api/agent-api/call`
 ///
 /// Resolves the disc's project → builds a synthetic ApiCall
@@ -203,6 +224,8 @@ pub async fn agent_api_call(
     //    api_* fields + quick_api_id + step name (used in error messages).
     //    Every other field defaults to a no-op (cf. WorkflowStep::default
     //    in models/workflows.rs).
+    let body = req.body.clone().map(normalize_body);
+
     let step = WorkflowStep {
         // Step name surfaces in executor error messages — be explicit so
         // a misconfigured call surfaces "agent-broker:<endpoint>" rather
@@ -217,7 +240,7 @@ pub async fn agent_api_call(
         api_path_params: req.path_params.clone(),
         api_query: req.query.clone(),
         api_headers: req.headers.clone(),
-        api_body: req.body.clone(),
+        api_body: body,
         api_extract: req.extract.clone(),
         ..Default::default()
     };
@@ -589,5 +612,35 @@ mod tests {
         let json_part = envelope_json.split("\n[SIGNAL:").next().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json_part).unwrap();
         assert_eq!(parsed.pointer("/data/x").and_then(|v| v.as_i64()), Some(1));
+    }
+
+    // ─── normalize_body (2026-06-10, Slides.com double-encoded body) ───
+
+    #[test]
+    fn normalize_body_unwraps_stringified_object() {
+        let b = serde_json::Value::String(r#"{"title":"X","data":"<section/>"}"#.into());
+        let out = super::normalize_body(b);
+        assert_eq!(out["title"], "X", "stringified object must be unwrapped: {out}");
+    }
+
+    #[test]
+    fn normalize_body_unwraps_stringified_array() {
+        let b = serde_json::Value::String(r#"[{"a":1}]"#.into());
+        let out = super::normalize_body(b);
+        assert!(out.is_array(), "stringified array must be unwrapped: {out}");
+    }
+
+    #[test]
+    fn normalize_body_keeps_plain_string_and_object() {
+        // A plain (non-JSON) string body is legit for some APIs — untouched.
+        let s = serde_json::Value::String("plain text payload".into());
+        assert_eq!(super::normalize_body(s.clone()), s);
+        // A real object is passed through untouched.
+        let o = serde_json::json!({"k": "v"});
+        assert_eq!(super::normalize_body(o.clone()), o);
+        // A string containing a JSON scalar ("42") stays a string (only
+        // object/array unwrap — a scalar was plausibly intentional).
+        let n = serde_json::Value::String("42".into());
+        assert_eq!(super::normalize_body(n.clone()), n);
     }
 }

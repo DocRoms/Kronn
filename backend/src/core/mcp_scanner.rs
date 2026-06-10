@@ -2322,7 +2322,7 @@ pub fn build_api_context_block(
     // surfaces here. Pure MCP plugins (api_spec = None) get skipped.
     let api_plugins: Vec<(&crate::models::McpServer, &std::collections::HashMap<String, String>, &ApiSpec)> =
         plugins_with_env.iter()
-            .filter_map(|(s, env)| s.api_spec.as_ref().map(|spec| (s, env, spec)))
+            .filter_map(|(s, _config_id, env)| s.api_spec.as_ref().map(|spec| (s, env, spec)))
             .collect();
 
     if api_plugins.is_empty() {
@@ -2508,11 +2508,17 @@ pub fn build_api_context_block(
 /// separately. On a decryption failure for one config, that entry is
 /// dropped (logged) — we don't want one broken config to suppress the
 /// whole block for the project.
-/// One active API plugin bound to its decrypted env map. Exported as a
+/// One active API plugin: (server, config_id, decrypted env). Exported as a
 /// named alias so the signature of [`collect_active_api_plugins`] and the
 /// matching `build_api_context_block` input both stay readable (and keep
 /// clippy's `type_complexity` lint quiet on the return type).
-pub type ActiveApiPlugin = (crate::models::McpServer, std::collections::HashMap<String, String>);
+///
+/// The config id rides along (2026-06-10) so callers can disambiguate
+/// MULTIPLE configs of the same server on one project. Pre-fix it was
+/// dropped, and both the ApiCall executor (`matches_config` stub `true`)
+/// and the streaming OAuth2 cache-key re-derive silently picked the FIRST
+/// matching config — i.e. potentially the wrong credential.
+pub type ActiveApiPlugin = (crate::models::McpServer, String, std::collections::HashMap<String, String>);
 
 pub fn collect_active_api_plugins(
     conn: &rusqlite::Connection,
@@ -2541,7 +2547,7 @@ pub fn collect_active_api_plugins(
                 continue;
             }
         };
-        out.push(((*server).clone(), env));
+        out.push(((*server).clone(), config.id.clone(), env));
     }
     Ok(out)
 }

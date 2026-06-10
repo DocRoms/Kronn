@@ -28,6 +28,15 @@ pub struct PromptVariable {
     /// variables are treated as required.
     #[serde(default = "default_variable_required")]
     pub required: bool,
+    /// 2026-06-10 — optional regex the provided value must match (anchored
+    /// full-match). Lets a workflow declare a shape (`^[A-Z]+-\d+$` for a
+    /// Jira key) so a typo like `7152` instead of `EW-7152` is rejected at
+    /// launch with a clear message, BEFORE it reaches the API as a literal
+    /// path param and 404s. `None` = no shape constraint (legacy). Invalid
+    /// regex is treated as "no constraint" (never blocks a launch on a
+    /// malformed pattern; logged).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
 }
 
 fn default_variable_required() -> bool { true }

@@ -14,6 +14,7 @@ pub mod batch_apicall_step;
 pub mod quick_api_hydrate;
 pub mod quick_prompt_hydrate;
 pub mod json_data_step;
+pub mod sub_workflow_step;
 pub mod notify_step;
 pub mod gate_step;
 pub mod gate_checkpoint;
@@ -258,7 +259,7 @@ impl WorkflowEngine {
 
         // Execute in background
         tokio::spawn(async move {
-            if let Err(e) = runner::execute_run(state, &workflow, &mut run, &tokens, &agents, None).await {
+            if let Err(e) = runner::execute_run(state, &workflow, &mut run, &tokens, &agents, None, None, None).await {
                 tracing::error!("Workflow run {} failed: {}", run.id, e);
             }
         });
@@ -342,6 +343,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 
