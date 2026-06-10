@@ -841,29 +841,31 @@ body"#;
             "skill must teach `lift` vs `invent` for evidence-backed values");
     }
 
-    /// 0.8.3 guard: the architect counts step types correctly.
-    /// Kronn ships **8** step types (Agent, ApiCall, BatchApiCall,
-    /// BatchQuickPrompt, Exec, Gate, JsonData, Notify). A skill that
-    /// still says "six step types" leaves an LLM consuming it unable
-    /// to enumerate the catalog correctly. This test fires the moment
-    /// the count drifts.
+    /// 2026-06-11 guard: the architect counts step types correctly.
+    /// Kronn ships **9** step types (Agent, ApiCall, BatchApiCall,
+    /// BatchQuickPrompt, Exec, Gate, JsonData, Notify, SubWorkflow). A
+    /// skill that still says "eight step types" leaves an LLM consuming
+    /// it unable to enumerate the catalog correctly. This test fires the
+    /// moment the count drifts.
     #[test]
-    fn workflow_architect_skill_counts_eight_step_types() {
+    fn workflow_architect_skill_counts_nine_step_types() {
         let skills = list_all_skills();
         let arch = skills.iter().find(|s| s.id == "workflow-architect")
             .expect("workflow-architect skill must exist");
         let c = &arch.content;
-        assert!(c.contains("eight step types") || c.contains("8 step types"),
-            "skill must say 'eight step types' (not 'six') — the catalog has grown");
+        assert!(c.contains("nine step types") || c.contains("9 step types"),
+            "skill must say 'nine step types' — the catalog has grown to include SubWorkflow");
+        assert!(c.contains("SubWorkflow"),
+            "skill must teach the SubWorkflow step type by name");
         // The old wrong counts must NOT linger anywhere as authoritative.
-        // We tolerate the word 'six' in other phrases but the literal
-        // 'six step types' / 'seven step types' is the regression.
         assert!(!c.contains("six step types"),
-            "skill still says 'six step types' — stale count, must be 'eight'");
+            "skill still says 'six step types' — stale count, must be 'nine'");
         assert!(!c.contains("seven step types"),
-            "skill still says 'seven step types' — stale count, must be 'eight'");
-        assert!(!c.contains("The 7 step types"),
-            "skill still says 'The 7 step types cover every case' — stale count");
+            "skill still says 'seven step types' — stale count, must be 'nine'");
+        assert!(!c.contains("eight step types"),
+            "skill still says 'eight step types' — stale count, must be 'nine'");
+        assert!(!c.contains("The 7 step types") && !c.contains("The 8 step types"),
+            "skill still says 'The 7/8 step types cover every case' — stale count");
     }
 
     /// 0.8.3 guard: the architect must surface the **reuse-first**

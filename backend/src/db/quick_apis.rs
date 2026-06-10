@@ -214,6 +214,7 @@ mod tests {
                 placeholder: String::new(),
                 description: None,
                 required: true,
+                pattern: None,
             }],
             profile_ids: vec![],
             directive_ids: vec![],

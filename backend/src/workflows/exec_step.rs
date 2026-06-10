@@ -145,6 +145,18 @@ pub async fn execute_exec_step(
             )),
         }
     }
+    // 2026-06-11 — defence-in-depth: the allowlist authorises a BINARY, but
+    // `git`/`rm` carry irreversible foot-guns in their ARGS. Refuse the few
+    // unambiguously-destructive invocations (force-push rewrites shared
+    // history; rm -rf is unrecoverable) AFTER templating, so a `{{var}}` that
+    // renders into `--force` can't sneak past. This is NOT a sandbox — just a
+    // guardrail against the obvious irreversible ones.
+    if let Some(reason) = destructive_reason(raw_command, &rendered_args) {
+        return fail(step, start, format!(
+            "Exec step `{}`: refused `{} {}` — {reason}. Reformule l'étape sans cette opération destructive.",
+            step.name, raw_command, rendered_args.join(" ")
+        ));
+    }
 
     let timeout_secs = step.exec_timeout_secs
         .map(u64::from)
@@ -182,6 +194,13 @@ pub async fn execute_exec_step(
                     step.name, i, e
                 )),
             }
+        }
+        // Same destructive-arg guard as the main command (2026-06-11).
+        if let Some(reason) = destructive_reason(setup_cmd, &setup_args) {
+            return fail(step, start, format!(
+                "Exec step `{}`: refused setup `{} {}` — {reason}.",
+                step.name, setup_cmd, setup_args.join(" ")
+            ));
         }
         tracing::info!(
             target: "kronn::workflow_exec",
@@ -262,8 +281,15 @@ pub async fn execute_exec_step(
         // the child gets reparented to PID 1 and keeps running.
         .kill_on_drop(true);
 
+    // 2026-06-11 — setup + main share ONE deadline. The setup phase above
+    // consumed `start.elapsed()` of the budget; the main command gets the
+    // REMAINDER (floored at 1s), so a step with `exec_timeout_secs = T` can't
+    // run for up to 2×T (setup T + main T) as it could before.
+    let main_timeout_secs = timeout_secs
+        .saturating_sub(start.elapsed().as_secs())
+        .max(1);
     let output_future = cmd.output();
-    let timed_out = match tokio::time::timeout(Duration::from_secs(timeout_secs), output_future).await {
+    let timed_out = match tokio::time::timeout(Duration::from_secs(main_timeout_secs), output_future).await {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => {
             return fail(step, start, format!(
@@ -278,8 +304,8 @@ pub async fn execute_exec_step(
         Ok(out) => out,
         Err(()) => {
             return fail(step, start, format!(
-                "Exec step `{}`: timed out after {}s.",
-                step.name, timeout_secs
+                "Exec step `{}`: timed out after {}s (shared setup+main budget {}s).",
+                step.name, main_timeout_secs, timeout_secs
             ));
         }
     };
@@ -357,8 +383,11 @@ pub async fn execute_exec_step(
             envelope_detected: Some(true),
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action,
     }
@@ -383,8 +412,11 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action: None,
     }
@@ -408,9 +440,68 @@ fn truncate_to_limit(s: String) -> String {
     truncated
 }
 
+/// 2026-06-11 — returns `Some(reason)` when a binary+args invocation is one
+/// of the few UNAMBIGUOUSLY irreversible foot-guns the allowlist can't catch
+/// (it only authorises the binary). Deliberately narrow: force-push (rewrites
+/// shared history) and recursive-force `rm` (unrecoverable deletion). Not a
+/// sandbox — a guardrail against the obvious irreversible operations. Args
+/// are matched AFTER templating (so a `{{var}}` rendering to `--force` is
+/// caught). Everything else (cargo test, npm install, git diff/status/add,
+/// make…) passes untouched.
+fn destructive_reason(cmd: &str, args: &[String]) -> Option<String> {
+    let a: Vec<&str> = args.iter().map(|s| s.trim()).collect();
+    let has = |needle: &str| a.contains(&needle);
+    // A short-flag bundle like `-rf` / `-fr` that contains a given letter.
+    let short_flag_has = |letter: char| {
+        a.iter().any(|x| x.starts_with('-') && !x.starts_with("--") && x.chars().skip(1).any(|c| c == letter))
+    };
+    match cmd {
+        "git" if has("push")
+            && (has("--force") || has("-f") || has("--force-with-lease")
+                || a.iter().any(|x| x.starts_with("--force-with-lease="))) =>
+        {
+            Some("git push --force rewrites shared remote history".to_string())
+        }
+        "rm" if (has("--recursive") || short_flag_has('r'))
+            && (has("--force") || short_flag_has('f')) =>
+        {
+            Some("rm -rf is an irreversible recursive delete".to_string())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn s(v: &[&str]) -> Vec<String> { v.iter().map(|x| x.to_string()).collect() }
+
+    // ── destructive_reason (2026-06-11 allowlist arg-hardening) ──
+    #[test]
+    fn destructive_blocks_force_push_all_spellings() {
+        assert!(destructive_reason("git", &s(&["push", "--force"])).is_some());
+        assert!(destructive_reason("git", &s(&["push", "-f"])).is_some());
+        assert!(destructive_reason("git", &s(&["push", "origin", "main", "--force-with-lease"])).is_some());
+    }
+
+    #[test]
+    fn destructive_blocks_rm_rf_bundled_and_split() {
+        assert!(destructive_reason("rm", &s(&["-rf", "/tmp/x"])).is_some());
+        assert!(destructive_reason("rm", &s(&["-fr", "x"])).is_some());
+        assert!(destructive_reason("rm", &s(&["-r", "-f", "x"])).is_some());
+        assert!(destructive_reason("rm", &s(&["--recursive", "--force", "x"])).is_some());
+    }
+
+    #[test]
+    fn destructive_allows_legit_invocations() {
+        assert!(destructive_reason("git", &s(&["push", "origin", "main"])).is_none());
+        assert!(destructive_reason("git", &s(&["diff", "--stat"])).is_none());
+        assert!(destructive_reason("git", &s(&["add", "-f", "ignored.txt"])).is_none()); // -f on add ≠ push
+        assert!(destructive_reason("rm", &s(&["file.txt"])).is_none()); // non-recursive
+        assert!(destructive_reason("cargo", &s(&["test", "--", "--nocapture"])).is_none());
+        assert!(destructive_reason("npm", &s(&["install"])).is_none());
+    }
 
     fn exec_step(
         name: &str,
@@ -469,6 +560,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 

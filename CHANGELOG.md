@@ -26,6 +26,118 @@ Agents can propose **durable learnings** (conventions, preferences, facts, pitfa
 
 ## [0.8.7] - 2026-05-28
 
+### Added — Big-ticket AutoPilot: multi-agent debate + per-task test→fix loop (2026-06-13)
+
+A major evolution of the `feasibility-autopilot`, validated live across 13 runs on a real Epic (Africanews→Euronews multi-brand migration). The plan is now **debated** by two agents and each fan-out task **fixes its own tests** before committing.
+
+- **`multi_agent_review` — debate the output of ANY Agent step with a second agent (new `WorkflowStep` field + `run_multi_agent_debate` engine).** After the step's own agent produces its output, Kronn opens a shared transcript and invites a reviewer agent (ideally a different model family); they alternate author↔reviewer until `[CONSENSUS: APPROVED]` or `max_rounds`. The converged output replaces the step's result (envelope-safe: on a TypedSchema step the author re-emits the full envelope, a guard reverts to the pre-debate output if it can't). Exposed as an advanced option in the WorkflowWizard (reviewer agent + tier + debate prompt). The feasibility-autopilot wires it **onto its `triage` step** (reviewer = Codex), **replacing the old `plan_review → Goto(triage)` file-relay loop** — the reviewer reads the artifact once then only the conversation delta, not the whole codebase each round: **−44 to −52 % on the plan phase** (197–229k vs ~408k), and a real back-and-forth.
+- **Per-task test→fix loop in the child (`item_tests`).** Each fan-out task runs the tests SCOPED to what it changed (`php -l` + `jest --findRelatedTests` + `phpunit --filter` in the project's dockerized php service) and, on a real failure, loops back to `implement` until green (bounded). **Baseline-aware** (`test_baseline` parent step records the tests already red on the approved base into `.kronn/known-failing.txt`): `item_tests` only loops on **NET-NEW** failures, never on the repo's pre-existing debt — eliminating ~104k wasted tokens/run (agents stopped chasing a pre-existing timezone-test failure). The parent `run_tests` becomes a read-only full-suite integration verdict (JS in-container with coverage≠test-failure semantics; PHP via the project's docker stack, worktree-mounted).
+- **Reliability hardening (all from live runs):** `[agents.model_tiers]` overrides now reach workflow agent spawns (were silently dropped) · Codex always `--sandbox=danger-full-access` in Docker (bwrap can't init a namespace in the container → reviewer was blind) · `request_changes_cut` resumes from the FIRST occurrence so a gate "request changes" after a Goto debate actually returns to triage · `agent_retry` (2× rate-limit-aware backoff) on the Agent steps · workflow guard timeout 2 h → 8 h (a 26-item fan-out was killed before `pr_draft`) · implement `stall_timeout` 20 → 10 min.
+- **UI:** live fan-out progress on a Running SubWorkflow step (`N sub-tasks · M ✓` instead of "no chunk received") · the resolved model/tier on every Agent step card (`StepResult.step_model`, e.g. `opus`, `sonnet · reasoning`, `haiku · economy` — incl. per-item routing) · fixed the per-task fan-out TABLE vanishing when a child output embedded a nested `---END_STEP_OUTPUT---` marker · clickable sub-run link.
+- Skill `workflow-architect` documents `multi_agent_review`. Design notes: `docs/design/collaborative-plan-review.md`, `docs/design/ew7247-autopilot-live-audit.md`. ~70 new/updated backend + frontend tests.
+
+### Fixed — Playwright MCP unusable for agents (wrong browser channel) (2026-06-11)
+
+Agents (and anyone) couldn't drive a browser through Kronn's Playwright MCP: `mcp-playwright` launched `@playwright/mcp` with no `--browser`, so it defaulted to the **`chrome` channel** (real Google Chrome at `/opt/google/chrome/chrome`) — almost never installed, even though `npx playwright install chromium` had downloaded the bundled browser. Every launch failed with "chrome not found" (disc f30e340d). The registry now pins `--browser chromium`; the boot registry sync + host_sync propagate the corrected args to existing configs' `.mcp.json`. Test pins it. **Anyone with the bundled Chromium can now run PW/browser steps.**
+
+### Added — `feasibility-autopilot` decomposed (PR-C) + in-flight board MCP tool (2026-06-11)
+
+- **`feasibility-autopilot` decomposed** (frontend preset + backend `build_feasibility_workflow` + `templates/feasibility-autopilot` endpoint, kept in sync). Parent `fetch_issue → triage → review_triage(Gate) → [feasibility_impl sub-workflow] → pr_draft`; child `implement → run_tests → drift_check`. The human-gated triage stays in the parent; triage writes its manifest to `.kronn/triage-manifest.md` and the child reads it from the shared worktree (Phase 2). `pr_draft` reads `{{steps.triage.data}}` (parent) + the child's drift output via the SubWorkflow envelope (`{{steps.feasibility_impl.data.last_output}}`) + `.kronn/decisions.md`. The endpoint creates the child first, then the parent referencing its id. **Behaviour change**: the old `implement BLOCKED → Goto(triage)` (a cross-parent/child jump, now illegal) is reconstructed at the parent as `SUBWF_FAILED → Goto(triage)`; a mid-implement hard-block is otherwise traced (KRONN-TODO + decisions.md) and surfaced in the PR. Backend + frontend tests updated.
+- **In-flight board MCP tool** `workflow_active_runs` (kronn-internal): lists every run that's NOT finished right now (Running / WaitingApproval / Pending) across all workflows, so an agent can see what else is happening before acting. Pure read over `GET /api/workflows` (no new endpoint); drill into a run's live step via `workflow_run_status`. Skill + 3 Python tests.
+
+### Added — Decomposed presets: SubWorkflow infra + worktree handoff + `ticket-to-pr` (2026-06-11)
+
+Made `SubWorkflow` usable end-to-end by the AI path AND the templates.
+
+- **Workflow Architect skill** now teaches **nine** step types (was eight): a full `SubWorkflow` section (role, schema, `OK`/`SUBWF_FAILED` signals, the 5 hard constraints, the create-child-first composition protocol). Guard test pins the count + `SubWorkflow` by name.
+- **Bundle infra**: `POST /api/workflows/bundle` gains a `child_workflows[]` category; the `@bundle:<id>` sentinel now resolves on `sub_workflow_id` too. Children are created first (inheriting the parent's `project_id`) and the SubWorkflow-graph validator (cycle/depth/no-gate/dangling) — previously skipped on the bundle path — now runs over the in-memory bundle graph.
+- **Phase 2 — worktree handoff**: a sub-workflow child can now **share the parent's git worktree** (`execute_run` gained `inherited_workspace`): it attaches instead of creating, skips `before_run`, and never cleans up / preserves the branch (the parent owns it). The child commits to the parent's branch so a later parent step (`create_pr`) sees the implementation. Test pins the invariant (attach → drop without cleanup → worktree + commit survive → parent preserves the branch).
+- The SubWorkflow step envelope now carries the child's last-step output (`data.last_output` / `last_step`) so a parent step can read the child's verdict.
+- **`ticket-to-pr` preset decomposed**: parent `fetch → analyze → plan_gate → [implement-verify sub-workflow] → ready_gate → create_pr → notify`; child `implement ↔ run_tests ↔ review` (internal loop, no Gate). Both human gates kept. Parent↔child data flows through `.kronn/plan.md` (intent) + `.kronn/decisions.md` (deviations) in the shared worktree — no new step field. The wizard routes a decomposed preset to the bundle endpoint and renders the `@bundle:` child as a synthetic "↳ (new)" picker option. FR/EN/ES.
+- **Wizard integration for decomposed presets** (found via a zero-token structural validation pass): the `✨ models` gallery now captures a preset's `childWorkflows` (not just the deep-link path); the `SubWorkflow` step type is recognised by both the summary validation AND the Create-button `disabled` guard (no longer treated as an Agent needing a prompt); the summary renders a `SOUS-WF` badge (not `AGENT`) and drops the agent-name suffix for it. Validated end-to-end: gallery → bundle → parent (7 steps) + child (3 steps) created atomically, `@bundle:` substituted to the real child id, graph accepted.
+
+### Added — Recursive sub-workflows, Phase 1c (UI) (2026-06-11)
+
+- **Wizard**: a `Sub-workflow` step type + a picker of existing workflows (self excluded; cycle/depth/no-gate enforced server-side at save). TS types (`StepType.SubWorkflow` + `WorkflowStep.sub_workflow_id` + `StepResult.child_run_id`) hand-edited into `generated.ts`.
+- **RunDetail**: a `SOUS-WF` step badge + a `↳ sub-run <id>` drill indicator (full recursive tree view is a follow-up).
+- i18n FR/EN/ES for the new step type, picker, and constraints hint.
+
+
+### Added — Recursive sub-workflows, Phase 1 (re-entrant runner) (2026-06-11)
+
+`StepType::SubWorkflow` — a workflow step that runs ANOTHER workflow as a nested child run. The runner is now re-entrant: the child executes with its own steps, Goto/loops and conditions (so "tests fail → back to implement, N× max" lives inside the child), and its terminal status maps onto the parent step (branchable via `on_result`). Spec: `docs/design/recursive-subworkflows.md`.
+
+- **Model (1a)**: `StepType::SubWorkflow` (bare tag) + `WorkflowStep.sub_workflow_id` + `StepResult.child_run_id` (the inverse of `WorkflowRun.parent_run_id`). All serde-default → zero migration. 6 `match` sites + 58 struct literals absorbed.
+- **Save-time validation (1a)**: a pure graph validator rejects cycles (`A→B→A`, incl. self), over-depth (> 5), dangling targets, and `Gate` inside a sub-workflow (forbidden in MVP — a nested gate isn't resumable yet). Wired into create/update/import. 4 unit tests.
+- **Re-entrant executor (1b-i)**: `execute_sub_workflow_step` creates the child run (`parent_run_id`, `run_type: "subworkflow"`), re-enters `execute_run` via `Box::pin`, maps the child's status (Success → `OK`, else `SUBWF_FAILED`), aggregates tokens, records `child_run_id`. Runtime depth backstop. SubWorkflow forbidden in `on_failure`.
+- **Proven live**: parent run → child run created + linked + executed → parent step Success + child continues; a self-referencing save is rejected with a `Cycle` error. Backend 3069/3069.
+- **Shared budget (1b-ii)**: `SharedBudget` — the LLM-calls quota is now shared across the whole sub-workflow tree (an `Arc<AtomicU32>` counter + the root's cap, cloned into every descendant `execute_run` via a new optional param). Pre-fix each child reset its own `max_llm_calls`, so a nested orchestration could spend depth × cap (a token bomb); now the entire tree is governed by one quota. `execute_run` gained a `shared_budget: Option<SharedBudget>` param (None = top-level → fresh; Some = child → inherited); all 6 call sites updated. Existing MaxLlmCalls guard tests unchanged (3070 green). Unit test pins clone-shares-counter.
+- **Known limits (hardened next)**: cancel doesn't cascade to children; the shared DEADLINE (wall-clock) is still per-run (smaller risk, depth-bounded); worktree is per-child (sharing/merge is Phase 2); no nested Gate (Phase 3). UI tree drill-down is 1c.
+
+### Fixed — Workflow engine: executor safety polish (2026-06-11)
+
+The 🔵 tier of the foundation cleanup — lower-frequency but each a real edge:
+
+- **Exec arg-hardening**: the allowlist authorises a binary, but `git push --force` (rewrites shared history) and `rm -rf` (irreversible) slipped through its args. A narrow `destructive_reason` guard refuses those few foot-guns AFTER templating (so a `{{var}}` rendering to `--force` is caught too), on both the main and setup commands. Not a sandbox — a guardrail; `git diff/add/status`, `cargo test`, `npm install`, `make`… are untouched. 3 tests.
+- **Exec shared setup+main deadline**: a step with `exec_timeout_secs = T` could run up to 2×T (setup T + main T). The main command now gets the REMAINING budget after setup (floored at 1s), capping the total at T.
+- **Pagination truncation is now branchable**: hitting `max_pages` while the API still had more pages emits `[SIGNAL: PAGINATION_TRUNCATED]` (status stays OK) instead of silently returning a partial result that looks complete. Test on the max-pages cap.
+- **`detect_items_key` picks the largest array, not the alphabetically-first**: serde_json's default `Map` is a BTreeMap, so "first array wins" returned `errors: []` over `issues: [...]`. Now order-independent (most elements wins, ties by key name). Test.
+
+### Fixed — Workflow engine: foundation hardening before recursive sub-workflows (2026-06-11)
+
+Pre-work for the recursive sub-workflow feature (design spec: `docs/design/recursive-subworkflows.md`): clean the flat engine before stacking recursion on it.
+
+- **Boot orphan-scan now reaps `Pending` too**, not just `Running` (`main.rs`): a run created but never picked up before a crash is just as orphaned. `WaitingApproval` is intentionally preserved (durable human gate). *(Note: the audit claimed this scan didn't exist — it did, for `Running`; the gap was only `Pending`.)*
+- **`resolve_path_params` is UTF-8 safe** — the old `bytes[i] as char` literal copy mojibake'd every multi-byte char in a path segment (accents/emoji/CJK). Rewritten to copy literal runs as whole `&str` slices; substituted values stay percent-encoded byte-wise. Regression test with accented literals.
+- **`ExtractSpec.fail_on_empty` defaults to `true`** — a silent empty extraction (step looks OK while `{{steps.X.data}}` is empty) now emits the branchable `NO_RESULTS` signal. Status stays `Success` (signal only); rows that serialized `false` explicitly are unchanged (no migration), only new/AI-generated specs get the safer default.
+- **Signal matching is end-of-line, not substring** (`evaluate_conditions` + the runner's Stop-verdict): a body excerpt or instruction recap *quoting* `[SIGNAL: ERROR]` mid-sentence in the last 5 lines no longer triggers a false Stop/Goto; a content-then-signal line ("Done. [SIGNAL: OK]") still matches.
+- **Launch-time variable shape validation** — `PromptVariable.pattern` (optional anchored regex) rejects a malformed value (the live `7152` instead of `EW-7152`) at trigger with a clear message, BEFORE it reaches the API as a literal path param and 404s. Malformed declared regex never blocks a launch. 4 unit tests on the pure validator.
+- **Agent-crash observability** — when an agent exits non-zero with empty stderr, the error now surfaces the agent's STDOUT tail + names a likely OOM/signal kill + points at atomicity (was the useless "killed by signal or sandbox"). 3 unit tests.
+
+### Fixed — Workflow engine: 3-lens audit fixes (control-flow, executors, run UX) (2026-06-10)
+
+A 4-agent audit of the workflow engine (triggered by a live "the 404 passed to the next step" report on a Ticket→PR run) surfaced one P0 and a cluster of P1 correctness/safety holes. All fixed, tested without restart (a run was in-flight), deployed at the next stable state.
+
+- **Gate auto-approve was dead on arrival** (P0): the timer self-POSTed to a URL missing the `{workflow_id}` segment (404) AND sent `"Approve"` while the handler matched lowercase `"approve"` — both failures logged as success. Every run with `gate_auto_approve_after_secs` stayed `WaitingApproval` forever. URL fixed, decision parsing is now case-insensitive, and the timer carries the gate identity (`gate_step`) so it can't approve a different gate than the one it was armed on.
+- **on_failure rollback steps are now visually fenced** (P1): `StepResult.is_rollback` marks compensation steps; the runner sets it; `RunDetail` renders them under a "⚠ on_failure — COMPENSATION" banner with a `↩ ROLLBACK` badge and a tinted row, and the "→ next" arrow is suppressed across the boundary. (This was the user-perceived "the failure continued" bug.)
+- **`decide_run` TOCTOU** (P1): a conditional `claim_waiting_run` UPDATE means two concurrent decisions (double-click, or a human racing the auto-approve timer) can no longer spawn two `resume_run`s on the same run.
+- **`on_result` rules were silently dead on Notify / JsonData / BatchQuickPrompt** (P1): the runner only acts on `condition_action`, which those executors never populated — now all evaluate conditions on both success and failure paths.
+- **Auto-retry is no longer applied to non-idempotent verbs** (P1): a network timeout after a POST was processed used to re-send and create duplicate Jira tickets / PR comments. Retries now apply only to GET/HEAD/OPTIONS.
+- **Invalid HTTP method fails loudly** (P1): a typo like `PSOT` used to silently fall back to GET (a write became a read returning 200). Now a step-level error.
+- **Agent-declared failures give an honest run verdict** (P1): an agent step that exits 0 but emits a trailing `[SIGNAL: ERROR]` with an `ERROR → Stop` rule now marks the run `Failed` instead of `Success`.
+- **Notify gained the SSRF guard + URL redaction** ApiCall already had (P1): templated webhook URLs are public-IP-asserted before firing, and only a redacted `scheme://host/first-seg/…` form is persisted (Slack-style path tokens no longer leak into run outputs).
+- **BatchApiCall item responses** (P0, separate entry above): the canonical-envelope parse fix shipped earlier in the same session.
+
+### Fixed — `api_call` writes silently no-oped: double-encoded JSON body (2026-06-10)
+
+POST/PATCH/PUT calls through the agent API broker could go out with a **stringified** JSON body (`"{\"title\":…}"` instead of `{"title":…}`): the upstream API would parse a JSON string, find no fields, and answer **200 while changing nothing** — reads worked, writes "succeeded" but were ignored. Diagnosed live on the Slides.com plugin after the key/plan/UA/HTTP-version hypotheses were all eliminated, by pointing a throwaway plugin at an httpbin echo: the wire body was double-encoded (method, URL and auth were all correct). Root cause: some MCP client stacks serialize the `body` tool-arg as a JSON string; the bridge and broker forwarded it verbatim.
+
+- **Broker** (`agent_api.rs::normalize_body`): a `body` that is a string parsing to a JSON object/array is unwrapped before building the ApiCall step. Plain-string and scalar-string bodies stay untouched (legit for some APIs). 3 unit tests.
+- **MCP bridge** (`disc-introspection-mcp.py`): same normalization before forwarding (defense-in-depth; bind-mounted, effective without backend rebuild).
+- Wiremock regression test pins that a PATCH override + JSON body reaches the wire as a real PATCH with the object body (with a GET catch-all that would expose any method degradation).
+
+### Added — Fable 5 selectable + Default-tier override in Config → Agents (2026-06-10)
+
+- **Fable 5 (`fable`)** is now selectable in the ClaudeCode "Mode IA" model pickers (reasoning + default lists). Verified end-to-end: tier set via API → discussion spawned with `--model fable` (docker spawn log) → the agent answers `claude-fable-5` when asked its exact model id. The CLI accepts the `fable` alias (tested live).
+- **The `Default` tier is now configurable in the UI** (🎯 third dropdown). The backend honored `ModelTierConfig.default` since 0.7.1 (Ollama picker), but AgentsSection never exposed it — and worse, every save from this section OMITTED `default` from the payload, silently wiping an Ollama model picked via OllamaCard. Saves now round-trip all three tiers for all agents.
+- "Par défaut (…)" option labels now show the backend's REAL built-in fallback per tier (passed explicitly, matching `runner.rs::resolve_model_flag`) instead of `options[0]` — the Codex reasoning label wrongly claimed `gpt-5.5` while the built-in is `gpt-5.4`.
+
+### Fixed — Multi-instance plugins: the EXACT config's credential is now injected (2026-06-10)
+
+`collect_active_api_plugins` dropped the config id, so every downstream consumer disambiguated "which instance of this plugin?" by taking the FIRST match: the ApiCall executor's `matches_config` was a `true` stub (TODO P0.5b), and the streaming OAuth2 pre-flight re-derived the config id with the same first-match query — two configs of one server with different credentials would silently use (and, for OAuth2, cache-corrupt) the wrong secret.
+
+- `ActiveApiPlugin` is now `(server, config_id, env)` — the collector surfaces the id, the executor matches `cid == config_id` exactly (stub deleted), and the streaming OAuth2 cache key uses the surfaced id (15-line DB re-derive deleted).
+- Regression test pins it: two configs of one server on one project → two entries, each carrying its own decrypted env.
+
+### Changed — MCP/API page refonte: modal detail, in-place editing, unified secrets (2026-06-10)
+
+Full UX overhaul of the plugin management page, driven by a 4-lens audit (dev/archi · integration · UX · UI). The page mixed two opposing edit models (registry MCP = inline env editing; custom API = read-only card + "jump to the top Add panel" with a `scrollTo(top)`), had two chained scroll-jumps, and re-implemented the "secret input + eye" pattern 4 divergent times — the direct breeding ground of the credential-desync bug.
+
+- **Plugin detail is now a centered MODAL** (`.mcp-modal-overlay` + `.mcp-plugin-modal`) instead of an inline full-width grid row — the grid never moves, both scroll-jumps (`scrollIntoView` on select + `window.scrollTo(top)` on edit) are gone. Esc is staged: while editing, first Esc cancels back to the view; Esc/backdrop/X close the modal and always cancel an in-flight edit (no stale form-state leak).
+- **Custom API editing happens IN the modal, in place** — clicking "Modifier le plugin" swaps the modal body to the same form as create (hoisted `customApiForm`, rendered in both places with zero prop-drilling). No more reusing the top Add panel for edits: the Add panel is now CREATE-only, and `handleAddMcpFromRegistry` routes the edit path on `editingCustomServerId` instead of riding `addMcpSelected`.
+- **Shared `<SecretField>` component** (`components/SecretField.tsx`) — single implementation of the secret value cell with three unambiguous states: create (input + eye), stored (read-only masked + read-only peek eye + "Remplacer" link), replacing (empty input + "Annuler"). Replaces 3-4 divergent inline implementations; `Eye`↔`EyeOff` encodes the revealed state by icon, not color alone. Removes the page's `customFieldsVisible`/`revealedStored` state.
+- 3 unit tests on `<SecretField>` + McpPage suite updated (55 tests green). CSS: `.mcp-plugin-modal` sizes/scrolls the reused `.mcp-detail-inline` panel as a modal.
+
 ### Added — Audit depth: deterministic detectors + binding disposition (2026-06-04)
 
 The Full audit was "partially complete" — it always found the deterministic infra/CI baseline but under-explored code-level dimensions (a single LLM pass with no ground-truth anchor). On DOCROMS_WEB this surfaced 9 TDs where a clean-slate audit finds 15. Fix = anchor the LLM pass with deterministic source scans, then make them binding.
@@ -34,6 +146,14 @@ The Full audit was "partially complete" — it always found the deterministic in
 - **Detector disposition gate (`validation::check_detector_disposition`)** — every injected detector signal MUST be addressed somewhere in the Step-8 output (a TD, a baseline note, or a matrix citation), else the step is incomplete and re-runs. Orphan-safe: only `TD-*.md` files still referenced in the freshly-written index count toward disposition (via `parse_index_td_ids`), so a stale historical TD can't mask an undisposed signal on an in-place re-audit. The disposition warning is persisted into `audit_run_steps`.
 - **Reconciliation `DeltaKind::Carried`** — a prior whose detail file is unchanged but whose ID is still listed in the new index is a healthy re-emission, not a `Missed` candidate. Fixes "Missed: N" reports for priors that were actually carried over.
 - **Re-audit dedup (Option C)** — when `docs/tech-debt/` already holds entries, a `render_known_debt_block` of prior `(id, severity, title)` digests is injected into Step 8 with a fresh-full-scan contract: keep every still-valid prior listed in the index (Carried-safe), don't duplicate detail files, emit NEW TDs for anything not on the list. "Zero new entries" is acceptable only when the coverage matrix documents a fresh scan and no detector signal is undisposed. Validated in-place on DOCROMS_WEB (run Completed, 15 re-emitted / 0 Missed, fresh-scan documented).
+
+### Fixed — Custom plugin credentials: coherent "Replace" UX, editing a key actually persists (2026-06-09)
+
+Changing a custom API plugin's secret via **"Modifier le plugin"** (the single edit surface — the per-config card is read-only by design) silently failed, and the UX was incoherent: the drawer pre-filled the value field with `revealSecrets`' **masked** value (`••••`), which can't round-trip into a real key, so on save the new key never reached `mcp_configs.env_encrypted` (what `api_call` uses). A first fix pre-filled the field EMPTY, but then the edit drawer looked wiped while the card still showed `••••` — "one place shows the key, the other doesn't." Reproduced live on the Slides.com custom plugin.
+
+- **Standard "stored secret" pattern** (à la GitHub/Stripe "Replace key"). In edit mode, a field whose env_key is already stored renders as a **read-only masked indicator + "Remplacer"** button — never a pre-filled or blank `<input>`. So the card AND the edit drawer show the same truth ("a key is stored"); nothing looks wiped.
+- **Three unambiguous states**: stored (masked + Remplacer) / replacing (empty input + Annuler, appears only after clicking Remplacer) / create (empty input from the start). Not replacing = the stored key is kept (the save skips the env PATCH entirely); clicking Remplacer + typing replaces it. `revealSecrets` is never used for the form (no masked round-trip).
+- New state `replacingFields` + per-field `stored` flag (from the config's `env_keys`). i18n FR/EN/ES (`replaceValue`, `cancelReplace`, edit-mode hint). 3 frontend tests pin the contract (stored → Remplacer + no value input + no `revealSecrets`; Remplacer→type → env PATCH with slugged key; not-replacing → env untouched). Backend `update_custom_spec` was already env-untouching — unchanged.
 
 ### Fixed — Multi-agent discussions: no more double-responder (2026-06-08)
 

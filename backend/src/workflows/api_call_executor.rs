@@ -240,8 +240,12 @@ pub async fn execute_api_call_step_core(
         }
     }
 
-    // Method: step override > spec endpoint default > GET.
-    let method = resolve_method(&step.api_method, endpoint_path, spec);
+    // Method: step override > spec endpoint default > GET. Invalid method
+    // strings fail the step loudly (pre-fix they silently became GET).
+    let method = match resolve_method(&step.api_method, endpoint_path, spec) {
+        Ok(m) => m,
+        Err(e) => return fail(step, start, e),
+    };
 
     // Fire with retry, walking pagination if the spec requests it. The
     // walker handles its own rate-limit (one slot per HTTP page), retries,
@@ -253,6 +257,9 @@ pub async fn execute_api_call_step_core(
     let plugin_slug = step.api_plugin_slug.as_deref().unwrap_or("");
     let config_id = step.api_config_id.as_deref().unwrap_or("");
     let pagination = step.api_pagination.clone().unwrap_or(PaginationSpec::None);
+    // Set by the walk below (Ok arm); the Err arm returns, so it's always
+    // definitely-assigned before use — avoids a dead initial store.
+    let pagination_truncated: bool;
 
     let response = match walk_pages(
         method.clone(),
@@ -269,7 +276,10 @@ pub async fn execute_api_call_step_core(
     )
     .await
     {
-        Ok(v) => v,
+        Ok((v, was_truncated)) => {
+            pagination_truncated = was_truncated;
+            v
+        }
         Err(msg) => return fail(step, start, msg),
     };
 
@@ -307,12 +317,20 @@ pub async fn execute_api_call_step_core(
     } else {
         "OK"
     };
+    // 2026-06-11 — append PAGINATION_TRUNCATED when the walk hit max_pages
+    // with more pages remaining, so a workflow can branch (re-run with a
+    // tighter filter, alert, etc.) instead of trusting a silently-partial
+    // result. Status stays OK/NO_RESULTS — truncation is informational.
+    let mut signals: Vec<&str> = vec![signal];
+    if pagination_truncated {
+        signals.push("PAGINATION_TRUNCATED");
+    }
     let output = super::step_output_format::format_step_output(
         extract_out.value.clone(),
         status_str,
         &summary,
         None,
-        &[signal],
+        &signals,
     );
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
     let condition_result = condition_action.as_ref().map(|a| match a {
@@ -333,8 +351,11 @@ pub async fn execute_api_call_step_core(
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action,
     }
@@ -487,14 +508,16 @@ async fn execute_api_call_step_with_db_inner(
         .await
         .unwrap_or_default();
 
-    // Match plugin by slug. `McpServer.id` is the registry slug (e.g.
-    // "chartbeat", "jira"). `config_id` narrows to a specific instance
-    // since a project can wire the same plugin several times.
-    let found = plugins.into_iter().find(|(server, _env)| {
-        server.id == *slug
-            && matches_config(server, config_id, state)
+    // Match plugin by slug AND exact config id. `McpServer.id` is the
+    // registry slug (e.g. "chartbeat", "jira"); `config_id` pins the
+    // specific instance since a project can wire the same plugin several
+    // times with DIFFERENT credentials. Pre-fix (2026-06-10) the config
+    // match was a `true` stub (`matches_config`) → the FIRST instance won
+    // → potentially the wrong secret injected on multi-instance projects.
+    let found = plugins.into_iter().find(|(server, cid, _env)| {
+        server.id == *slug && cid == config_id
     });
-    let Some((plugin, mut env)) = found else {
+    let Some((plugin, _cid, mut env)) = found else {
         let pid_label = if resolved_pid.is_empty() { "(global)".to_string() } else { resolved_pid.clone() };
         return fail(
             step,
@@ -553,24 +576,9 @@ async fn execute_api_call_step_with_db_inner(
     execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
 }
 
-/// True when the (server, config_id) pair is one the DB active-plugin
-/// scan actually returned. `collect_active_api_plugins` already did the
-/// project-scope filter — this is just the per-instance match since a
-/// project can wire the same plugin multiple times.
-///
-/// Implemented via a second DB query because `collect_active_api_plugins`
-/// drops the `config_id` on the floor — we keep the helper minimal rather
-/// than refactor its signature just for this callsite.
-fn matches_config(server: &McpServer, config_id: &str, state: &crate::AppState) -> bool {
-    // Safe fast path: if the project has a single instance of this server,
-    // any valid config_id is "the one". For multi-instance disambiguation
-    // we delegate to the DB.
-    let _ = (server, config_id, state);
-    // TODO P0.5b: tighten this once `collect_active_api_plugins` surfaces
-    // per-(server, config_id) pairs. For the P1 Chartbeat vertical a
-    // project wires one instance, so this is a safe placeholder.
-    true
-}
+// `matches_config` (the TODO P0.5b `true` stub) is gone (2026-06-10):
+// `collect_active_api_plugins` now surfaces the config_id per entry, so the
+// plugin lookup above matches the exact instance directly.
 
 // ─── Auth resolution ────────────────────────────────────────────────────
 
@@ -824,44 +832,54 @@ pub(crate) fn resolve_path_params(
         .replace("{{", &MASK_OPEN.to_string().repeat(2))
         .replace("}}", &MASK_CLOSE.to_string().repeat(2));
 
-    // Substitute single-brace placeholders.
+    // Substitute single-brace placeholders. 2026-06-10 — rewritten to be
+    // UTF-8 SAFE: the previous version did `out.push(bytes[i] as char)` on a
+    // byte index, which mangles every multi-byte char (a continuation byte
+    // becomes a garbage Latin-1 codepoint). We now walk on the &str and copy
+    // literal runs as whole slices — `{`/`}` are ASCII so `find` always lands
+    // on a char boundary. Substituted VALUES stay percent-encoded byte-wise
+    // (correct: percent-encoding operates on bytes).
     let mut out = String::with_capacity(masked.len() + 32);
-    let bytes = masked.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'{' {
-            // Find the matching close brace.
-            if let Some(close_offset) = masked[i + 1..].find('}') {
-                let key = &masked[i + 1..i + 1 + close_offset];
-                // Empty `{}` or non-identifier-ish (whitespace, slashes)
-                // keys aren't ours — leave the literal.
-                let is_clean = !key.is_empty()
-                    && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-                if is_clean {
-                    if let Some(raw_value) = path_params.get(key) {
-                        let rendered = ctx.render(raw_value)?;
-                        // Percent-encode for path-segment safety: any char
-                        // outside RFC 3986 unreserved (`A-Za-z0-9-._~`) is
-                        // escaped, so `/` in a value can't escape the
-                        // segment and break out into a different endpoint.
-                        for byte in rendered.bytes() {
-                            let unreserved = byte.is_ascii_alphanumeric()
-                                || matches!(byte, b'-' | b'.' | b'_' | b'~');
-                            if unreserved {
-                                out.push(byte as char);
-                            } else {
-                                out.push_str(&format!("%{byte:02X}"));
-                            }
+    let mut rest = masked.as_str();
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]); // literal run before the brace (UTF-8 safe)
+        let after = &rest[open + 1..];
+        if let Some(close_rel) = after.find('}') {
+            let key = &after[..close_rel];
+            // Empty `{}` or non-identifier-ish (whitespace, slashes) keys
+            // aren't ours — leave the literal `{` and keep scanning.
+            let is_clean = !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            if is_clean {
+                if let Some(raw_value) = path_params.get(key) {
+                    let rendered = ctx.render(raw_value)?;
+                    // Percent-encode for path-segment safety: any char outside
+                    // RFC 3986 unreserved (`A-Za-z0-9-._~`) is escaped, so `/`
+                    // in a value can't break out into a different endpoint.
+                    for byte in rendered.bytes() {
+                        let unreserved = byte.is_ascii_alphanumeric()
+                            || matches!(byte, b'-' | b'.' | b'_' | b'~');
+                        if unreserved {
+                            out.push(byte as char);
+                        } else {
+                            out.push_str(&format!("%{byte:02X}"));
                         }
-                        i = i + 1 + close_offset + 1;
-                        continue;
                     }
+                    rest = &after[close_rel + 1..];
+                    continue;
                 }
             }
+            // Not our placeholder — emit the literal `{`, resume after it.
+            out.push('{');
+            rest = after;
+        } else {
+            // No closing brace — emit `{` + the verbatim tail and stop.
+            out.push('{');
+            out.push_str(after);
+            rest = "";
         }
-        out.push(bytes[i] as char);
-        i += 1;
     }
+    out.push_str(rest); // trailing literal run
 
     // Restore the masked template braces.
     let restored = out
@@ -932,16 +950,25 @@ fn resolve_method(
     step_override: &Option<String>,
     endpoint_path: &str,
     spec: &ApiSpec,
-) -> Method {
+) -> Result<Method, String> {
+    // 2026-06-10 audit P1 — an invalid override used to silently fall back
+    // to GET: a "PSOT" typo turned a write into a 200-OK read and the step
+    // reported Success having written nothing. Invalid = loud error now.
     if let Some(override_method) = step_override {
-        return Method::from_bytes(override_method.as_bytes()).unwrap_or(Method::GET);
+        let normalized = override_method.trim().to_ascii_uppercase();
+        return Method::from_bytes(normalized.as_bytes()).map_err(|_| {
+            format!("Invalid HTTP method override `{override_method}` — use GET/POST/PUT/PATCH/DELETE/HEAD")
+        });
     }
     // Match by path in the registry. The spec may carry default method
-    // per endpoint; absent that, GET is the safe default.
+    // per endpoint; absent that, GET is the safe default (read-only —
+    // a wrong GET can't mutate anything, unlike the old override path).
     if let Some(ep) = spec.endpoints.iter().find(|e| e.path == endpoint_path) {
-        return Method::from_bytes(ep.method.as_bytes()).unwrap_or(Method::GET);
+        return Method::from_bytes(ep.method.trim().to_ascii_uppercase().as_bytes()).map_err(|_| {
+            format!("Invalid HTTP method `{}` declared on endpoint `{endpoint_path}`", ep.method)
+        });
     }
-    Method::GET
+    Ok(Method::GET)
 }
 
 // ─── Pagination walk ────────────────────────────────────────────────────
@@ -972,7 +999,12 @@ async fn walk_pages(
     pagination: &PaginationSpec,
     plugin_slug: &str,
     config_id: &str,
-) -> Result<Value, String> {
+) -> Result<(Value, bool), String> {
+    // 2026-06-11 — returns `(merged_response, truncated)`. `truncated` is
+    // true when the walk stopped because it hit `max_pages` while the API
+    // still had more pages — the caller surfaces it as a branchable
+    // `[SIGNAL: PAGINATION_TRUNCATED]` instead of silently returning a
+    // partial result that looks complete.
     use super::api_call_step::pagination_max_pages;
 
     let max_pages = pagination_max_pages(pagination);
@@ -1002,6 +1034,7 @@ async fn walk_pages(
     let mut first_response: Option<Value> = None;
     let mut items_key: Option<String> = None;
     let mut accumulated_items: Vec<Value> = Vec::new();
+    let mut truncated = false;
 
     for page_idx in 0..max_pages {
         // Inject pagination params on every page after the first.
@@ -1043,7 +1076,7 @@ async fn walk_pages(
         // key for explicit pagination variants.
         if first_response.is_none() {
             if matches!(pagination, PaginationSpec::None | PaginationSpec::Auto { .. }) {
-                return Ok(resp);
+                return Ok((resp, false));
             }
             items_key = detect_items_key(&resp);
             first_response = Some(resp.clone());
@@ -1076,6 +1109,18 @@ async fn walk_pages(
             }
             _ => break,
         }
+
+        // Reaching the end of the loop body on the LAST allowed page means
+        // the termination condition above did NOT fire (otherwise we'd have
+        // broken) — i.e. the API still had more pages but we hit the cap.
+        if page_idx + 1 == max_pages {
+            truncated = true;
+            tracing::warn!(
+                target: "kronn::api_call",
+                plugin = %plugin_slug, config = %config_id, max_pages,
+                "pagination hit max_pages cap — result is TRUNCATED (more pages existed)"
+            );
+        }
     }
 
     // Build the merged response: copy page 1, swap the items array for the
@@ -1087,7 +1132,7 @@ async fn walk_pages(
             map.insert(key.to_string(), Value::Array(accumulated_items));
         }
     }
-    Ok(final_resp)
+    Ok((final_resp, truncated))
 }
 
 /// Heuristic: top-level object → first key whose value is an array.
@@ -1096,12 +1141,18 @@ async fn walk_pages(
 /// else — caller falls back to single-page behaviour.
 fn detect_items_key(response: &Value) -> Option<String> {
     let obj = response.as_object()?;
-    for (k, v) in obj {
-        if v.is_array() {
-            return Some(k.clone());
-        }
-    }
-    None
+    // 2026-06-11 — pick the array-valued field with the MOST elements (the
+    // data payload: `issues`, `results`, `data`), not the first array in map
+    // order. serde_json's default `Map` is a BTreeMap → alphabetical, so the
+    // previous "first array wins" returned `errors: []` over `issues: [...]`
+    // (audit). Longest-array is order-independent; ties break on key name for
+    // determinism.
+    let mut candidates: Vec<(&String, usize)> = obj
+        .iter()
+        .filter_map(|(k, v)| v.as_array().map(|a| (k, a.len())))
+        .collect();
+    candidates.sort_by(|(ka, la), (kb, lb)| lb.cmp(la).then_with(|| ka.cmp(kb)));
+    candidates.first().map(|(k, _)| (*k).clone())
 }
 
 fn extract_array_at(response: &Value, key: &str) -> Vec<Value> {
@@ -1183,6 +1234,19 @@ async fn send_with_retry(
         .build()
         .map_err(|e| format!("HTTP client build failed: {e}"))?;
 
+    // 2026-06-10 audit P1 — automatic retries are only safe on idempotent
+    // verbs. A network timeout can land AFTER the server processed a POST:
+    // blind re-sends created duplicate Jira tickets / PR comments. For
+    // mutating verbs the effective retry budget is forced to 0 — the step
+    // fails loudly and the user (or an on_result rule) decides. GET/HEAD/
+    // OPTIONS keep the configured budget. PUT/DELETE are idempotent per
+    // RFC 9110 but a retry still doubles side-effect logs upstream, so we
+    // stay conservative and only auto-retry the read-only verbs.
+    let max_retries = if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        max_retries
+    } else {
+        0
+    };
     let mut attempt: u8 = 0;
     loop {
         let mut req = client.request(method.clone(), url.clone());
@@ -1377,8 +1441,11 @@ fn fail(step: &WorkflowStep, start: Instant, msg: String) -> StepOutcome {
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action,
     }
@@ -1470,6 +1537,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 
@@ -1798,6 +1868,22 @@ mod tests {
         assert_eq!(out, "/user");
     }
 
+    #[test]
+    fn path_params_utf8_literal_segments_preserved() {
+        // 2026-06-10 — the old `bytes[i] as char` copy mojibake'd every
+        // multi-byte char in a LITERAL path segment (accents, emoji, CJK).
+        // The literal parts of the path must round-trip byte-for-byte; only
+        // substituted VALUES are percent-encoded.
+        let ctx = TemplateContext::new();
+        let mut params = HashMap::new();
+        params.insert("id".to_string(), "café-é".to_string());
+        let out = resolve_path_params("/articles/caché/{id}/résumé", &Some(params), &ctx).unwrap();
+        // Literal accented segments untouched; the value is percent-encoded.
+        assert_eq!(out, "/articles/caché/caf%C3%A9-%C3%A9/résumé");
+        assert!(out.contains("caché"), "literal accents must survive: {out}");
+        assert!(out.contains("résumé"), "trailing literal accents must survive: {out}");
+    }
+
     // ─── execute_api_call_step_core (HTTP wiremock) ─────────────────
 
     #[tokio::test]
@@ -1838,6 +1924,51 @@ mod tests {
             envelope["summary"].as_str().unwrap().contains("3 items"),
             "summary should count array length, got {}",
             envelope["summary"],
+        );
+    }
+
+    /// Diagnostic 2026-06-10 (Slides.com writes silently "ignored"):
+    /// reproduce the agent-broker call shape EXACTLY — literal id in the
+    /// path while the spec declares BOTH `GET /v1/decks/:id` and
+    /// `PATCH /v1/decks/:id`, an explicit `api_method` override, and a
+    /// JSON body — and pin what actually goes on the wire. The GET
+    /// catch-all mock turns a silent method-degradation into a loud
+    /// `caught: GET` in the assertion message.
+    #[tokio::test]
+    async fn patch_override_with_body_sends_patch_and_body_on_the_wire() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/v1/decks/123"))
+            .and(wiremock::matchers::body_json(json!({"title": "NEW"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"ok": true}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"caught": "GET"}})))
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::Bearer { env_key: "SECRETKEY".into() },
+            vec![mk_endpoint("GET", "/v1/decks/:id"), mk_endpoint("PATCH", "/v1/decks/:id")],
+        );
+        let mut env = HashMap::new();
+        env.insert("SECRETKEY".into(), "sk-test".into());
+
+        let mut step = mk_step("/v1/decks/123");
+        step.api_method = Some("PATCH".into());
+        step.api_body = Some(json!({"title": "NEW"}));
+
+        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "output: {}", outcome.result.output);
+        let envelope = extract_envelope(&outcome.result.output);
+        // envelope.data = the full mock response body, which itself nests
+        // its payload under "data" — hence the double hop.
+        assert_eq!(
+            envelope["data"]["data"]["ok"], json!(true),
+            "the wire request must be PATCH with the JSON body — envelope: {envelope}"
         );
     }
 
@@ -2337,6 +2468,27 @@ mod tests {
         // Cap = 3 pages → 3 items merged. Without the cap this would
         // loop forever.
         assert_eq!(envelope["data"], json!([1, 1, 1]));
+        // 2026-06-11 — has_more stayed true at the cap → the result is
+        // partial, and the step must say so (branchable signal), not return
+        // a silently-truncated payload that looks complete.
+        assert!(
+            outcome.result.output.contains("[SIGNAL: PAGINATION_TRUNCATED]"),
+            "hitting max_pages with more pages must emit PAGINATION_TRUNCATED; got:\n{}",
+            outcome.result.output
+        );
+    }
+
+    #[test]
+    fn detect_items_key_picks_largest_array_not_alphabetical_first() {
+        // 2026-06-11 — `errors: []` (alphabetically before `issues`) used to
+        // win because serde_json's Map is a BTreeMap and we took the FIRST
+        // array. The data payload is the BIGGEST array.
+        let resp = json!({
+            "errors": [],
+            "issues": [{ "key": "KR-1" }, { "key": "KR-2" }],
+            "warnings": ["w"],
+        });
+        assert_eq!(detect_items_key(&resp).as_deref(), Some("issues"));
     }
 
     #[tokio::test]

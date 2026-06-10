@@ -9,6 +9,7 @@ import { pluginKind, type PluginKind } from '../lib/pluginKind';
 import { linkify } from '../lib/linkify';
 import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
 import { Dropdown } from '../components/Dropdown';
+import { SecretField } from '../components/SecretField';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
   X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
@@ -140,7 +141,6 @@ interface McpPageProps {
 export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initialSelectedConfigId, installedAgentTypes, configLanguage }: McpPageProps) {
   const { t } = useT();
   const { toast } = useToast();
-  const detailRef = useRef<HTMLDivElement>(null);
   const [editingLabelId, setEditingLabelId] = useState<string | null>(null);
   const [editingLabelText, setEditingLabelText] = useState('');
   const [showAddMcp, setShowAddMcp] = useState(false);
@@ -166,7 +166,12 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [customBaseUrl, setCustomBaseUrl] = useState('');
   const [customDescription, setCustomDescription] = useState('');
   const [customDocsUrl, setCustomDocsUrl] = useState('');
-  const [customFields, setCustomFields] = useState<Array<{ label: string; value: string }>>([
+  // `stored` (edit mode only) = this field's env_key already has a value
+  // saved in the config. Such fields render as a read-only masked "🔒 stored
+  // + Remplacer" affordance (never a pre-filled or empty input), so the
+  // user always sees that a key exists and a blank field never looks like
+  // a wipe. See `replacingFields` for the "Remplacer" toggle.
+  const [customFields, setCustomFields] = useState<Array<{ label: string; value: string; stored?: boolean }>>([
     { label: '', value: '' },
   ]);
   // 0.8.6 — endpoints declared at creation time. Empty by default so
@@ -184,6 +189,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   // submit handler can ALSO update credential values without forcing
   // the user to leave for the env drawer. Single-form UX for both
   // spec and values, on user request 2026-05-20.
+  // The id of the config whose encrypted env the "Modifier le plugin"
+  // (single edit surface) save patches. Read in the submit handler.
   const [editingCustomConfigId, setEditingCustomConfigId] = useState<string | null>(null);
   // 0.8.6 — `editingStoredEnvKeys` removed 2026-05-20 when the edit
   // form's value column was replaced by a static "→ Édite via Éditer
@@ -192,12 +199,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   // Orphan-env warning now lives on the env-edit drawer side (where it
   // belongs architecturally) rather than this spec-edit form.
   //
-  // 0.8.6 (2026-05-20) — per-row reveal toggle for the unified edit
-  // form. Indexed by row position (not env_key) because labels can
-  // be renamed mid-edit and the user might want to reveal the value
-  // before/after a rename. Set on `setCustomFieldsVisible`, cleared
-  // on `resetAddMcp`.
-  const [customFieldsVisible, setCustomFieldsVisible] = useState<Set<number>>(new Set());
+  // Show/hide of secret values + read-only peek are now owned by the shared
+  // <SecretField> component (refonte 2026-06-09), so the page no longer holds
+  // per-row visibility / revealed-value state. It only tracks which stored
+  // fields the user chose to REPLACE (parent owns the replace decision):
+  const [replacingFields, setReplacingFields] = useState<Set<number>>(new Set());
   // 0.8.6 — Custom plugin auth state. MVP exposes 3 variants out of
   // the 7 supported by the runtime: None (default), Bearer (simple
   // static token), TokenExchange (Didomi-shape: POST creds → access
@@ -252,12 +258,22 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   }, [initialSelectedConfigId]);
 
-  // Scroll to detail panel when a config is selected
+  // The plugin detail/edit is a centered MODAL overlay (refonte Phase 2,
+  // 2026-06-10) — no more inline-in-grid detail, so no scroll-jump at all.
+  // Esc is staged: while EDITING, first Esc cancels the edit (back to the
+  // view body); a second Esc (or backdrop/X) closes the modal. resetAddMcp
+  // only invokes stable setters, so the captured closure is safe.
   useEffect(() => {
-    if (selectedConfigId && detailRef.current) {
-      detailRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [selectedConfigId]);
+    if (!selectedConfigId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (editingCustomServerId) { resetAddMcp(); return; }
+      setSelectedConfigId(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedConfigId, editingCustomServerId]);
   // "Show more" for project toggles per config
   const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
   const PROJECT_TOGGLE_LIMIT = 10;
@@ -291,7 +307,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     setEditingCustomServerId(null);
     setEditingCustomConfigId(null);
     setCustomAuth('None');
-    setCustomFieldsVisible(new Set());
+    setReplacingFields(new Set());
     setImportJsonText('');
     setImportJsonError(null);
     setImportJsonLoading(false);
@@ -616,11 +632,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   };
 
   const handleAddMcpFromRegistry = async () => {
-    if (!addMcpSelected) return;
+    // Refonte 2b (2026-06-10) — the EDIT path no longer rides on the Add
+    // panel (`addMcpSelected` stays null while editing in the plugin
+    // modal), so route on `editingCustomServerId` as well.
+    if (!addMcpSelected && !editingCustomServerId) return;
     // Custom API branch: forward the freeform form as `custom_spec` instead
     // of env-keys. Validation mirrors the backend (name + base_url required)
     // so the user sees the error before the round-trip.
-    if (addMcpSelected === 'api-custom') {
+    if (addMcpSelected === 'api-custom' || editingCustomServerId) {
       if (!customName.trim()) {
         toast(t('mcp.custom.errorName'), 'error');
         return;
@@ -661,15 +680,17 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           // its orphans clean up automatically, but multi-project configs
           // need an explicit cleanup pass).
           const orphanKeys = updateResp.orphan_env_keys ?? [];
-          // Step 2 — 0.8.6 unified edit : ALSO patch the encrypted env
-          // for this config so a single form save persists BOTH spec
-          // and credential values. Pre-fix the user typed values in
-          // this form and they silently dropped (materialize_custom_server
-          // only reads labels). Now we slug each label → env_key and
-          // build the env map. Wholesale replacement = orphan slugs
-          // (from a prior rename) get cleaned up automatically. Skip
-          // empty values to avoid wiping the user's untouched fields
-          // when the masked-pre-fill failed (revealSecrets glitch).
+          // Step 2 — patch the encrypted env so "Modifier le plugin" is the
+          // SINGLE edit surface for BOTH structure and credentials (the card
+          // is read-only by design — we don't want N places to edit one key).
+          //
+          // 2026-06-09 fix : the value fields are pre-filled EMPTY (not with
+          // a masked secret — see openEditCustomPlugin). So `f.value !== ''`
+          // now cleanly means "the user typed a NEW value to replace this
+          // key"; an untouched (empty) field is SKIPPED, keeping the stored
+          // secret. This is what kills the desync bug: the old masked
+          // pre-fill made every field look non-empty, so a real key change
+          // couldn't be told apart from "leave as-is" and never persisted.
           if (editingCustomConfigId) {
             const newEnv: Record<string, string> = {};
             for (const f of filteredFields) {
@@ -677,14 +698,18 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 newEnv[slugEnvKey(f.label)] = f.value;
               }
             }
-            try {
-              await mcpsApi.updateConfig(editingCustomConfigId, { env: newEnv });
-            } catch (envErr) {
-              console.warn('Spec saved but env PATCH failed:', envErr);
-              toast(t('mcp.custom.specSavedEnvFailed', userError(envErr)), 'error');
-              resetAddMcp();
-              refetchMcps();
-              return;
+            // Only PATCH when the user actually entered at least one new
+            // value — an empty map would be a no-op round-trip.
+            if (Object.keys(newEnv).length > 0) {
+              try {
+                await mcpsApi.updateConfig(editingCustomConfigId, { env: newEnv });
+              } catch (envErr) {
+                console.warn('Spec saved but env PATCH failed:', envErr);
+                toast(t('mcp.custom.specSavedEnvFailed', userError(envErr)), 'error');
+                resetAddMcp();
+                refetchMcps();
+                return;
+              }
             }
           }
           toast(t('mcp.custom.updated', savedName), 'success');
@@ -752,6 +777,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       }
       return;
     }
+    // Registry path — the custom/edit branch above returned, so reaching
+    // here means a registry tile is selected. Explicit guard narrows the
+    // `string | null` for TS (the compound guard at the top can't).
+    if (!addMcpSelected) return;
     try {
       await mcpsApi.createConfig({
         server_id: addMcpSelected,
@@ -968,6 +997,419 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   }
   // ── Render ──
+
+  // Refonte 2b (2026-06-10) — the Custom API form, hoisted to a local
+  // JSX const so it renders in TWO places without prop-drilling (it
+  // closes over the component state): the Add panel (CREATE mode) and
+  // the plugin modal body (EDIT mode, in-place — no more jump to the
+  // top panel). Extraction into a standalone component is Phase 3.
+  const customApiForm = (
+            <>
+              {/* Custom API freeform editor. Mirrors `CustomApiPayload`:
+                  name + base URL are required; description + docs link +
+                  fields are optional. The backend slugifies each field
+                  label into an env key. */}
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.name')} *</label>
+                <input
+                  className="input"
+                  value={customName}
+                  onChange={(e) => setCustomName(e.target.value)}
+                  placeholder={t('mcp.custom.namePlaceholder')}
+                  autoFocus
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.baseUrl')} *</label>
+                <input
+                  className="input mcp-input-mono"
+                  value={customBaseUrl}
+                  onChange={(e) => setCustomBaseUrl(e.target.value)}
+                  placeholder={t('mcp.custom.baseUrlPlaceholder')}
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.description')}</label>
+                <textarea
+                  className="input"
+                  rows={3}
+                  value={customDescription}
+                  onChange={(e) => setCustomDescription(e.target.value)}
+                  placeholder={t('mcp.custom.descriptionPlaceholder')}
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.docsUrl')}</label>
+                <input
+                  className="input mcp-input-mono"
+                  value={customDocsUrl}
+                  onChange={(e) => setCustomDocsUrl(e.target.value)}
+                  placeholder="https://docs.example.com/api"
+                />
+              </div>
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.fields')}</label>
+                <p className="mcp-env-key-desc mb-3">{t('mcp.custom.fieldsHint')}</p>
+                {/* 0.8.6 — Edit mode: reassure the user their secrets
+                    are safe. The encrypted env lives in the per-config
+                    row (mcp_configs), NOT in the spec we're editing.
+                    Without this banner, users see empty value fields
+                    and assume their credentials were wiped (caught
+                    2026-05-19 in live test "je n'ai plus les valeurs").
+                    The masked `•••• stocké` per-row makes the same
+                    point inline. */}
+                {editingCustomServerId && (
+                  <p className="mcp-env-key-desc mb-3" style={{ borderLeft: '3px solid var(--kr-accent)', paddingLeft: '0.6rem' }}>
+                    🔒 {t('mcp.custom.fieldsHintEditMode')}
+                  </p>
+                )}
+                {customFields.map((f, idx) => {
+                  return (
+                  <div key={idx} className="mcp-custom-field-row mb-2">
+                    <input
+                      className="input mcp-custom-field-label"
+                      value={f.label}
+                      onChange={(e) => setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, label: e.target.value } : row))}
+                      placeholder={t('mcp.custom.fieldLabel')}
+                    />
+                    {/* Secrets via the shared <SecretField> (single source of
+                        truth): stored → masked + 👁 peek + "Remplacer";
+                        replacing → empty input + 👁 + "Annuler"; create →
+                        input + 👁. "Modifier le plugin" reste la surface unique
+                        d'édition (la carte est en lecture seule). */}
+                    <SecretField
+                      value={f.value}
+                      onChange={(v) => setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, value: v } : row))}
+                      stored={!!editingCustomServerId && !!f.stored}
+                      replacing={replacingFields.has(idx)}
+                      onReplace={() => setReplacingFields(prev => { const n = new Set(prev); n.add(idx); return n; })}
+                      onCancelReplace={() => {
+                        setReplacingFields(prev => { const n = new Set(prev); n.delete(idx); return n; });
+                        setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, value: '' } : row));
+                      }}
+                      onRevealStored={async () => {
+                        if (!editingCustomConfigId) return null;
+                        const entries = await mcpsApi.revealSecrets(editingCustomConfigId);
+                        return entries.find(e => e.key === slugEnvKey(f.label))?.masked_value ?? null;
+                      }}
+                    />
+                    <button
+                      type="button"
+                      className="mcp-icon-btn"
+                      onClick={() => setCustomFields(prev => prev.filter((_, i) => i !== idx))}
+                      disabled={customFields.length === 1}
+                      aria-label={t('mcp.custom.fieldRemove')}
+                      title={t('mcp.custom.fieldRemove')}
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                  );
+                })}
+                <button
+                  type="button"
+                  className="mcp-btn-action"
+                  onClick={() => setCustomFields(prev => [...prev, { label: '', value: '' }])}
+                >
+                  <Plus size={12} /> {t('mcp.custom.fieldAdd')}
+                </button>
+              </div>
+              {/* 0.8.6 — endpoints declared at creation time. The AI helper
+                  (button further below) can populate this list after fetching
+                  `docs_url` via WebFetch. Empty list = `mcp_list` will emit
+                  `NEEDS_RESEARCH` and agents will go through the doc each time.
+                  Cf. [[project_endpoints_autodiscovery_0_8_6]]. */}
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.endpoints.header')}</label>
+                <p className="mcp-env-key-desc mb-3">
+                  {customEndpoints.length === 0
+                    ? t('mcp.custom.endpoints.emptyHint')
+                    : t('mcp.custom.endpoints.populatedHint', customEndpoints.length)}
+                </p>
+                {customEndpoints.map((e, idx) => (
+                  <div key={idx} className="mcp-custom-field-row mb-2">
+                    <select
+                      className="input mcp-custom-field-label"
+                      value={e.method || 'GET'}
+                      onChange={(ev) => setCustomEndpoints(prev => prev.map((row, i) => i === idx ? { ...row, method: ev.target.value } : row))}
+                      aria-label={t('mcp.custom.endpoints.methodLabel')}
+                    >
+                      <option value="GET">GET</option>
+                      <option value="POST">POST</option>
+                      <option value="PUT">PUT</option>
+                      <option value="PATCH">PATCH</option>
+                      <option value="DELETE">DELETE</option>
+                    </select>
+                    <input
+                      className="input mcp-input-mono"
+                      value={e.path}
+                      onChange={(ev) => setCustomEndpoints(prev => prev.map((row, i) => i === idx ? { ...row, path: ev.target.value } : row))}
+                      placeholder="/v1/widgets"
+                    />
+                    <input
+                      className="input"
+                      value={e.description}
+                      onChange={(ev) => setCustomEndpoints(prev => prev.map((row, i) => i === idx ? { ...row, description: ev.target.value } : row))}
+                      placeholder={t('mcp.custom.endpoints.descPlaceholder')}
+                    />
+                    <button
+                      type="button"
+                      className="mcp-icon-btn"
+                      onClick={() => setCustomEndpoints(prev => prev.filter((_, i) => i !== idx))}
+                      aria-label={t('mcp.custom.endpoints.remove')}
+                      title={t('mcp.custom.endpoints.remove')}
+                    >
+                      <X size={12} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  type="button"
+                  className="mcp-btn-action"
+                  onClick={() => setCustomEndpoints(prev => [...prev, { path: '', method: 'GET', description: '' }])}
+                >
+                  <Plus size={12} /> {t('mcp.custom.endpoints.add')}
+                </button>
+              </div>
+              {/* 0.8.6 — Auth section. MVP exposes 3 of the 7 runtime
+                  variants (None, Bearer, TokenExchange) — others (Header,
+                  Query, Basic, OAuth2) come in 0.8.6 Layer A. The
+                  TokenExchange option specifically unblocks Didomi-shape
+                  APIs (POST /sessions with JSON body → access_token →
+                  Bearer). Cf. [[project_token_exchange_generic_0_9_0]]. */}
+              <div className="mb-5">
+                <label className="mcp-field-label">{t('mcp.custom.auth.header')}</label>
+                <p className="mcp-env-key-desc mb-3">{t('mcp.custom.auth.hint')}</p>
+                <select
+                  className="input mcp-custom-field-label"
+                  value={authKindOf(customAuth)}
+                  onChange={(e) => setAuthKindBy(e.target.value as 'None' | 'Bearer' | 'TokenExchange')}
+                  style={{ marginBottom: '0.75rem', width: '100%' }}
+                >
+                  <option value="None">{t('mcp.custom.auth.kind.none')}</option>
+                  <option value="Bearer">{t('mcp.custom.auth.kind.bearer')}</option>
+                  <option value="TokenExchange">{t('mcp.custom.auth.kind.tokenExchange')}</option>
+                  {authKindOf(customAuth) === 'Other' && (
+                    <option value="Other" disabled>{t('mcp.custom.auth.kind.other')}</option>
+                  )}
+                </select>
+                {/* Bearer — 1 env_key dropdown peuplé depuis customFields */}
+                {authKindOf(customAuth) === 'Bearer' && typeof customAuth === 'object' && 'Bearer' in customAuth && (
+                  <div className="mcp-custom-field-row mb-2">
+                    <label className="mcp-field-label mcp-field-label-inline" style={{ minWidth: '120px' }}>
+                      {t('mcp.custom.auth.bearer.envKey')}
+                    </label>
+                    <select
+                      className="input mcp-input-mono"
+                      value={customAuth.Bearer.env_key}
+                      onChange={(e) => setCustomAuth({ Bearer: { env_key: e.target.value } })}
+                    >
+                      <option value="">{t('mcp.custom.auth.bearer.envKeyPlaceholder')}</option>
+                      {customFields.filter(f => f.label.trim()).map(f => (
+                        <option key={f.label} value={slugEnvKey(f.label)}>
+                          {slugEnvKey(f.label)} ({f.label})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                {/* TokenExchange — Didomi pattern, JSON body POST → access_token */}
+                {authKindOf(customAuth) === 'TokenExchange' && typeof customAuth === 'object' && 'TokenExchange' in customAuth && (
+                  <div style={{ borderLeft: '3px solid var(--kr-accent)', paddingLeft: '0.8rem' }}>
+                    <p className="mcp-env-key-desc mb-3" style={{ fontSize: '0.85em' }}>{t('mcp.custom.auth.tokenExchange.hint')}</p>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.endpoint')}</label>
+                      <input
+                        className="input mcp-input-mono"
+                        value={customAuth.TokenExchange.endpoint}
+                        onChange={(e) => setCustomAuth({
+                          TokenExchange: { ...customAuth.TokenExchange, endpoint: e.target.value },
+                        })}
+                        placeholder="/sessions"
+                      />
+                    </div>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.method')}</label>
+                      <select
+                        className="input mcp-input-mono"
+                        value={customAuth.TokenExchange.method}
+                        onChange={(e) => setCustomAuth({
+                          TokenExchange: { ...customAuth.TokenExchange, method: e.target.value },
+                        })}
+                      >
+                        <option value="POST">POST</option>
+                        <option value="PUT">PUT</option>
+                      </select>
+                    </div>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.bodyFormat')}</label>
+                      <select
+                        className="input mcp-input-mono"
+                        value={customAuth.TokenExchange.body_format}
+                        onChange={(e) => setCustomAuth({
+                          TokenExchange: { ...customAuth.TokenExchange, body_format: e.target.value as 'Json' | 'FormUrlEncoded' },
+                        })}
+                      >
+                        <option value="Json">JSON (application/json)</option>
+                        <option value="FormUrlEncoded">Form URL-encoded (application/x-www-form-urlencoded)</option>
+                      </select>
+                    </div>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.bodyTemplate')}</label>
+                      <p className="mcp-env-key-desc mb-2" style={{ fontSize: '0.8em' }}>{t('mcp.custom.auth.tokenExchange.bodyTemplateHint')}</p>
+                      <textarea
+                        className="input mcp-input-mono"
+                        rows={5}
+                        value={(() => {
+                          try { return JSON.stringify(customAuth.TokenExchange.body_template, null, 2); }
+                          catch { return '{}'; }
+                        })()}
+                        onChange={(e) => {
+                          try {
+                            const parsed = JSON.parse(e.target.value);
+                            setCustomAuth({ TokenExchange: { ...customAuth.TokenExchange, body_template: parsed } });
+                          } catch {
+                            // Keep the textarea contents user-typed even when invalid;
+                            // we store the raw text via a sibling state? Simpler: just
+                            // don't update the parsed value on invalid JSON. The user
+                            // sees their typo and corrects.
+                          }
+                        }}
+                        placeholder='{"type": "api-key", "key": "${ENV.API_KEY}", "secret": "${ENV.API_SECRET}"}'
+                      />
+                    </div>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.tokenJsonpath')}</label>
+                      <input
+                        className="input mcp-input-mono"
+                        value={customAuth.TokenExchange.token_jsonpath}
+                        onChange={(e) => setCustomAuth({
+                          TokenExchange: { ...customAuth.TokenExchange, token_jsonpath: e.target.value },
+                        })}
+                        placeholder="$.access_token"
+                      />
+                    </div>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.ttl')}</label>
+                      <input
+                        className="input mcp-input-mono"
+                        type="number"
+                        min={0}
+                        value={customAuth.TokenExchange.ttl_seconds}
+                        onChange={(e) => setCustomAuth({
+                          TokenExchange: { ...customAuth.TokenExchange, ttl_seconds: parseInt(e.target.value, 10) || 0 },
+                        })}
+                      />
+                    </div>
+                    <div className="mb-3">
+                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.inject')}</label>
+                      <Dropdown<'BearerHeader' | 'CustomHeader' | 'QueryParam'>
+                        value={typeof customAuth.TokenExchange.inject === 'string' ? customAuth.TokenExchange.inject : (Object.keys(customAuth.TokenExchange.inject)[0] as 'CustomHeader' | 'QueryParam')}
+                        options={[
+                          { value: 'BearerHeader', label: 'Bearer header (Authorization: Bearer ...)' },
+                          { value: 'CustomHeader', label: 'Custom header' },
+                          { value: 'QueryParam', label: 'Query param' },
+                        ]}
+                        onChange={(kind) => {
+                          let inject: ApiAuthKind extends infer T ? T extends { TokenExchange: { inject: infer I } } ? I : never : never;
+                          if (kind === 'BearerHeader') inject = 'BearerHeader' as typeof inject;
+                          else if (kind === 'CustomHeader') inject = { CustomHeader: { name: 'X-Auth-Token' } } as typeof inject;
+                          else inject = { QueryParam: { name: 'token' } } as typeof inject;
+                          setCustomAuth({ TokenExchange: { ...customAuth.TokenExchange, inject } });
+                        }}
+                        ariaLabel={t('mcp.custom.auth.tokenExchange.inject')}
+                        testId="mcp-token-exchange-inject"
+                      />
+                    </div>
+                  </div>
+                )}
+                {/* Other variants (ApiKeyQuery / Header / Basic / OAuth2) :
+                    not yet exposed in UI. If an existing plugin uses one of
+                    them (e.g. registry-shipped), the picker shows "Other —
+                    edit in JSON" placeholder so the user knows it's
+                    intentional, not a bug. */}
+                {authKindOf(customAuth) === 'Other' && (
+                  <p className="mcp-env-key-desc" style={{ color: 'var(--kr-warning)' }}>
+                    {t('mcp.custom.auth.kind.otherWarning')}
+                  </p>
+                )}
+              </div>
+              <div className="flex-row gap-4 mb-6">
+                <button className={`mcp-project-toggle ${addMcpGlobal ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
+                  {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
+                  {t('mcp.globalAll')}
+                </button>
+              </div>
+              <div className="flex-row gap-4">
+                <button
+                  className="mcp-btn-action mcp-btn-action-primary"
+                  onClick={handleAddMcpFromRegistry}
+                  disabled={!customName.trim() || !customBaseUrl.trim()}
+                >
+                  <Check size={14} /> {editingCustomServerId ? t('mcp.custom.saveEdit') : t('mcp.custom.save')}
+                </button>
+                <button className="mcp-btn-action" onClick={() => { setAddMcpSelected(null); resetAddMcp(); }}>
+                  {t('mcp.back')}
+                </button>
+                {/* AI helper bubble: pre-fills the form from a curl, a docs link
+                    or a freeform description. Same UX as the workflow ApiCall
+                    helper (header agent dropdown, top context chip, welcome
+                    starters). */}
+                {installedAgentTypes && installedAgentTypes.length > 0 && (
+                  <CustomApiAiHelper
+                    formSnapshot={{
+                      name: customName,
+                      base_url: customBaseUrl,
+                      description: customDescription,
+                      docs_url: customDocsUrl,
+                      fields: customFields,
+                      endpoints: customEndpoints,
+                    }}
+                    onApply={(updates: Partial<CustomApiPayload>) => {
+                      if (typeof updates.name === 'string') setCustomName(updates.name);
+                      if (typeof updates.base_url === 'string') setCustomBaseUrl(updates.base_url);
+                      if (typeof updates.description === 'string') setCustomDescription(updates.description);
+                      if (typeof updates.docs_url === 'string') setCustomDocsUrl(updates.docs_url);
+                      if (Array.isArray(updates.fields) && updates.fields.length > 0) {
+                        // Merge: keep user-typed values for fields that already
+                        // have content, accept agent-proposed labels/empties for
+                        // the rest. Avoids the agent wiping a token the user
+                        // already pasted while still letting it add new fields.
+                        const existing = customFields.filter(f => f.label.trim() || f.value.trim());
+                        const proposedLabels = new Set(updates.fields.map(f => f.label));
+                        const merged = [
+                          ...existing.filter(f => !proposedLabels.has(f.label) || f.value.trim()),
+                          ...updates.fields.filter(f =>
+                            !existing.some(e => e.label === f.label && e.value.trim()),
+                          ),
+                        ];
+                        setCustomFields(merged.length > 0 ? merged : [{ label: '', value: '' }]);
+                      }
+                      // 0.8.6 — endpoint merge. The agent typically proposes
+                      // 5-15 endpoints after a WebFetch. We merge by
+                      // (path + method) so the user's hand-typed entries are
+                      // preserved (no surprise wipe), and the agent's proposals
+                      // fill the gaps. The "Add row" trailing-empty sentinel is
+                      // filtered out of the seed.
+                      if (Array.isArray(updates.endpoints) && updates.endpoints.length > 0) {
+                        const existing = customEndpoints.filter(e => e.path.trim() !== '');
+                        const key = (e: ApiEndpoint) => `${e.method.toUpperCase()} ${e.path.trim()}`;
+                        const seen = new Set(existing.map(key));
+                        const merged: ApiEndpoint[] = [
+                          ...existing,
+                          ...updates.endpoints.filter(e => !seen.has(key(e))),
+                        ];
+                        setCustomEndpoints(merged);
+                      }
+                    }}
+                    installedAgents={installedAgentTypes}
+                    configLanguage={configLanguage}
+                    t={t}
+                  />
+                )}
+              </div>
+            </>
+  );
 
   return (
     <div>
@@ -1416,414 +1858,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               <p className="mcp-form-hint">{t('mcp.custom.importSecretsHint')}</p>
             </>
           ) : addMcpSelected === 'api-custom' ? (
-            <>
-              {/* Custom API freeform editor. Mirrors `CustomApiPayload`:
-                  name + base URL are required; description + docs link +
-                  fields are optional. The backend slugifies each field
-                  label into an env key. */}
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.name')} *</label>
-                <input
-                  className="input"
-                  value={customName}
-                  onChange={(e) => setCustomName(e.target.value)}
-                  placeholder={t('mcp.custom.namePlaceholder')}
-                  autoFocus
-                />
-              </div>
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.baseUrl')} *</label>
-                <input
-                  className="input mcp-input-mono"
-                  value={customBaseUrl}
-                  onChange={(e) => setCustomBaseUrl(e.target.value)}
-                  placeholder={t('mcp.custom.baseUrlPlaceholder')}
-                />
-              </div>
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.description')}</label>
-                <textarea
-                  className="input"
-                  rows={3}
-                  value={customDescription}
-                  onChange={(e) => setCustomDescription(e.target.value)}
-                  placeholder={t('mcp.custom.descriptionPlaceholder')}
-                />
-              </div>
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.docsUrl')}</label>
-                <input
-                  className="input mcp-input-mono"
-                  value={customDocsUrl}
-                  onChange={(e) => setCustomDocsUrl(e.target.value)}
-                  placeholder="https://docs.example.com/api"
-                />
-              </div>
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.fields')}</label>
-                <p className="mcp-env-key-desc mb-3">{t('mcp.custom.fieldsHint')}</p>
-                {/* 0.8.6 — Edit mode: reassure the user their secrets
-                    are safe. The encrypted env lives in the per-config
-                    row (mcp_configs), NOT in the spec we're editing.
-                    Without this banner, users see empty value fields
-                    and assume their credentials were wiped (caught
-                    2026-05-19 in live test "je n'ai plus les valeurs").
-                    The masked `•••• stocké` per-row makes the same
-                    point inline. */}
-                {editingCustomServerId && (
-                  <p className="mcp-env-key-desc mb-3" style={{ borderLeft: '3px solid var(--kr-accent)', paddingLeft: '0.6rem' }}>
-                    🔒 {t('mcp.custom.fieldsHintEditMode')}
-                  </p>
-                )}
-                {customFields.map((f, idx) => {
-                  // 0.8.6 — per-row reveal toggle. The visible set is
-                  // keyed by row index because labels can be renamed
-                  // mid-edit (slug-based keys would race the rename).
-                  const isVisible = customFieldsVisible.has(idx);
-                  return (
-                  <div key={idx} className="mcp-custom-field-row mb-2">
-                    <input
-                      className="input mcp-custom-field-label"
-                      value={f.label}
-                      onChange={(e) => setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, label: e.target.value } : row))}
-                      placeholder={t('mcp.custom.fieldLabel')}
-                    />
-                    <input
-                      className="input mcp-input-mono"
-                      type={isVisible ? 'text' : 'password'}
-                      value={f.value}
-                      onChange={(e) => setCustomFields(prev => prev.map((row, i) => i === idx ? { ...row, value: e.target.value } : row))}
-                      placeholder={t('mcp.custom.fieldValue')}
-                    />
-                    <button
-                      type="button"
-                      className="mcp-icon-btn"
-                      onClick={() => setCustomFieldsVisible(prev => {
-                        const next = new Set(prev);
-                        if (next.has(idx)) next.delete(idx); else next.add(idx);
-                        return next;
-                      })}
-                      title={isVisible ? t('mcp.hide') : t('mcp.show')}
-                      aria-label={isVisible ? t('mcp.hide') : t('mcp.show')}
-                    >
-                      <Eye size={12} style={{ color: isVisible ? 'var(--kr-accent-ink)' : 'var(--kr-text-ghost)' }} />
-                    </button>
-                    <button
-                      type="button"
-                      className="mcp-icon-btn"
-                      onClick={() => setCustomFields(prev => prev.filter((_, i) => i !== idx))}
-                      disabled={customFields.length === 1}
-                      aria-label={t('mcp.custom.fieldRemove')}
-                      title={t('mcp.custom.fieldRemove')}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                  );
-                })}
-                <button
-                  type="button"
-                  className="mcp-btn-action"
-                  onClick={() => setCustomFields(prev => [...prev, { label: '', value: '' }])}
-                >
-                  <Plus size={12} /> {t('mcp.custom.fieldAdd')}
-                </button>
-              </div>
-              {/* 0.8.6 — endpoints declared at creation time. The AI helper
-                  (button further below) can populate this list after fetching
-                  `docs_url` via WebFetch. Empty list = `mcp_list` will emit
-                  `NEEDS_RESEARCH` and agents will go through the doc each time.
-                  Cf. [[project_endpoints_autodiscovery_0_8_6]]. */}
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.endpoints.header')}</label>
-                <p className="mcp-env-key-desc mb-3">
-                  {customEndpoints.length === 0
-                    ? t('mcp.custom.endpoints.emptyHint')
-                    : t('mcp.custom.endpoints.populatedHint', customEndpoints.length)}
-                </p>
-                {customEndpoints.map((e, idx) => (
-                  <div key={idx} className="mcp-custom-field-row mb-2">
-                    <select
-                      className="input mcp-custom-field-label"
-                      value={e.method || 'GET'}
-                      onChange={(ev) => setCustomEndpoints(prev => prev.map((row, i) => i === idx ? { ...row, method: ev.target.value } : row))}
-                      aria-label={t('mcp.custom.endpoints.methodLabel')}
-                    >
-                      <option value="GET">GET</option>
-                      <option value="POST">POST</option>
-                      <option value="PUT">PUT</option>
-                      <option value="PATCH">PATCH</option>
-                      <option value="DELETE">DELETE</option>
-                    </select>
-                    <input
-                      className="input mcp-input-mono"
-                      value={e.path}
-                      onChange={(ev) => setCustomEndpoints(prev => prev.map((row, i) => i === idx ? { ...row, path: ev.target.value } : row))}
-                      placeholder="/v1/widgets"
-                    />
-                    <input
-                      className="input"
-                      value={e.description}
-                      onChange={(ev) => setCustomEndpoints(prev => prev.map((row, i) => i === idx ? { ...row, description: ev.target.value } : row))}
-                      placeholder={t('mcp.custom.endpoints.descPlaceholder')}
-                    />
-                    <button
-                      type="button"
-                      className="mcp-icon-btn"
-                      onClick={() => setCustomEndpoints(prev => prev.filter((_, i) => i !== idx))}
-                      aria-label={t('mcp.custom.endpoints.remove')}
-                      title={t('mcp.custom.endpoints.remove')}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                ))}
-                <button
-                  type="button"
-                  className="mcp-btn-action"
-                  onClick={() => setCustomEndpoints(prev => [...prev, { path: '', method: 'GET', description: '' }])}
-                >
-                  <Plus size={12} /> {t('mcp.custom.endpoints.add')}
-                </button>
-              </div>
-              {/* 0.8.6 — Auth section. MVP exposes 3 of the 7 runtime
-                  variants (None, Bearer, TokenExchange) — others (Header,
-                  Query, Basic, OAuth2) come in 0.8.6 Layer A. The
-                  TokenExchange option specifically unblocks Didomi-shape
-                  APIs (POST /sessions with JSON body → access_token →
-                  Bearer). Cf. [[project_token_exchange_generic_0_9_0]]. */}
-              <div className="mb-5">
-                <label className="mcp-field-label">{t('mcp.custom.auth.header')}</label>
-                <p className="mcp-env-key-desc mb-3">{t('mcp.custom.auth.hint')}</p>
-                <select
-                  className="input mcp-custom-field-label"
-                  value={authKindOf(customAuth)}
-                  onChange={(e) => setAuthKindBy(e.target.value as 'None' | 'Bearer' | 'TokenExchange')}
-                  style={{ marginBottom: '0.75rem', width: '100%' }}
-                >
-                  <option value="None">{t('mcp.custom.auth.kind.none')}</option>
-                  <option value="Bearer">{t('mcp.custom.auth.kind.bearer')}</option>
-                  <option value="TokenExchange">{t('mcp.custom.auth.kind.tokenExchange')}</option>
-                  {authKindOf(customAuth) === 'Other' && (
-                    <option value="Other" disabled>{t('mcp.custom.auth.kind.other')}</option>
-                  )}
-                </select>
-                {/* Bearer — 1 env_key dropdown peuplé depuis customFields */}
-                {authKindOf(customAuth) === 'Bearer' && typeof customAuth === 'object' && 'Bearer' in customAuth && (
-                  <div className="mcp-custom-field-row mb-2">
-                    <label className="mcp-field-label mcp-field-label-inline" style={{ minWidth: '120px' }}>
-                      {t('mcp.custom.auth.bearer.envKey')}
-                    </label>
-                    <select
-                      className="input mcp-input-mono"
-                      value={customAuth.Bearer.env_key}
-                      onChange={(e) => setCustomAuth({ Bearer: { env_key: e.target.value } })}
-                    >
-                      <option value="">{t('mcp.custom.auth.bearer.envKeyPlaceholder')}</option>
-                      {customFields.filter(f => f.label.trim()).map(f => (
-                        <option key={f.label} value={slugEnvKey(f.label)}>
-                          {slugEnvKey(f.label)} ({f.label})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                )}
-                {/* TokenExchange — Didomi pattern, JSON body POST → access_token */}
-                {authKindOf(customAuth) === 'TokenExchange' && typeof customAuth === 'object' && 'TokenExchange' in customAuth && (
-                  <div style={{ borderLeft: '3px solid var(--kr-accent)', paddingLeft: '0.8rem' }}>
-                    <p className="mcp-env-key-desc mb-3" style={{ fontSize: '0.85em' }}>{t('mcp.custom.auth.tokenExchange.hint')}</p>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.endpoint')}</label>
-                      <input
-                        className="input mcp-input-mono"
-                        value={customAuth.TokenExchange.endpoint}
-                        onChange={(e) => setCustomAuth({
-                          TokenExchange: { ...customAuth.TokenExchange, endpoint: e.target.value },
-                        })}
-                        placeholder="/sessions"
-                      />
-                    </div>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.method')}</label>
-                      <select
-                        className="input mcp-input-mono"
-                        value={customAuth.TokenExchange.method}
-                        onChange={(e) => setCustomAuth({
-                          TokenExchange: { ...customAuth.TokenExchange, method: e.target.value },
-                        })}
-                      >
-                        <option value="POST">POST</option>
-                        <option value="PUT">PUT</option>
-                      </select>
-                    </div>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.bodyFormat')}</label>
-                      <select
-                        className="input mcp-input-mono"
-                        value={customAuth.TokenExchange.body_format}
-                        onChange={(e) => setCustomAuth({
-                          TokenExchange: { ...customAuth.TokenExchange, body_format: e.target.value as 'Json' | 'FormUrlEncoded' },
-                        })}
-                      >
-                        <option value="Json">JSON (application/json)</option>
-                        <option value="FormUrlEncoded">Form URL-encoded (application/x-www-form-urlencoded)</option>
-                      </select>
-                    </div>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.bodyTemplate')}</label>
-                      <p className="mcp-env-key-desc mb-2" style={{ fontSize: '0.8em' }}>{t('mcp.custom.auth.tokenExchange.bodyTemplateHint')}</p>
-                      <textarea
-                        className="input mcp-input-mono"
-                        rows={5}
-                        value={(() => {
-                          try { return JSON.stringify(customAuth.TokenExchange.body_template, null, 2); }
-                          catch { return '{}'; }
-                        })()}
-                        onChange={(e) => {
-                          try {
-                            const parsed = JSON.parse(e.target.value);
-                            setCustomAuth({ TokenExchange: { ...customAuth.TokenExchange, body_template: parsed } });
-                          } catch {
-                            // Keep the textarea contents user-typed even when invalid;
-                            // we store the raw text via a sibling state? Simpler: just
-                            // don't update the parsed value on invalid JSON. The user
-                            // sees their typo and corrects.
-                          }
-                        }}
-                        placeholder='{"type": "api-key", "key": "${ENV.API_KEY}", "secret": "${ENV.API_SECRET}"}'
-                      />
-                    </div>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.tokenJsonpath')}</label>
-                      <input
-                        className="input mcp-input-mono"
-                        value={customAuth.TokenExchange.token_jsonpath}
-                        onChange={(e) => setCustomAuth({
-                          TokenExchange: { ...customAuth.TokenExchange, token_jsonpath: e.target.value },
-                        })}
-                        placeholder="$.access_token"
-                      />
-                    </div>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.ttl')}</label>
-                      <input
-                        className="input mcp-input-mono"
-                        type="number"
-                        min={0}
-                        value={customAuth.TokenExchange.ttl_seconds}
-                        onChange={(e) => setCustomAuth({
-                          TokenExchange: { ...customAuth.TokenExchange, ttl_seconds: parseInt(e.target.value, 10) || 0 },
-                        })}
-                      />
-                    </div>
-                    <div className="mb-3">
-                      <label className="mcp-field-label">{t('mcp.custom.auth.tokenExchange.inject')}</label>
-                      <Dropdown<'BearerHeader' | 'CustomHeader' | 'QueryParam'>
-                        value={typeof customAuth.TokenExchange.inject === 'string' ? customAuth.TokenExchange.inject : (Object.keys(customAuth.TokenExchange.inject)[0] as 'CustomHeader' | 'QueryParam')}
-                        options={[
-                          { value: 'BearerHeader', label: 'Bearer header (Authorization: Bearer ...)' },
-                          { value: 'CustomHeader', label: 'Custom header' },
-                          { value: 'QueryParam', label: 'Query param' },
-                        ]}
-                        onChange={(kind) => {
-                          let inject: ApiAuthKind extends infer T ? T extends { TokenExchange: { inject: infer I } } ? I : never : never;
-                          if (kind === 'BearerHeader') inject = 'BearerHeader' as typeof inject;
-                          else if (kind === 'CustomHeader') inject = { CustomHeader: { name: 'X-Auth-Token' } } as typeof inject;
-                          else inject = { QueryParam: { name: 'token' } } as typeof inject;
-                          setCustomAuth({ TokenExchange: { ...customAuth.TokenExchange, inject } });
-                        }}
-                        ariaLabel={t('mcp.custom.auth.tokenExchange.inject')}
-                        testId="mcp-token-exchange-inject"
-                      />
-                    </div>
-                  </div>
-                )}
-                {/* Other variants (ApiKeyQuery / Header / Basic / OAuth2) :
-                    not yet exposed in UI. If an existing plugin uses one of
-                    them (e.g. registry-shipped), the picker shows "Other —
-                    edit in JSON" placeholder so the user knows it's
-                    intentional, not a bug. */}
-                {authKindOf(customAuth) === 'Other' && (
-                  <p className="mcp-env-key-desc" style={{ color: 'var(--kr-warning)' }}>
-                    {t('mcp.custom.auth.kind.otherWarning')}
-                  </p>
-                )}
-              </div>
-              <div className="flex-row gap-4 mb-6">
-                <button className={`mcp-project-toggle ${addMcpGlobal ? 'mcp-project-toggle-on' : 'mcp-project-toggle-off'}`} onClick={() => setAddMcpGlobal(!addMcpGlobal)}>
-                  {addMcpGlobal ? <CheckSquare size={11} className="text-accent" /> : <Square size={11} />}
-                  {t('mcp.globalAll')}
-                </button>
-              </div>
-              <div className="flex-row gap-4">
-                <button
-                  className="mcp-btn-action mcp-btn-action-primary"
-                  onClick={handleAddMcpFromRegistry}
-                  disabled={!customName.trim() || !customBaseUrl.trim()}
-                >
-                  <Check size={14} /> {editingCustomServerId ? t('mcp.custom.saveEdit') : t('mcp.custom.save')}
-                </button>
-                <button className="mcp-btn-action" onClick={() => { setAddMcpSelected(null); resetAddMcp(); }}>
-                  {t('mcp.back')}
-                </button>
-                {/* AI helper bubble: pre-fills the form from a curl, a docs link
-                    or a freeform description. Same UX as the workflow ApiCall
-                    helper (header agent dropdown, top context chip, welcome
-                    starters). */}
-                {installedAgentTypes && installedAgentTypes.length > 0 && (
-                  <CustomApiAiHelper
-                    formSnapshot={{
-                      name: customName,
-                      base_url: customBaseUrl,
-                      description: customDescription,
-                      docs_url: customDocsUrl,
-                      fields: customFields,
-                      endpoints: customEndpoints,
-                    }}
-                    onApply={(updates: Partial<CustomApiPayload>) => {
-                      if (typeof updates.name === 'string') setCustomName(updates.name);
-                      if (typeof updates.base_url === 'string') setCustomBaseUrl(updates.base_url);
-                      if (typeof updates.description === 'string') setCustomDescription(updates.description);
-                      if (typeof updates.docs_url === 'string') setCustomDocsUrl(updates.docs_url);
-                      if (Array.isArray(updates.fields) && updates.fields.length > 0) {
-                        // Merge: keep user-typed values for fields that already
-                        // have content, accept agent-proposed labels/empties for
-                        // the rest. Avoids the agent wiping a token the user
-                        // already pasted while still letting it add new fields.
-                        const existing = customFields.filter(f => f.label.trim() || f.value.trim());
-                        const proposedLabels = new Set(updates.fields.map(f => f.label));
-                        const merged = [
-                          ...existing.filter(f => !proposedLabels.has(f.label) || f.value.trim()),
-                          ...updates.fields.filter(f =>
-                            !existing.some(e => e.label === f.label && e.value.trim()),
-                          ),
-                        ];
-                        setCustomFields(merged.length > 0 ? merged : [{ label: '', value: '' }]);
-                      }
-                      // 0.8.6 — endpoint merge. The agent typically proposes
-                      // 5-15 endpoints after a WebFetch. We merge by
-                      // (path + method) so the user's hand-typed entries are
-                      // preserved (no surprise wipe), and the agent's proposals
-                      // fill the gaps. The "Add row" trailing-empty sentinel is
-                      // filtered out of the seed.
-                      if (Array.isArray(updates.endpoints) && updates.endpoints.length > 0) {
-                        const existing = customEndpoints.filter(e => e.path.trim() !== '');
-                        const key = (e: ApiEndpoint) => `${e.method.toUpperCase()} ${e.path.trim()}`;
-                        const seen = new Set(existing.map(key));
-                        const merged: ApiEndpoint[] = [
-                          ...existing,
-                          ...updates.endpoints.filter(e => !seen.has(key(e))),
-                        ];
-                        setCustomEndpoints(merged);
-                      }
-                    }}
-                    installedAgents={installedAgentTypes}
-                    configLanguage={configLanguage}
-                    t={t}
-                  />
-                )}
-              </div>
-            </>
+            customApiForm
           ) : (
             <>
               {/* Label */}
@@ -2027,6 +2062,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               /* ── Inline detail: spans full grid width, right after this card ── */
               const def = mcpRegistry.find(m => m.id === cfg.server_id);
               const isEditingLabel = editingLabelId === cfg.id;
+              // Refonte 2b — this plugin's spec+credentials are being edited
+              // IN the modal (body swaps to the hoisted customApiForm).
+              const isEditingThisCustom = editingCustomServerId === cfg.server_id;
+              // Closing the modal (backdrop / X) always cancels an in-flight
+              // edit so stale form state can't leak into the next open.
+              const closePluginModal = () => {
+                if (editingCustomServerId) resetAddMcp();
+                setSelectedConfigId(null);
+              };
               const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
 
               // 0.8.6 (#29) — open the edit form pre-filled with the
@@ -2042,30 +2086,27 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 setCustomBaseUrl(spec.base_url);
                 setCustomDescription(cfgServer.description);
                 setCustomDocsUrl(spec.docs_url ?? '');
+                // 2026-06-09 — never pre-fill secret values (a masked
+                // `revealSecrets` pre-fill can't round-trip into a real key
+                // → the desync bug). Instead, mark fields whose env_key is
+                // already stored in THIS config: they render as a read-only
+                // masked "🔒 enregistrée + Remplacer" affordance (see render),
+                // so the user always sees a key exists and an empty field
+                // never looks like a wipe. value:'' = "keep unless replaced".
                 const ck = spec.config_keys ?? [];
-                let revealedEnv: Record<string, string> = {};
-                try {
-                  const entries = await mcpsApi.revealSecrets(cfg.id);
-                  entries.forEach(e => { revealedEnv[e.key] = e.masked_value; });
-                } catch (e) {
-                  console.warn('Failed to reveal secrets for edit prefill:', e);
-                }
+                const storedKeys = new Set(cfg.env_keys ?? []);
                 setCustomFields(
                   ck.length > 0
-                    ? ck.map(k => ({
-                        label: k.label,
-                        value: revealedEnv[k.env_key] ?? '',
-                      }))
+                    ? ck.map(k => ({ label: k.label, value: '', stored: storedKeys.has(k.env_key) }))
                     : [{ label: '', value: '' }],
                 );
+                setReplacingFields(new Set());
                 setCustomEndpoints(spec.endpoints ?? []);
                 setCustomAuth(spec.auth ?? 'None');
-                setShowAddMcp(true);
-                setAddMcpSelected('api-custom');
-                setSelectedConfigId(null);
-                requestAnimationFrame(() => {
-                  window.scrollTo({ top: 0, behavior: 'smooth' });
-                });
+                // Refonte 2b (2026-06-10) — the edit form renders IN-PLACE
+                // inside this modal (see mcp-detail-body below). No more
+                // jumping to the top Add panel + scroll-to-top: the modal
+                // stays open, the body swaps view → form.
               };
 
               // 0.8.6 (#29) — surface a banner on legacy Custom plugins
@@ -2081,7 +2122,8 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 && cfgServer?.api_spec
                 && (cfgServer.api_spec.endpoints?.length ?? 0) === 0;
               const detail = (
-                <div key={`detail-${cfg.id}`} ref={detailRef} className="mcp-detail-inline" onClick={e => e.stopPropagation()}>
+                <div key={`detail-${cfg.id}`} className="mcp-modal-overlay" onClick={closePluginModal}>
+                <div className="mcp-detail-inline mcp-plugin-modal" onClick={e => e.stopPropagation()}>
                   <div className="mcp-detail-header">
                     <div className="mcp-registry-card-icon" style={{ width: 40, height: 40 }}><Puzzle size={20} /></div>
                     <div className="flex-1">
@@ -2097,41 +2139,49 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                       {serverIncomp.length > 0 && <span className="mcp-server-incompat">{serverIncomp.map(i => `⚠ ${i.agent}: ${i.reason}`).join(' · ')}</span>}
                     </div>
                     <div className="flex-row gap-3">
-                      {/* 0.8.6 — Edit spec button. Only on Custom API plugins
-                          (`custom-{slug}-{nano}` ids). Opens the same form as
-                          create, pre-filled from the server's api_spec, then
-                          PUTs `/api/mcps/custom/:server_id` on submit. The
-                          encrypted env per-config is NOT edited here — the
-                          user uses the existing "Edit env" drawer for that.
-                          Closes the misleading "delete + recreate" gap surfaced
-                          by the user 2026-05-19 on Didomi. */}
-                      {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
-                        <button
-                          className="mcp-btn-action"
-                          onClick={openEditCustomPlugin}
-                          title={t('mcp.custom.editSpec')}
-                        >
-                          <Pencil size={12} /> {t('mcp.custom.editSpec')}
-                        </button>
+                      {/* Refonte 2b — header actions hidden while EDITING:
+                          the body holds the form (with its own Save/Back);
+                          a bare header + X keeps the edit surface focused. */}
+                      {!isEditingThisCustom && (
+                        <>
+                          {/* Edit spec+credentials button. Only on Custom API
+                              plugins (`custom-{slug}-{nano}` ids). Swaps the
+                              modal body to the same form as create, pre-filled
+                              from the server's api_spec — IN PLACE. */}
+                          {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
+                            <button
+                              className="mcp-btn-action"
+                              onClick={openEditCustomPlugin}
+                              title={t('mcp.custom.editSpec')}
+                            >
+                              <Pencil size={12} /> {t('mcp.custom.editSpec')}
+                            </button>
+                          )}
+                          {/* 0.8.6 (#33) — Export as JSON. Spec-only, no
+                              credentials. Sharing the resulting payload is
+                              safe. */}
+                          {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
+                            <button
+                              className="mcp-btn-action"
+                              onClick={() => handleExportCustomPlugin(cfgServer as McpServer)}
+                              title={t('mcp.custom.copyAsJson')}
+                              data-testid="mcp-custom-export-json"
+                            >
+                              <Upload size={12} /> {t('mcp.custom.copyAsJson')}
+                            </button>
+                          )}
+                          <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
+                        </>
                       )}
-                      {/* 0.8.6 (#33) — Export as JSON. Spec-only, no
-                          credentials. Sharing the resulting payload is
-                          safe. */}
-                      {cfg.server_id.startsWith('custom-') && cfgServer?.api_spec && (
-                        <button
-                          className="mcp-btn-action"
-                          onClick={() => handleExportCustomPlugin(cfgServer as McpServer)}
-                          title={t('mcp.custom.copyAsJson')}
-                          data-testid="mcp-custom-export-json"
-                        >
-                          <Upload size={12} /> {t('mcp.custom.copyAsJson')}
-                        </button>
-                      )}
-                      <button className="mcp-btn-action" style={{ color: 'var(--kr-error)', borderColor: 'rgba(var(--kr-error-rgb), 0.3)' }} onClick={() => { handleDeleteMcpConfig(cfg.id); setSelectedConfigId(null); }}><Trash2 size={12} /> {t('mcp.deleteConfig')}</button>
-                      <button className="mcp-icon-btn" onClick={() => setSelectedConfigId(null)} aria-label="Close"><X size={14} /></button>
+                      <button className="mcp-icon-btn" onClick={closePluginModal} aria-label="Close"><X size={14} /></button>
                     </div>
                   </div>
                   <div className="mcp-detail-body">
+                    {/* Refonte 2b — EDIT mode renders the hoisted custom
+                        form IN PLACE of the view body. ISO with MCP env
+                        editing: everything happens here, no jump to the
+                        top Add panel, no scroll. */}
+                    {isEditingThisCustom ? customApiForm : (<>
                     {/* 0.8.6 (#29) — autodiscovery banner for legacy
                         Custom plugins with no endpoints declared. CTA
                         opens the same edit form as the header button,
@@ -2350,7 +2400,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         </p>
                       </div>
                     )}
+                    </>)}
                   </div>
+                </div>
                 </div>
               );
               return [card, detail];

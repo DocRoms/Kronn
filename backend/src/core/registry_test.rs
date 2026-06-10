@@ -277,6 +277,17 @@ mod tests {
         assert!(m.tags.contains(&"testing".to_string()));
         assert!(m.tags.contains(&"e2e".to_string()));
         assert!(m.env_keys.is_empty(), "Playwright MCP needs no API keys");
+        // 2026-06-11 — must pin `--browser chromium`, NOT the default `chrome`
+        // channel (real Google Chrome, rarely installed → every PW launch
+        // failed; disc f30e340d). Bundled Chromium is what `playwright install`
+        // provides, so anyone with it can drive a browser.
+        if let crate::models::McpTransport::Stdio { args, .. } = &m.transport {
+            let joined = args.join(" ");
+            assert!(joined.contains("--browser"), "Playwright MCP must set --browser: {joined}");
+            assert!(joined.contains("chromium"), "Playwright MCP must use bundled chromium, not the chrome channel: {joined}");
+        } else {
+            panic!("Playwright MCP must be a Stdio transport");
+        }
     }
 
     #[test]

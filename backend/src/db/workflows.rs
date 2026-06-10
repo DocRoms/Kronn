@@ -702,6 +702,20 @@ pub fn increment_batch_progress(
     Ok(Some(run))
 }
 
+/// 2026-06-10 (audit P1, TOCTOU) — atomic claim of a gate decision. Flips a
+/// run from `WaitingApproval` to `new_status` ONLY if it is still waiting,
+/// and reports whether THIS caller won. Two concurrent `decide_run`s (a
+/// double-click, or a human racing the auto-approve timer) used to both
+/// pass the read-then-check and spawn two concurrent `resume_run`s on the
+/// same run; the conditional UPDATE makes exactly one of them win.
+pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE workflow_runs SET status = ?2 WHERE id = ?1 AND status = 'WaitingApproval'",
+        params![run_id, run_status_str(new_status)],
+    )?;
+    Ok(n == 1)
+}
+
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
     update_run_progress(conn, RunProgressSnapshot::from_run(run))
 }

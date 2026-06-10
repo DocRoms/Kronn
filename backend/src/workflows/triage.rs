@@ -111,6 +111,10 @@ pub fn triage_manifest_schema() -> serde_json::Value {
             "files_touched": {
                 "type": "array",
                 "items": { "type": "string" }
+            },
+            "unchanged": {
+                "type": "array",
+                "items": { "type": "string" }
             }
         }
     })
@@ -189,6 +193,281 @@ pub fn triage_output_format() -> StepOutputFormat {
         schema: triage_manifest_schema(),
         on_invalid: OnInvalid::Fail,
     }
+}
+
+/// 2026-06-12 (critical fix #1) — derive the MACHINE-readable companion
+/// files from the VALIDATED manifest envelope, instead of trusting the
+/// agent to hand-write 4 mutually-consistent files. Kills the trust gap
+/// (the human gates the envelope; the fan-out + deterministic checks now
+/// execute EXACTLY that data) and guarantees item shape by construction.
+///
+/// Returns `(workspace-relative path, content)` pairs the runner writes:
+/// - `.kronn/tasks.json`     — clear+decided+mocked items (NOT blocked),
+///   topologically ordered by `depends_on` (stable; unknown/cyclic deps
+///   keep input order).
+/// - `.kronn/decision_ids.txt` — decided+mocked ids (markers enforced).
+/// - `.kronn/files_touched.txt` — union of items' `scope` + top-level
+///   `files_touched`, deduped, input order.
+///
+/// Pure → unit-testable. The agent keeps writing only the human-readable
+/// `.kronn/triage-manifest.md`.
+pub fn derive_machine_files(manifest: &serde_json::Value) -> Vec<(String, String)> {
+    let cat = |k: &str| manifest.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let (clear, decided, mocked) = (cat("clear"), cat("decided"), cat("mocked"));
+
+    // tasks.json — implementable items, topo-sorted by depends_on.
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    items.extend(clear.iter().cloned());
+    items.extend(decided.iter().cloned());
+    items.extend(mocked.iter().cloned());
+    let id_of = |v: &serde_json::Value| v.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+    let known: std::collections::HashSet<String> = items.iter().map(&id_of).collect();
+    // Kahn's algorithm, stable: repeatedly take the first item whose deps
+    // (restricted to known ids) are all already emitted. Cycles/unknown
+    // deps fall back to input order (emit the first remaining item).
+    let mut ordered: Vec<serde_json::Value> = Vec::with_capacity(items.len());
+    let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut remaining = items;
+    while !remaining.is_empty() {
+        let pos = remaining.iter().position(|it| {
+            it.get("depends_on").and_then(|d| d.as_array()).map(|deps| {
+                deps.iter().all(|d| {
+                    let ds = d.as_str().unwrap_or("");
+                    !known.contains(ds) || emitted.contains(ds)
+                })
+            }).unwrap_or(true)
+        }).unwrap_or(0); // cycle → take first (input order)
+        let it = remaining.remove(pos);
+        emitted.insert(id_of(&it));
+        ordered.push(it);
+    }
+    let tasks_json = serde_json::to_string_pretty(&serde_json::Value::Array(ordered)).unwrap_or_else(|_| "[]".into());
+
+    // decision_ids.txt — decided + mocked only (blocked items have no
+    // reliable code location for a marker; run-3 live finding).
+    let mut ids: Vec<String> = Vec::new();
+    for it in decided.iter().chain(mocked.iter()) {
+        let id = id_of(it);
+        if !id.is_empty() && !ids.contains(&id) { ids.push(id); }
+    }
+    let ids_txt = if ids.is_empty() { String::new() } else { ids.join("\n") + "\n" };
+
+    // files_touched.txt — union of every item's scope + top-level list.
+    let mut files: Vec<String> = Vec::new();
+    let mut push_file = |f: &str| {
+        let f = f.trim();
+        if !f.is_empty() && !files.iter().any(|x| x == f) { files.push(f.to_string()); }
+    };
+    for it in clear.iter().chain(decided.iter()).chain(mocked.iter()) {
+        if let Some(scope) = it.get("scope").and_then(|s| s.as_array()) {
+            for f in scope { if let Some(fs) = f.as_str() { push_file(fs); } }
+        }
+        if let Some(w) = it.get("where").and_then(|w| w.as_str()) { push_file(w); }
+    }
+    if let Some(ft) = manifest.get("files_touched").and_then(|v| v.as_array()) {
+        for f in ft { if let Some(fs) = f.as_str() { push_file(fs); } }
+    }
+    let files_txt = if files.is_empty() { String::new() } else { files.join("\n") + "\n" };
+
+    vec![
+        (".kronn/tasks.json".into(), tasks_json),
+        (".kronn/decision_ids.txt".into(), ids_txt),
+        (".kronn/files_touched.txt".into(), files_txt),
+        (".kronn/plan_lint.txt".into(), lint_manifest(manifest)),
+        // Full (merged) manifest — the hydration base for the next
+        // incremental re-triage round (see `merge_unchanged_items`).
+        (".kronn/manifest.json".into(),
+         serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".into())),
+    ]
+}
+
+/// 2026-06-12 — incremental re-triage. A re-triage round (plan review
+/// `NEEDS_RETRIAGE`, or a human Gate "request changes") may emit only the
+/// items it actually changes plus a top-level `unchanged: ["<id>", …]`
+/// array; this hydrates those ids back to full items from the PREVIOUS
+/// round's manifest (engine-written `.kronn/manifest.json`), so the agent
+/// never re-pays the re-emission of an untouched item (the expensive part
+/// being mechanical items' `files[].content`).
+///
+/// Rules — pure, unit-tested:
+/// - an id re-emitted IN FULL in the new manifest wins over `unchanged`
+///   (the agent's latest word takes precedence);
+/// - hydrated items keep their previous CATEGORY (clear/decided/mocked/
+///   blocked — wherever they lived last round);
+/// - ids unknown to the previous manifest are ignored (the plan lint's
+///   item count makes the drop visible);
+/// - `files_touched` becomes the union of previous + new (a partial
+///   round only lists the changed items' files);
+/// - the `unchanged` key is stripped from the result.
+///
+/// Returns `(merged manifest, hydrated item count)`.
+pub fn merge_unchanged_items(
+    manifest: &serde_json::Value,
+    previous: &serde_json::Value,
+) -> (serde_json::Value, usize) {
+    const CATS: [&str; 4] = ["clear", "decided", "mocked", "blocked"];
+    let ids: Vec<String> = manifest
+        .get("unchanged")
+        .and_then(|u| u.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let mut merged = manifest.clone();
+    if let Some(obj) = merged.as_object_mut() {
+        obj.remove("unchanged");
+    }
+    if ids.is_empty() {
+        return (merged, 0);
+    }
+
+    let present: std::collections::HashSet<String> = CATS
+        .iter()
+        .flat_map(|c| {
+            merged
+                .get(c)
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|i| i.get("id").and_then(|x| x.as_str()).map(String::from))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+        .collect();
+
+    let mut hydrated = 0usize;
+    for id in &ids {
+        if present.contains(id) {
+            continue; // re-emitted in full this round — agent wins
+        }
+        for cat in CATS {
+            let found = previous
+                .get(cat)
+                .and_then(|v| v.as_array())
+                .and_then(|a| {
+                    a.iter()
+                        .find(|i| i.get("id").and_then(|x| x.as_str()) == Some(id.as_str()))
+                })
+                .cloned();
+            if let Some(item) = found {
+                match merged.get_mut(cat).and_then(|v| v.as_array_mut()) {
+                    Some(arr) => arr.push(item),
+                    None => {
+                        if let Some(obj) = merged.as_object_mut() {
+                            obj.insert(cat.to_string(), serde_json::json!([item]));
+                        }
+                    }
+                }
+                hydrated += 1;
+                break;
+            }
+        }
+    }
+
+    // files_touched: union previous ∪ new, input order, deduped.
+    let mut files: Vec<String> = Vec::new();
+    for src in [previous, &merged] {
+        if let Some(ft) = src.get("files_touched").and_then(|v| v.as_array()) {
+            for f in ft.iter().filter_map(|f| f.as_str()) {
+                if !f.trim().is_empty() && !files.iter().any(|x| x == f) {
+                    files.push(f.to_string());
+                }
+            }
+        }
+    }
+    if let Some(obj) = merged.as_object_mut() {
+        obj.insert("files_touched".into(), serde_json::json!(files));
+    }
+
+    (merged, hydrated)
+}
+
+/// Rebuild a step output so its envelope carries `merged` as `data` —
+/// used after `merge_unchanged_items` so EVERY downstream reader
+/// (`{{steps.triage.data}}`, the human Gate, pr_draft) sees the FULL
+/// manifest, not the partial incremental emission. Keeps the agent's
+/// free-text preamble; preserves the original envelope's status/summary.
+pub fn rewrite_envelope_data(output: &str, merged: &serde_json::Value) -> String {
+    let (status, summary) = crate::workflows::template::extract_step_envelope(output)
+        .map(|e| (e.status, e.summary))
+        .unwrap_or_else(|| ("OK".into(), String::new()));
+    let envelope = serde_json::json!({
+        "data": merged,
+        "status": status,
+        "summary": summary,
+    });
+    let prefix = output
+        .find("---STEP_OUTPUT---")
+        .map(|i| &output[..i])
+        .unwrap_or(output);
+    format!(
+        "{}---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---",
+        prefix,
+        serde_json::to_string(&envelope).unwrap_or_default()
+    )
+}
+
+/// 2026-06-12 (« deux cerveaux ») — deterministic PLAN LINT over the validated
+/// manifest: shape stats + warnings (oversized scopes, scope overlaps between
+/// items, dangling depends_on). 0 tokens; computed by the engine alongside the
+/// machine files, surfaced to the `plan_lint` Exec step (cat) so the plan
+/// reviewer AND the human gate see the plan's shape at a glance. Pure.
+pub fn lint_manifest(manifest: &serde_json::Value) -> String {
+    let cat = |k: &str| manifest.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let (clear, decided, mocked, blocked) = (cat("clear"), cat("decided"), cat("mocked"), cat("blocked"));
+    let items: Vec<&serde_json::Value> = clear.iter().chain(decided.iter()).chain(mocked.iter()).collect();
+    fn id_of(v: &serde_json::Value) -> &str { v.get("id").and_then(|i| i.as_str()).unwrap_or("") }
+
+    let mech = items.iter().filter(|i| i.get("mechanical").and_then(|m| m.as_bool()) == Some(true)).count();
+    let cx = |lvl: &str| items.iter().filter(|i| i.get("complexity").and_then(|c| c.as_str()) == Some(lvl)).count();
+    let (low, med, high) = (cx("low"), cx("med"), cx("high"));
+
+    let mut warnings: Vec<String> = Vec::new();
+    // Anti-outlier: a scope spanning many files = an item bundling several
+    // concerns → the expensive runaway children of run 7 (45k tokens).
+    const SCOPE_CAP: usize = 4;
+    for it in &items {
+        let n = it.get("scope").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+        if n > SCOPE_CAP {
+            warnings.push(format!("item `{}` scope has {n} files (> {SCOPE_CAP} — consider splitting)", id_of(it)));
+        }
+    }
+    // Scope overlaps between items → serialization / conflict risk.
+    for (a_idx, a) in items.iter().enumerate() {
+        let sa: std::collections::HashSet<&str> = a.get("scope").and_then(|s| s.as_array())
+            .map(|x| x.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+        for b in items.iter().skip(a_idx + 1) {
+            let hit = b.get("scope").and_then(|s| s.as_array())
+                .and_then(|x| x.iter().filter_map(|f| f.as_str()).find(|f| sa.contains(f)));
+            if let Some(f) = hit {
+                warnings.push(format!("items `{}` and `{}` share scope file `{f}`", id_of(a), id_of(b)));
+            }
+        }
+    }
+    // Dangling depends_on (typo'd / blocked ids — the topo-sort ignores them,
+    // but the author should know).
+    let known: std::collections::HashSet<&str> = items.iter().map(|i| id_of(i)).collect();
+    for it in &items {
+        if let Some(deps) = it.get("depends_on").and_then(|d| d.as_array()) {
+            for d in deps.iter().filter_map(|d| d.as_str()) {
+                if !known.contains(d) {
+                    warnings.push(format!("item `{}` depends_on unknown/non-implementable id `{d}`", id_of(it)));
+                }
+            }
+        }
+    }
+
+    let mut out = format!(
+        "PLAN LINT — {} implementable items ({} clear / {} decided / {} mocked · {} blocked excluded)\n\
+         mechanical (engine-appliable): {mech} · complexity: {low} low / {med} med / {high} high\n",
+        items.len(), clear.len(), decided.len(), mocked.len(), blocked.len(),
+    );
+    if warnings.is_empty() {
+        out.push_str("no warnings — plan shape looks sane\n");
+    } else {
+        out.push_str(&format!("⚠ {} WARNING(S):\n", warnings.len()));
+        for w in &warnings { out.push_str(&format!("- {w}\n")); }
+    }
+    out
 }
 
 /// Parse a validated triage manifest JSON value into a vector of
@@ -567,5 +846,145 @@ mod tests {
             }
             other => panic!("expected TypedSchema, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn derive_machine_files_orders_filters_and_dedupes() {
+        let manifest = serde_json::json!({
+            "clear": [
+                {"id": "b", "what": "B", "scope": ["src/b.php"], "depends_on": ["a"]},
+                {"id": "a", "what": "A", "scope": ["src/a.php", "src/b.php"]}
+            ],
+            "decided": [{"id": "c", "what": "C", "chosen": "x", "why": "y", "scope": ["src/c.ts"], "depends_on": ["b"]}],
+            "mocked": [{"id": "d", "what": "D", "placeholder": "p", "scope": []}],
+            "blocked": [{"id": "z", "what": "Z", "needed_from": "team"}],
+            "files_touched": ["src/a.php", "extra/file.yaml"]
+        });
+        let files = super::derive_machine_files(&manifest);
+        let get = |n: &str| files.iter().find(|(p, _)| p.ends_with(n)).map(|(_, c)| c.clone()).unwrap();
+        // tasks.json: blocked excluded; topo order puts a before b before c.
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&get("tasks.json")).unwrap();
+        let ids: Vec<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
+        assert!(!ids.contains(&"z"), "blocked items are not implementable");
+        let pos = |i: &str| ids.iter().position(|x| *x == i).unwrap();
+        assert!(pos("a") < pos("b") && pos("b") < pos("c"), "depends_on topo order: got {ids:?}");
+        // decision_ids: decided+mocked only.
+        let ids_txt = get("decision_ids.txt");
+        assert_eq!(ids_txt.trim().split('\n').collect::<Vec<_>>(), vec!["c", "d"]);
+        // files_touched: deduped union of scopes + top-level.
+        let ft = get("files_touched.txt");
+        assert_eq!(ft.matches("src/b.php").count(), 1, "dedup");
+        assert!(ft.contains("extra/file.yaml"));
+    }
+
+    #[test]
+    fn derive_machine_files_survives_cycles_and_missing_fields() {
+        // Cycle a<->b + items without ids/scopes must not panic or loop.
+        let manifest = serde_json::json!({
+            "clear": [
+                {"id": "a", "what": "A", "depends_on": ["b"]},
+                {"id": "b", "what": "B", "depends_on": ["a"]},
+                {"what": "no id"}
+            ],
+            "decided": [], "mocked": [], "blocked": []
+        });
+        let files = super::derive_machine_files(&manifest);
+        let tasks: Vec<serde_json::Value> = serde_json::from_str(&files[0].1).unwrap();
+        assert_eq!(tasks.len(), 3, "cycle members + id-less item all emitted");
+    }
+
+    #[test]
+    fn lint_manifest_reports_stats_and_warnings() {
+        let manifest = serde_json::json!({
+            "clear": [
+                {"id":"big","what":"x","mechanical":false,"complexity":"high","scope":["a","b","c","d","e"]},
+                {"id":"s1","what":"x","mechanical":true,"complexity":"low","scope":["f1"],"depends_on":["ghost"]}
+            ],
+            "decided": [{"id":"s2","what":"x","chosen":"c","why":"w","complexity":"low","scope":["f1"]}],
+            "mocked": [], "blocked": [{"id":"z","what":"x","why":"w","needed_from":"t"}]
+        });
+        let out = super::lint_manifest(&manifest);
+        assert!(out.contains("3 implementable items"));
+        assert!(out.contains("mechanical (engine-appliable): 1"));
+        assert!(out.contains("scope has 5 files"), "anti-outlier warning");
+        assert!(out.contains("share scope file `f1`"), "overlap warning");
+        assert!(out.contains("unknown/non-implementable id `ghost`"), "dangling deps warning");
+    }
+
+    #[test]
+    fn derive_machine_files_includes_full_manifest_json() {
+        let manifest = serde_json::json!({
+            "clear": [{"id": "a", "what": "A"}],
+            "decided": [], "mocked": [], "blocked": [], "files_touched": []
+        });
+        let files = super::derive_machine_files(&manifest);
+        let (_, raw) = files.iter().find(|(p, _)| p.ends_with("manifest.json")).expect("manifest.json derived");
+        let back: serde_json::Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(back, manifest, "manifest.json is the verbatim merged manifest");
+    }
+
+    #[test]
+    fn merge_unchanged_hydrates_keeps_categories_and_unions_files() {
+        let previous = serde_json::json!({
+            "clear": [{"id": "a", "what": "A", "scope": ["src/a.php"]}],
+            "decided": [{"id": "b", "what": "B", "chosen": "x", "why": "y"}],
+            "mocked": [{"id": "c", "what": "C", "placeholder": "p"}],
+            "blocked": [{"id": "z", "what": "Z", "why": "w", "needed_from": "team"}],
+            "files_touched": ["src/a.php", "src/b.php"]
+        });
+        // Round 2: only `b` is re-emitted (reclassified content), rest unchanged.
+        let incremental = serde_json::json!({
+            "clear": [],
+            "decided": [{"id": "b", "what": "B v2", "chosen": "x2", "why": "review finding"}],
+            "mocked": [], "blocked": [],
+            "files_touched": ["src/b.php", "src/new.php"],
+            "unchanged": ["a", "c", "z", "ghost-id"]
+        });
+        let (merged, n) = super::merge_unchanged_items(&incremental, &previous);
+        assert_eq!(n, 3, "a + c + z hydrated; ghost-id ignored");
+        assert!(merged.get("unchanged").is_none(), "key stripped");
+        // categories preserved
+        assert_eq!(merged["clear"][0]["id"], "a");
+        assert_eq!(merged["mocked"][0]["id"], "c");
+        assert_eq!(merged["blocked"][0]["id"], "z");
+        // re-emitted item wins (not duplicated, new content kept)
+        let decided = merged["decided"].as_array().unwrap();
+        assert_eq!(decided.len(), 1);
+        assert_eq!(decided[0]["what"], "B v2");
+        // files_touched = union previous ∪ new
+        let ft: Vec<&str> = merged["files_touched"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+        assert_eq!(ft, vec!["src/a.php", "src/b.php", "src/new.php"]);
+    }
+
+    #[test]
+    fn merge_unchanged_noop_without_unchanged_key() {
+        let m = serde_json::json!({
+            "clear": [{"id": "a", "what": "A"}],
+            "decided": [], "mocked": [], "blocked": [], "files_touched": ["f"]
+        });
+        let (merged, n) = super::merge_unchanged_items(&m, &serde_json::json!({}));
+        assert_eq!(n, 0);
+        assert_eq!(merged, m);
+    }
+
+    #[test]
+    fn rewrite_envelope_data_replaces_data_keeps_preamble_and_summary() {
+        let output = "I analyzed the review findings.\n---STEP_OUTPUT---\n{\"data\": {\"clear\": []}, \"status\": \"OK\", \"summary\": \"partial manifest\"}\n---END_STEP_OUTPUT---";
+        let merged = serde_json::json!({"clear": [{"id": "a", "what": "A"}]});
+        let rewritten = super::rewrite_envelope_data(output, &merged);
+        assert!(rewritten.starts_with("I analyzed the review findings.\n"));
+        let env = crate::workflows::template::extract_step_envelope(&rewritten).unwrap();
+        assert_eq!(env.summary, "partial manifest");
+        let data: serde_json::Value = serde_json::from_str(&env.data_json).unwrap();
+        assert_eq!(data, merged, "envelope data is the merged manifest");
+    }
+
+    #[test]
+    fn lint_manifest_clean_plan_says_sane() {
+        let manifest = serde_json::json!({
+            "clear": [{"id":"a","what":"x","scope":["f1"]}],
+            "decided": [], "mocked": [], "blocked": []
+        });
+        assert!(super::lint_manifest(&manifest).contains("plan shape looks sane"));
     }
 }

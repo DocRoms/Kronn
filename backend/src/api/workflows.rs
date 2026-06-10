@@ -236,6 +236,44 @@ fn validate_json_data_steps(steps: &[WorkflowStep]) -> Result<(), String> {
     Ok(())
 }
 
+/// 2026-06-10 — validate launch-time variables against their declared
+/// contract: `required` (non-empty) + optional `pattern` (anchored regex
+/// full-match). Pure + testable. Returns the first violation message (FR,
+/// user-facing) or `Ok(())`. A malformed declared regex is treated as
+/// "no constraint" (logged, never blocks a launch). This is the net that
+/// stops a typo like `7152` (vs `EW-7152`) from reaching the API as a
+/// literal path param and 404ing.
+pub(crate) fn validate_launch_variables(
+    declared: &[crate::models::PromptVariable],
+    provided: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    for d in declared {
+        let label = if d.label.is_empty() { &d.name } else { &d.label };
+        let val = provided.get(&d.name).map(|s| s.trim()).unwrap_or("");
+        if d.required && val.is_empty() {
+            return Err(format!("Variable « {label} » est obligatoire pour lancer ce workflow."));
+        }
+        if val.is_empty() {
+            continue; // optional + empty → nothing to shape-check
+        }
+        if let Some(pat) = d.pattern.as_deref().filter(|p| !p.trim().is_empty()) {
+            match regex_lite::Regex::new(&format!("^(?:{pat})$")) {
+                Ok(re) if !re.is_match(val) => {
+                    return Err(format!(
+                        "Variable « {label} » = « {val} » ne respecte pas le format attendu ({pat})."
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(
+                    "Variable '{}' has an invalid pattern '{}' ({}); skipping shape check",
+                    d.name, pat, e
+                ),
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 0.8.5 — enforce the per-`StepType` required-fields contract that
 /// `#[serde(default)]` on `WorkflowStep.{agent,prompt_template,mode}`
 /// stopped enforcing at the JSON layer.
@@ -270,6 +308,93 @@ fn validate_required_fields_per_type(steps: &[WorkflowStep]) -> Result<(), Strin
         validate_step_required_fields(s)?;
     }
     Ok(())
+}
+
+/// Max nesting depth for SubWorkflow steps (Phase 1, spec §4.3). A chain
+/// `A → B → C → D → E → F` (depth 6) is refused — well beyond any sane
+/// decomposition and the cheap rampart if cycle detection is ever bypassed.
+pub(crate) const MAX_SUBWORKFLOW_DEPTH: usize = 5;
+
+/// 2026-06-11 (Phase 1) — PURE validation of the SubWorkflow graph rooted at
+/// the workflow being saved. Detects cycles (`A → B → A`, incl. self), over-
+/// depth, dangling targets, and `Gate` steps inside a sub-workflow (forbidden
+/// in MVP — a nested gate can't be resumed yet, spec arbitrage B). DB-free:
+/// the caller pre-loads every workflow's steps into `graph` (the I/O part).
+///
+/// `start_id` is the id of the workflow being saved (a create can pass a
+/// placeholder that matches no existing reference — no cycle is possible
+/// for a not-yet-existent id). `start_steps` are its NEW steps (for an
+/// update, these override whatever stale version sits in `graph`).
+pub(crate) fn validate_sub_workflow_graph(
+    start_id: &str,
+    start_steps: &[WorkflowStep],
+    graph: &std::collections::HashMap<String, Vec<WorkflowStep>>,
+) -> Result<(), String> {
+    fn visit(
+        steps: &[WorkflowStep],
+        graph: &std::collections::HashMap<String, Vec<WorkflowStep>>,
+        path: &mut Vec<String>,
+    ) -> Result<(), String> {
+        for step in steps {
+            if !matches!(step.step_type, StepType::SubWorkflow) {
+                continue;
+            }
+            let target = match step.sub_workflow_id.as_deref().map(str::trim) {
+                Some(t) if !t.is_empty() => t,
+                _ => continue, // field-required check handles the empty case
+            };
+            // Cycle: the target is an ancestor on the current path.
+            if path.iter().any(|a| a == target) {
+                return Err(format!(
+                    "Cycle de sous-workflows détecté : {} → {target} (un workflow ne peut pas se rappeler lui-même, même indirectement).",
+                    path.join(" → ")
+                ));
+            }
+            // Depth: path already holds the ancestors; descending one more.
+            if path.len() >= MAX_SUBWORKFLOW_DEPTH {
+                return Err(format!(
+                    "Profondeur de sous-workflows trop grande (> {MAX_SUBWORKFLOW_DEPTH}) : {} → {target}.",
+                    path.join(" → ")
+                ));
+            }
+            let child_steps = graph.get(target).ok_or_else(|| {
+                format!("Le sous-workflow référencé « {target} » est introuvable (supprimé ? id erroné ?).")
+            })?;
+            // MVP: no Gate inside a sub-workflow (can't resume a nested gate).
+            if child_steps.iter().any(|s| matches!(s.step_type, StepType::Gate)) {
+                return Err(format!(
+                    "Le sous-workflow « {target} » contient une étape Gate — interdit en sous-workflow (un gate imbriqué n'est pas encore reprenable). Retire le Gate du sous-workflow ou ne l'utilise pas comme sous-workflow.",
+                ));
+            }
+            path.push(target.to_string());
+            visit(child_steps, graph, path)?;
+            path.pop();
+        }
+        Ok(())
+    }
+    let mut path = vec![start_id.to_string()];
+    visit(start_steps, graph, &mut path)
+}
+
+/// Async wrapper: short-circuits when no SubWorkflow step is present (no DB
+/// hit for the common case), else loads every workflow's steps and runs the
+/// pure validator above.
+async fn validate_sub_workflow_graph_db(
+    state: &AppState,
+    start_id: &str,
+    steps: &[WorkflowStep],
+) -> Result<(), String> {
+    if !steps.iter().any(|s| matches!(s.step_type, StepType::SubWorkflow)) {
+        return Ok(());
+    }
+    let all = state
+        .db
+        .with_conn(crate::db::workflows::list_workflows)
+        .await
+        .map_err(|e| format!("DB error loading workflows for sub-workflow validation: {e}"))?;
+    let graph: std::collections::HashMap<String, Vec<WorkflowStep>> =
+        all.into_iter().map(|w| (w.id, w.steps)).collect();
+    validate_sub_workflow_graph(start_id, steps, &graph)
 }
 
 /// Per-step required-field check, extracted from the loop above so the
@@ -341,6 +466,19 @@ fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
                             s.name, secs
                         ));
                     }
+                }
+            }
+            StepType::SubWorkflow => {
+                // 2026-06-11 Phase 1 — a SubWorkflow step MUST name a target.
+                // Existence + cycle + depth + "no Gate inside" are checked by
+                // the dedicated graph validator (validate_sub_workflow_graph,
+                // which needs DB access); here we only enforce the field is
+                // present (mirrors the unwired-API check).
+                if s.sub_workflow_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                    return Err(format!(
+                        "Step SubWorkflow « {} » : `sub_workflow_id` est requis (choisis le workflow enfant à lancer).",
+                        s.name
+                    ));
                 }
             }
             // Other variants have their own dedicated validators:
@@ -639,6 +777,12 @@ pub async fn create(
     if let Err(e) = validate_required_fields_per_type(&req.on_failure) {
         return Json(ApiResponse::err(e));
     }
+    // 2026-06-11 Phase 1 — SubWorkflow graph: cycle/depth/dangling/no-gate.
+    // A create can't be in a cycle with itself (its id doesn't exist yet),
+    // so a placeholder start id is safe.
+    if let Err(e) = validate_sub_workflow_graph_db(&state, "__new__", &req.steps).await {
+        return Json(ApiResponse::err(e));
+    }
 
     let now = Utc::now();
     let wf = Workflow {
@@ -727,8 +871,34 @@ pub async fn create_feasibility_autopilot(
     State(state): State<AppState>,
     Json(params): Json<crate::workflows::big_ticket_template::FeasibilityWorkflowParams>,
 ) -> Json<ApiResponse<Workflow>> {
-    let req = crate::workflows::big_ticket_template::build_feasibility_workflow(params);
-    create(State(state), Json(req)).await
+    use crate::workflows::big_ticket_template as tpl;
+    // 2026-06-11 (PR-C) — the template is now DECOMPOSED: a parent (triage +
+    // human gate + pr_draft) and a child (implement → run_tests → drift_check).
+    // Create the CHILD first so the parent's `feasibility_impl` SubWorkflow
+    // step references its real id — the child then exists when the parent's
+    // sub-workflow-graph validation runs in `create()`.
+    let agent = params.agent.clone().unwrap_or(crate::models::AgentType::ClaudeCode);
+    let ticket_ref = params.ticket_ref.clone().unwrap_or_else(|| "{{ticket_ref}}".into());
+    let project_id = params.project_id.clone();
+    let parent_name = params.name.clone().unwrap_or_else(|| {
+        format!("Big-ticket AutoPilot ({})", params.ticket_ref.clone().unwrap_or_else(|| "manual".into()))
+    });
+
+    let child_req = tpl::build_feasibility_child(agent, &ticket_ref, project_id, &parent_name, params.decomposed);
+    let child_resp = create(State(state.clone()), Json(child_req)).await;
+    let child = match child_resp.0.data {
+        Some(w) => w,
+        // Surface the child's creation error verbatim (no orphan parent).
+        None => return child_resp,
+    };
+
+    let mut parent_req = tpl::build_feasibility_workflow(params);
+    for s in parent_req.steps.iter_mut() {
+        if matches!(s.step_type, crate::models::StepType::SubWorkflow) {
+            s.sub_workflow_id = Some(child.id.clone());
+        }
+    }
+    create(State(state), Json(parent_req)).await
 }
 
 /// PUT /api/workflows/:id
@@ -797,6 +967,10 @@ pub async fn update(
             return Json(ApiResponse::err(e));
         }
         if let Err(e) = validate_required_fields_per_type(new_steps) {
+            return Json(ApiResponse::err(e));
+        }
+        // 2026-06-11 Phase 1 — SubWorkflow graph (cycle incl. self via `id`).
+        if let Err(e) = validate_sub_workflow_graph_db(&state, &id, new_steps).await {
             return Json(ApiResponse::err(e));
         }
     }
@@ -1010,6 +1184,12 @@ pub async fn import_workflow(
     if let Err(e) = validate_required_fields_per_type(&wf.on_failure) {
         return Json(ApiResponse::err(e));
     }
+    // 2026-06-11 Phase 1 — SubWorkflow graph. An import that references a
+    // sub-workflow absent on this instance fails loudly here (the export
+    // bundle doesn't yet embed referenced workflows — Phase 2 follow-up).
+    if let Err(e) = validate_sub_workflow_graph_db(&state, "__import__", &wf.steps).await {
+        return Json(ApiResponse::err(e));
+    }
 
     // Build a remap table for QP ids (source → fresh) and insert the
     // bundled QPs first. If a step references a QP that's NOT bundled,
@@ -1108,17 +1288,8 @@ pub async fn trigger(
     // - Unknown variables (sent but not declared) → silently dropped
     //   (defensive: don't let a stale form smuggle data in).
     let provided_vars = body.map(|Json(b)| b.variables).unwrap_or_default();
-    for declared in &wf.variables {
-        if declared.required {
-            let val = provided_vars.get(&declared.name).map(|s| s.trim()).unwrap_or("");
-            if val.is_empty() {
-                let label = if declared.label.is_empty() { &declared.name } else { &declared.label };
-                return sse_error(format!(
-                    "Variable « {} » est obligatoire pour lancer ce workflow.",
-                    label
-                ));
-            }
-        }
+    if let Err(msg) = validate_launch_variables(&wf.variables, &provided_vars) {
+        return sse_error(msg);
     }
     let trigger_obj = build_manual_trigger_obj(&provided_vars, Utc::now());
 
@@ -1185,7 +1356,7 @@ pub async fn trigger(
         drop(cfg);
 
         if let Err(e) = crate::workflows::runner::execute_run(
-            state_for_run, &wf, &mut run_exec, &tokens, &agents, Some(tx),
+            state_for_run, &wf, &mut run_exec, &tokens, &agents, Some(tx), None, None,
         ).await {
             tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
         }
@@ -1568,6 +1739,9 @@ pub async fn test_step(
         AgentType::Ollama => agents.ollama.full_access,
         AgentType::Custom => false,
     };
+    // Owned clone for the spawned task — the Test button must resolve model
+    // tiers exactly like a real run (run-9 finding: overrides were dropped).
+    let model_tiers = agents.model_tiers.clone();
 
     // In dry_run mode, prepend a simulation preamble. The preamble is
     // adaptive so it does not fight the output contract downstream steps rely on:
@@ -1606,6 +1780,7 @@ pub async fn test_step(
         let outcome = crate::workflows::steps::execute_step(
             &step, &project_path, &work_dir, &tokens, full_access, &ctx,
             &agent_extra_context, Some(progress_tx),
+            Some(&model_tiers),
         ).await;
 
         let _ = tx.send(crate::workflows::runner::RunEvent::StepDone {
@@ -1813,6 +1988,12 @@ pub struct DecideRunRequest {
     pub decision: String,
     #[serde(default)]
     pub comment: Option<String>,
+    /// Optional gate identity (step name). When set, the decision only
+    /// applies if the run is currently waiting on THAT gate — protects a
+    /// stale caller (e.g. the auto-approve timer armed on gate A) from
+    /// deciding a later gate B it never saw. 2026-06-10 audit P1.
+    #[serde(default)]
+    pub gate_step: Option<String>,
 }
 
 /// Response for [`decide_run`].
@@ -1852,6 +2033,23 @@ pub async fn decide_run(
         )));
     }
 
+    // Gate identity guard (2026-06-10 audit P1): a decision pinned to a
+    // specific gate must match the gate the run is ACTUALLY waiting on.
+    if let Some(ref expected_gate) = payload.gate_step {
+        let current_gate = run
+            .step_results
+            .iter()
+            .rev()
+            .find(|r| r.status == RunStatus::WaitingApproval)
+            .map(|r| r.step_name.clone());
+        if current_gate.as_deref() != Some(expected_gate.as_str()) {
+            return Json(ApiResponse::err(format!(
+                "Decision targets gate `{expected_gate}` but the run is waiting on `{}` — stale decision rejected",
+                current_gate.as_deref().unwrap_or("(unknown)")
+            )));
+        }
+    }
+
     let wf_id = run.workflow_id.clone();
     let workflow = match state
         .db
@@ -1863,7 +2061,10 @@ pub async fn decide_run(
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let decision = match payload.decision.as_str() {
+    // Case-insensitive decision parsing (2026-06-10 audit P0): the
+    // auto-approve timer used to send "Approve" and the strict lowercase
+    // match silently rejected it (wrapped in an HTTP 200 envelope).
+    let decision = match payload.decision.to_ascii_lowercase().as_str() {
         "approve" => GateDecision::Approve { comment: payload.comment.clone() },
         "request_changes" => match payload.comment.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
             Some(c) => GateDecision::RequestChanges { comment: c.to_string() },
@@ -1878,16 +2079,38 @@ pub async fn decide_run(
         ))),
     };
 
+    let new_status = match &decision {
+        GateDecision::Reject { .. } => RunStatus::Failed,
+        _ => RunStatus::Running,
+    };
+
+    // Atomic claim (2026-06-10 audit P1, TOCTOU): the read-then-check above
+    // is advisory only — two concurrent decide calls (double-click, or a
+    // human racing the auto-approve timer) could both pass it and spawn two
+    // concurrent `resume_run`s on the same run. The conditional UPDATE
+    // (`… WHERE status = 'WaitingApproval'`) lets exactly ONE caller win.
+    let claim_run_id = run.id.clone();
+    let claim_status = new_status.clone();
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status))
+        .await
+    {
+        Ok(true) => {} // we won the claim — proceed
+        Ok(false) => {
+            return Json(ApiResponse::err(
+                "Run was just decided by another caller — decision ignored (no double-resume)",
+            ));
+        }
+        Err(e) => return Json(ApiResponse::err(format!("DB error claiming run: {e}"))),
+    }
+
     // Resume in the background — long-running, the operator just gets
     // back the new status (Running for approve/request_changes, Failed
     // for reject). The UI already polls run state via SSE/refetch.
     let state_clone = state.clone();
     let run_for_resume = run.clone();
     let run_id_for_log = run.id.clone();
-    let new_status = match &decision {
-        GateDecision::Reject { .. } => RunStatus::Failed,
-        _ => RunStatus::Running,
-    };
     tokio::spawn(async move {
         let cfg = state_clone.config.read().await;
         let tokens = cfg.tokens.clone();
@@ -2470,6 +2693,9 @@ pub async fn suggestions(
                 exec_setup_args: vec![],
                 quick_prompt_id: None,
                 json_data_payload: None,
+                sub_workflow_id: None,
+                sub_workflow_foreach_file: None,
+                multi_agent_review: None,
             }).collect(),
         });
     }
@@ -2690,6 +2916,109 @@ pub async fn test_api_call(
 mod tests {
     use super::*;
 
+    // ── validate_sub_workflow_graph (2026-06-11 Phase 1) ──
+    fn subwf_step(name: &str, target: &str) -> WorkflowStep {
+        WorkflowStep { name: name.into(), step_type: StepType::SubWorkflow,
+            sub_workflow_id: Some(target.into()), ..Default::default() }
+    }
+    fn gate_step(name: &str) -> WorkflowStep {
+        WorkflowStep { name: name.into(), step_type: StepType::Gate, ..Default::default() }
+    }
+    fn agent_step(name: &str) -> WorkflowStep {
+        WorkflowStep { name: name.into(), step_type: StepType::Agent, ..Default::default() }
+    }
+
+    #[test]
+    fn subwf_graph_detects_direct_and_indirect_cycle() {
+        let mut g = std::collections::HashMap::new();
+        g.insert("A".to_string(), vec![subwf_step("s", "B")]);
+        g.insert("B".to_string(), vec![subwf_step("s", "A")]);
+        // Saving A (A→B→A) must be rejected.
+        let err = validate_sub_workflow_graph("A", &g["A"], &g).unwrap_err();
+        assert!(err.contains("Cycle"), "got: {err}");
+        // Self-reference too.
+        let self_ref = vec![subwf_step("s", "A")];
+        assert!(validate_sub_workflow_graph("A", &self_ref, &g).unwrap_err().contains("Cycle"));
+    }
+
+    #[test]
+    fn subwf_graph_rejects_overdepth_and_dangling() {
+        let mut g = std::collections::HashMap::new();
+        // Chain A→B→C→D→E→F = depth 6 > MAX (5).
+        for (id, next) in [("A","B"),("B","C"),("C","D"),("D","E"),("E","F")] {
+            g.insert(id.to_string(), vec![subwf_step("s", next)]);
+        }
+        g.insert("F".to_string(), vec![agent_step("done")]);
+        assert!(validate_sub_workflow_graph("A", &g["A"], &g).unwrap_err().contains("Profondeur"));
+        // Dangling target.
+        let dangling = vec![subwf_step("s", "GHOST")];
+        assert!(validate_sub_workflow_graph("X", &dangling, &g).unwrap_err().contains("introuvable"));
+    }
+
+    #[test]
+    fn subwf_graph_rejects_gate_inside_child() {
+        let mut g = std::collections::HashMap::new();
+        g.insert("child".to_string(), vec![agent_step("impl"), gate_step("review")]);
+        let parent = vec![subwf_step("s", "child")];
+        assert!(validate_sub_workflow_graph("parent", &parent, &g).unwrap_err().contains("Gate"));
+    }
+
+    #[test]
+    fn subwf_graph_accepts_valid_nesting() {
+        let mut g = std::collections::HashMap::new();
+        g.insert("leaf".to_string(), vec![agent_step("impl"), agent_step("tests")]);
+        g.insert("mid".to_string(), vec![subwf_step("s", "leaf")]);
+        let parent = vec![agent_step("plan"), subwf_step("s", "mid")];
+        assert!(validate_sub_workflow_graph("parent", &parent, &g).is_ok());
+    }
+
+    // ── validate_launch_variables (2026-06-10, the `7152` shape bug) ──
+    fn var(name: &str, required: bool, pattern: Option<&str>) -> crate::models::PromptVariable {
+        crate::models::PromptVariable {
+            name: name.into(), label: String::new(), placeholder: String::new(),
+            description: None, required, pattern: pattern.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn launch_vars_pattern_rejects_malformed_value() {
+        let declared = vec![var("ticket_key", true, Some(r"[A-Z]+-\d+"))];
+        let mut provided = std::collections::HashMap::new();
+        provided.insert("ticket_key".to_string(), "7152".to_string()); // the live bug
+        let err = validate_launch_variables(&declared, &provided).unwrap_err();
+        assert!(err.contains("format attendu"), "got: {err}");
+        // The correct shape passes.
+        provided.insert("ticket_key".to_string(), "EW-7152".to_string());
+        assert!(validate_launch_variables(&declared, &provided).is_ok());
+    }
+
+    #[test]
+    fn launch_vars_pattern_is_anchored_full_match() {
+        // A value that merely CONTAINS a match must be rejected (anchored).
+        let declared = vec![var("k", true, Some(r"[A-Z]+-\d+"))];
+        let mut provided = std::collections::HashMap::new();
+        provided.insert("k".to_string(), "junk EW-1 junk".to_string());
+        assert!(validate_launch_variables(&declared, &provided).is_err());
+    }
+
+    #[test]
+    fn launch_vars_required_empty_rejected_optional_empty_ok() {
+        let declared = vec![var("req", true, None), var("opt", false, Some(r"\d+"))];
+        let empty = std::collections::HashMap::new();
+        assert!(validate_launch_variables(&declared, &empty).is_err()); // req missing
+        let mut only_req = std::collections::HashMap::new();
+        only_req.insert("req".to_string(), "x".to_string()); // opt absent → skipped
+        assert!(validate_launch_variables(&declared, &only_req).is_ok());
+    }
+
+    #[test]
+    fn launch_vars_invalid_regex_never_blocks() {
+        let declared = vec![var("k", true, Some("(("))]; // malformed
+        let mut provided = std::collections::HashMap::new();
+        provided.insert("k".to_string(), "anything".to_string());
+        assert!(validate_launch_variables(&declared, &provided).is_ok());
+    }
+
     #[test]
     fn count_misconfigured_steps_flags_unwired_api_and_clears_when_fixed() {
         // Mirrors the user's AI-generated "Ticket → PR" workflow: an ApiCall
@@ -2833,6 +3162,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 
@@ -3205,6 +3537,7 @@ mod tests {
                 placeholder: "kronn".into(),
                 description: None,
                 required: true,
+                pattern: None,
             }],
             agent: AgentType::ClaudeCode,
             project_id: Some("src-project".into()),

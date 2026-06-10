@@ -108,6 +108,25 @@ pub async fn create_bundle(
         id_map.insert(ca.bundle_id.clone(), server.id.clone());
         custom_servers.push((ca.bundle_id.clone(), server, ca.payload.clone()));
     }
+    // Child workflows (2026-06-11) — pre-allocate a UUID per child so the
+    // parent's `@bundle:<id>` on `sub_workflow_id` resolves to a real id
+    // before the parent is validated/inserted. Children are inserted FIRST
+    // in the transaction (§5) so the FK-free `sub_workflow_id` is sound.
+    for cw in &req.child_workflows {
+        if !validate_bundle_id(&cw.bundle_id) {
+            return Json(ApiResponse::err(format!(
+                "Invalid bundle_id `{}` on child_workflows entry — must be kebab-case ([A-Za-z0-9_-]+) and non-empty",
+                cw.bundle_id
+            )));
+        }
+        if !all_bundle_ids.insert(cw.bundle_id.clone()) {
+            return Json(ApiResponse::err(format!(
+                "Duplicate bundle_id `{}` (must be unique across quick_prompts/quick_apis/custom_apis/child_workflows)",
+                cw.bundle_id
+            )));
+        }
+        id_map.insert(cw.bundle_id.clone(), Uuid::new_v4().to_string());
+    }
 
     // ── 2. Validate every @bundle:X ref resolves ───────────────
     // Walk the workflow as JSON; cheaper than maintaining a list of
@@ -124,6 +143,16 @@ pub async fn create_bundle(
             missing_refs.push(bid.to_string());
         }
     });
+    // Children can reference siblings/grand-children via @bundle: too.
+    for cw in &req.child_workflows {
+        if let Ok(cv) = serde_json::to_value(&cw.request) {
+            collect_bundle_refs(&cv, &mut |bid| {
+                if !id_map.contains_key(bid) {
+                    missing_refs.push(bid.to_string());
+                }
+            });
+        }
+    }
     if !missing_refs.is_empty() {
         missing_refs.sort();
         missing_refs.dedup();
@@ -227,6 +256,86 @@ pub async fn create_bundle(
         updated_at: now,
     };
 
+    // ── 4b. Build child workflows + validate the SubWorkflow graph ──
+    // Children inherit the parent's project_id when they don't set one
+    // (INV-3: linked_repos / project MCPs / [TRIAGE] addendum must apply
+    // inside the child run). Their own @bundle: refs are substituted with
+    // the same id_map (sibling / grand-child references).
+    let parent_project_id = req.workflow.project_id.clone();
+    let mut prepared_children: Vec<Workflow> = Vec::with_capacity(req.child_workflows.len());
+    for cw in &req.child_workflows {
+        let real_id = id_map[&cw.bundle_id].clone();
+        let mut cv = match serde_json::to_value(&cw.request) {
+            Ok(v) => v,
+            Err(e) => return Json(ApiResponse::err(format!(
+                "Child workflow `{}` is not valid JSON: {}", cw.bundle_id, e
+            ))),
+        };
+        substitute_bundle_refs(&mut cv, &id_map);
+        let creq: CreateWorkflowRequest = match serde_json::from_value(cv) {
+            Ok(w) => w,
+            Err(e) => return Json(ApiResponse::err(format!(
+                "Child workflow `{}` shape broke after @bundle: substitution: {}", cw.bundle_id, e
+            ))),
+        };
+        prepared_children.push(Workflow {
+            id: real_id,
+            name: creq.name.clone(),
+            project_id: creq.project_id.clone().or_else(|| parent_project_id.clone()),
+            trigger: creq.trigger.clone(),
+            steps: creq.steps.clone(),
+            actions: creq.actions.clone(),
+            safety: creq.safety.clone().unwrap_or(WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            }),
+            workspace_config: creq.workspace_config.clone(),
+            concurrency_limit: creq.concurrency_limit,
+            guards: creq.guards.clone(),
+            artifacts: creq.artifacts.clone(),
+            on_failure: creq.on_failure.clone(),
+            exec_allowlist: creq.exec_allowlist.clone(),
+            variables: creq.variables.clone(),
+            enabled: true,
+            created_at: now,
+            updated_at: now,
+        });
+    }
+
+    // SubWorkflow graph guard (cycle / depth / dangling / no-gate). The
+    // bundle endpoint otherwise skips this validation entirely; with
+    // child workflows in play it MUST run. Build the graph from existing
+    // DB workflows overlaid with the bundle's children (by their pre-
+    // allocated real ids), then validate from the parent.
+    if wf_to_insert.steps.iter().any(|s| matches!(s.step_type, StepType::SubWorkflow))
+        || prepared_children.iter().any(|c| c.steps.iter().any(|s| matches!(s.step_type, StepType::SubWorkflow)))
+    {
+        let db_workflows = match state
+            .db
+            .with_conn(crate::db::workflows::list_workflows)
+            .await
+        {
+            Ok(all) => all,
+            Err(e) => return Json(ApiResponse::err(format!(
+                "DB error loading workflows for sub-workflow validation: {e}"
+            ))),
+        };
+        let mut graph: std::collections::HashMap<String, Vec<WorkflowStep>> =
+            db_workflows.into_iter().map(|w| (w.id, w.steps)).collect();
+        for child in &prepared_children {
+            graph.insert(child.id.clone(), child.steps.clone());
+        }
+        if let Err(e) = crate::api::workflows::validate_sub_workflow_graph(
+            &wf_id,
+            &wf_to_insert.steps,
+            &graph,
+        ) {
+            return Json(ApiResponse::err(e));
+        }
+    }
+
     // ── 5. Single transaction — atomic insert across all artifacts ─
     let qps_for_response: Vec<BundleCreated> = req.quick_prompts.iter().zip(prepared_qps.iter())
         .map(|(declared, inserted)| BundleCreated {
@@ -247,6 +356,13 @@ pub async fn create_bundle(
             bundle_id: bundle_id.clone(),
             id: server.id.clone(),
             name: server.name.clone(),
+        })
+        .collect();
+    let children_for_response: Vec<BundleCreated> = req.child_workflows.iter().zip(prepared_children.iter())
+        .map(|(declared, inserted)| BundleCreated {
+            bundle_id: declared.bundle_id.clone(),
+            id: inserted.id.clone(),
+            name: inserted.name.clone(),
         })
         .collect();
     let workflow_name_for_response = wf_to_insert.name.clone();
@@ -270,6 +386,11 @@ pub async fn create_bundle(
             for (_, server, _) in &custom_servers {
                 crate::db::mcps::upsert_server(&tx, server)?;
             }
+            // Children BEFORE the parent so the parent's substituted
+            // `sub_workflow_id` points at an already-inserted row.
+            for child in &prepared_children {
+                crate::db::workflows::insert_workflow(&tx, child)?;
+            }
             crate::db::workflows::insert_workflow(&tx, &wf_to_insert)?;
             tx.commit()?;
             Ok::<_, anyhow::Error>(())
@@ -283,6 +404,7 @@ pub async fn create_bundle(
         quick_prompts: qps_for_response,
         quick_apis: qas_for_response,
         custom_apis: custom_apis_for_response,
+        child_workflows: children_for_response,
         workflow: BundleWorkflowCreated {
             id: workflow_id_for_response,
             name: workflow_name_for_response,
@@ -430,6 +552,30 @@ mod tests {
         let mut found = Vec::new();
         collect_bundle_refs(&v, &mut |bid| found.push(bid.to_string()));
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn sub_workflow_id_is_a_substitution_point() {
+        // 2026-06-11 — the @bundle: walker is field-agnostic, so a parent's
+        // `sub_workflow_id: "@bundle:<child>"` is collected AND substituted
+        // exactly like quick_prompt_id. This is the whole mechanism behind
+        // decomposed-preset child workflows.
+        let mut v = json!({
+            "name": "parent",
+            "steps": [
+                { "name": "do-work", "step_type": { "type": "SubWorkflow" }, "sub_workflow_id": "@bundle:impl-verify" }
+            ],
+            "trigger": { "type": "Manual" }
+        });
+        // collect
+        let mut found = Vec::new();
+        collect_bundle_refs(&v, &mut |bid| found.push(bid.to_string()));
+        assert_eq!(found, vec!["impl-verify"], "sub_workflow_id ref must be collected");
+        // substitute
+        let id_map: HashMap<String, String> =
+            vec![("impl-verify".to_string(), "real-child-uuid".to_string())].into_iter().collect();
+        substitute_bundle_refs(&mut v, &id_map);
+        assert_eq!(v["steps"][0]["sub_workflow_id"], "real-child-uuid");
     }
 
     #[test]

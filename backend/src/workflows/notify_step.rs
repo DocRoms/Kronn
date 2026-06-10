@@ -31,6 +31,16 @@ pub async fn execute_notify_step(
     step: &WorkflowStep,
     ctx: &TemplateContext,
 ) -> StepOutcome {
+    execute_notify_step_with_policy(step, ctx, true).await
+}
+
+/// `enforce_public_ip = false` is for tests hitting a local wiremock —
+/// mirrors `SecurityPolicy::allow_loopback_for_tests` on the ApiCall side.
+pub async fn execute_notify_step_with_policy(
+    step: &WorkflowStep,
+    ctx: &TemplateContext,
+    enforce_public_ip: bool,
+) -> StepOutcome {
     let start = Instant::now();
 
     // ── Validate + extract config ───────────────────────────────────────
@@ -61,6 +71,25 @@ pub async fn execute_notify_step(
         Ok(b) => b,
         Err(e) => return fail(step, start, format!("Template render error on body: {}", e)),
     };
+
+    // ── SSRF guard (2026-06-10 audit P1) ────────────────────────────────
+    // The URL is templated — a value coming from an upstream step's output
+    // could point the webhook at localhost / private ranges (cloud metadata,
+    // the Kronn backend itself, …). ApiCall has had this guard since 0.6;
+    // Notify fired unchecked. Same public-IP assertion, same loud failure.
+    let parsed_url = match reqwest::Url::parse(&url) {
+        Ok(u) => u,
+        Err(e) => return fail(step, start, format!("Notify: invalid URL after templating: {e}")),
+    };
+    if enforce_public_ip {
+        if let Err(e) = super::api_call_security::assert_public_ip(&parsed_url).await {
+            return fail(step, start, format!("Security: {e}"));
+        }
+    }
+    // Redacted form for EVERYTHING we persist (output, summary). Webhook
+    // secrets often live in the PATH (hooks.slack.com/services/T…/B…/xxx),
+    // so we keep scheme + host + first path segment only.
+    let redacted_url = redact_notify_url(&parsed_url);
 
     // ── Build and fire the request ──────────────────────────────────────
     let client = match reqwest::Client::builder()
@@ -102,12 +131,14 @@ pub async fn execute_notify_step(
     // delivery success without parsing the JSON. Cf.
     // [[project_step_output_homogenisation_0_9_0]].
     let status_str = if is_success { "OK" } else { "ERROR" };
-    let summary = format!("{} {} → {}", method.as_str(), url, http_status);
+    // Persist only the REDACTED url (audit P1: full webhook URLs — Slack
+    // tokens live in the path — used to land verbatim in run outputs).
+    let summary = format!("{} {} → {}", method.as_str(), redacted_url, http_status);
     let output = super::step_output_format::format_step_output(
         serde_json::json!({
             "http_status": http_status,
             "response_excerpt": excerpt,
-            "url": url,
+            "url": redacted_url,
             "method": method.as_str(),
         }),
         status_str,
@@ -116,6 +147,12 @@ pub async fn execute_notify_step(
         &[status_str],
     );
 
+    // 2026-06-10 audit P1 — the runner only honours `outcome.condition_action`;
+    // returning None here meant `on_result` rules on Notify steps were
+    // silently dead: a Slack 5xx with a declared `ERROR → Skip` recovery
+    // still tipped the whole run into rollback. Evaluate like ApiCall does.
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(condition_label);
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
@@ -124,34 +161,72 @@ pub async fn execute_notify_step(
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
-        condition_action: None,
+        condition_action,
+    }
+}
+
+/// Redact a webhook URL for persistence: scheme + host + FIRST path
+/// segment only. Unlike API base URLs, webhook secrets commonly live in
+/// the path itself (`hooks.slack.com/services/T…/B…/secret`) — query-only
+/// redaction would still leak them into run outputs and logs.
+fn redact_notify_url(url: &reqwest::Url) -> String {
+    let host = url.host_str().unwrap_or("?");
+    let first_seg = url
+        .path_segments()
+        .and_then(|mut s| s.next())
+        .filter(|s| !s.is_empty());
+    match first_seg {
+        Some(seg) => format!("{}://{}/{}/…", url.scheme(), host, seg),
+        None => format!("{}://{}/", url.scheme(), host),
+    }
+}
+
+/// Human label for a fired condition — same convention as the ApiCall
+/// executor (`Stop` / `Skip` / `Goto:<target>`).
+fn condition_label(a: &crate::models::ConditionAction) -> String {
+    use crate::models::ConditionAction;
+    match a {
+        ConditionAction::Stop => "Stop".to_string(),
+        ConditionAction::Skip => "Skip".to_string(),
+        ConditionAction::Goto { step_name, .. } => format!("Goto:{step_name}"),
     }
 }
 
 fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutcome {
+    let output: String = msg.into();
+    // Same fix as the success path: config/transport failures must still
+    // honour declared `on_result` recovery rules.
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(condition_label);
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
             status: RunStatus::Failed,
-            output: msg.into(),
+            output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
-        condition_action: None,
+        condition_action,
     }
 }
 
@@ -212,6 +287,9 @@ mod tests {
             exec_setup_args: vec![],
             quick_prompt_id: None,
             json_data_payload: None,
+            sub_workflow_id: None,
+            sub_workflow_foreach_file: None,
+            multi_agent_review: None,
         }
     }
 
@@ -223,7 +301,7 @@ mod tests {
         });
         step.notify_config = None;
         let ctx = TemplateContext::new();
-        let out = execute_notify_step(&step, &ctx).await;
+        let out = execute_notify_step_with_policy(&step, &ctx, false).await;
         assert_eq!(out.result.status, RunStatus::Failed);
         assert!(out.result.output.contains("missing `notify_config`"));
     }
@@ -235,7 +313,7 @@ mod tests {
             headers: HashMap::new(), body_template: String::new(),
         });
         let ctx = TemplateContext::new();
-        let out = execute_notify_step(&step, &ctx).await;
+        let out = execute_notify_step_with_policy(&step, &ctx, false).await;
         assert_eq!(out.result.status, RunStatus::Failed);
         assert!(out.result.output.contains("`url` is empty"));
     }
@@ -247,7 +325,7 @@ mod tests {
             headers: HashMap::new(), body_template: String::new(),
         });
         let ctx = TemplateContext::new();
-        let out = execute_notify_step(&step, &ctx).await;
+        let out = execute_notify_step_with_policy(&step, &ctx, false).await;
         assert_eq!(out.result.status, RunStatus::Failed);
         assert!(out.result.output.contains("unsupported method"));
     }
@@ -297,7 +375,7 @@ mod tests {
             body_template: r#"{"stage":"{{steps.audit.output}}"}"#.into(),
         });
 
-        let out = execute_notify_step(&step, &ctx).await;
+        let out = execute_notify_step_with_policy(&step, &ctx, false).await;
         assert_eq!(out.result.status, RunStatus::Success, "unexpected failure: {}", out.result.output);
         assert_eq!(out.result.tokens_used, 0, "Notify must never consume tokens");
 
@@ -333,11 +411,41 @@ mod tests {
             headers: HashMap::new(),
             body_template: "{}".into(),
         });
-        let out = execute_notify_step(&step, &TemplateContext::new()).await;
+        let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
         assert_eq!(out.result.status, RunStatus::Failed);
         let parsed = crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
         assert_eq!(parsed["status"], "ERROR");
         assert_eq!(parsed["data"]["http_status"], 400);
         assert!(parsed["data"]["response_excerpt"].as_str().unwrap().contains("nope, bad payload"));
+    }
+
+    /// 2026-06-10 audit P1 — webhook secrets often live in the URL PATH
+    /// (Slack: /services/T…/B…/<token>). Persisted outputs carry only
+    /// scheme + host + first segment.
+    #[test]
+    fn redact_notify_url_keeps_only_first_path_segment() {
+        let url = reqwest::Url::parse("https://hooks.slack.com/services/T0001/B0002/supersecrettoken?x=1").unwrap();
+        let red = redact_notify_url(&url);
+        assert_eq!(red, "https://hooks.slack.com/services/…");
+        assert!(!red.contains("supersecrettoken"));
+        assert!(!red.contains("B0002"));
+        // Bare host stays readable.
+        let bare = reqwest::Url::parse("https://example.com/").unwrap();
+        assert_eq!(redact_notify_url(&bare), "https://example.com/");
+    }
+
+    /// 2026-06-10 audit P1 — SSRF guard: a templated URL resolving to
+    /// localhost/private ranges must fail the step, like ApiCall does.
+    #[tokio::test]
+    async fn notify_refuses_private_target() {
+        let step = make_step(NotifyConfig {
+            url: "http://127.0.0.1:9/hook".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: "{}".into(),
+        });
+        let out = execute_notify_step(&step, &TemplateContext::new()).await;
+        assert_eq!(out.result.status, RunStatus::Failed);
+        assert!(out.result.output.contains("Security"), "got: {}", out.result.output);
     }
 }

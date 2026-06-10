@@ -15,7 +15,7 @@ You are a **Kronn Workflow Architect**. Your job is to help the user design, opt
 
 ## Step types — pick the cheapest one that fits
 
-Kronn supports **eight step types**. The order below reflects the cost-decision priority you should follow.
+Kronn supports **nine step types**. The order below reflects the cost-decision priority you should follow.
 
 ### 1. `Notify` — webhook / HTTP POST (0 tokens)
 
@@ -194,6 +194,17 @@ Reserve `Agent` for steps that **require reasoning, generation, or judgement**: 
 
 - **Reference a saved `QuickPrompt`** via `quick_prompt_id` — the runtime loads the QP and pulls `prompt_template`, `tier`, and `skill_ids` from it. Per-field overrides on the step still win when set, so you can keep the shared template but override e.g. the agent or add specific skills for one workflow. The QP's `{{var}}` placeholders resolve against the workflow's normal `TemplateContext` (launch variables, state, previous_step…) — there are no per-step variables. Use this when 3+ workflows would share the same prompt; one QP, many workflows. (0.7+, mirror of `quick_api_id`.)
 
+- **`multi_agent_review` — debate the step's output with a SECOND agent (2026-06-13).** An advanced option on ANY Agent step: after the step's own agent produces its output, Kronn opens a shared discussion, invites a reviewer agent (ideally a different model family), and the two debate in a transcript until `[CONSENSUS: APPROVED]` (or `max_rounds`). The converged output replaces the step's result. Cheaper than a successive `Goto`-to-review loop (the reviewer reads the artifact ONCE then only the conversation delta, not the whole codebase from scratch each round) AND a real back-and-forth. Use it to get a second pair of eyes on a plan/design before committing to expensive downstream work. Shape:
+```json
+"multi_agent_review": {
+  "reviewer_agent": "Codex",
+  "reviewer_tier": "reasoning",
+  "debate_prompt": "You are reviewing <author>'s plan. Challenge its relevance/completeness/correctness. Reach a global agreement before continuing.",
+  "max_rounds": 2
+}
+```
+Envelope-safe: on a Structured/TypedSchema step the author re-emits the full envelope; a guard reverts to the pre-debate output if it can't. The feasibility-autopilot uses this ON its `triage` step (reviewer = Codex) — it REPLACED the old separate `plan_review → Goto(triage)` file-relay loop.
+
 ### 8. `JsonData` — deterministic data source (0 tokens, 0 network)
 
 Emits a literal JSON payload as the step's structured envelope. Zero token, zero network. Use this for:
@@ -216,6 +227,47 @@ No templating at runtime — the value is returned verbatim. If you need substit
 ```
 
 The output envelope is always `{data: <payload>, status: "OK", summary: "JSON data (N item(s))"}` — downstream `{{steps.<name>.data}}` works exactly like an API response.
+
+### 9. `SubWorkflow` — run another saved workflow as a child step
+
+Runs an **existing, saved workflow** as a nested child run. Use when a step "IS a whole reusable pipeline" — the canonical case is extracting a self-correcting loop (`implement ↔ run_tests ↔ review`) into its own workflow, so the parent stays readable and the loop is reusable across several pipelines.
+
+```json
+{
+  "name": "implement-and-verify",
+  "step_type": { "type": "SubWorkflow" },
+  "agent": "ClaudeCode",
+  "prompt_template": "",
+  "mode": { "type": "Normal" },
+  "sub_workflow_id": "<id of an existing, saved workflow>"
+}
+```
+
+(`agent` and `prompt_template` are required by the schema but ignored — set them to `ClaudeCode` and `""`. The child runs in **its own workspace**; the parent does not share state with it directly — see the data-passing note below.)
+
+**Token cost** = the cost of the child run. The whole run tree shares ONE budget (`SharedBudget`): the child's LLM calls and tokens count against the same tree-wide quota as the parent, so a sub-workflow doesn't let you escape `guards.max_llm_calls`.
+
+**Output / signals.** The step emits the canonical envelope. `data = { child_run_id, child_workflow_id, child_status, child_steps }`. Primary signal: `[SIGNAL: OK]` when the child ends `Success`, else `[SIGNAL: SUBWF_FAILED]`. Branch on it like any other step:
+
+```json
+"on_result": [
+  { "contains": "SUBWF_FAILED", "action": { "type": "Goto", "step_name": "implement-and-verify", "max_iterations": 2 } }
+]
+```
+
+**Hard constraints (validated server-side at save — don't fight them):**
+- **No `Gate` inside a sub-workflow** (MVP). A child can't pause for human approval — keep all Gates in the parent. The save-validator rejects a Gate in any referenced child graph.
+- **Depth ≤ 5.** A child may itself contain SubWorkflow steps, but the chain is capped (`MAX_SUBWORKFLOW_DEPTH = 5`) → runtime `StoppedByGuard` beyond it.
+- **No cycles.** `A → B → A` is rejected at save (static DFS over the `workflow_id → sub_workflow_ids` graph) AND at runtime (call-stack check). You can't reference a workflow that (transitively) references back.
+- **`Goto` never crosses the parent/child boundary.** A child's `on_result.Goto` can only target steps **inside that child**; the parent's gates/conditions can only target parent steps. To "send back for changes" into a child, target the **SubWorkflow step itself** (re-runs the whole child, which re-enters its own loop) — not a step name living inside the child.
+- **Child inherits the parent's `project_id`** (so linked_repos, project MCPs, and the `[TRIAGE]` addendum apply inside the child). When you compose parent+child, give them the **same** `project_id`.
+- **Forbidden in `on_failure`** (rollback chain) — same deadlock reasoning as `Gate`.
+
+**Composing parent + child — you must create the child FIRST.** A `SubWorkflow` step needs `sub_workflow_id` of an **already-persisted** workflow. Two ways:
+- **MCP / autonomous** — call `workflow_create_draft` for the child first, read back its `id`, then create the parent with `sub_workflow_id: "<that id>"`.
+- **Bundle** — declare the child under `child_workflows[]` in a `KRONN:BUNDLE_READY` bundle and reference it from the parent's step via the sentinel `sub_workflow_id: "@bundle:<child_bundle_id>"`. The server creates children first, substitutes real ids, then creates the parent — atomically (see § Signal Protocol § B).
+
+Never emit a parent `SubWorkflow` step whose `sub_workflow_id` points at a workflow that doesn't exist yet *outside* of these two flows — the step would be a dangling reference.
 
 ## Reuse-first principle — ask before composing inline
 
@@ -253,8 +305,9 @@ For each step the user describes, ask in this order:
 6. **Is it "do the same API call on N items"?** (create N tickets, post N comments, update N statuses, test N sub-domains/locales/regions) → `BatchApiCall`. Zero tokens, parallel HTTP. If the user has a saved `QuickApi` for that endpoint, reference it via `quick_api_id` instead of duplicating the inline config.
 7. **Is it "do the same LLM task on N items"?** (review each PR, audit each ticket, summarize each report) → `BatchQuickPrompt`. Costs N agent runs but reuses one Quick Prompt — **always pick an existing QP from the dropdown rather than declaring inline**.
 8. **Does it require an LLM to think, write, or decide?** → `Agent`. **First** check Quick Prompts: if 3+ workflows share the same prompt, save it as a `QuickPrompt` and reference it via `quick_prompt_id` instead of duplicating the inline `prompt_template`. Suggest creating one if the user describes a prompt they'll reuse.
+9. **Is this "block" a whole reusable pipeline — or does an existing workflow already do this chunk?** (a self-correcting `implement → run_tests → review` loop; a "fetch → enrich → store" mini-pipeline reused across several parents) → `SubWorkflow`. **Reference** the existing workflow via `sub_workflow_id` instead of copy-pasting its steps into every parent. This is a *composition* choice, orthogonal to cost (the child's cost is whatever its steps cost, counted against the shared tree budget). Mind the constraints: no Gate inside the child, depth ≤ 5, no cycle, and the child must already exist (create it first — see § 9 above).
 
-The 8 step types cover **every** case. Step 3's nuance matters: not every API call has a built-in plugin — when none matches, recommend a **Custom API plugin** (see § Reuse-first principle #3) before falling back to Agent+curl. Say so plainly to the user; don't pretend an `ApiCall` is possible when no plugin (built-in or custom) exists yet.
+The 9 step types cover **every** case. Step 3's nuance matters: not every API call has a built-in plugin — when none matches, recommend a **Custom API plugin** (see § Reuse-first principle #3) before falling back to Agent+curl. Say so plainly to the user; don't pretend an `ApiCall` is possible when no plugin (built-in or custom) exists yet.
 
 **Step 6 vs Step 7** — pick BatchApiCall whenever the per-item action is a deterministic HTTP call (create / update / fetch). Pick BatchQuickPrompt only when each item needs a real LLM run (a generated diff, a written review, a classification). Bulk-creating 30 Jira tickets with BatchQuickPrompt is the textbook anti-pattern: 30 agent runs, 30× tokens, slower, less reliable than 30 parallel POSTs.
 
@@ -299,7 +352,7 @@ A workflow is created via `POST /api/workflows` with this JSON structure:
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string | Unique step identifier (kebab-case, e.g. `collect-tickets`) |
-| `step_type` | `{ "type": "Agent" \| "ApiCall" \| "Notify" \| "BatchQuickPrompt" \| "Gate" \| "Exec" }` | Decides what the engine runs. Default: `Agent`. |
+| `step_type` | `{ "type": "Agent" \| "ApiCall" \| "Notify" \| "BatchQuickPrompt" \| "BatchApiCall" \| "Gate" \| "Exec" \| "JsonData" \| "SubWorkflow" }` | Decides what the engine runs. Default: `Agent`. |
 | `agent` | string | `ClaudeCode`, `Codex`, `GeminiCli`, `Kiro`, `Vibe`, `CopilotCli`. Required by schema but ignored when `step_type ≠ Agent` (set to `ClaudeCode`). |
 | `prompt_template` | string | Required by schema. For non-Agent steps, set to `""` — the engine doesn't read it. |
 | `mode` | object | Always `{ "type": "Normal" }` |
@@ -381,6 +434,14 @@ Output envelope: `{ data: { items: [{input, status, response?, error?, http_stat
 | `gate_message` | string | Markdown shown to the operator on RunDetail. Templates supported (resolved at gate-execution time so the operator sees actual values). Empty falls back to a default placeholder |
 | `gate_request_changes_target` | string | Step name to jump to when operator picks "Request Changes". `null` = previous step (Auto-Dev `pause_pre_merge → goto: implement` pattern) |
 | `gate_notify_url` | string | Optional webhook URL fired (best-effort POST) when the run enters `WaitingApproval`. Body `{run_id, workflow_id, workflow_name, step_name, message}`. Templates supported on the URL itself (`{{state.slack_url}}` etc.) |
+
+### Fields specific to `SubWorkflow`
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `sub_workflow_id` | string | **REQUIRED.** Id of an existing, saved workflow to run as a child. Validated at save: must exist, must not introduce a cycle, must not push depth > 5, must not contain a `Gate`. Use the `@bundle:<id>` sentinel in a `KRONN:BUNDLE_READY` bundle when the child is created in the same transaction (see § Signal Protocol § B → `child_workflows`). |
+
+The step's output envelope exposes `data = { child_run_id, child_workflow_id, child_status, child_steps }` and `{{steps.<name>.child_run_id}}`. The child run does **not** share `{{steps.*}}` / `{{state.*}}` with the parent — they have separate `TemplateContext`s. Read the child's terminal status via `{{steps.<name>.status}}` (`OK` / `Failed`) or branch on the `[SIGNAL: OK | SUBWF_FAILED]` marker.
 
 ### Workflow-level fields (top-level, NOT per-step)
 
@@ -470,8 +531,9 @@ If a referenced field doesn't resolve, the placeholder stays literal (`{{steps.X
 | `Notify` | `[SIGNAL: OK]` on 2xx delivery, `[SIGNAL: ERROR]` on non-2xx. Useful when chaining `Notify → Notify` (primary webhook → fallback) via `contains "ERROR" → Goto fallback_notify` |
 | `BatchQuickPrompt` | `[SIGNAL: OK]` if all children succeeded, `[SIGNAL: PARTIAL]` if some failed, `[SIGNAL: ERROR]` if all failed, `[SIGNAL: PENDING]` in fire-and-forget mode (`wait_for_completion: false`). Same `PARTIAL → Goto self` retry pattern as `BatchApiCall` |
 | `Gate` | none — Gate is a pause, not a producer. Branch on the operator's decision via the `request_changes_target` field, not `on_result` |
+| `SubWorkflow` | `[SIGNAL: OK]` when the child run ends `Success`, `[SIGNAL: SUBWF_FAILED]` otherwise (child `Failed` / `StoppedByGuard` / `Cancelled`). Common pattern: `contains "SUBWF_FAILED" → Goto self (max_iterations: 1-2)` to re-run the child once, or fall through to `on_failure`. Remember: a Goto here re-runs the WHOLE child (you can't jump to a step inside it) |
 
-**`on_result` is honoured even when the step status is `Failed`** for `Exec` and `ApiCall`. This means a `Goto` rule can override the rollback chain: e.g. `cargo test` exits 1 → status `Failed`, but `contains "ERROR" → Goto implement` fires and the run continues to `implement` instead of triggering `on_failure`. If no rule matches a `Failed` step, the rollback chain fires as before.
+**`on_result` is honoured even when the step status is `Failed`** for `Exec`, `ApiCall`, and `SubWorkflow`. This means a `Goto` rule can override the rollback chain: e.g. `cargo test` exits 1 → status `Failed`, but `contains "ERROR" → Goto implement` fires and the run continues to `implement` instead of triggering `on_failure`. Same for a child run that ends `Failed` → `contains "SUBWF_FAILED" → Goto <subworkflow-step>` re-runs the child instead of failing the parent. If no rule matches a `Failed` step, the rollback chain fires as before.
 
 ### Trigger types
 
@@ -503,7 +565,8 @@ Apply these rules to every workflow you design:
 15. **Reuse `QuickApi` references** — when the same API call appears in 3+ workflows (or you want to test it from the Quick APIs page standalone), define a `QuickApi` once and reference it via `quick_api_id` on the `BatchApiCall` step. Updates to the QuickApi propagate automatically to every workflow that references it. Per-field overrides on the step still work for one-off tweaks (e.g. different `api_extract` path per workflow).
 16. **Add an `on_failure` rollback chain on ops-grade pipelines** — workflows that touch prod or external systems should declare `Workflow.on_failure: [...]` to notify ops + revert state when something blows up. Fires **only on `Failed`** AND only when no `on_result` rule on the failed step matched (a Goto/Skip overrides the rollback). Never fires on user `Cancelled` / guard-stop / Gate `reject` — those are intentional stops.
 17. **Declare `variables` for parameterized manual launches** — instead of writing 5 versions of "audit feature X" workflow, declare a `feature_name` variable and let the operator type the value at launch time. Mirrors Quick Prompts.
-18. **Set sensible `guards` on every workflow you ship** — `timeout_seconds: 1800` (30 min), `max_llm_calls: 50`, `loop_detection_max_revisits: 10`. These cost nothing and prevent runaway runs from emptying the wallet.
+18. **Set sensible `guards` on every workflow you ship** — `timeout_seconds: 1800` (30 min), `max_llm_calls: 50`, `loop_detection_max_revisits: 10`. These cost nothing and prevent runaway runs from emptying the wallet. (Guards are enforced **tree-wide** via the shared budget — a sub-workflow can't escape them.)
+19. **Extract reusable self-correcting loops into a `SubWorkflow`** — when the same `implement → run_tests → review` (or any multi-step loop) appears in several pipelines, save it once and reference it via `sub_workflow_id` rather than copy-pasting 3 steps into every parent. The parent stays readable (`fetch → analyze → gate → [sub-workflow] → gate → pr`), the loop is maintained in one place, and the child's internal Gotos (`run_tests ERROR → implement`, `review NEEDS_CHANGES → implement`) live entirely inside the child. Keep every `Gate` in the **parent** (Gates are forbidden inside a child) and remember a "request changes" gate must target the **SubWorkflow step**, not a step inside the child.
 
 ## Feasibility-Gated pattern — for big tickets (0.8.3)
 
@@ -581,6 +644,7 @@ Kronn has **three** ways to ship a workflow from a discussion. Pick by intent:
 - `qp_list()` — every Quick Prompt in the user's library. If a step in your draft could reuse an existing QP via `quick_prompt_id` / `batch_quick_prompt_id`, do that instead of inlining the same prompt.
 - `qa_list()` — every Quick API. Same logic for `quick_api_id` on `ApiCall` / `BatchApiCall` steps.
 - `mcp_list()` — wired MCP configs + REGISTRY servers with an `api_spec`. Use this to pick the right `api_plugin_slug` + `api_config_id` when an `ApiCall` step needs a fresh endpoint; without it the agent would have to guess slugs.
+- `workflow_active_runs()` — **in-flight board**: every workflow run that is NOT finished right now (Running / WaitingApproval / Pending) across all workflows, as `[{workflow_id, workflow_name, project_id, run_id, status, started_at}]`. Call it to see what else is happening before you trigger or edit something (avoid stepping on a run in progress, or notice a run paused on a gate). Drill into the live step of any run with `workflow_run_status(run_id)`.
 
 Available via the `kronn-internal` MCP server (always wired). Signature:
 
@@ -618,10 +682,10 @@ Use this when the user already has all the Quick Prompts / Quick APIs / Custom A
 
 ### B. `KRONN:BUNDLE_READY` — workflow + its supporting artifacts (0.8.3, **preferred when the workflow needs anything new**)
 
-Use this when the workflow references **at least one** Quick Prompt / Quick API / Custom API plugin that **doesn't exist yet**. The bundle endpoint creates everything atomically (transaction — rollback on any failure, no orphan rows).
+Use this when the workflow references **at least one** Quick Prompt / Quick API / Custom API plugin / **child workflow** that **doesn't exist yet**. The bundle endpoint creates everything atomically (transaction — rollback on any failure, no orphan rows).
 
-1. Declare each new artifact under its category (`quick_prompts` / `quick_apis` / `custom_apis`) with a `bundle_id` (kebab- or snake-case, ASCII, must be unique across all categories within this bundle).
-2. In the workflow's step fields, refer to those artifacts via the **sentinel `@bundle:<bundle_id>`** — the server substitutes them with real ids at create-time. Recognized substitution points: `quick_prompt_id`, `batch_quick_prompt_id`, `quick_api_id`, `api_config_id`.
+1. Declare each new artifact under its category (`quick_prompts` / `quick_apis` / `custom_apis` / `child_workflows`) with a `bundle_id` (kebab- or snake-case, ASCII, must be unique across all categories within this bundle). A `child_workflows[]` entry is a full workflow object (same shape as `workflow`) — the server creates it **before** the parent and inherits the parent's `project_id` unless the child sets its own.
+2. In the workflow's step fields, refer to those artifacts via the **sentinel `@bundle:<bundle_id>`** — the server substitutes them with real ids at create-time. Recognized substitution points: `quick_prompt_id`, `batch_quick_prompt_id`, `quick_api_id`, `api_config_id`, and **`sub_workflow_id`** (resolves to a `child_workflows[]` entry). This is how you ship a decomposed parent + child (e.g. an `implement → test → review` sub-workflow) in one click.
 3. Present the bundle JSON in a fenced ` ```json ... ``` ` block.
 4. Immediately after the closing ` ``` `, on the very next line, write: `KRONN:BUNDLE_READY`.
 5. The frontend renders a **"Create everything (1 workflow + N supporting artifacts)"** button that POSTs to `/api/workflows/bundle`.
@@ -807,6 +871,9 @@ Do not paraphrase, do not move the disclaimer above the signal line, do not omit
 - **`Goto.max_iterations` is a per-edge cap**, not workflow-wide. Two different Gotos targeting different steps each have their own counter. The workflow-level `loop_detection_max_revisits` guard remains the global safety net.
 - **Launch variables must be declared in `Workflow.variables` to be valid** — referencing `{{some_var}}` in a step prompt without declaring it renders empty at runtime. The wizard surfaces a live warning ("undeclared var") with a 1-click "add to launch variables" button.
 - **`gate_notify_url` is per-user / not portable** — when a workflow is exported via `/api/workflows/:id/export`, `gate_notify_url` is stripped to avoid leaking webhooks across instances.
+- **`SubWorkflow` references must already exist** — `sub_workflow_id` points at a saved workflow. In a conversational design, create the child first (`workflow_create_draft`) or bundle it (`child_workflows[]` + `@bundle:`). A dangling `sub_workflow_id` is rejected at save.
+- **`SubWorkflow` has NO `Gate` inside, ≤ 5 depth, no cycle** — all validated server-side at save. Keep human approval in the parent.
+- **A child does NOT inherit the parent's `{{steps.*}}` / `{{state.*}}`** — separate `TemplateContext`. To pass data in, the child must declare its own launch `variables` (and the parent step provides them — note: in the current MVP the SubWorkflow step does not yet map parent values into the child's variables, so design children that are self-sufficient or read shared sources like `agent_decisions`). To read the child's result out, use `{{steps.<subwf>.status}}` / the `data` metadata, not the child's internal step names.
 
 ## Validation
 
@@ -818,6 +885,7 @@ Before emitting `KRONN:WORKFLOW_READY`:
 - For `ApiCall` steps: `api_plugin_slug` and `api_endpoint_path` are set; `api_extract` is set if downstream steps reference `{{steps.X.data}}`
 - For `Notify` steps: `notify_config.url` is set and the `body` is a valid string
 - For `BatchQuickPrompt`: `batch_quick_prompt_id` and `batch_items_from` are set
+- For `SubWorkflow`: `sub_workflow_id` is set (a real saved-workflow id, or an `@bundle:<id>` sentinel resolving to a `child_workflows[]` entry) — never empty, never a name; no `Gate` lives inside the referenced child
 - Steps referencing `{{previous_step.data}}` follow either an ApiCall step (with `api_extract`) or a Structured Agent step
 - Collection Agent steps have `on_result` with NO_RESULTS → Stop
 - The JSON is valid and matches the schema above

@@ -241,6 +241,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   } | null>(null);
   const [detailWorkflow, setDetailWorkflow] = useState<Workflow | null>(null);
   const [detailRuns, setDetailRuns] = useState<WorkflowRun[]>([]);
+  // Throttle clock for mirroring WorkflowRunUpdated into the run list while a
+  // local SSE run is streaming (see the useWebSocket handler below).
+  const lastRunsRefetchRef = useRef(0);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [triggering, setTriggering] = useState<string | null>(null);
   // Race-free guard for handleTrigger / fireTrigger — `disabled={triggering===wf.id}`
@@ -355,10 +358,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   useWebSocket((msg) => {
     if (msg.type !== 'workflow_run_updated') return;
     if (!detailWorkflow || msg.workflow_id !== detailWorkflow.id) return;
-    // Skip when our own SSE driver is already feeding live state — it has
-    // richer chunked output the WS event can't reproduce, and a re-fetch
-    // mid-stream would flicker the run list.
-    if (liveRun && liveRun.workflowId === detailWorkflow.id && !liveRun.finished) return;
+    // During our own SSE-driven run, the blue live view already streams the
+    // in-flight step. We STILL mirror WorkflowRunUpdated into the run list so
+    // per-step statuses and the in-progress history card refresh without an
+    // F5 — but THROTTLED (≤ 1×/3.5s) so the streaming <pre> never flickers.
+    const activeLocalRun = liveRun && liveRun.workflowId === detailWorkflow.id && !liveRun.finished;
+    if (activeLocalRun) {
+      const nowTs = Date.now();
+      if (nowTs - lastRunsRefetchRef.current < 3500) return;
+      lastRunsRefetchRef.current = nowTs;
+    }
     workflowsApi.listRuns(detailWorkflow.id).then(setDetailRuns).catch(() => {});
   });
 
@@ -1367,6 +1376,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 triggering={triggering === detailWorkflow.id}
                 agentAccess={agentAccess}
                 onNavigateToBatch={onNavigateToBatch}
+                onNavigateToWorkflow={(wfId) => openDetail(wfId)}
                 onGateDecided={() => setLiveRun(null)}
                 onExport={async () => {
                   try {

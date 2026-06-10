@@ -708,6 +708,31 @@ Suite de la réponse.";
     }
 
     #[test]
+    fn resolve_model_flag_user_override_beats_builtin() {
+        // Run-9 finding — the [agents.model_tiers] overrides MUST win over
+        // the built-in fallbacks (a Reasoning step configured on `fable`
+        // was silently running on the built-in `opus`).
+        use crate::models::setup::{ModelTiersConfig, ModelTierConfig};
+        use crate::models::ModelTier;
+        let cfg = ModelTiersConfig {
+            claude_code: ModelTierConfig {
+                reasoning: Some("fable".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, Some(&cfg)),
+            Some("fable".into())
+        );
+        // unset tiers still fall through to the built-ins
+        assert_eq!(
+            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, Some(&cfg)),
+            Some("haiku".into())
+        );
+    }
+
+    #[test]
     fn resolve_model_flag_codex_tiers() {
         use crate::models::ModelTier;
         assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None), Some("gpt-5-codex-mini".into()));
@@ -894,14 +919,20 @@ Suite de la réponse.";
 
     #[test]
     #[serial]
-    fn codex_docker_sandbox_workspace_write() {
+    fn codex_docker_always_full_access_sandbox() {
+        // 2026-06-13 (run-9 finding) — bwrap cannot create user namespaces
+        // inside the container on ANY host OS, so workspace-write is
+        // structurally broken in Docker: Codex couldn't read a single file
+        // and the plan review emitted a false NEEDS_RETRIAGE. The container
+        // + worktree are the isolation boundary; always danger-full-access.
         std::env::set_var("KRONN_HOST_HOME", "/home/testuser");
         std::env::set_var("KRONN_HOST_OS", "Linux");
         let (_, _, args, _, _, _) = super::super::agent_command(
             &AgentType::Codex, "prompt", false, "", None,
         );
-        assert!(args.contains(&"--sandbox=workspace-write".to_string()),
-            "Linux Docker + no full_access should use workspace-write sandbox");
+        assert!(args.contains(&"--sandbox=danger-full-access".to_string()),
+            "Docker (any OS) must use danger-full-access — bwrap can't init in the container");
+        assert!(!args.contains(&"--sandbox=workspace-write".to_string()));
         std::env::remove_var("KRONN_HOST_HOME");
         std::env::remove_var("KRONN_HOST_OS");
     }

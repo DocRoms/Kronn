@@ -4,6 +4,7 @@ import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
 import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
+import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import '../../pages/WorkflowsPage.css';
 
 export type GateDecisionKind = 'approve' | 'request_changes' | 'reject';
@@ -27,6 +28,9 @@ export interface RunDetailProps {
   onCancel?: () => void;
   /** 0.7.0 Phase 4 — submit a gate decision (approve / request_changes / reject). */
   onDecide?: (payload: DecideRunRequest) => Promise<void> | void;
+  /** 2026-06-13 — jump to a (sub-)workflow's run list, e.g. from a fan-out
+   *  per-task row to the child sub-workflow that ran that task. */
+  onNavigateToWorkflow?: (workflowId: string) => void;
 }
 
 /** Live counter for the step that's currently running. The exact start
@@ -36,6 +40,45 @@ export interface RunDetailProps {
  *  "this step has been running for 23s" — way better than a static
  *  "running..." that screams "the page is frozen". Ticks every second
  *  via setInterval; effect cleaned up on unmount or status change. */
+
+/** 2026-06-13 — live fan-out progress for a Running SubWorkflow (foreach) step.
+ *  A SubWorkflow step doesn't stream agent chunks, so the parent run view used
+ *  to sit on "agent starting… (no chunk received)" for the whole 2-3h fan-out —
+ *  no way to tell it's alive or where it's at. This polls the child workflow's
+ *  runs and shows "N items · M ✓ · running <id>". */
+function FanOutProgress({
+  childWorkflowId,
+  t,
+}: {
+  childWorkflowId: string;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const [runs, setRuns] = useState<WorkflowRun[]>([]);
+  useEffect(() => {
+    let alive = true;
+    const fetchRuns = async () => {
+      try {
+        const r = await workflowsApi.listRuns(childWorkflowId);
+        if (alive) setRuns(r);
+      } catch { /* transient — keep last */ }
+    };
+    void fetchRuns();
+    const id = window.setInterval(() => void fetchRuns(), 8000);
+    return () => { alive = false; window.clearInterval(id); };
+  }, [childWorkflowId]);
+
+  if (runs.length === 0) return null;
+  const done = runs.filter(r => r.status !== 'Running').length;
+  const ok = runs.filter(r => r.status === 'Success').length;
+  const running = runs.find(r => r.status === 'Running');
+  return (
+    <span className="wf-fanout-live" data-testid="wf-fanout-live" style={{ color: 'var(--kr-warning)' }}>
+      {t('wf.fanoutProgress', done, ok)}
+      {running ? ` · ${running.id.slice(0, 8)}…` : ''}
+    </span>
+  );
+}
+
 function LiveStepStatus({
   run,
   step,
@@ -628,7 +671,7 @@ function ProducedBranchesPanel({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, onNavigateToWorkflow }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
@@ -780,17 +823,23 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
                 {ws_step.step_type && (
                   <span className="wf-step-type-badge" data-type={
                     ws_step.step_type.type === 'ApiCall' ? 'api'
+                      : ws_step.step_type.type === 'BatchApiCall' ? 'api'
                       : ws_step.step_type.type === 'Notify' ? 'notify'
                       : ws_step.step_type.type === 'BatchQuickPrompt' ? 'batch'
                       : ws_step.step_type.type === 'Gate' ? 'gate'
                       : ws_step.step_type.type === 'Exec' ? 'exec'
+                      : ws_step.step_type.type === 'JsonData' ? 'data'
+                      : ws_step.step_type.type === 'SubWorkflow' ? 'subwf'
                       : 'agent'
                   }>
                     {ws_step.step_type.type === 'ApiCall' ? 'API'
+                      : ws_step.step_type.type === 'BatchApiCall' ? 'API'
                       : ws_step.step_type.type === 'Notify' ? 'NOTIFY'
                       : ws_step.step_type.type === 'BatchQuickPrompt' ? 'BATCH'
                       : ws_step.step_type.type === 'Gate' ? 'GATE'
                       : ws_step.step_type.type === 'Exec' ? 'EXEC'
+                      : ws_step.step_type.type === 'JsonData' ? 'DATA'
+                      : ws_step.step_type.type === 'SubWorkflow' ? 'SUB-WF'
                       : 'AGENT'}
                   </span>
                 )}
@@ -815,9 +864,11 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
                     {completed.tokens_used.toLocaleString()} {t('wf.stepTokensSuffix')}
                   </span>
                 )}
-                {isNext && (
+                {isNext && ws_step.step_type?.type === 'SubWorkflow' && ws_step.sub_workflow_id ? (
+                  <FanOutProgress childWorkflowId={ws_step.sub_workflow_id} t={t} />
+                ) : isNext ? (
                   <LiveStepStatus run={run} step={ws_step} stepIndex={i} t={t} />
-                )}
+                ) : null}
               </div>
             );
           })}
@@ -854,8 +905,29 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
         <div className="mt-4">
           {run.step_results.map((sr, i) => {
             const isExpanded = expandedStep === i;
+            // 2026-06-10 — on_failure compensation steps are visually fenced
+            // off: pre-fix a green rollback right after the failed step read
+            // as "the run continued past the failure" (live confusion on the
+            // Ticket→PR run). The banner marks where compensation starts.
+            const isFirstRollback = !!sr.is_rollback && !(run.step_results[i - 1]?.is_rollback);
+            // 2026-06-12 — fan-out aggregate (sub_workflow_foreach_file):
+            // per-task table + chip. PARTIAL is Success engine-side (so the
+            // run continues to pr_draft) — the warning chip is how a human
+            // notices the partial without reading the raw envelope JSON.
+            const foreach = sr.step_kind === 'SubWorkflow' ? parseForeachEnvelope(sr.output) : null;
+            // The child workflow that ran the fan-out items — its id lives on
+            // the SubWorkflow step definition. Lets each per-task row link to
+            // the child sub-workflow's run list (2026-06-13 user request).
+            const childWorkflowId = foreach
+              ? workflowSteps?.find(ws => ws.name === sr.step_name)?.sub_workflow_id ?? null
+              : null;
             return (
-              <div key={i} className="wf-step-result" data-expanded={isExpanded}>
+              <div key={i} className="wf-step-result" data-expanded={isExpanded} data-rollback={sr.is_rollback ? 'true' : undefined}>
+                {isFirstRollback && (
+                  <div className="wf-rollback-separator" data-testid="wf-rollback-separator">
+                    ⚠ {t('wf.rollbackSection')}
+                  </div>
+                )}
                 <button
                   className="wf-step-result-btn"
                   data-expanded={isExpanded}
@@ -867,6 +939,11 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
                     style={{ background: STATUS_COLORS[sr.status] ?? 'var(--kr-text-faint)' }}
                   />
                   <span className="font-semibold">{sr.step_name}</span>
+                  {sr.is_rollback && (
+                    <span className="wf-step-kind-badge" data-kind="rollback" style={{ color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.4)' }}>
+                      ↩ ROLLBACK
+                    </span>
+                  )}
                   {/* Snapshot of what was actually used for this step at
                       run time — frozen on the row so editing the workflow
                       afterwards (swapping agent, retargeting plugin) keeps
@@ -903,11 +980,48 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
                       <Terminal size={9} /> EXEC
                     </span>
                   )}
+                  {sr.step_kind === 'SubWorkflow' && (
+                    <span className="wf-step-kind-badge" data-kind="subworkflow">
+                      <GitBranch size={9} /> SOUS-WF
+                    </span>
+                  )}
+                  {foreach && (
+                    <span
+                      className="wf-step-kind-badge"
+                      data-testid="wf-foreach-chip"
+                      style={foreach.failed > 0
+                        ? { color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.4)' }
+                        : { color: 'var(--kr-success)', borderColor: 'rgba(var(--kr-success-rgb), 0.4)' }}
+                    >
+                      {foreach.failed > 0
+                        ? `⚠ ${foreach.succeeded}/${foreach.total} · ${foreach.failed} ${t('wf.foreachFailedChip')}`
+                        : `${foreach.succeeded}/${foreach.total}`}
+                    </span>
+                  )}
+                  {/* 2026-06-11 Phase 1c — drill indicator into the nested
+                      child run. Full recursive tree view is a follow-up; this
+                      surfaces that a child run exists + its id. */}
+                  {sr.child_run_id && (
+                    <span className="text-2xs text-ghost" title={sr.child_run_id} style={{ fontFamily: 'var(--kr-font-mono)' }}>
+                      ↳ {t('wf.subRun')} {sr.child_run_id.slice(0, 8)}…
+                    </span>
+                  )}
                   {sr.step_kind === 'Agent' && sr.step_agent && (
                     <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[sr.step_agent] ?? 'var(--kr-text-faint)' }}>
                       {AGENT_LABELS[sr.step_agent] ?? sr.step_agent}
                     </span>
                   )}
+                  {/* 2026-06-13 — the model/tier actually resolved for this step
+                      (backend-stamped), shown on EVERY agent step incl. per-item
+                      fan-out routing. Falls back to the step-def tier for runs
+                      recorded before step_model shipped. */}
+                  {sr.step_kind === 'Agent' && (() => {
+                    const fallback = workflowSteps?.find(ws => ws.name === sr.step_name)?.agent_settings;
+                    const label = sr.step_model || fallback?.model || fallback?.tier;
+                    return label ? (
+                      <span className="wf-tier-badge" title={t('wf.modelTierHint')}>{label}</span>
+                    ) : null;
+                  })()}
                   <span className="text-ghost">
                     {sr.duration_ms > 0 ? `${(sr.duration_ms / 1000).toFixed(1)}s` : ''}
                   </span>
@@ -916,8 +1030,12 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
                       {conditionLabel(sr.condition_result)}
                     </span>
                   )}
-                  {!sr.condition_result && sr.status === 'Success' && i < run.step_results.length - 1 && (
-                    <span className="text-2xs" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>&rarr; suite</span>
+                  {/* "→ next" only on NOMINAL continuation: never on a
+                      rollback step, never when the next row is rollback
+                      (the run did NOT "continue", it's compensating). */}
+                  {!sr.condition_result && sr.status === 'Success' && i < run.step_results.length - 1
+                    && !sr.is_rollback && !run.step_results[i + 1]?.is_rollback && (
+                    <span className="text-2xs" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>&rarr; {t('wf.nextStepArrow')}</span>
                   )}
                   <span className="flex-1" />
                   {!isExpanded && sr.output && (
@@ -930,6 +1048,43 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide }: 
 
                 {isExpanded && (
                   <div className="wf-step-output-full">
+                    {foreach && (
+                      <table className="wf-foreach-table" data-testid="wf-foreach-table">
+                        <thead>
+                          <tr>
+                            <th>#</th>
+                            <th>{t('wf.foreachTaskCol')}</th>
+                            <th>{t('wf.status')}</th>
+                            <th>{t('wf.subRun')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {foreach.items.map(it => (
+                            <tr key={`${it.item}-${it.id}`}>
+                              <td className="text-ghost">{it.item}</td>
+                              <td style={{ fontFamily: 'var(--kr-font-mono)' }}>{it.id}</td>
+                              {/* binary headline color (ok/failed); the 0 tk
+                                  hint carries the per-type detail */}
+                              <td style={{ color: it.status === 'Failed' ? (STATUS_COLORS['Failed'] ?? 'var(--kr-warning)') : (STATUS_COLORS['Success'] ?? 'var(--kr-success)') }}>
+                                {it.status}{isZeroTokenItem(it.status) ? ' · 0 tk' : ''}
+                              </td>
+                              <td className="text-ghost" style={{ fontFamily: 'var(--kr-font-mono)' }} title={it.child_run_id ?? undefined}>
+                                {it.child_run_id
+                                  ? (childWorkflowId && onNavigateToWorkflow
+                                      ? <button
+                                          type="button"
+                                          className="wf-subrun-link"
+                                          onClick={() => onNavigateToWorkflow(childWorkflowId)}
+                                          title={t('wf.openSubRun')}
+                                        >{it.child_run_id.slice(0, 8)}… ↗</button>
+                                      : `${it.child_run_id.slice(0, 8)}…`)
+                                  : '—'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
                     <div className="wf-step-output-code">
                       {sr.output || t('wf.noOutput')}
                     </div>

@@ -315,6 +315,9 @@ pub async fn run_qa(
         exec_setup_args: vec![],
         quick_prompt_id: None,
         json_data_payload: None,
+        sub_workflow_id: None,
+        sub_workflow_foreach_file: None,
+        multi_agent_review: None,
     };
 
     // 0.8.6 (#59) — record as manual_test : Quick API standalone runs
@@ -453,6 +456,9 @@ pub async fn batch_run_qa(
         exec_setup_command: None, exec_setup_args: vec![],
         quick_prompt_id: None,
         json_data_payload: None,
+        sub_workflow_id: None,
+        sub_workflow_foreach_file: None,
+        multi_agent_review: None,
     };
 
     let ctx = crate::workflows::template::TemplateContext::new();

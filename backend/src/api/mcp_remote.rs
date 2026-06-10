@@ -246,6 +246,8 @@ pub async fn workflow_trigger(
             &tokens,
             &agents,
             None,
+            None, // top-level run → fresh shared budget
+            None, // top-level run → own worktree
         )
         .await
         {
@@ -785,6 +787,18 @@ pub async fn qp_batch_run(
         Ok(o) => o,
         Err(e) => return Json(ApiResponse::err(format!("Failed to create batch: {}", e))),
     };
+
+    // Flip the "agent working" spinner ON for every child up front — the
+    // per-stream BatchRunChildStarted only fires when a child's agent
+    // actually begins, so semaphore-queued children would otherwise look
+    // crashed (no spinner) until their turn. Each is cleared by its own
+    // BatchRunProgress / BatchRunFinished event on completion.
+    for disc_id in &outcome.discussion_ids {
+        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
+            run_id: outcome.run_id.clone(),
+            discussion_id: disc_id.clone(),
+        });
+    }
 
     // Kick off every child agent fire-and-forget (semaphore-throttled in the
     // runner). The MCP caller doesn't await SSE — results land in the DB.

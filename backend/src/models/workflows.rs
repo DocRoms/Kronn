@@ -594,6 +594,60 @@ pub struct WorkflowStep {
     /// un Agent step ou un ApiCall.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub json_data_payload: Option<serde_json::Value>,
+
+    /// 2026-06-11 (Phase 1) — for `StepType::SubWorkflow`: the id of the
+    /// workflow to run as a nested child. Required for that step type
+    /// (enforced at save). `None` for every other step type. Mirrors the
+    /// `batch_quick_prompt_id` / `quick_api_id` "reference another entity by
+    /// id" pattern, keeping `StepType` a bare tag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_workflow_id: Option<String>,
+
+    /// 2026-06-12 (Phase 3b MVP) — for `StepType::SubWorkflow`: when set, the
+    /// child workflow is executed ONCE PER ITEM of the JSON array stored in
+    /// this workspace-relative file (e.g. `.kronn/tasks.json`, written by a
+    /// triage step). Sequential fan-out in the SHARED parent worktree: before
+    /// each child run the engine writes the item to `.kronn/current_task.json`
+    /// so the child's prompts read ONLY their slice (scoped context = fewer
+    /// tokens + more deterministic). `None` = single child run (Phase 1/2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_workflow_foreach_file: Option<String>,
+
+    /// 2026-06-13 — "Multi-agent review" advanced option on an Agent step.
+    /// When set, the step runs its own agent normally, THEN opens a shared
+    /// Kronn discussion and invites a SECOND agent (a different model family,
+    /// e.g. Codex reviewing Claude's plan) to debate the output until they
+    /// reach agreement — instead of a successive `Goto` re-run loop that
+    /// re-reads everything from scratch each round. Cheaper (the reviewer
+    /// reads the artifact once, then only the conversation delta) and a real
+    /// back-and-forth rather than a file relay. `None` = plain Agent step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_agent_review: Option<MultiAgentReviewConfig>,
+}
+
+/// Config for the "Multi-agent review" option on an Agent step (see
+/// `WorkflowStep::multi_agent_review`). A discussion is created, the step's
+/// own agent posts its output, the `reviewer_agent` is invited, and the two
+/// debate (reusing the multi-agent orchestration core) until they converge
+/// or `max_rounds` is hit.
+#[derive(Debug, Clone, Serialize, Deserialize, TS, PartialEq)]
+#[ts(export)]
+pub struct MultiAgentReviewConfig {
+    /// The second agent invited to challenge the step's output. Pick a
+    /// DIFFERENT model family than the step's agent to avoid same-model blind
+    /// spots (the whole point of a second pair of eyes).
+    pub reviewer_agent: AgentType,
+    /// Reasoning tier for the reviewer (None = the agent's default tier).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_tier: Option<ModelTier>,
+    /// The debate framing posted into the discussion to open the exchange,
+    /// e.g. "Voici le plan émis par <initial>. <reviewer>, challenge sa
+    /// pertinence ; vous devez parvenir à un accord global avant de continuer."
+    pub debate_prompt: String,
+    /// Max debate rounds before falling through with the best-so-far result
+    /// (bounded so a never-converging debate can't hang the run). Default 3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rounds: Option<u32>,
 }
 
 /// Extraction specification for an `ApiCall` step's JSON response.
@@ -611,10 +665,21 @@ pub struct ExtractSpec {
     pub fallback: Option<serde_json::Value>,
 
     /// If true and the extraction returns `null` / empty array, the step
-    /// reports `status: NO_RESULTS` so `on_result` conditions (Skip, Stop,
-    /// Goto) can fire. Default false → status OK even on empty data.
-    #[serde(default)]
+    /// emits the `NO_RESULTS` signal (status stays `Success`) so `on_result`
+    /// conditions (Skip, Stop, Goto) can branch on "the API returned
+    /// nothing". 2026-06-10: default flipped to **true** — a silent empty
+    /// extraction was a recurring footgun (the step looked OK while
+    /// downstream `{{steps.X.data}}` was empty). Existing rows that
+    /// serialized `false` explicitly keep their behaviour (no migration);
+    /// only specs that omit the field (new / AI-generated) get the safer
+    /// default. Set `false` deliberately when an empty result is normal.
+    #[serde(default = "default_true")]
     pub fail_on_empty: bool,
+}
+
+/// serde default for `ExtractSpec::fail_on_empty` (2026-06-10).
+fn default_true() -> bool {
+    true
 }
 
 /// Pagination strategy for an `ApiCall` step. `Auto` covers the three most
@@ -758,6 +823,16 @@ pub enum StepType {
     /// source est prête. Output toujours `Structured` : envelope
     /// `{data: payload, status: "OK", summary: "JSON data (N items)"}`.
     JsonData,
+    /// 2026-06-11 (Phase 1) — run ANOTHER workflow as a nested child run.
+    /// The target is `WorkflowStep.sub_workflow_id`. The child run executes
+    /// with its OWN steps, Goto/loops and conditions (the engine is
+    /// re-entrant), under a SHARED budget + bounded recursion depth + cycle
+    /// detection. MVP constraints (spec `docs/design/recursive-subworkflows.md`):
+    /// no `Gate` allowed inside a sub-workflow, no `SubWorkflow` in an
+    /// `on_failure` rollback chain. The child's terminal status maps to this
+    /// step's status (→ the parent's `on_result` can branch on it), and its
+    /// run id is recorded on the `StepResult.child_run_id` for drill-down.
+    SubWorkflow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -1013,6 +1088,14 @@ pub struct StepResult {
     /// run with a different agent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_agent: Option<AgentType>,
+    /// 2026-06-13 — the model/tier actually RESOLVED for this Agent step at
+    /// run time (e.g. "opus", "sonnet · reasoning", "haiku · economy"). Stamped
+    /// from the step's tier + the user's model_tiers config, so the run-detail
+    /// UI shows the real model on EVERY agent step — including the per-item
+    /// fan-out routing (low→economy/high→reasoning), not just steps with an
+    /// explicit tier in their definition. `None` for non-agent steps.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_model: Option<String>,
     /// Snapshot of the API plugin slug for ApiCall steps (`mcp-github`,
     /// `api-chartbeat`, …). `None` otherwise.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1024,6 +1107,21 @@ pub struct StepResult {
     /// for non-API steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub step_api_endpoint_path: Option<String>,
+    /// 2026-06-10 (audit P1) — true when this result was produced by the
+    /// `on_failure` compensation chain, NOT the nominal step sequence.
+    /// Pre-fix, rollback results were appended to `step_results` with no
+    /// marker: a green `alert-ops` right after a red `fetch-ticket` read
+    /// as "the run continued past the failure". The UI renders these
+    /// under a dedicated ROLLBACK section. `default` keeps legacy rows
+    /// (and every nominal constructor) at `false`.
+    #[serde(default)]
+    pub is_rollback: bool,
+    /// 2026-06-11 (Phase 1) — for a `SubWorkflow` step: the id of the child
+    /// run it spawned, so the UI can drill from this step into the nested
+    /// run tree (`GET /runs/:id/tree`). `None` for every other step type and
+    /// for legacy rows. The inverse of `WorkflowRun.parent_run_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child_run_id: Option<String>,
 }
 
 

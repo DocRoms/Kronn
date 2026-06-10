@@ -270,8 +270,11 @@ pub async fn execute_batch_apicall_step(
             envelope_detected: Some(true),
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action,
     }
@@ -287,12 +290,21 @@ impl ItemOutcome {
     fn from_step(outcome: &StepOutcome) -> Self {
         let raw = &outcome.result.output;
         if outcome.result.status == RunStatus::Success {
-            // ApiCall success path emits `{json}\n[SIGNAL: OK]`. Strip the
-            // signal then parse, then pull `data` (post-extract value).
-            let json_part = raw.split("\n[SIGNAL:").next().unwrap_or(raw);
-            let response = serde_json::from_str::<Value>(json_part)
-                .ok()
-                .and_then(|v| v.get("data").cloned())
+            // 0.8.5 broke this path silently: children emit the canonical
+            // envelope (`summary\n---STEP_OUTPUT---\n{json}\n---END…---\n[SIGNAL:…]`),
+            // but this parser still assumed the pre-0.8.5 `{json}\n[SIGNAL:`
+            // shape — `from_str` failed on the human prefix and every
+            // `items[].response` aggregated as Null (caught by the 2026-06-10
+            // executor audit). Parse via the shared envelope extractor, with
+            // the legacy split kept as a fallback for old persisted outputs.
+            let response = super::template::extract_step_envelope(raw)
+                .and_then(|e| serde_json::from_str::<Value>(&e.data_json).ok())
+                .or_else(|| {
+                    let json_part = raw.split("\n[SIGNAL:").next().unwrap_or(raw);
+                    serde_json::from_str::<Value>(json_part)
+                        .ok()
+                        .and_then(|v| v.get("data").cloned())
+                })
                 .unwrap_or(Value::Null);
             ItemOutcome::Ok { response, http_status: None }
         } else {
@@ -420,8 +432,11 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
+            step_model: None,
             step_api_plugin_slug: None,
             step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
         },
         condition_action: None,
     }
@@ -618,5 +633,52 @@ mod tests {
         assert_eq!(outcome.result.output, "boom");
         assert_eq!(outcome.result.tokens_used, 0);
         assert!(outcome.condition_action.is_none());
+    }
+
+    /// Regression (2026-06-10 audit P0): since 0.8.5 the child ApiCall
+    /// emits the canonical envelope — the old `{json}\n[SIGNAL:` split
+    /// failed to parse it and EVERY successful item aggregated with
+    /// `response: Null` (downstream correlation impossible). Pin that the
+    /// canonical shape now yields the real `data` value, and that the
+    /// legacy pre-0.8.5 shape still parses (fallback).
+    #[test]
+    fn item_outcome_parses_canonical_envelope_response() {
+        use crate::models::StepResult;
+        let mk = |output: &str| StepOutcome {
+            result: StepResult {
+                step_name: "child".into(),
+                status: RunStatus::Success,
+                output: output.into(),
+                tokens_used: 0,
+                duration_ms: 1,
+                started_at: None,
+                condition_result: None,
+                envelope_detected: Some(true),
+                step_kind: None,
+                step_agent: None,
+                step_model: None,
+                step_api_plugin_slug: None,
+                step_api_endpoint_path: None,
+                is_rollback: false,
+                child_run_id: None,
+            },
+            condition_action: None,
+        };
+
+        // Canonical 0.8.5+ envelope (human prefix + markers + signal).
+        let canonical = "POST ok → object\n---STEP_OUTPUT---\n{\"data\":{\"number\":42},\"status\":\"OK\",\"summary\":\"created\"}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]";
+        match ItemOutcome::from_step(&mk(canonical)) {
+            ItemOutcome::Ok { response, .. } => {
+                assert_eq!(response["number"], 42, "canonical envelope must yield real data, got {response}");
+            }
+            ItemOutcome::Failed { error, .. } => panic!("expected Ok, got Failed: {error}"),
+        }
+
+        // Legacy pre-0.8.5 shape still supported via fallback.
+        let legacy = "{\"data\":{\"number\":7},\"status\":\"OK\"}\n[SIGNAL: OK]";
+        match ItemOutcome::from_step(&mk(legacy)) {
+            ItemOutcome::Ok { response, .. } => assert_eq!(response["number"], 7),
+            ItemOutcome::Failed { error, .. } => panic!("expected Ok, got Failed: {error}"),
+        }
     }
 }

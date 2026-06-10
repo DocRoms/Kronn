@@ -466,12 +466,19 @@ fn extract_spec_roundtrip_minimal_omits_fallback() {
 
 #[test]
 fn extract_spec_deserializes_when_fail_on_empty_absent() {
-    // Old rows written before `fail_on_empty` existed must still load with
-    // the documented default (`false`). `#[serde(default)]` guarantees it.
+    // 2026-06-11 — the default flipped to `true`: a spec that OMITS the
+    // field now opts INTO the `NO_RESULTS` signal on empty extraction
+    // (safer — a silent empty result was a footgun). Rows that serialized
+    // `false` explicitly are unaffected (verified below). Status stays
+    // Success either way; this only changes the emitted signal.
     let parsed: ExtractSpec = serde_json::from_str(r#"{"path":"$.items"}"#).unwrap();
     assert_eq!(parsed.path, "$.items");
-    assert!(!parsed.fail_on_empty);
+    assert!(parsed.fail_on_empty, "absent field now defaults to true");
     assert!(parsed.fallback.is_none());
+    // Explicit `false` is still honoured (no behaviour change for old rows).
+    let explicit: ExtractSpec =
+        serde_json::from_str(r#"{"path":"$.items","fail_on_empty":false}"#).unwrap();
+    assert!(!explicit.fail_on_empty, "explicit false must be preserved");
 }
 
 #[test]
@@ -603,6 +610,9 @@ fn workflow_step_api_call_roundtrip() {
             exec_setup_args: vec![],
         quick_prompt_id: None,
         json_data_payload: None,
+        sub_workflow_id: None,
+        sub_workflow_foreach_file: None,
+        multi_agent_review: None,
     };
     let json = serde_json::to_string(&step).unwrap();
     let parsed: WorkflowStep = serde_json::from_str(&json).unwrap();

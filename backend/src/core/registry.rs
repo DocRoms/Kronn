@@ -480,6 +480,16 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
                     ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}".into(),         method: "GET".into(),  description: "[ISSUES · single] Full payload of one issue. Path placeholder `{issueIdOrKey}` = key (`KR-123`) or numeric id. `fields=...` query param to slice fields. `expand=changelog,renderedFields` for transitions + ADF rendered HTML.".into() },
                     ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}/comment".into(), method: "GET".into(),  description: "[ISSUES · comments] Comments on an issue (paginated, `startAt`+`maxResults`).".into() },
                     ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}/transitions".into(), method: "GET".into(), description: "[ISSUES · transitions] Available workflow transitions for an issue (id + name + target status). Use this before POSTing a transition by id.".into() },
+                    // ── Issues · writes (ticket framing) ────────────────
+                    // v2 endpoints return/accept WIKI markup (the `{panel}` /
+                    // `h2. +Titre+` / `!image!` syntax), unlike v3 which speaks
+                    // ADF. The framing flow reads + rewrites descriptions in
+                    // wiki, so these MUST stay on v2 — the `jira_update_issue`
+                    // MCP tool (ADF) silently mangles panels and drops images.
+                    ApiEndpoint { path: "/rest/api/2/issue/{issueIdOrKey}".into(),            method: "GET".into(),  description: "[ISSUES · wiki read] One issue with its description in RAW WIKI markup (v2, not ADF). `fields=summary,description,labels,status,parent` to slice. Use before a PUT for the media-guard (extract `!image!` / attachment refs).".into() },
+                    ApiEndpoint { path: "/rest/api/2/issue/{issueIdOrKey}".into(),            method: "PUT".into(),  description: "[ISSUES · update] Update fields and/or labels. Wiki description: `{\"fields\":{\"description\":\"<wiki>\"}}`. Labels: `{\"update\":{\"labels\":[{\"add\":\"ia_framed\"},{\"remove\":\"Unspecified\"}]}}`. Both can be combined in one call. Returns 204. SIDE EFFECT — mutates the ticket.".into() },
+                    ApiEndpoint { path: "/rest/api/2/issue/{issueIdOrKey}/comment".into(),    method: "POST".into(), description: "[ISSUES · comment] Add a comment in WIKI markup (tables, panels). Body `{\"body\":\"<wiki>\"}`. Returns 201. SIDE EFFECT — posts publicly on the ticket.".into() },
+                    ApiEndpoint { path: "/rest/api/3/issue/{issueIdOrKey}/transitions".into(), method: "POST".into(), description: "[ISSUES · transition] Execute a workflow transition. Body `{\"transition\":{\"id\":\"<id>\"}}` — GET the transitions list first to resolve the id (e.g. To Frame → To Do). Returns 204. SIDE EFFECT — moves the ticket.".into() },
                     // ── Projects ────────────────────────────────────────
                     ApiEndpoint { path: "/rest/api/3/project/search".into(),               method: "GET".into(),  description: "[PROJECTS · list] Paginated project list. Query: `query=ACME` for name/key match, `expand=lead,description`. Replaces the deprecated `GET /project`.".into() },
                     ApiEndpoint { path: "/rest/api/3/project/{projectIdOrKey}".into(),     method: "GET".into(),  description: "[PROJECTS · single] One project — components, lead, issue types. `expand=description,lead,issueTypes`.".into() },
@@ -573,12 +583,24 @@ pub fn builtin_registry() -> Vec<McpDefinition> {
             description: "Cross-browser automation and E2E testing — official Microsoft server".into(),
             transport: McpTransport::Stdio {
                 command: "npx".into(),
-                args: vec!["-y".into(), "@playwright/mcp@latest".into()],
+                // 2026-06-11 — pin `--browser chromium`. `@playwright/mcp`
+                // defaults to the `chrome` CHANNEL (real Google Chrome at
+                // /opt/google/chrome/chrome), which agents rarely have →
+                // every PW launch failed with "chrome not found" even though
+                // `npx playwright install chromium` had downloaded the bundled
+                // browser (disc f30e340d). Bundled Chromium is what `playwright
+                // install` provides, so anyone with it can now drive a browser.
+                args: vec![
+                    "-y".into(),
+                    "@playwright/mcp@latest".into(),
+                    "--browser".into(),
+                    "chromium".into(),
+                ],
             },
             env_keys: vec![],
             tags: vec!["browser".into(), "testing".into(), "e2e".into()],
             token_url: None,
-            token_help: Some("Run 'npx playwright install' first to download browser binaries".into()),
+            token_help: Some("Run 'npx playwright install chromium' first to download the bundled browser".into()),
             publisher: "Microsoft".into(),
             official: true,
             alt_packages: vec![],

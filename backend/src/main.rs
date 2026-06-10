@@ -131,9 +131,15 @@ async fn main() -> anyhow::Result<()> {
     // as running forever without this cleanup. We mark any still-Running row
     // as Failed with a clear note.
     let cleaned = state.db.with_conn(|conn| {
+        // 2026-06-10 — also reap `Pending`: a run row created but never
+        // picked up before the previous process died is just as orphaned as
+        // a `Running` one (the cancel registry is empty at boot, nothing
+        // will ever advance it). `WaitingApproval` is INTENTIONALLY left
+        // alone — it's a durable human-gate state that survives restarts by
+        // design and resumes via /decide.
         let runs = conn.execute(
             "UPDATE workflow_runs SET status = 'Failed', finished_at = datetime('now') \
-             WHERE status = 'Running'",
+             WHERE status IN ('Running', 'Pending')",
             [],
         )?;
         // Append a marker message to the last agent response so the UI shows
