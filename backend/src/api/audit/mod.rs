@@ -12,6 +12,7 @@ use std::pin::Pin;
 use axum::response::sse::Event;
 use futures::Stream;
 
+pub mod anti_hallu_enforce;
 pub mod anti_hallu_step;
 pub mod briefing;
 pub mod drift;

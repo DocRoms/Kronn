@@ -24,6 +24,45 @@ Agents can propose **durable learnings** (conventions, preferences, facts, pitfa
 
 ---
 
+## [0.8.8] - 2026-06-16
+
+### Added — Anti-hallucination `enforce` mode (PR-A audit gate · PR-B disc refusal · PR-C beta)
+
+`AntiHallucMode::Enforce` previously behaved exactly like `warn`. PR-A gives it teeth on the **audit pipeline** — the surface that writes the most durable docs.
+
+- **Per-step citation gate** (`api/audit/anti_hallu_enforce.rs`, pure + unit-tested): in `enforce`, after an audit step's agent writes its `docs/` file, the file's formal `[src: …]` markers are mechanically re-linted against the real tree (`core::anti_halluc::analyze_roots`). A fabricated citation (path missing / line out of bounds / outside project / training-data) **re-runs the step** with a corrective addendum naming the broken citations (bounded by `MAX_ATTEMPTS = 3`, new `step_retry` SSE event). If they still don't resolve after the cap, the step fails → the run ends *Interrupted* (no validation discussion) instead of committing a doc with invented citations.
+- **Auto-stamp `audit="<today>"`** on every `curated="ai"` section of a clean step file (idempotent, deterministic, 0 tokens) — the date honestly reflects "verified conformant today".
+- `off`/`warn` are unchanged: one attempt per step, gate inert. The gate's branching is a pure `decide(verdict, attempt, max) -> Pass|Retry|Fail` so it's unit-tested without a live agent. 12 new unit tests; clippy `-D warnings` clean.
+
+PR-B extends `enforce` to **discussions** (chat / batch / WF agent steps), at the runner chokepoint + the streaming finalize:
+
+- **Auto-attached `kronn-doc-author` skill.** When `enforce` and the agent's project carries a `docs/AGENTS.md`, the doc-authoring cheat-sheet (`kronn:section` markers + `[src:]` grammar) is injected inline so any agent that edits docs writes in the convention the lint accepts — even if the user never attached the skill. Idempotent (skipped when already in `skill_ids`), inert outside enforce.
+- **Non-destructive P3 fail-fast.** When a finalized agent reply carries a fabricated `[src:]` citation, the message is **kept** (with its red pill) and a System note is appended (`⛔ Réponse refusée (enforce) : N citation(s) fabriquée(s) …`) so the human arbitrates a correction. No auto-retry — on a user disc the user decides.
+- Both branches are pure, unit-tested policies in `core::anti_halluc` (`should_auto_attach_doc_author`, `enforce_refusal_needed`, `enforce_refusal_message`); 3 new tests. clippy `-D warnings` clean.
+PR-C lifts the `enforce` mode out of preview: the Settings label is now **Strict (beta · 0.8.8)** (FR/EN/ES) and the help text + selection toast — which still claimed *"behaves like Warn until 0.8.8, write-refusal ships then"* — now describe what `enforce` actually does (audit step-retry → clean fail; disc reply kept but flagged). The enforce feedback is already visible through existing surfaces (the disc refusal renders as a System message; an exhausted audit gate surfaces as a `step_warning` in the audit recap). *Optional remaining polish: a live `step_retry` chip during an audit, and extending the existing checksum drift banner with the anti-hallu signals (audit date > 6 mo, unresolved `[src:]`).*
+
+### Fixed — Feasibility AutoPilot `run_tests` PHP verdict reported ERROR(harness) on a healthy suite
+
+The parent `run_tests` step mounted the project's `vendor/` conditionally, gated by a fragile host→container path back-substitution (`${vend/#…}`); when it mis-evaluated, `vendor/` was left unmounted → phpunit couldn't autoload → boot failure mis-classified as `ERROR(php harness)`. Now vendor is resolved by checking the **container** paths directly (worktree's own `vendor/` first, else borrow main's), and a genuinely absent `vendor/` is an honest **SKIP (run composer install)** instead of a scary ERROR. Also added `--colors=never` so the `Tests: N` / `Failures:` summary parse is ANSI-free. Verified live on front_euronews (3602 tests → PASS; filtered class → clean OK). +4 assertions on the existing `run_tests` template test.
+
+### Fixed — Sidebar message count inflated by System rows
+
+The "N msg" label in the discussion sidebar (`SwipeableDiscItem`) and on the dashboard `ProjectCard` showed the raw `message_count`, which counts tool-call breadcrumbs, cached-summary lines and the new enforce-refusal note (all `MessageRole::System`) — wildly higher than the real conversation length. The 0.8.7 fix had switched the unread *badge* to `non_system_message_count` (via `unseenBasis`) but the visible total label was missed. Both now use `unseenBasis(disc)` (the backend already exposes the System-excluding count via a subquery). Render-level regression test added.
+
+### Fixed — Auto-summary kept firing after being disabled in Settings
+
+`maybe_generate_summary` only checked the **per-disc** `summary_strategy`, which is frozen at creation from the global default. Turning auto-summary off in Settings only affected NEW discs, so older long threads (created when the default was `Auto`) kept summarising. The global `default_summary_strategy` is now a **master kill-switch**: `SummaryStrategy::auto_fires(global, disc)` returns false whenever the global is `Off`, regardless of the disc's frozen value; otherwise the per-disc strategy decides as before. Pure + unit-tested.
+
+### Fixed — Anti-hallucination: bare-filename citations no longer false-flagged
+
+A dominant source of false "unverified" amber pills: an agent that cited a file by **bare name + line** (`` `NewslettersManager.ts:107` ``) without its full path was flagged unverified even though the file exists — `verify_file_ref` only probed the path at each root's top level, so a nested file never resolved.
+
+- `verify_file_ref` now falls back to a **unique-basename walk** when a separator-less name doesn't resolve at root level: exactly one matching file in the tree → `Verified` (with line-bounds check + the resolved relative path shown in the pill detail); 2+ matches → stays unresolved but with an actionable *"ambiguous, cite the full path"* reason; 0 → `NotFound` as before. Full paths are unchanged.
+- The walk reuses the `scanner` skip-list (`node_modules`, `vendor`, `target`, **`.kronn`** …) — skipping `.kronn` is load-bearing: its `worktrees/` hold full project copies that otherwise make every basename look ambiguous (real case: front_euronews had 11 copies of one file, 1 real). Multi-root (Isolated worktree + main) is first-root-wins, so a file present in both isn't double-counted as ambiguous. Bounded walk (caps at 60k entries → never a false unique on a partial scan).
+- Verified live on the exact false positive (disc `d344b52b`): `NewslettersManager.ts:107` and `SocialLoginManager.ts:199` now resolve `Verified` against the real checkout. 8 new unit tests (incl. the `.kronn/worktrees` skip, ambiguity, multi-root, out-of-bounds, and the end-to-end inline-anchor case); clippy `-D warnings` clean.
+
+---
+
 ## [0.8.7] - 2026-05-28
 
 ### Added — Big-ticket AutoPilot: multi-agent debate + per-task test→fix loop (2026-06-13)

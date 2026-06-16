@@ -211,3 +211,14 @@ describe('SwipeableDiscItem — pointer/swipe gesture', () => {
     expect(screen.getByText('disc.delete')).toBeDefined();
   });
 });
+
+describe('SwipeableDiscItem — visible "N msg" label (non-System count)', () => {
+  it('renders non_system_message_count, not the System-inflated message_count', () => {
+    // Real shape: 2 user-facing msgs + 50 tool/refusal/summary System rows.
+    renderItem({ disc: disc({ message_count: 52, non_system_message_count: 2 }) });
+    expect(screen.getByText(/^2 msg ·/)).toBeDefined();
+    expect(screen.queryByText(/52 msg/)).toBeNull();
+    // aria-label matches too.
+    expect(screen.getByRole('button').getAttribute('aria-label')).toContain('2 messages');
+  });
+});

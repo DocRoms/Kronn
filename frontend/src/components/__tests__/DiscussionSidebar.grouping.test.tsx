@@ -206,9 +206,15 @@ describe('DiscussionSidebar — grouping', () => {
     expect(onToggleGroup).toHaveBeenCalledWith('p1');
   });
 
-  it('selecting a discussion fires onSelect with id + message count', async () => {
+  it('selecting a discussion fires onSelect with the non-System message count', async () => {
     const onSelect = vi.fn();
-    const discussions = [mkDisc({ id: 'd1', project_id: null, title: 'Click me', message_count: 7 })];
+    // The selection basis is `unseenBasis` → `non_system_message_count`, NOT the
+    // raw `message_count` (which is inflated by tool-log / summary / refusal
+    // System rows). Here the disc has 12 raw rows but only 7 user/agent ones.
+    const discussions = [mkDisc({
+      id: 'd1', project_id: null, title: 'Click me',
+      message_count: 12, non_system_message_count: 7,
+    })];
     render(<DiscussionSidebar {...baseProps} discussions={discussions} onSelect={onSelect} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
 

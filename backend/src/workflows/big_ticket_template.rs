@@ -701,20 +701,32 @@ fn build_run_tests_step() -> WorkflowStep {
         "compose=''; for c in \"$main/docker-compose.yml\" \"$main/docker-compose.yaml\" \"$main/compose.yml\"; do [ -f \"$c\" ] && { compose=\"$c\"; break; }; done",
         "if [ -n \"$phpdir\" ] && [ -n \"$compose\" ] && command -v docker >/dev/null 2>&1; then",
         "  svc=\"$(grep -oE '^  [a-zA-Z0-9_-]+:' \"$compose\" | tr -d ' :' | grep -iE '^php' | head -1)\"; [ -z \"$svc\" ] && svc='php'",
-        "  sub=\"${phpdir#./}\"",
-        "  if [ \"$sub\" = '.' ] || [ -z \"$sub\" ]; then mnt=\"$(hosttr \"$wt\")\"; vend=\"$(hosttr \"$main\")/vendor\"; else mnt=\"$(hosttr \"$wt\")/$sub\"; vend=\"$(hosttr \"$main\")/$sub/vendor\"; fi",
-        "  echo \"→ PHP via docker compose service '$svc' (worktree mounted, main vendor borrowed)\"",
-        "  vmount=''; [ -d \"${vend/#${KRONN_HOST_HOME:-/host-home}//host-home}\" ] 2>/dev/null && vmount=\"-v $vend:/app/vendor\"",
-        "  docker compose -f \"$compose\" run --rm --no-deps -T -v \"$mnt:/app\" $vmount -w /app \"$svc\" vendor/bin/phpunit -c phpunit.xml.dist >/tmp/php.out 2>&1",
-        "  rc=$?; tail -20 /tmp/php.out",
-        "  # classify: a phpunit summary line ('Tests: N') means the suite RAN —",
-        "  # rc!=0 with a summary = real failures (FAIL); rc!=0 WITHOUT a summary",
-        "  # = phpunit couldn't boot (harness/env error). run-11b: 176 real PHP",
-        "  # failures were mis-tagged ERROR by a too-loose substring match.",
-        "  if [ $rc -eq 0 ]; then php_v='PASS'",
-        "  elif grep -qE 'Tests: [0-9]+' /tmp/php.out; then fails=\"$(grep -oE '(Failures|Errors): [0-9]+' /tmp/php.out | paste -sd, -)\"; php_v=\"FAIL($fails)\"",
-        "  elif grep -qE '(No tests executed|Cannot open|could not open|Fatal error|Class .* not found|bootstrap)' /tmp/php.out; then php_v='ERROR(php harness — not a code failure)'",
-        "  else php_v='FAIL'; fi",
+        "  sub=\"${phpdir#./}\"; [ \"$sub\" = '.' ] && sub=''",
+        "  base=''; [ -n \"$sub\" ] && base=\"/$sub\"",
+        "  mnt=\"$(hosttr \"$wt\")$base\"",
+        "  # vendor: prefer the worktree's own, else borrow main's. Check the",
+        "  # CONTAINER paths directly ($wt/$main come from git inside the Kronn",
+        "  # container) — the previous host→container back-substitution was",
+        "  # fragile and, when it left vendor unmounted, phpunit failed to boot",
+        "  # and got mis-tagged ERROR(harness). A truly absent vendor is now an",
+        "  # honest SKIP, not a scary ERROR.",
+        "  vend=''",
+        "  if [ -d \"$wt$base/vendor\" ]; then vend=\"$(hosttr \"$wt\")$base/vendor\"",
+        "  elif [ -d \"$main$base/vendor\" ]; then vend=\"$(hosttr \"$main\")$base/vendor\"; fi",
+        "  if [ -z \"$vend\" ]; then php_v='SKIP(no vendor/ — run composer install in the project)'",
+        "  else",
+        "    echo \"→ PHP via docker compose service '$svc' (worktree mounted, vendor: $vend)\"",
+        "    docker compose -f \"$compose\" run --rm --no-deps -T -v \"$mnt:/app\" -v \"$vend:/app/vendor\" -w /app \"$svc\" vendor/bin/phpunit -c phpunit.xml.dist --colors=never >/tmp/php.out 2>&1",
+        "    rc=$?; tail -20 /tmp/php.out",
+        "    # classify: a phpunit summary line ('Tests: N') means the suite RAN —",
+        "    # rc!=0 with a summary = real failures (FAIL); rc!=0 WITHOUT a summary",
+        "    # = phpunit couldn't boot (harness/env error). --colors=never keeps",
+        "    # the summary parse free of ANSI codes.",
+        "    if [ $rc -eq 0 ]; then php_v='PASS'",
+        "    elif grep -qE 'Tests: [0-9]+' /tmp/php.out; then fails=\"$(grep -oE '(Failures|Errors): [0-9]+' /tmp/php.out | paste -sd, -)\"; php_v=\"FAIL($fails)\"",
+        "    elif grep -qE '(No tests executed|Cannot open|could not open|Fatal error|Class .* not found|bootstrap)' /tmp/php.out; then php_v='ERROR(php harness — not a code failure)'",
+        "    else php_v='FAIL'; fi",
+        "  fi",
         "else",
         "  php_v='SKIP(no dockerized php stack at repo root — run `make test` in the project)'",
         "fi",
@@ -1209,6 +1221,11 @@ mod tests {
         assert!(script.contains("vendor/bin/phpunit -c phpunit.xml.dist"), "PHP suite actually runs");
         assert!(script.contains("hosttr"), "container→host path translation for bind mounts");
         assert!(script.contains("no dockerized php stack"), "honest SKIP when no stack — never a false FAIL");
+        // 0.8.8 fignolage — robust PHP verdict:
+        assert!(script.contains("--colors=never"), "ANSI-free phpunit output → reliable summary parse");
+        assert!(script.contains("composer install"), "absent vendor → honest SKIP, not a scary ERROR(harness)");
+        assert!(script.contains("$wt$base/vendor"), "vendor resolved via CONTAINER path (worktree first) — no fragile host→container back-substitution");
+        assert!(!script.contains("${vend/#"), "the fragile parameter back-substitution is gone");
         assert!(!script.contains("no php runtime in the Kronn container"), "no longer installs/needs local php");
         assert!(script.contains("TEST VERDICT"), "per-suite verdict for the PR");
     }

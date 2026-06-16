@@ -569,15 +569,20 @@ pub(super) async fn maybe_generate_summary(
         _ => return,
     };
 
-    // Per-disc strategy override (added 2026-05-09 — `OnDemand` and `Off`
-    // suppress the auto-fire entirely; `Auto` keeps the historical
-    // threshold-based behaviour). The cache itself stays around so an
-    // explicit summarise call (planned tool surface) can still write to
-    // it.
-    if !matches!(disc.summary_strategy, crate::models::SummaryStrategy::Auto) {
+    // Auto-fire gate. The GLOBAL Settings default is a master kill-switch
+    // (global `Off` suppresses everywhere — fixes "disabled in config but old
+    // long discs keep summarising": the default only seeds NEW discs, so older
+    // rows kept a frozen per-disc `Auto`). Otherwise the per-disc strategy
+    // decides (`OnDemand`/`Off` suppress; `Auto` keeps the threshold behaviour).
+    // The cache stays around either way so an explicit summarise call can write.
+    let global_default = {
+        let cfg = state.config.read().await;
+        cfg.server.default_summary_strategy
+    };
+    if !crate::models::SummaryStrategy::auto_fires(global_default, disc.summary_strategy) {
         tracing::debug!(
-            "Summary auto-fire disabled for {} (strategy: {:?})",
-            discussion_id, disc.summary_strategy
+            "Summary auto-fire suppressed for {} (global: {:?}, disc: {:?})",
+            discussion_id, global_default, disc.summary_strategy
         );
         return;
     }
