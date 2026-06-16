@@ -182,6 +182,49 @@ pub enum SummaryStrategy {
     Off,
 }
 
+impl SummaryStrategy {
+    /// Whether the background auto-summary should fire, given the GLOBAL default
+    /// (`ServerConfig::default_summary_strategy`, the Settings toggle) and THIS
+    /// disc's stored strategy.
+    ///
+    /// The global `Off` is a **master kill-switch**: turning auto-summary off in
+    /// Settings suppresses it everywhere, including older discs whose per-disc
+    /// strategy was frozen to `Auto` at creation (the global default is only
+    /// applied to NEW discs, so changing it never rewrote existing rows — the
+    /// "I disabled it but long discs keep summarising" bug). Otherwise the
+    /// per-disc strategy decides, and only `Auto` auto-fires.
+    pub fn auto_fires(global_default: SummaryStrategy, disc: SummaryStrategy) -> bool {
+        if matches!(global_default, SummaryStrategy::Off) {
+            return false;
+        }
+        matches!(disc, SummaryStrategy::Auto)
+    }
+}
+
+#[cfg(test)]
+mod summary_strategy_tests {
+    use super::SummaryStrategy::{Auto, Off, OnDemand};
+    use super::SummaryStrategy;
+
+    #[test]
+    fn global_off_is_a_master_kill_switch() {
+        // The reported bug: global Off must suppress even an old disc frozen to Auto.
+        assert!(!SummaryStrategy::auto_fires(Off, Auto));
+        assert!(!SummaryStrategy::auto_fires(Off, OnDemand));
+        assert!(!SummaryStrategy::auto_fires(Off, Off));
+    }
+
+    #[test]
+    fn per_disc_decides_when_global_is_not_off() {
+        // Global Auto (or OnDemand) → the per-disc strategy is honoured.
+        assert!(SummaryStrategy::auto_fires(Auto, Auto));
+        assert!(!SummaryStrategy::auto_fires(Auto, Off));
+        assert!(!SummaryStrategy::auto_fires(Auto, OnDemand));
+        assert!(SummaryStrategy::auto_fires(OnDemand, Auto));
+        assert!(!SummaryStrategy::auto_fires(OnDemand, Off));
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum MessageRole {

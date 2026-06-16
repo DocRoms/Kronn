@@ -5,6 +5,7 @@ import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable, isTrackerMcp } from '../lib/constants';
 import { AiDocViewer } from './AiDocViewer';
+import { unseenBasis } from './SwipeableDiscItem';
 import AuditRecapPanel from './AuditRecapPanel';
 import type { AuditKind } from '../types/AuditKind';
 import { ProjectSkills } from './ProjectSkills';
@@ -1040,7 +1041,7 @@ export function ProjectCard({
                         {disc.title}
                       </span>
                       <span className="dash-row-disc-meta">
-                        {disc.message_count ?? disc.messages.length} msg · {disc.agent}
+                        {unseenBasis(disc)} msg · {disc.agent}
                       </span>
                     </div>
                     <button className="dash-icon-btn" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }} aria-label="Open discussion">
@@ -1566,7 +1567,7 @@ export function ProjectCard({
                     {validationInProgress && validationDisc ? (
                       <>
                         <p className="dash-audit-warning">
-                          <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', validationDisc.message_count ?? validationDisc.messages.length)}
+                          <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} /> {t('audit.validationInProgress', unseenBasis(validationDisc))}
                         </p>
                         <p className="dash-audit-desc">
                           {t('audit.validationHint')}

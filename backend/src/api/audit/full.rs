@@ -470,6 +470,13 @@ pub async fn full_audit(
             }
         };
 
+        // 0.8.8 PR-A — read the anti-hallucination mode once for the whole run.
+        // In `enforce`, each step that writes a doc is gated on mechanical
+        // `[src:]` citation verification, with a bounded corrective retry; in
+        // `off`/`warn` the gate is inert and each step runs exactly once.
+        let enforce_mode = crate::core::anti_halluc::current_mode()
+            == crate::core::anti_halluc::AntiHallucMode::Enforce;
+
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
@@ -599,12 +606,32 @@ pub async fn full_audit(
             // live elapsed counter (computed client-side from the
             // step_started_at wallclock).
             let step_started_at = std::time::Instant::now();
+
+            // 0.8.8 PR-A — enforce-mode per-step retry loop. `off`/`warn` run a
+            // single attempt (`max_attempts == 1`) with the gate inert, so the
+            // behaviour is unchanged. In `enforce`, a step that wrote fabricated
+            // `[src:]` citations re-runs with a corrective addendum, bounded by
+            // `MAX_ATTEMPTS`. The terminal attempt falls through to `step_done`
+            // / DB finalize exactly once.
+            let max_attempts = if enforce_mode {
+                super::anti_hallu_enforce::MAX_ATTEMPTS
+            } else {
+                1
+            };
+            let mut attempt: usize = 0;
+            let mut citation_feedback: Option<String> = None;
+            'attempts: loop {
+            attempt += 1;
             let mut step_tokens: u64 = 0;
+            let attempt_prompt = match &citation_feedback {
+                Some(fb) => format!("{full_prompt}\n\n{fb}"),
+                None => full_prompt.clone(),
+            };
 
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 full_access: true,
                 tier: crate::models::ModelTier::Reasoning,
-                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &full_prompt, &tokens)
+                ..runner::AgentStartConfig::new(&agent_type, &project_path_str, &attempt_prompt, &tokens)
             }).await {
                 Ok(mut process) => {
                     // Register the child PID for cancellation
@@ -824,6 +851,82 @@ pub async fn full_audit(
                         }
                     }
 
+                    // 0.8.8 PR-A — enforce-mode citation gate. Runs only when
+                    // the step is otherwise successful and wrote a real file
+                    // (the "REVIEW" pseudo-step writes nothing). Re-lints the
+                    // written file's `[src:]` markers against the real tree.
+                    if enforce_mode && success && analysis_step.target_file != "REVIEW" {
+                        let target_path = project_path.join(analysis_step.target_file);
+                        if let Ok(written) = std::fs::read_to_string(&target_path) {
+                            let verdict = super::anti_hallu_enforce::lint_step_file(
+                                &written,
+                                &[&project_path],
+                            );
+                            use super::anti_hallu_enforce::GateDecision;
+                            match super::anti_hallu_enforce::decide(&verdict, attempt, max_attempts) {
+                                GateDecision::Retry => {
+                                    // Re-run the step with a corrective addendum
+                                    // naming the fabricated citations.
+                                    tracing::warn!(
+                                        "Audit step {} ({}) enforce gate: {} fabricated citation(s), retry {}/{}",
+                                        step, file_label, verdict.count(), attempt + 1, max_attempts
+                                    );
+                                    yield Event::default().event("step_retry").data(
+                                        serde_json::json!({
+                                            "step": step,
+                                            "file": file_label,
+                                            "attempt": attempt,
+                                            "max_attempts": max_attempts,
+                                            "fabricated_count": verdict.count(),
+                                            "reason": "anti_hallu_fabricated_citations",
+                                        }).to_string()
+                                    );
+                                    citation_feedback = Some(
+                                        super::anti_hallu_enforce::corrective_feedback(file_label, &verdict),
+                                    );
+                                    continue 'attempts;
+                                }
+                                GateDecision::Fail => {
+                                    // Retries exhausted — fail the step so the run
+                                    // ends Interrupted (no validation disc) rather
+                                    // than committing a doc with fabricated citations.
+                                    success = false;
+                                    let reason = format!(
+                                        "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
+                                        verdict.count(), max_attempts
+                                    );
+                                    tracing::warn!("Audit step {} ({}) enforce gate failed: {}", step, file_label, reason);
+                                    yield Event::default().event("step_warning").data(
+                                        serde_json::json!({
+                                            "step": step,
+                                            "file": file_label,
+                                            "reason": reason.clone(),
+                                            "repaired_from_template": false,
+                                        }).to_string()
+                                    );
+                                    warning = Some(crate::api::audit::validation::StepValidationWarning {
+                                        reason,
+                                        repaired: false,
+                                    });
+                                }
+                                GateDecision::Pass => {
+                                    // Clean citations — stamp `audit="<today>"` on
+                                    // any curated="ai" section (deterministic, 0 tokens).
+                                    if let Some(stamped) =
+                                        super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
+                                    {
+                                        if let Err(e) = std::fs::write(&target_path, &stamped) {
+                                            tracing::warn!(
+                                                "Audit step {} ({}): failed to stamp audit dates: {}",
+                                                step, file_label, e
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     let step_done = serde_json::json!({
                         "step": step,
                         "success": success,
@@ -899,6 +1002,10 @@ pub async fn full_audit(
                     yield Event::default().event("step_error").data(err.to_string());
                 }
             }
+            // Terminal attempt (success, exhausted retries, or start failure).
+            // The retry path `continue`s before reaching here.
+            break 'attempts;
+            } // 'attempts: per-step enforce retry loop
         }
 
         // ── Auto-detect project skills ──

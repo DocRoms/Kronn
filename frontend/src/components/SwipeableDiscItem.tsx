@@ -88,11 +88,13 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
     setOffsetX(0);
   };
 
-  // The unread badge tracks USER + AGENT messages only — the streaming layer
-  // persists tool calls + cached-summary lines as MessageRole::System rows,
-  // which inflate `message_count`. Using `non_system_message_count` keeps
-  // "50 outils dans un message" from showing up as "50 à lire".
-  const unseen = unseenBasis(disc) - lastSeenCount;
+  // The unread badge AND the visible "N msg" label track USER + AGENT messages
+  // only — the streaming layer persists tool calls + cached-summary lines + the
+  // enforce refusal note as MessageRole::System rows, which inflate
+  // `message_count`. `unseenBasis` resolves to `non_system_message_count`, so
+  // "50 outils dans un message" never shows up as "50 messages" / "50 à lire".
+  const msgCount = unseenBasis(disc);
+  const unseen = msgCount - lastSeenCount;
   const showBadge = unseen > 0 && !isActive;
   const bgColor = offsetX > 30 ? `rgba(59,130,246,${Math.min(Math.abs(offsetX) / 120, 0.4)})`
                  : offsetX < -30 ? `rgba(239,68,68,${Math.min(Math.abs(offsetX) / 120, 0.4)})`
@@ -121,11 +123,11 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
         role="button"
         tabIndex={0}
         aria-current={isActive ? 'true' : undefined}
-        aria-label={`${disc.title} — ${disc.message_count ?? disc.messages.length} messages, ${disc.agent}`}
+        aria-label={`${disc.title} — ${msgCount} messages, ${disc.agent}`}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            onSelect(disc.id, disc.message_count ?? disc.messages.length);
+            onSelect(disc.id, msgCount);
           }
         }}
         style={{
@@ -200,7 +202,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
             {(disc.participants?.length ?? 0) > 1 && (
               <Users size={8} style={{ color: 'var(--kr-purple)' }} />
             )}
-            {disc.message_count ?? disc.messages.length} msg · {disc.agent}
+            {msgCount} msg · {disc.agent}
             {relativeWhen && (
               <>
                 {' · '}

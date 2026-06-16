@@ -104,6 +104,42 @@ pub fn current_mode() -> AntiHallucMode {
     *cell().read().unwrap()
 }
 
+// ─── P3 (0.8.8 PR-B) — enforce-mode disc policy helpers ──────────────────
+//
+// Pure decision functions so the runner / streaming wiring is unit-testable
+// without spawning a live agent (the call sites supply the FS check + mode).
+
+/// Whether the enforce gate should auto-attach the `kronn-doc-author` skill to
+/// an agent run: only in enforce, only when the project carries a
+/// `docs/AGENTS.md`, and only if the skill isn't already attached (idempotent).
+pub fn should_auto_attach_doc_author(
+    mode: AntiHallucMode,
+    skill_ids: &[String],
+    project_has_agents_md: bool,
+) -> bool {
+    mode == AntiHallucMode::Enforce
+        && project_has_agents_md
+        && !skill_ids.iter().any(|s| s == "kronn-doc-author")
+}
+
+/// Whether a finalized agent message must get the enforce P3 refusal note: only
+/// in enforce, and only when ≥1 formal `[src:]` citation is high-confidence
+/// fabricated.
+pub fn enforce_refusal_needed(mode: AntiHallucMode, fabricated_count: u32) -> bool {
+    mode == AntiHallucMode::Enforce && fabricated_count > 0
+}
+
+/// The System message surfaced when a disc reply is refused under enforce.
+/// Non-destructive: the agent message stays; this note tells the human to get
+/// it corrected before relying on it (no auto-retry — the user arbitrates).
+pub fn enforce_refusal_message(fabricated_count: u32) -> String {
+    format!(
+        "⛔ Réponse refusée (anti-hallucination · enforce) : {fabricated_count} citation(s) `[src: …]` \
+fabriquée(s) — fichier ou ligne introuvable / hors projet. La réponse est conservée mais NON validée : \
+demandez à l'agent de corriger ou retirer ces citations avant de vous en servir."
+    )
+}
+
 // ─── P1 — directive ──────────────────────────────────────────────────────
 
 /// The sourcing-discipline directive injected into agent prompts.
@@ -981,6 +1017,78 @@ fn line_bounds_status(candidate: &Path, line_spec: Option<(usize, usize)>) -> (S
     }
 }
 
+/// Heavy / generated / Kronn-internal dirs never descended when resolving a
+/// bare basename. Mirrors `scanner::scan_kronn_markers`'s skip list. Skipping
+/// `.kronn` is load-bearing: its `worktrees/` hold FULL project copies, so
+/// without it every basename looks ambiguous — the exact false-ambiguity that
+/// masked the real unique file in front_euronews (11 copies, 1 real).
+const BASENAME_WALK_SKIP_DIRS: &[&str] = &[
+    "node_modules", "vendor", "target", ".git", "dist", "build", ".next",
+    ".kronn", ".kronn-worktrees", ".venv", "__pycache__",
+];
+
+/// Outcome of walking the tree for a bare basename (no path separator).
+enum BasenameResolution {
+    /// Exactly one file under the (first matching) root carries this basename.
+    Unique(PathBuf),
+    /// Two or more candidates — too ambiguous to green-light.
+    Ambiguous(usize),
+    /// No file with this basename, or the walk was capped before deciding.
+    NotFound,
+}
+
+/// Resolve a bare basename (e.g. `Foo.ts`) to a UNIQUE file in the project
+/// tree, so an agent that cites `Foo.ts:42` without the full path stops being a
+/// false "unverified". Roots are tried IN ORDER (Isolated worktree before the
+/// main checkout, mirroring `verify_file_ref`), and the FIRST root that holds
+/// any match decides — so the same file present in both a worktree root and the
+/// main root is not double-counted as ambiguous. Heavy / `.kronn` dirs are
+/// pruned. Bounded: past `MAX_WALK_ENTRIES` we bail to `NotFound` rather than
+/// risk a false `Unique` on a partial scan.
+fn resolve_unique_basename(basename: &str, roots: &[&Path]) -> BasenameResolution {
+    const MAX_WALK_ENTRIES: usize = 60_000;
+    for root in roots {
+        let mut found: Option<PathBuf> = None;
+        let mut count = 0usize;
+        let mut scanned = 0usize;
+        let mut capped = false;
+        let walker = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| {
+                // Prune skip dirs by name (depth > 0 so the root itself stays).
+                if e.depth() > 0 && e.file_type().is_dir() {
+                    if let Some(name) = e.file_name().to_str() {
+                        return !BASENAME_WALK_SKIP_DIRS.contains(&name);
+                    }
+                }
+                true
+            });
+        for entry in walker.filter_map(|e| e.ok()) {
+            scanned += 1;
+            if scanned > MAX_WALK_ENTRIES {
+                capped = true;
+                break;
+            }
+            if entry.file_type().is_file() && entry.file_name().to_str() == Some(basename) {
+                count += 1;
+                if count == 1 {
+                    found = Some(entry.path().to_path_buf());
+                } else {
+                    return BasenameResolution::Ambiguous(count); // ≥2 in this root
+                }
+            }
+        }
+        if capped {
+            return BasenameResolution::NotFound; // don't claim a unique on a partial scan
+        }
+        if let Some(p) = found {
+            return BasenameResolution::Unique(p); // exactly one in this root → decided
+        }
+        // 0 matches in this root → fall through to the next root.
+    }
+    BasenameResolution::NotFound
+}
+
 /// Verify a file reference against one or more candidate roots. The FIRST root
 /// where the (jailed) relative path exists wins — this is how an Isolated
 /// discussion's git worktree is tried before the main checkout, fixing the
@@ -991,6 +1099,8 @@ fn line_bounds_status(candidate: &Path, line_spec: Option<(usize, usize)>) -> (S
 /// - Relative path → lexical jail + symlink-escape re-check under EACH root.
 ///   `../` escape in every root → OutsideProject; jailed-but-absent everywhere
 ///   → NotFound. The SSRF/jail guarantee is unchanged (applied per-root).
+/// - Bare basename (no separator) unresolved at root level → unique-match walk
+///   (`resolve_unique_basename`) before NotFound.
 fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
     let reference = clean_reference(reference);
     if reference.is_empty() {
@@ -1048,6 +1158,34 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
             "relative path escapes the project root via ../".into(),
         );
     }
+
+    // Bare basename (no separator) that didn't resolve at any root level — it
+    // very likely lives deeper in the tree. Walk for a UNIQUE basename match
+    // before giving up. This kills the dominant false positive: an agent citing
+    // `Foo.ts:42` without the full path was flagged "unverified" even though the
+    // file exists. Only a UNIQUE match is green-lit; 2+ stays unresolved (we
+    // never claim a fact we can't pin), but with an actionable reason.
+    if !path_str.is_empty() && !path_str.contains('/') && !path_str.contains('\\') {
+        match resolve_unique_basename(path_str, roots) {
+            BasenameResolution::Unique(found) => {
+                let (status, detail) = line_bounds_status(&found, line_spec);
+                let shown = roots
+                    .iter()
+                    .find_map(|r| found.strip_prefix(r).ok())
+                    .unwrap_or(found.as_path())
+                    .display();
+                return (status, format!("{detail} — resolved by unique basename → {shown}"));
+            }
+            BasenameResolution::Ambiguous(n) => {
+                return (
+                    SourceStatus::NotFound,
+                    format!("bare name `{path_str}` matches {n} files — ambiguous, cite the full path"),
+                );
+            }
+            BasenameResolution::NotFound => {}
+        }
+    }
+
     (SourceStatus::NotFound, format!("file not found: {}", path_str))
 }
 
@@ -1253,6 +1391,43 @@ mod tests {
         assert!(!AntiHallucMode::Off.is_active());
         assert!(AntiHallucMode::Warn.is_active());
         assert!(AntiHallucMode::Enforce.is_active());
+    }
+
+    // ── PR-B enforce-mode disc helpers ────────────────────────────────
+
+    #[test]
+    fn auto_attach_doc_author_only_in_enforce_with_agents_md() {
+        let none: Vec<String> = vec![];
+        // Enforce + project has AGENTS.md + not already attached → attach.
+        assert!(should_auto_attach_doc_author(AntiHallucMode::Enforce, &none, true));
+        // Wrong mode → never.
+        assert!(!should_auto_attach_doc_author(AntiHallucMode::Warn, &none, true));
+        assert!(!should_auto_attach_doc_author(AntiHallucMode::Off, &none, true));
+        // No docs/AGENTS.md → never (nothing to discipline against).
+        assert!(!should_auto_attach_doc_author(AntiHallucMode::Enforce, &none, false));
+        // Idempotent: already attached → don't duplicate.
+        let attached = vec!["rust".to_string(), "kronn-doc-author".to_string()];
+        assert!(!should_auto_attach_doc_author(AntiHallucMode::Enforce, &attached, true));
+    }
+
+    #[test]
+    fn enforce_refusal_only_when_enforce_and_fabricated() {
+        assert!(enforce_refusal_needed(AntiHallucMode::Enforce, 1));
+        assert!(enforce_refusal_needed(AntiHallucMode::Enforce, 7));
+        // No fabricated citations → no refusal even in enforce.
+        assert!(!enforce_refusal_needed(AntiHallucMode::Enforce, 0));
+        // Warn/off never refuse, regardless of count.
+        assert!(!enforce_refusal_needed(AntiHallucMode::Warn, 3));
+        assert!(!enforce_refusal_needed(AntiHallucMode::Off, 3));
+    }
+
+    #[test]
+    fn refusal_message_states_count_and_non_destructive() {
+        let msg = enforce_refusal_message(2);
+        assert!(msg.contains('2'));
+        assert!(msg.to_lowercase().contains("refus"));
+        // Must convey the message is KEPT (non-destructive), not deleted.
+        assert!(msg.contains("conservée"));
     }
 
     #[test]
@@ -1784,6 +1959,107 @@ mod tests {
         let root = temp_project();
         let c = verify_source_marker("src/nope.rs:1", Some(&root));
         assert_eq!(c.status, SourceStatus::NotFound, "{:?}", c);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Bare-basename resolution (kills the "Foo.ts:42 unverified" FP) ──
+
+    /// Make a fresh temp project root and run `f` to populate it. Returns root.
+    fn temp_root_with(f: impl FnOnce(&Path)) -> PathBuf {
+        let mut d = std::env::temp_dir();
+        d.push(format!("kronn_basename_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        f(&d);
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, lines: usize) {
+        let p = root.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x\n".repeat(lines)).unwrap();
+    }
+
+    #[test]
+    fn bare_basename_resolves_to_unique_nested_file() {
+        // The core fix: a bare `Widget.ts:2` cited without its full path, living
+        // deep in the tree, now verifies instead of showing "unverified".
+        let root = temp_root_with(|r| write_file(r, "app/assets/ts/Services/Widget.ts", 3));
+        let (status, detail) = verify_file_ref("Widget.ts:2", &[&root]);
+        assert_eq!(status, SourceStatus::Verified, "{detail}");
+        assert!(detail.contains("unique basename"), "{detail}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bare_basename_skips_dot_kronn_worktree_copies() {
+        // The real front_euronews case: 1 real file + a copy under
+        // `.kronn/worktrees/`. Without the skip the basename looks ambiguous;
+        // with it, the main copy is the unique match → Verified.
+        let root = temp_root_with(|r| {
+            write_file(r, "app/assets/ts/Widget.ts", 3);
+            write_file(r, ".kronn/worktrees/wt-abc/app/assets/ts/Widget.ts", 3);
+            write_file(r, "node_modules/pkg/Widget.ts", 3);
+        });
+        let (status, _d) = verify_file_ref("Widget.ts:1", &[&root]);
+        assert_eq!(status, SourceStatus::Verified, "{_d}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bare_basename_two_real_copies_stay_ambiguous() {
+        // Two genuine copies (NOT under a skip dir) → we refuse to guess.
+        let root = temp_root_with(|r| {
+            write_file(r, "a/Widget.ts", 3);
+            write_file(r, "b/Widget.ts", 3);
+        });
+        let (status, detail) = verify_file_ref("Widget.ts:1", &[&root]);
+        assert_eq!(status, SourceStatus::NotFound);
+        assert!(detail.contains("ambiguous"), "{detail}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bare_basename_absent_is_not_found() {
+        let root = temp_root_with(|r| write_file(r, "app/Other.ts", 3));
+        let (status, _d) = verify_file_ref("Widget.ts:1", &[&root]);
+        assert_eq!(status, SourceStatus::NotFound);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bare_basename_unique_but_line_out_of_bounds() {
+        // Resolved by name, but the cited line is past EOF → honest OutOfBounds.
+        let root = temp_root_with(|r| write_file(r, "deep/dir/Widget.ts", 2));
+        let (status, _d) = verify_file_ref("Widget.ts:99", &[&root]);
+        assert_eq!(status, SourceStatus::OutOfBounds, "{_d}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn bare_basename_same_file_in_two_roots_is_not_ambiguous() {
+        // Isolated-disc shape: roots = [worktree, main], same file in both.
+        // First root wins (mirrors exact-path semantics) → not double-counted.
+        let wt = temp_root_with(|r| write_file(r, "app/Widget.ts", 3));
+        let main = temp_root_with(|r| write_file(r, "app/Widget.ts", 3));
+        let (status, _d) = verify_file_ref("Widget.ts:1", &[&wt, &main]);
+        assert_eq!(status, SourceStatus::Verified, "{_d}");
+        std::fs::remove_dir_all(&wt).ok();
+        std::fs::remove_dir_all(&main).ok();
+    }
+
+    #[test]
+    fn inline_bare_basename_anchor_no_longer_unverified() {
+        // End-to-end via analyze_roots: the exact disc d344b52b false positive.
+        // A backticked bare anchor `Widget.ts:2` for a nested file used to land
+        // in `unverified_count`; it now resolves green.
+        let root = temp_root_with(|r| write_file(r, "app/assets/ts/Services/Widget.ts", 5));
+        let report = analyze_roots("See `Widget.ts:2` for the logic.", &[&root]);
+        assert_eq!(report.unverified_count, 0, "should not be a soft-amber FP");
+        assert!(
+            report.sources.iter().any(|s| s.status == SourceStatus::Verified),
+            "the inline anchor must resolve to a Verified source: {:?}",
+            report.sources
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 

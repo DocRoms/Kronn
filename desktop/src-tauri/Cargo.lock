@@ -2298,7 +2298,7 @@ dependencies = [
 
 [[package]]
 name = "kronn"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2342,7 +2342,7 @@ dependencies = [
 
 [[package]]
 name = "kronn-desktop"
-version = "0.8.7"
+version = "0.8.8"
 dependencies = [
  "anyhow",
  "axum",

@@ -935,6 +935,49 @@ pub(crate) async fn make_agent_stream(
                     tracing::error!("Failed to save agent message: {e}");
                 }
 
+                // 0.8.8 PR-B — enforce-mode P3 fail-fast (non-destructive). The
+                // agent message above is kept (with its red pill); when it
+                // carries a fabricated `[src:]` citation, append a System refusal
+                // so the human arbitrates a correction. No auto-retry — on a user
+                // disc the user decides. Inert outside enforce / when clean.
+                let fabricated_count = agent_msg
+                    .lint_report
+                    .as_ref()
+                    .map(|r| r.fabricated_count)
+                    .unwrap_or(0);
+                if crate::core::anti_halluc::enforce_refusal_needed(
+                    crate::core::anti_halluc::current_mode(),
+                    fabricated_count,
+                ) {
+                    let refusal = DiscussionMessage {
+                        lint_report: None,
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        content: crate::core::anti_halluc::enforce_refusal_message(fabricated_count),
+                        agent_type: None,
+                        timestamp: Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                    };
+                    let did_ref = disc_id.clone();
+                    let m = refusal.clone();
+                    if let Err(e) = state.db.with_conn(move |conn| {
+                        crate::db::discussions::insert_message(conn, &did_ref, &m)
+                    }).await {
+                        tracing::warn!("Failed to insert enforce refusal system message: {e}");
+                    }
+                    tracing::info!(
+                        "enforce P3: disc {} agent reply has {} fabricated citation(s) — refusal surfaced",
+                        disc_id, fabricated_count
+                    );
+                }
+
                 // ── Slash-marker fallback (Vibe / Ollama) ──────────────
                 // Agents that don't speak MCP can request introspection
                 // by emitting `KRONN:DISC_*` lines in their reply. Scan

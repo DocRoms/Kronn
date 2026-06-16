@@ -542,6 +542,28 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         crate::core::skills::build_skills_prompt(config.skill_ids)
     };
 
+    // 0.8.8 PR-B — enforce mode auto-attaches the `kronn-doc-author` cheat-sheet
+    // when the agent's project carries a `docs/AGENTS.md`, so an agent that
+    // edits docs gets the `[src:]` / `kronn:section` discipline even if the user
+    // never attached the skill. Idempotent (skipped when already in skill_ids)
+    // and inert outside enforce. The content is injected inline (the skill isn't
+    // in skill_ids, so the native-files path wouldn't write it to disk).
+    let project_has_agents_md = !config.project_path.is_empty()
+        && std::path::Path::new(config.project_path)
+            .join("docs/AGENTS.md")
+            .exists();
+    let doc_author_prompt = if crate::core::anti_halluc::should_auto_attach_doc_author(
+        crate::core::anti_halluc::current_mode(),
+        config.skill_ids,
+        project_has_agents_md,
+    ) {
+        crate::core::skills::get_skill("kronn-doc-author")
+            .map(|s| s.content.to_string())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
     // Build directives prompt (always injected — no native format)
     let directives_prompt = crate::core::directives::build_directives_prompt(config.directive_ids);
 
@@ -595,6 +617,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if !user_context.is_empty() { parts.push(format!("=== USER CONTEXT (cross-project) ===\n\n{}", user_context)); }
     if !profiles_prompt.is_empty() { parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt)); }
     if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }
+    if !doc_author_prompt.is_empty() { parts.push(format!("=== DOC AUTHORING DISCIPLINE (enforce) ===\n\n{}", doc_author_prompt)); }
     if !config.context_files_prompt.is_empty() { parts.push(format!("=== CONTEXT FILES ===\n\n{}", config.context_files_prompt)); }
     if !mcp_context.is_empty() { parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context)); }
     if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }

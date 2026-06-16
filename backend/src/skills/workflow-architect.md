@@ -139,6 +139,10 @@ When you need to run the same task on N items in parallel (e.g. "review each PR"
 }
 ```
 
+**Item shape → QP variables.** `batch_items_from` may resolve to either:
+- **An array of scalars** (`["EW-1","EW-2"]`) — each value fills the QP's **first** variable and doubles as the discussion title (legacy single-var fan-out).
+- **An array of objects** (`[{"id":"EW-1","summary":"…","descriptionWiki":"…"}, …]`) — each object's keys map onto the QP's `{{var}}` placeholders **by name** (multi-variable, identical to the MCP `qp_batch_run` path). The disc title is the first present & non-empty of `_title` / `id` / `key` / `number` (reserved keys; `_title` is title-only and not injected as a variable). This is how you feed a multi-variable Quick Prompt (e.g. a triage QP taking `id` + `descriptionWiki` + `summary` + `status` + `parentKey` + `labels`) from pre-fetched data — **0 tokens** spent shaping it, no per-child MCP fetch. JSONPath can't rename/restructure keys, so produce the flat objects with an upstream `Exec` (`python3`/`jq`) step whose object keys exactly match the QP variable names, then point `batch_items_from` at `{{steps.<reshape>.data.stdout}}`.
+
 ### 6. `BatchApiCall` — fan out an API call over a list (0 tokens)
 
 The mechanical counterpart of `BatchQuickPrompt`: same fan-out semantics, but **each child fires a templated HTTP request**, not an LLM run. Use this whenever the user wants to "create N tickets", "post N comments", "update N statuses", "test 8 sub-domains" — anything that's the same call with varying inputs. **Zero tokens consumed**, parallel HTTP capped by `batch_concurrent_limit` (default 5, max 20). The aggregated envelope reports per-item status so a downstream Agent step can correlate inputs with outcomes (e.g. setting `blocks` links between freshly-created tickets).
@@ -401,7 +405,7 @@ A workflow is created via `POST /api/workflows` with this JSON structure:
 | Field | Type | Description |
 |-------|------|-------------|
 | `batch_quick_prompt_id` | string | ID of the Quick Prompt template to fan out |
-| `batch_items_from` | string | Template resolving to a list (`{{steps.fetch.data}}` or raw text) |
+| `batch_items_from` | string | Template resolving to a list. **Scalars** (`["EW-1","EW-2"]`) fill the QP's first variable + become the disc title. **Objects** (`[{"id":"EW-1","summary":"…"}, …]`) map keys → QP variables **by name**; title from `_title`/`id`/`key`/`number`. Lets you drive a multi-variable QP from pre-fetched data (reshape with an upstream `Exec` step, point at `{{steps.X.data.stdout}}`). |
 | `batch_wait_for_completion` | boolean | Default `true` — workflow waits for all children before next step |
 | `batch_max_items` | number | Cap (default 50). Refuses to spawn more. |
 | `batch_workspace_mode` | string | `"Direct"` (default, all share main worktree) or `"Isolated"` (per-disc git worktree — required if children write code in parallel; needs `project_id`) |
