@@ -11,7 +11,7 @@ use crate::AppState;
 pub async fn detect(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<AgentDetection>>> {
-    let mut detected = agents::detect_all().await;
+    let mut detected = agents::detect_all_cached(false).await;
     let config = state.config.read().await;
     for agent in &mut detected {
         // Apply explicit disable/enable from config
@@ -55,6 +55,8 @@ pub async fn install(
             if let Err(e) = crate::core::config::save(&config).await {
                 tracing::error!("Failed to save config after agent install: {e}");
             }
+            // The detection cache is now stale — the agent just appeared.
+            agents::invalidate_detect_cache();
             Json(ApiResponse::ok(output))
         }
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
@@ -72,7 +74,7 @@ pub async fn uninstall(
 ) -> Json<ApiResponse<String>> {
     // Check if the agent is host-managed (binary found in KRONN_HOST_BIN)
     let is_host_managed = {
-        let detected = agents::detect_all().await;
+        let detected = agents::detect_all_cached(false).await;
         detected.iter()
             .find(|a| a.agent_type == agent_type)
             .map(|a| a.host_managed)
@@ -87,6 +89,9 @@ pub async fn uninstall(
         agents::uninstall_agent(&agent_type).await
     };
 
+    // The detection cache is now stale regardless of outcome (the agent is
+    // gone or being disabled) — re-probe on the next status call.
+    agents::invalidate_detect_cache();
     match result {
         Ok(output) => {
             // Auto-disable after uninstall so runtime_available doesn't keep it "usable"

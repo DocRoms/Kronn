@@ -219,12 +219,60 @@ async fn context_files_upload_text_file() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["success"], true);
     assert_eq!(json["data"]["file"]["filename"], "test.txt");
-    assert_eq!(json["data"]["file"]["extracted_size"], 11); // "Hello world".len()
-    assert!(json["data"]["file"]["disk_path"].is_null());
+    // Small file → the preview equals the full content ("Hello world" = 11).
+    assert_eq!(json["data"]["file"]["extracted_size"], 11);
+    // 2026-06-25: text files now land ON DISK (raw file + preview in context),
+    // not inlined — so a disk_path is set (was null in the extract-to-context era).
+    let disk_path = json["data"]["file"]["disk_path"].as_str()
+        .expect("a text file is now saved to disk, disk_path must be set");
+    assert!(disk_path.contains(".kronn/context-files/"), "unexpected path: {disk_path}");
+    let _ = std::fs::remove_file(disk_path);
 }
 
 #[tokio::test]
-async fn context_files_upload_unsupported_format() {
+async fn context_files_upload_image_lands_in_persistent_dir_not_temp() {
+    // Regression (0.8.8): project-less disc images used to save to the system
+    // temp dir — under Docker that's the container /tmp, wiped on restart, so
+    // the bytes vanished and the bubble thumbnail 404'd. They must land in the
+    // persistent data dir (config_dir) instead.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await; // no project
+    let app = kronn::build_router(state);
+
+    let boundary = "----ImgBoundary";
+    // A tiny but valid-enough PNG header so extract_content takes the image path.
+    let mut body = Vec::new();
+    body.extend_from_slice(format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"shot.png\"\r\nContent-Type: image/png\r\n\r\n"
+    ).as_bytes());
+    body.extend_from_slice(b"\x89PNG\r\n\x1a\nfakepngpayload");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/discussions/{}/context-files", disc_id))
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let json: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+    assert_eq!(json["success"], true, "upload failed: {json}");
+    let disk_path = json["data"]["file"]["disk_path"].as_str().expect("image must have a disk_path");
+    let persistent = kronn::core::config::config_dir().unwrap();
+    assert!(
+        disk_path.starts_with(persistent.to_str().unwrap()),
+        "project-less image must persist under the data dir {persistent:?}, not the ephemeral temp dir; got {disk_path}"
+    );
+    // Clean up the file we just wrote under the real data dir.
+    let _ = std::fs::remove_file(disk_path);
+}
+
+#[tokio::test]
+async fn context_files_upload_arbitrary_file_lands_on_disk() {
+    // 2026-06-25: with files-on-disc, a non-image / non-office extension is no
+    // longer REJECTED as "Unsupported" — its raw bytes are saved to disk for
+    // the agent to read with its tools. Nothing is rejected purely on type.
     let state = test_state();
     let disc_id = create_test_discussion(&state).await;
     let app = kronn::build_router(state);
@@ -244,8 +292,11 @@ async fn context_files_upload_unsupported_format() {
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["success"], false);
-    assert!(json["error"].as_str().unwrap().contains("Unsupported"));
+    assert_eq!(json["success"], true, "arbitrary file must be accepted: {json}");
+    let disk_path = json["data"]["file"]["disk_path"].as_str()
+        .expect("an arbitrary file must be saved to disk");
+    assert!(disk_path.contains(".kronn/context-files/"), "unexpected path: {disk_path}");
+    let _ = std::fs::remove_file(disk_path);
 }
 
 #[tokio::test]
@@ -277,6 +328,240 @@ async fn context_files_delete_nonexistent_returns_error() {
 
     let (_, json) = delete_json(app, &format!("/api/discussions/{}/context-files/nonexistent", disc_id)).await;
     assert_eq!(json["success"], false);
+}
+
+// ── 0.8.8: per-message attachments — image content route + MCP exposure ──
+
+/// GET the raw bytes of an attachment; returns (status, content-type, body).
+async fn get_raw(app: Router, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
+    let req = Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).map(String::from);
+    let body = resp.into_body().collect().await.unwrap().to_bytes().to_vec();
+    (status, ct, body)
+}
+
+#[tokio::test]
+async fn context_file_content_streams_image_bytes() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+
+    // Write a fake PNG to disk and register it as an image context file.
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("shot.png");
+    let bytes: &[u8] = b"\x89PNG\r\n\x1a\nFAKEPNGDATA";
+    std::fs::write(&img_path, bytes).unwrap();
+    let path_str = img_path.to_string_lossy().to_string();
+
+    state.db.with_conn({
+        let did = disc_id.clone();
+        let p = path_str.clone();
+        move |conn| {
+            kronn::db::discussions::insert_context_file(conn, "cf-img", &did, "shot.png", "image/png", bytes.len() as u64, "[Image]", Some(&p))
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, ct, body) = get_raw(app, &format!("/api/discussions/{}/context-files/cf-img/content", disc_id)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ct.as_deref(), Some("image/png"));
+    assert_eq!(body, bytes, "the route must stream the exact on-disk bytes");
+}
+
+#[tokio::test]
+async fn context_file_content_404_for_text_file_without_disk_path() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    // A text file has no disk_path → nothing to stream.
+    state.db.with_conn({
+        let did = disc_id.clone();
+        move |conn| {
+            kronn::db::discussions::insert_context_file(conn, "cf-txt", &did, "notes.txt", "text/plain", 5, "hello", None)
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, _, _) = get_raw(app, &format!("/api/discussions/{}/context-files/cf-txt/content", disc_id)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn context_file_content_serves_image_type_even_when_stored_mime_is_legacy_text() {
+    // Regression (0.8.8): mime_from_extension used to map images to text/plain,
+    // so legacy rows stored "text/plain" for a .png. The content route must
+    // derive image/png from the filename, else the browser renders bytes as
+    // text when the thumbnail is opened.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("legacy.png");
+    std::fs::write(&img_path, b"\x89PNGlegacy").unwrap();
+    let p = img_path.to_string_lossy().to_string();
+    state.db.with_conn({
+        let did = disc_id.clone();
+        move |conn| {
+            // Stored mime is the WRONG legacy value on purpose.
+            kronn::db::discussions::insert_context_file(conn, "cf-leg", &did, "legacy.png", "text/plain", 10, "[Image]", Some(&p))
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, ct, _) = get_raw(app, &format!("/api/discussions/{}/context-files/cf-leg/content", disc_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ct.as_deref(), Some("image/png"), "must derive image/png from .png, not serve the stored text/plain");
+}
+
+#[tokio::test]
+async fn link_pending_endpoint_pins_popup_files_to_first_message() {
+    // Reproduces the creation-popup path: files uploaded as pending, then the
+    // frontend links them to the first message via this endpoint.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let did = disc_id.clone();
+    state.db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+             VALUES ('first-msg', ?1, 'User', 'tu vois cette image ?', NULL, ?2, 0)",
+            rusqlite::params![did, chrono::Utc::now().to_rfc3339()],
+        )?;
+        kronn::db::discussions::insert_context_file(conn, "cf-pop", &did, "shot.png", "text/plain", 10, "[Image]", Some("/tmp/shot.png"))?;
+        Ok(())
+    }).await.unwrap();
+
+    let app = kronn::build_router(state.clone());
+    let (status, json) = post_json(app, &format!("/api/discussions/{}/context-files/link-pending", disc_id),
+        serde_json::json!({ "message_id": "first-msg" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    assert_eq!(json["data"], 1, "one pending file linked");
+
+    // The file is now pinned to the first message, not pending.
+    let files = state.db.with_conn(move |conn| {
+        kronn::db::discussions::list_context_files_for_message(conn, "first-msg").map_err(|e| anyhow::anyhow!(e))
+    }).await.unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0].filename, "shot.png");
+}
+
+#[tokio::test]
+async fn context_file_content_sanitizes_filename_in_content_disposition() {
+    // A filename carrying quotes + CRLF must not inject headers into the
+    // Content-Disposition value.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("ok.png");
+    std::fs::write(&img_path, b"\x89PNGx").unwrap();
+    let p = img_path.to_string_lossy().to_string();
+    state.db.with_conn({
+        let did = disc_id.clone();
+        move |conn| {
+            kronn::db::discussions::insert_context_file(
+                conn, "cf-evil", &did, "evil\".png\r\nX-Injected: 1", "image/png", 5, "[Image]", Some(&p),
+            ).map_err(|e| anyhow::anyhow!(e))
+        }
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let req = Request::builder().method("GET")
+        .uri(format!("/api/discussions/{}/context-files/cf-evil/content", disc_id))
+        .body(Body::empty()).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cd = resp.headers().get("content-disposition").unwrap().to_str().unwrap();
+    assert!(!cd.contains('\r') && !cd.contains('\n'), "no CR/LF in disposition: {cd:?}");
+    assert!(!cd.contains("X-Injected: 1\r"), "no header injection");
+    // The sanitized name keeps the readable text, drops the quote + control chars.
+    assert!(cd.contains("evil.pngX-Injected: 1"), "sanitized name: {cd:?}");
+}
+
+#[tokio::test]
+async fn context_file_content_404_for_unknown_id() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let app = kronn::build_router(state);
+    let (status, _, _) = get_raw(app, &format!("/api/discussions/{}/context-files/ghost/content", disc_id)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn context_file_content_404_when_id_belongs_to_other_discussion() {
+    // Security: the row must match BOTH disc_id and file_id, so a file from
+    // disc A can't be fetched through disc B's URL.
+    let state = test_state();
+    let disc_a = create_test_discussion(&state).await;
+    let disc_b = create_test_discussion(&state).await;
+    let dir = tempfile::tempdir().unwrap();
+    let img_path = dir.path().join("a.png");
+    std::fs::write(&img_path, b"PNGA").unwrap();
+    let p = img_path.to_string_lossy().to_string();
+    state.db.with_conn({
+        let did = disc_a.clone();
+        move |conn| {
+            kronn::db::discussions::insert_context_file(conn, "cf-a", &did, "a.png", "image/png", 4, "[Image]", Some(&p))
+                .map_err(|e| anyhow::anyhow!(e))
+        }
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    // Fetch cf-a through disc_b's URL → must 404.
+    let (status, _, _) = get_raw(app, &format!("/api/discussions/{}/context-files/cf-a/content", disc_b)).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn disc_get_message_includes_pinned_attachments() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+
+    // Insert a user message and pin an image to it.
+    let did = disc_id.clone();
+    state.db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+             VALUES ('m-att', ?1, 'User', 'regarde cette image', NULL, ?2, 0)",
+            rusqlite::params![did, chrono::Utc::now().to_rfc3339()],
+        )?;
+        kronn::db::discussions::insert_context_file(conn, "cf-att", &did, "diagram.png", "image/png", 99, "[Image]", Some("/tmp/diagram.png"))?;
+        kronn::db::discussions::link_pending_context_files_to_message(conn, &did, "m-att")?;
+        Ok(())
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, json) = get_json(app, &format!("/api/discussions/{}/message/0", disc_id)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["success"], true);
+    let attachments = json["data"]["attachments"].as_array().expect("attachments array present");
+    assert_eq!(attachments.len(), 1, "the pinned image must surface to the agent");
+    assert_eq!(attachments[0]["filename"], "diagram.png");
+    assert_eq!(attachments[0]["mime_type"], "image/png");
+}
+
+#[tokio::test]
+async fn disc_get_message_omits_attachments_when_none() {
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let did = disc_id.clone();
+    state.db.with_conn(move |conn| {
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+             VALUES ('m-plain', ?1, 'User', 'pas de fichier', NULL, ?2, 0)",
+            rusqlite::params![did, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, json) = get_json(app, &format!("/api/discussions/{}/message/0", disc_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    // `skip_serializing_if = "Vec::is_empty"` → the field is absent, not [].
+    assert!(json["data"].get("attachments").is_none(), "empty attachments must not be serialized");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -4907,6 +5192,42 @@ async fn disc_load_other_clamps_range_to_total() {
     assert_eq!(loaded["data"]["total_messages"], 2);
     assert_eq!(loaded["data"]["to_idx"], 2, "to must clamp to total");
     assert_eq!(loaded["data"]["messages"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn disc_load_other_surfaces_message_attachments_cross_disc() {
+    // 0.8.8 — a cross-disc reader must see images attached to messages of
+    // ANOTHER disc (disk_path included) so a file-tool agent can open them.
+    // Without this, browsing another thread returns only text.
+    let state = test_state();
+    let disc_id = create_test_discussion(&state).await;
+    let did = disc_id.clone();
+    state.db.with_conn(move |conn| {
+        for (mid, role, content) in [("m-a", "User", "question"), ("m-b", "Agent", "reponse avec image")] {
+            conn.execute(
+                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0)",
+                rusqlite::params![mid, did, role, content, chrono::Utc::now().to_rfc3339()],
+            )?;
+        }
+        kronn::db::discussions::insert_context_file(conn, "cf-lo", &did, "chart.png", "image/png", 99, "[Image]", Some("/data/.kronn/context-files/x_chart.png"))?;
+        kronn::db::discussions::link_pending_context_files_to_message(conn, &did, "m-b")?;
+        Ok(())
+    }).await.unwrap();
+
+    let app = kronn::build_router(state);
+    let (status, loaded) = get_json(app, &format!("/api/disc/load_other?disc_id={}", disc_id)).await;
+    assert_eq!(status, StatusCode::OK);
+    let msgs = loaded["data"]["messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 2);
+    // Text-only message: attachments field omitted (skip_serializing_if empty).
+    assert!(msgs[0].get("attachments").is_none(), "message with no files must omit attachments");
+    // Image message: the attachment with its on-disk path for file-tool access.
+    let att = msgs[1]["attachments"].as_array().expect("attachments present on the image message");
+    assert_eq!(att.len(), 1);
+    assert_eq!(att[0]["filename"], "chart.png");
+    assert_eq!(att[0]["mime_type"], "image/png");
+    assert_eq!(att[0]["disk_path"], "/data/.kronn/context-files/x_chart.png");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════

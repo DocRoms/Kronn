@@ -6,6 +6,8 @@
 
 use axum::{
     extract::{Path, State},
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 
@@ -50,9 +52,16 @@ pub async fn upload_context_file(
         Err(e) => return Json(ApiResponse::err(e.to_string())),
     };
 
-    // Resolve the work directory for this discussion (project path or temp dir).
-    // Images are saved there so agents can read them with their file tools.
+    // Resolve the work directory for this discussion. With a project, images
+    // land in its worktree (agents read them with file tools). WITHOUT a
+    // project we must NOT use the system temp dir: under Docker that's the
+    // container's /tmp, wiped on every restart/rebuild, so the attachment
+    // bytes vanish and the bubble thumbnail 404s. Fall back to the persistent
+    // data dir (KRONN_DATA_DIR volume) instead, only dropping to temp if even
+    // that can't be resolved.
+    let persistent_fallback = || crate::core::config::config_dir().unwrap_or_else(|_| std::env::temp_dir());
     let did_for_path = discussion_id.clone();
+    let fallback = persistent_fallback();
     let work_dir: std::path::PathBuf = state.db.with_conn(move |conn| {
         let project_id: Option<String> = conn.query_row(
             "SELECT project_id FROM discussions WHERE id = ?1",
@@ -68,17 +77,32 @@ pub async fn upload_context_file(
         } else {
             None
         };
-        Ok(std::path::PathBuf::from(path.unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string())))
-    }).await.unwrap_or_else(|_: anyhow::Error| std::env::temp_dir());
+        Ok(match path {
+            Some(p) => std::path::PathBuf::from(p),
+            None => fallback,
+        })
+    }).await.unwrap_or_else(|_: anyhow::Error| persistent_fallback());
 
     let id = uuid::Uuid::new_v4().to_string();
     let mime = crate::core::context_files::mime_from_extension(&filename).to_string();
     let original_size = data.len() as u64;
     let suggested_skills = crate::core::context_files::suggest_skills(&filename);
 
-    // Handle text vs image
+    // Handle text vs image vs on-disk file
     let (extracted_text, disk_path) = match content {
         crate::core::context_files::ExtractedContent::Text(text) => (text, None),
+        crate::core::context_files::ExtractedContent::DiskFile { data: file_data, preview } => {
+            // Raw file saved to disk (worktree); only the preview lands in
+            // context. The agent reads the full file by path. Falls back to the
+            // persistent config dir if the project worktree write fails.
+            match crate::core::context_files::save_file_to_dir(&work_dir, &id, &filename, &file_data) {
+                Ok(path) => (preview, Some(path)),
+                Err(e) => match crate::core::context_files::save_file_to_disk(&id, &filename, &file_data) {
+                    Ok(path) => (preview, Some(path)),
+                    Err(e2) => return Json(ApiResponse::err(format!("Failed to save file: {e} / fallback: {e2}"))),
+                },
+            }
+        }
         crate::core::context_files::ExtractedContent::Image { data: img_data, ext } => {
             match crate::core::context_files::save_image_to_dir(&work_dir, &id, &filename, &ext, &img_data) {
                 Ok(path) => {
@@ -123,6 +147,9 @@ pub async fn upload_context_file(
                 original_size,
                 extracted_size,
                 disk_path,
+                // Freshly uploaded files are pending until the user sends a
+                // message; send_message pins them to that message id.
+                message_id: None,
                 created_at: chrono::Utc::now(),
             };
             Json(ApiResponse::ok(crate::models::UploadContextFileResponse {
@@ -145,6 +172,98 @@ pub async fn list_context_files(
         Ok(files) => Json(ApiResponse::ok(files)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
+}
+
+/// Body for POST /api/discussions/:id/context-files/link-pending.
+#[derive(serde::Deserialize)]
+pub struct LinkPendingRequest {
+    pub message_id: String,
+}
+
+/// POST /api/discussions/:id/context-files/link-pending
+///
+/// Pin every still-pending (composer-staged) file of a discussion to a given
+/// message. The in-disc composer links implicitly at send time, but the
+/// initial-creation popup (NewDiscussionForm) uploads files AFTER the first
+/// message already exists and runs the agent via `run_agent` (which never
+/// links) — so without this, popup attachments stay pending and get vacuumed
+/// into message #2 on the next send. The frontend calls this with the first
+/// message id right after the popup upload. Returns how many were linked.
+pub async fn link_pending_context_files(
+    State(state): State<AppState>,
+    Path(discussion_id): Path<String>,
+    Json(req): Json<LinkPendingRequest>,
+) -> Json<ApiResponse<usize>> {
+    let did = discussion_id.clone();
+    match state.db.with_conn(move |conn| {
+        crate::db::discussions::link_pending_context_files_to_message(conn, &did, &req.message_id)
+            .map_err(|e| anyhow::anyhow!(e))
+    }).await {
+        Ok(n) => Json(ApiResponse::ok(n)),
+        Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
+    }
+}
+
+/// GET /api/discussions/:id/context-files/:file_id/content
+///
+/// Streams the raw bytes of an uploaded image so the frontend can render a
+/// thumbnail in the message bubble. Security: the on-disk path is resolved
+/// from the DB row keyed by BOTH discussion_id AND file_id — a client never
+/// supplies a path, so there is no traversal surface. Only image rows have a
+/// `disk_path`; text files (disk_path NULL) and unknown ids return 404.
+pub async fn get_context_file_content(
+    State(state): State<AppState>,
+    Path((discussion_id, file_id)): Path<(String, String)>,
+) -> Response {
+    let row = state.db.with_conn(move |conn| {
+        conn.query_row(
+            "SELECT disk_path, mime_type, filename FROM context_files WHERE id = ?1 AND discussion_id = ?2",
+            rusqlite::params![file_id, discussion_id],
+            |r| Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            )),
+        ).map_err(|e| anyhow::anyhow!(e))
+    }).await;
+
+    let (disk_path, mime_type, filename) = match row {
+        Ok((Some(p), mime, name)) => (p, mime, name),
+        // No row, or a text file with no stored bytes.
+        _ => return (StatusCode::NOT_FOUND, "File not found").into_response(),
+    };
+
+    let bytes = match tokio::fs::read(&disk_path).await {
+        Ok(b) => b,
+        Err(_) => return (StatusCode::NOT_FOUND, "File content missing on disk").into_response(),
+    };
+
+    // Derive the Content-Type from the filename extension rather than trusting
+    // the stored mime_type: legacy rows (pre-0.8.8) saved images as the default
+    // `text/plain`, which would make the browser render the bytes as text when
+    // opened. mime_from_extension is the single source of truth and now maps
+    // every image extension. Fall back to the stored mime, then octet-stream.
+    let derived = crate::core::context_files::mime_from_extension(&filename);
+    let content_type = if derived != "text/plain" {
+        derived.to_string()
+    } else if !mime_type.is_empty() && mime_type != "text/plain" {
+        mime_type
+    } else {
+        derived.to_string()
+    };
+    // Strip quotes AND control chars (CR/LF) so a crafted filename can't inject
+    // headers into the Content-Disposition value.
+    let safe_name: String = filename.chars().filter(|c| *c != '"' && !c.is_control()).collect();
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, content_type),
+            // Inline so <img>/blob can render it; filename is best-effort.
+            (header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", safe_name)),
+            (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
+        ],
+        bytes,
+    ).into_response()
 }
 
 /// DELETE /api/discussions/:id/context-files/:file_id

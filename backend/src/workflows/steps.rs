@@ -1027,6 +1027,7 @@ mod tests {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,

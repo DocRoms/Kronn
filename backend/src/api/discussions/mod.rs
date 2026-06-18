@@ -40,6 +40,15 @@ pub(super) const MAX_CONTENT_LEN: usize = 100_000;
 pub(super) const AGENT_GLOBAL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// Default stall timeout (5 minutes) — overridden by config.server.agent_stall_timeout_min
 pub(super) const DEFAULT_STALL_TIMEOUT_MIN: u32 = 5;
+/// Stall ceiling for NON-streaming agents (Codex `exec` etc.): they're silent
+/// on stdout until the very end, so the short streaming stall would kill a
+/// slow-but-healthy run (the 2026-06-23 fix). But the global deadline (30 min)
+/// is too long to hold a scarce concurrency slot for a genuinely-hung run —
+/// 5 such runs squat the whole `agent_semaphore` and everything else queues
+/// ("planted", 2026-06-24). 15 min is the middle ground: comfortably above a
+/// real triage (the working ones run 1-3 min) while freeing the slot in half
+/// the global window when an agent truly hangs.
+pub(super) const NON_STREAMING_STALL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Hard cap on a single agent reply (~2 MB). Beyond this we kill the agent
 /// and append a partial-response footer. The bound is intentionally
 /// generous — a normal Claude Code reply is ~50 KB even with tool calls,

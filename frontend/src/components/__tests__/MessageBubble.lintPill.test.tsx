@@ -717,6 +717,69 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     });
   });
 
+  // 0.8.8 — the footer must never HIDE the verified count behind a warning.
+  // When the headline pill is a warning AND the reply also has verified
+  // citations, a second green "verified" chip is shown alongside it; both open
+  // the same drawer. (User-reported: "1 affirmation sans source" was shown but
+  // the 14 verified citations were invisible.)
+  describe('verified count shown alongside a warning pill', () => {
+    it('unsourced + verified → BOTH the amber warning pill and a green verified pill', () => {
+      renderBubble({
+        unsourced_count: 1,
+        flagged_spans: [{ text: 'a claim with no source', reason: 'heuristic' }],
+        sources: [
+          { raw: 'src/a.rs:1', kind: 'file', status: 'verified', detail: 'exists' },
+          { raw: 'src/b.rs:1', kind: 'file', status: 'verified', detail: 'exists' },
+        ],
+        fabricated_count: 0,
+      });
+      expect(screen.getByTestId('lint-pill').getAttribute('data-severity')).toBe('unsourced');
+      const verifiedPill = screen.getByTestId('lint-pill-verified');
+      expect(verifiedPill.getAttribute('data-severity')).toBe('verified');
+      expect(verifiedPill.textContent).toContain('2');
+      expect(verifiedPill.textContent).toContain('disc.lintVerified');
+      // it opens the same drawer
+      fireEvent.click(verifiedPill);
+      expect(screen.getByTestId('lint-detail')).toBeTruthy();
+      expect(screen.getByTestId('lint-verified-group').textContent).toContain('src/a.rs:1');
+    });
+
+    it('fabricated + verified → the red pill AND the verified count both show', () => {
+      renderBubble({
+        unsourced_count: 0,
+        flagged_spans: [],
+        fabricated_count: 1,
+        sources: [
+          { raw: 'ghost.rs:1', kind: 'file', status: 'not_found', detail: 'no' },
+          { raw: 'ok.rs:1', kind: 'file', status: 'verified', detail: 'exists' },
+        ],
+      });
+      expect(screen.getByTestId('lint-pill').getAttribute('data-severity')).toBe('fabricated');
+      expect(screen.getByTestId('lint-pill-verified').textContent).toContain('1');
+    });
+
+    it('verified-only report does NOT render a duplicate verified pill (headline already green)', () => {
+      renderBubble({
+        unsourced_count: 0,
+        flagged_spans: [],
+        fabricated_count: 0,
+        sources: [{ raw: 'src/a.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
+      });
+      expect(screen.getByTestId('lint-pill').getAttribute('data-severity')).toBe('verified');
+      expect(screen.queryByTestId('lint-pill-verified')).toBeNull();
+    });
+
+    it('warning with NO verified sources shows no extra pill', () => {
+      renderBubble({
+        unsourced_count: 2,
+        flagged_spans: [{ text: 'x', reason: 'y' }],
+        sources: [],
+        fabricated_count: 0,
+      });
+      expect(screen.queryByTestId('lint-pill-verified')).toBeNull();
+    });
+  });
+
   // 0.8.8 Option B — neutral "unverifiable" tier: cited but uncheckable
   // (URL / user-confirmed / inferred). Surfaced, never hidden.
   describe('unverifiable (neutral) tier — Option B', () => {

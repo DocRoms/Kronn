@@ -733,6 +733,11 @@ export interface WorkflowStep {
   exec_setup_command?: string | null;
   /** Argv for `exec_setup_command`. Same literal semantics as `exec_args`. */
   exec_setup_args?: string[];
+  /** 0.8.8 — Optional data piped to the main command's stdin (templated like
+   *  `exec_args`, but not subject to the OS argv ARG_MAX ceiling — for large
+   *  reshaped payloads e.g. an enriched Jira backlog). `null` → stdin stays
+   *  /dev/null. Main command only, not `exec_setup_command`. */
+  exec_stdin?: string | null;
 
   // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
   /** Payload JSON émis par le step. Validé au save (parse JSON valide,
@@ -1187,6 +1192,8 @@ export interface ContextFile {
   original_size: number;
   extracted_size: number;
   disk_path?: string | null;
+  /** Message this file is attached to. null = pending (still in the composer). */
+  message_id: string | null;
   created_at: string;
 }
 

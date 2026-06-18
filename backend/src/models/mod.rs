@@ -141,6 +141,10 @@ pub struct ContextFile {
     pub extracted_size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_path: Option<String>,
+    /// The message this file is attached to. `None` = pending (still staged in
+    /// the composer) or a legacy disc-wide file. Always serialized (even when
+    /// null) so the frontend can split pending-vs-attached without ambiguity.
+    pub message_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

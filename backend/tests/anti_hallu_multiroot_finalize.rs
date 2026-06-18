@@ -23,7 +23,7 @@
 //! fn that restores `warn` before it returns, and it is marked `#[serial]`.
 
 use kronn::core::anti_halluc::{
-    finalize_lint_report, set_mode, verify_source_marker, SourceStatus,
+    set_mode, verify_source_marker, SourceStatus,
 };
 use serial_test::serial;
 use std::path::{Path, PathBuf};
@@ -31,6 +31,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DIM: &str = "multiroot_finalize";
+
+/// Test shim. The real `finalize_lint_report` gained a 4th param
+/// (`linked_repo_paths`) with the cross-repo citation resolver; it's
+/// irrelevant to these multi-ROOT tests (workspace/project root resolution,
+/// not linked repos), so we pin it to `&[]` and keep the 3-arg call sites.
+fn finalize_lint_report(
+    text: &str,
+    workspace_path: Option<&str>,
+    project_path: &str,
+) -> Option<kronn::core::anti_halluc::LintReport> {
+    kronn::core::anti_halluc::finalize_lint_report(text, workspace_path, project_path, &[])
+}
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 

@@ -30,6 +30,7 @@ use super::orchestration::detect_agent_error_hint;
 use super::{
     detect_terminal_signal, truncate_after_signal, AgentStreamEvent, SseStream,
     AGENT_GLOBAL_TIMEOUT, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
+    NON_STREAMING_STALL_TIMEOUT,
 };
 
 // ── Decoder-loop detector (shared by make_agent_stream + run_agent_streaming) ──
@@ -62,6 +63,60 @@ pub(super) fn is_decoder_loop(text: &str, last: &mut String, count: &mut u32) ->
         }
     }
     false
+}
+
+/// How long the stall watchdog waits for stdout before killing the agent.
+///
+/// Streaming agents (Claude `--output-format stream-json`) emit a chunk every
+/// few hundred ms, so a long silence genuinely means a hang → use the
+/// configured stall. NON-streaming agents (`OutputMode::Text` — Codex `exec`
+/// and friends) write their answer ONLY at the very end and are legitimately
+/// silent on stdout for the whole run; applying the stall to them killed
+/// slow-but-healthy runs and left an empty discussion (2026-06-23: every Codex
+/// batch child died this way while the same workflow worked on Claude). For
+/// those we drop the stall and rely solely on the absolute global deadline.
+/// Pure — unit-tested.
+pub(super) fn effective_stall_timeout(
+    is_stream_json: bool,
+    configured: std::time::Duration,
+    global: std::time::Duration,
+) -> std::time::Duration {
+    if is_stream_json { configured } else { global }
+}
+
+/// Whether a finished child run counts as a SUCCESS for batch accounting.
+///
+/// A clean process exit with an EMPTY assistant reply is NOT a success — the
+/// child produced nothing usable. Counting it as completed is how a batch
+/// workflow reported a green "Success" while all its discussions were empty
+/// (2026-06-23: Codex children exited 0 but silent → 16 empty discs counted as
+/// "16 completed"). Require BOTH a clean exit AND a non-blank response. Pure —
+/// unit-tested. Applies uniformly to every agent (an empty Claude reply isn't
+/// a successful child either), so it doesn't single out one CLI.
+pub(super) fn child_run_counts_as_success(exit_success: bool, response: &str) -> bool {
+    exit_success && !response.trim().is_empty()
+}
+
+/// Hard byte-cap on a persisted agent message, applied at the persistence
+/// boundary so EVERY path is bounded.
+///
+/// The streaming loop caps stdout at `MAX_AGENT_RESPONSE_BYTES`, but the
+/// error/kill path REPLACES the response with the full captured stderr, which
+/// is NOT capped — a killed verbose agent (Codex exec, silent-until-end) left a
+/// 2.4 MB message that froze then crashed the browser tab on open (2026-06-23).
+/// Char-boundary-safe: stderr carries UTF-8 (French errors, emoji from npm), so
+/// a naive byte truncate would panic. Pure — unit-tested.
+pub(super) fn cap_agent_response(mut content: String, limit: usize) -> String {
+    if content.len() <= limit {
+        return content;
+    }
+    let mut cut = limit;
+    while cut > 0 && !content.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    content.truncate(cut);
+    content.push_str("\n\n[… message tronqué — dépassait la limite de stockage …]");
+    content
 }
 
 /// A completed tool call, classified into the transcript bucket the UI
@@ -564,7 +619,14 @@ pub(crate) async fn make_agent_stream(
                     let t = cfg.server.agent_stall_timeout_min;
                     if t > 0 { t } else { DEFAULT_STALL_TIMEOUT_MIN }
                 };
-                let stall_timeout = Duration::from_secs(stall_timeout_min as u64 * 60);
+                // Streaming agents use the configured stall; non-streaming
+                // (Text) agents are silent until the end and rely on the global
+                // deadline instead. See `effective_stall_timeout`.
+                let stall_timeout = effective_stall_timeout(
+                    is_stream_json,
+                    Duration::from_secs(stall_timeout_min as u64 * 60),
+                    NON_STREAMING_STALL_TIMEOUT,
+                );
                 let mut was_interrupted = false;
                 // Set when we break the loop because the agent emitted a
                 // terminal signal (KRONN:ARCHITECTURE_READY, etc.). Used to
@@ -853,12 +915,25 @@ pub(crate) async fn make_agent_stream(
                     }
                 }
 
-                // Detect error patterns in both stdout and stderr and add helpful guidance
+                // Detect known error patterns (quota/usage-limit, auth, rate
+                // limit, MCP…) and LEAD with the clean, actionable hint instead
+                // of burying it under a wall of raw stderr. 2026-06-24: a Codex
+                // quota error dumped 32 KB of echoed prompt + stderr, with the
+                // real "you've hit your usage limit" signal lost at the bottom.
+                // Now the hint is the headline; the raw output folds into a
+                // collapsible "détails techniques" card (kronn:context marker,
+                // rendered by MessageBody). No recognised hint → raw as before.
                 if !success && !was_interrupted {
                     let all_output = format!("{}\n{}", full_response, stderr_text);
-                    let error_hint = detect_agent_error_hint(&all_output, &agent_type);
-                    if let Some(hint) = error_hint {
-                        full_response.push_str(&format!("\n\n{}", hint));
+                    if let Some(hint) = detect_agent_error_hint(&all_output, &agent_type) {
+                        let raw = full_response.trim();
+                        full_response = if raw.is_empty() {
+                            hint
+                        } else {
+                            format!(
+                                "{hint}\n\n<!-- kronn:context title=\"détails techniques\" -->\n{raw}\n<!-- /kronn:context -->"
+                            )
+                        };
                     }
                 }
 
@@ -871,6 +946,12 @@ pub(crate) async fn make_agent_stream(
                     }
                     count
                 };
+
+                // Hard cap before persistence — covers EVERY path (incl. the
+                // error/kill stderr capture above, which bypasses the streaming
+                // cap), so a multi-MB message can't reach the DB or crash the UI
+                // renderer on open. See `cap_agent_response`.
+                full_response = cap_agent_response(full_response, MAX_AGENT_RESPONSE_BYTES);
 
                 // Save agent response to DB — always runs even if client is gone
                 let tier_label = match disc_tier {
@@ -899,11 +980,33 @@ pub(crate) async fn make_agent_stream(
                 // (Isolated worktree first, then the main checkout), keep the
                 // report only when it has a signal, and emit telemetry. All of
                 // that lives in the unit-tested `finalize_lint_report` helper.
+                // 0.8.8 — also resolve citations against the project's declared
+                // linked_repos (filesystem locations only), so an agent citing a
+                // sibling repo (front_apollo, …) isn't flagged "couldn't verify".
+                let linked_repo_paths: Vec<String> = if let Some(ref pid) = disc.project_id {
+                    let pid = pid.clone();
+                    state.db.with_conn(move |conn| {
+                        let p = crate::db::projects::get_project(conn, &pid)?;
+                        Ok(p.map(|p| p.linked_repos.into_iter()
+                            .map(|lr| lr.location)
+                            .filter(|loc| !loc.starts_with("http://") && !loc.starts_with("https://"))
+                            .collect::<Vec<_>>())
+                            .unwrap_or_default())
+                    }).await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
                 let lint_report = crate::core::anti_halluc::finalize_lint_report(
                     &full_response,
                     workspace_path.as_deref(),
                     &project_path,
+                    &linked_repo_paths,
                 );
+
+                // Computed BEFORE `full_response` is moved into the message
+                // below — reused by the batch-progress hook so an empty-but-
+                // clean-exit child isn't mis-counted as a batch success.
+                let child_run_was_success = child_run_counts_as_success(success, &full_response);
 
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
@@ -1158,7 +1261,10 @@ pub(crate) async fn make_agent_stream(
                 // the sidebar pill + any open batch monitor updates live.
                 if let Some(ref run_id) = batch_run_id {
                     let run_id_inner = run_id.clone();
-                    let child_succeeded = success;
+                    // Empty-but-clean-exit children are NOT successes (Codex
+                    // silent-exit bug). Computed above, before `full_response`
+                    // was moved into the persisted message.
+                    let child_succeeded = child_run_was_success;
                     let ws_tx = state.ws_broadcast.clone();
                     let batch_updated = state.db.with_conn(move |conn| {
                         crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
@@ -1619,6 +1725,90 @@ mod pretty_kronn_args_tests {
         // System message still says `[kronn-internal: tool()]` which
         // tells the user the call happened even if we can't show args.
         assert_eq!(pretty_kronn_args("disc_get_message", "not-json"), "");
+    }
+}
+
+#[cfg(test)]
+mod agent_lifecycle_tests {
+    use super::{effective_stall_timeout, child_run_counts_as_success, cap_agent_response, AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT};
+    use std::time::Duration;
+
+    // ── #1 — stall watchdog must not apply to non-streaming agents ──
+    // (2026-06-23: Codex `exec` is silent on stdout until the very end; the
+    // no-chunk stall killed slow-but-healthy runs → empty discussions.)
+
+    #[test]
+    fn streaming_agent_keeps_configured_stall() {
+        let configured = Duration::from_secs(5 * 60);
+        assert_eq!(
+            effective_stall_timeout(true, configured, AGENT_GLOBAL_TIMEOUT),
+            configured,
+            "Claude (stream-json) must KEEP its short stall — don't regress streaming",
+        );
+    }
+
+    #[test]
+    fn non_streaming_agent_uses_bounded_stall_not_global() {
+        let configured = Duration::from_secs(5 * 60);
+        // Non-streaming agents bypass the SHORT streaming stall but get a
+        // BOUNDED ceiling (not the full 30-min global) so a hung run frees its
+        // concurrency slot in reasonable time — the 2026-06-24 clog fix.
+        assert_eq!(
+            effective_stall_timeout(false, configured, NON_STREAMING_STALL_TIMEOUT),
+            NON_STREAMING_STALL_TIMEOUT,
+            "Codex/Text agents use the bounded non-streaming stall",
+        );
+        assert!(NON_STREAMING_STALL_TIMEOUT > configured,
+            "must outlast the short streaming stall (else slow non-streamers die early)");
+        assert!(NON_STREAMING_STALL_TIMEOUT < AGENT_GLOBAL_TIMEOUT,
+            "must be SHORTER than the global, else a hung run squats its slot too long");
+    }
+
+    // ── #2 — empty-but-clean-exit child is NOT a batch success ──
+    // (made a batch workflow report green Success over 16 empty discs.)
+
+    #[test]
+    fn clean_exit_with_real_reply_is_success() {
+        assert!(child_run_counts_as_success(true, "Triage:\n- clear: EW-1 ready to frame"));
+    }
+
+    #[test]
+    fn clean_exit_with_blank_reply_is_not_success() {
+        assert!(!child_run_counts_as_success(true, ""), "empty reply ≠ success");
+        assert!(!child_run_counts_as_success(true, "   \n\t  "), "whitespace-only ≠ success");
+    }
+
+    #[test]
+    fn failed_exit_is_never_success_even_with_partial_text() {
+        assert!(!child_run_counts_as_success(false, "partial output before crash"));
+    }
+
+    // ── cap_agent_response — the source fix: no multi-MB message reaches
+    // the DB / UI, even on the error/kill stderr-capture path. ──
+
+    #[test]
+    fn small_response_is_left_untouched() {
+        let s = "a normal reply".to_string();
+        assert_eq!(cap_agent_response(s.clone(), 2_000_000), s);
+    }
+
+    #[test]
+    fn oversized_response_is_capped_with_marker() {
+        let huge = "x".repeat(3_000_000); // ~2.4 MB Codex dump shape
+        let out = cap_agent_response(huge, 2_000_000);
+        assert!(out.len() <= 2_000_000 + 80, "must be bounded near the limit, got {}", out.len());
+        assert!(out.contains("tronqué"), "must signal truncation");
+    }
+
+    #[test]
+    fn cap_is_char_boundary_safe_on_utf8() {
+        // 'é' is 2 bytes — a cut landing mid-char would panic without the
+        // is_char_boundary guard (French stderr / emoji are common).
+        let s = "é".repeat(1000); // 2000 bytes
+        let out = cap_agent_response(s, 1001); // 1001 lands mid-'é'
+        // No panic + still valid UTF-8 (String guarantees it if no panic).
+        assert!(out.contains("tronqué"));
+        assert!(out.len() <= 1001 + 80);
     }
 }
 

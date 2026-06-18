@@ -100,6 +100,22 @@ impl TemplateContext {
         }
     }
 
+    /// Resolve a single `{{key}}` to its TYPED `serde_json::Value` (array /
+    /// object / number / … preserved), or None if unknown. The api_body
+    /// renderer uses this for whole-placeholder fields so a nested array/object
+    /// is injected as real JSON rather than an escaped string. A flat string
+    /// value is returned as `Value::String` (so scalars stay scalars).
+    pub fn resolve_value(&self, key: &str) -> Option<serde_json::Value> {
+        // Typed resolution FIRST so a `.data` / `.data_json` (whole or nested)
+        // yields the PARSED value, not the flat unwrapped string. Non-data keys
+        // (launch vars, `current_task.<field>`, …) fall through to the flat
+        // string value, preserving scalar-as-string behaviour.
+        if let Some(v) = resolve_typed_path(&self.values, key) {
+            return Some(v);
+        }
+        self.values.get(key).map(|v| serde_json::Value::String(v.clone()))
+    }
+
     /// Render a template string, replacing all `{{variable}}` occurrences.
     pub fn render(&self, template: &str) -> Result<String> {
         let mut result = String::with_capacity(template.len());
@@ -171,41 +187,57 @@ impl TemplateContext {
 ///   - arrays / objects → pretty-printed JSON (operator-friendly inside a
 ///     markdown code block, indexable downstream)
 pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -> Option<String> {
-    // We only support nesting through `<prefix>.data.<path>`. Locate the
-    // `.data` segment that anchors the JSON traversal.
+    resolve_typed_path(values, key).map(|v| stringify_json_leaf(&v))
+}
+
+/// Anchor a dotted key on its `.data` OR `.data_json` segment, returning
+/// `(prefix, path-after-anchor)`. `steps.X.data.subtasks.0` and
+/// `steps.X.data_json.subtasks.0` both anchor identically — the JSON source is
+/// always the parseable `<prefix>.data_json` sibling regardless of which alias
+/// the author wrote. Returns None when there's no anchor, the anchor is the
+/// last segment (a bare flat key, handled elsewhere), or it's the first segment
+/// (no prefix).
+fn anchor_and_path(key: &str) -> Option<(String, Vec<&str>)> {
     let parts: Vec<&str> = key.split('.').collect();
-    let data_idx = parts.iter().position(|p| *p == "data")?;
-    if data_idx == parts.len() - 1 {
-        // Bare `<prefix>.data` — that's a flat key, already handled by the
-        // caller before we got here. If we reach this branch the key was
-        // missing, so don't fabricate a value.
+    let idx = parts.iter().position(|p| *p == "data" || *p == "data_json")?;
+    if idx == 0 || idx == parts.len() - 1 {
         return None;
     }
-    if data_idx == 0 {
-        // No prefix in front of `data` — not a recognized pattern.
-        return None;
+    Some((parts[..idx].join("."), parts[idx + 1..].to_vec()))
+}
+
+/// Like [`resolve_nested_path`] but returns the TYPED `serde_json::Value` at the
+/// path (array/object/number/… preserved) instead of a stringified form. Used
+/// by the api_body renderer to inject a real nested array/object into a JSON
+/// field (`"comments": "{{steps.review.data.inlineComments}}"` → a real array),
+/// which `stringify_json_leaf` could only express as an escaped string. Also
+/// resolves a bare `<prefix>.data` / `.data_json` to the whole parsed payload.
+pub(crate) fn resolve_typed_path(values: &HashMap<String, String>, key: &str) -> Option<serde_json::Value> {
+    let parts: Vec<&str> = key.split('.').collect();
+    // Whole-payload form: `<prefix>.data` or `<prefix>.data_json` (no sub-path).
+    if parts.len() >= 2 && matches!(*parts.last().unwrap(), "data" | "data_json") {
+        let prefix = parts[..parts.len() - 1].join(".");
+        let json_str = values
+            .get(&format!("{prefix}.data_json"))
+            .or_else(|| values.get(&format!("{prefix}.data")))?;
+        return serde_json::from_str(json_str).ok();
     }
 
-    let prefix = parts[..data_idx].join(".");
-    let path = &parts[data_idx + 1..];
-
-    // Prefer the JSON sibling (`<prefix>.data_json`) — guaranteed parseable.
-    // Fall back to `<prefix>.data` (which may or may not be valid JSON
-    // depending on whether the original `data` was a string vs an object).
+    // Nested form: walk the path under the `.data`/`.data_json` anchor.
+    let (prefix, path) = anchor_and_path(key)?;
     let json_str = values
-        .get(&format!("{}.data_json", prefix))
-        .or_else(|| values.get(&format!("{}.data", prefix)))?;
-
+        .get(&format!("{prefix}.data_json"))
+        .or_else(|| values.get(&format!("{prefix}.data")))?;
     let parsed: serde_json::Value = serde_json::from_str(json_str).ok()?;
     let mut current = &parsed;
-    for segment in path {
+    for segment in &path {
         current = if let Ok(idx) = segment.parse::<usize>() {
             current.as_array()?.get(idx)?
         } else {
             current.get(*segment)?
         };
     }
-    Some(stringify_json_leaf(current))
+    Some(current.clone())
 }
 
 fn stringify_json_leaf(v: &serde_json::Value) -> String {
@@ -930,6 +962,40 @@ mod tests {
     }
 
     #[test]
+    fn resolve_value_returns_typed_array_not_string() {
+        // The api_body injection contract: a nested array stays a REAL array.
+        let ctx = ctx_with_envelope(
+            "review",
+            r#"{"verdict": "APPROVE", "inlineComments": [{"path": "a.rs", "line": 4, "body": "x"}]}"#,
+            "Reviewed",
+        );
+        let v = ctx.resolve_value("steps.review.data.inlineComments").unwrap();
+        assert!(v.is_array(), "must stay a JSON array, got: {v}");
+        assert_eq!(v[0]["line"], 4);
+        // scalar field stays a (typed) scalar string
+        assert_eq!(ctx.resolve_value("steps.review.data.verdict").unwrap(), "APPROVE");
+    }
+
+    #[test]
+    fn resolve_value_anchors_on_data_json_alias_too() {
+        // `data_json.<field>` must resolve identically to `data.<field>`
+        // (the bug: only `data` was anchored, so `data_json.x` stayed literal).
+        let ctx = ctx_with_envelope("review", r#"{"comments": [1, 2]}"#, "ok");
+        let viz = ctx.render("{{steps.review.data_json.comments}}").unwrap();
+        assert!(viz.contains('1') && viz.contains('2'), "data_json nested must render, got: {viz}");
+        let typed = ctx.resolve_value("steps.review.data_json.comments").unwrap();
+        assert!(typed.is_array());
+    }
+
+    #[test]
+    fn resolve_value_whole_data_returns_full_payload() {
+        let ctx = ctx_with_envelope("seed", r#"{"a": 1, "b": [2, 3]}"#, "ok");
+        let v = ctx.resolve_value("steps.seed.data").unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"][1], 3);
+    }
+
+    #[test]
     fn nested_array_with_index_resolves() {
         let ctx = ctx_with_envelope(
             "analyze",
@@ -1301,6 +1367,7 @@ mod tests {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,

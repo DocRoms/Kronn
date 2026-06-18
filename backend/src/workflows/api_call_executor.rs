@@ -888,13 +888,40 @@ pub(crate) fn resolve_path_params(
     Ok(restored)
 }
 
-/// Walks a JSON value and renders string leaves through the template
-/// engine. Non-string types pass through unchanged — we never stringify
-/// a JSON sub-tree into a template because that enables injection
-/// attacks (a `"}` in the data would break out of its field).
+/// If `s` is EXACTLY one `{{ … }}` placeholder spanning the whole string (no
+/// surrounding text, no second placeholder), return the inner key. This is the
+/// only case where typed injection is safe + meaningful: a placeholder embedded
+/// in surrounding text (`"PR #{{n}}"`) must string-render, but a lone
+/// placeholder (`"{{steps.review.data.inlineComments}}"`) can be replaced by the
+/// real JSON value it points at.
+fn whole_placeholder(s: &str) -> Option<&str> {
+    let t = s.trim();
+    let inner = t.strip_prefix("{{")?.strip_suffix("}}")?;
+    if inner.contains("{{") || inner.contains("}}") {
+        return None;
+    }
+    Some(inner.trim())
+}
+
+/// Walks a JSON value and renders string leaves through the template engine.
+/// A string leaf that is a LONE `{{key}}` placeholder pointing at structured
+/// data is replaced by the real typed JSON value (so `"comments":
+/// "{{steps.review.data.inlineComments}}"` becomes a real array, not an escaped
+/// string). This is injection-SAFE — we inject a parsed `serde_json::Value`
+/// that reqwest re-serializes, never splicing raw text into a template, so a
+/// `"}` inside the data still can't break out of its field. Any other string
+/// (placeholder embedded in surrounding text, or an unknown ref) string-renders
+/// as before.
 fn render_json_value(value: &Value, ctx: &TemplateContext) -> anyhow::Result<Value> {
     match value {
-        Value::String(s) => Ok(Value::String(ctx.render(s)?)),
+        Value::String(s) => {
+            if let Some(key) = whole_placeholder(s) {
+                if let Some(v) = ctx.resolve_value(key) {
+                    return Ok(v);
+                }
+            }
+            Ok(Value::String(ctx.render(s)?))
+        }
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for v in items {
@@ -1535,6 +1562,7 @@ mod tests {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -3012,5 +3040,55 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "workflow");
         assert!(rows[0].run_id.is_none());
+    }
+
+    // ── api_body typed injection (whole-placeholder) ────────────────────
+    #[test]
+    fn render_body_injects_nested_array_as_real_json() {
+        let mut ctx = TemplateContext::new();
+        ctx.set(
+            "steps.review.data_json",
+            r#"{"verdict":"APPROVE","generalComment":"LGTM","inlineComments":[{"path":"a.rs","line":4,"body":"x"}]}"#,
+        );
+        let body = serde_json::json!({
+            "event": "{{steps.review.data.verdict}}",
+            "body": "{{steps.review.data.generalComment}}",
+            "comments": "{{steps.review.data.inlineComments}}"
+        });
+        let out = render_json_value(&body, &ctx).unwrap();
+        assert_eq!(out["event"], "APPROVE");
+        assert_eq!(out["body"], "LGTM");
+        assert!(out["comments"].is_array(), "nested array must inject as real JSON, got: {}", out["comments"]);
+        assert_eq!(out["comments"][0]["line"], 4);
+        assert_eq!(out["comments"][0]["path"], "a.rs");
+    }
+
+    #[test]
+    fn render_body_data_json_alias_also_injects_typed() {
+        let mut ctx = TemplateContext::new();
+        ctx.set("steps.review.data_json", r#"{"comments":[{"line":1}]}"#);
+        let body = serde_json::json!({ "comments": "{{steps.review.data_json.comments}}" });
+        let out = render_json_value(&body, &ctx).unwrap();
+        assert!(out["comments"].is_array());
+        assert_eq!(out["comments"][0]["line"], 1);
+    }
+
+    #[test]
+    fn render_body_embedded_placeholder_still_strings() {
+        // A placeholder inside surrounding text must NOT type-inject.
+        let mut ctx = TemplateContext::new();
+        ctx.set("n", "42");
+        let body = serde_json::json!({ "title": "PR #{{n}}" });
+        let out = render_json_value(&body, &ctx).unwrap();
+        assert_eq!(out["title"], "PR #42");
+    }
+
+    #[test]
+    fn render_body_unknown_ref_stays_literal() {
+        // Unknown ref stays the literal placeholder (broken ref visible, not blanked).
+        let ctx = TemplateContext::new();
+        let body = serde_json::json!({ "x": "{{steps.nope.data.foo}}" });
+        let out = render_json_value(&body, &ctx).unwrap();
+        assert_eq!(out["x"], "{{steps.nope.data.foo}}");
     }
 }

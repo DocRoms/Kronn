@@ -1089,6 +1089,79 @@ fn resolve_unique_basename(basename: &str, roots: &[&Path]) -> BasenameResolutio
     BasenameResolution::NotFound
 }
 
+/// True iff `full` ends with `needle` at a PATH-SEGMENT boundary: either equal,
+/// or `full` ends with `"/" + needle`. Segment alignment is what stops
+/// `Foo.php` matching `BarFoo.php` and `apps/x` matching `myapps/x`.
+fn path_has_segment_suffix(full: &str, needle: &str) -> bool {
+    if full == needle {
+        return true;
+    }
+    full.strip_suffix(needle).is_some_and(|rest| rest.ends_with('/'))
+}
+
+/// Resolve a MULTI-SEGMENT relative citation to a UNIQUE file by segment-aligned
+/// full-path suffix match. Fixes the dominant inline-anchor false positive: a
+/// path cited relative to an app SUBDIR (project code lives under `application/`
+/// but the verify root is the project root → `apps/x/Foo.php` is really at
+/// `application/apps/x/Foo.php`), or a sibling-repo path written with the repo
+/// name (`front_apollo/plugins/…`, resolved once that linked repo is a root).
+///
+/// Guards mirror `resolve_unique_basename` — heavy/`.kronn` dirs pruned (the
+/// worktree copies would otherwise make everything ambiguous), walk capped, and
+/// ONLY a unique match is green-lit (2+ → Ambiguous, never a false verify). The
+/// match is always a real descendant of a registered root, so no SSRF/escape.
+fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResolution {
+    const MAX_WALK_ENTRIES: usize = 60_000;
+    let needle = needle.replace('\\', "/");
+    let needle = needle.trim_start_matches('/');
+    // Single-segment needles are the basename walk's job; require ≥2 segments.
+    if needle.is_empty() || !needle.contains('/') {
+        return BasenameResolution::NotFound;
+    }
+    for root in roots {
+        let mut found: Option<PathBuf> = None;
+        let mut count = 0usize;
+        let mut scanned = 0usize;
+        let mut capped = false;
+        let walker = walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_entry(|e| {
+                if e.depth() > 0 && e.file_type().is_dir() {
+                    if let Some(name) = e.file_name().to_str() {
+                        return !BASENAME_WALK_SKIP_DIRS.contains(&name);
+                    }
+                }
+                true
+            });
+        for entry in walker.filter_map(|e| e.ok()) {
+            scanned += 1;
+            if scanned > MAX_WALK_ENTRIES {
+                capped = true;
+                break;
+            }
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let full = entry.path().to_string_lossy().replace('\\', "/");
+            if path_has_segment_suffix(&full, needle) {
+                count += 1;
+                if count == 1 {
+                    found = Some(entry.path().to_path_buf());
+                } else {
+                    return BasenameResolution::Ambiguous(count);
+                }
+            }
+        }
+        if capped {
+            return BasenameResolution::NotFound;
+        }
+        if let Some(p) = found {
+            return BasenameResolution::Unique(p);
+        }
+    }
+    BasenameResolution::NotFound
+}
+
 /// Verify a file reference against one or more candidate roots. The FIRST root
 /// where the (jailed) relative path exists wins — this is how an Isolated
 /// discussion's git worktree is tried before the main checkout, fixing the
@@ -1114,6 +1187,17 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
     }
 
     let (path_str, line_spec) = split_path_and_lines(reference);
+    // Re-clean: the FP fix. Agents write `path`:line (markdown path in
+    // backticks, the :line OUTSIDE them). At the top, `clean_reference` only
+    // peels OUTER wrappers — the closing backtick sits internal (before :line)
+    // and survives; `split_path_and_lines` then appends it onto path_str, so a
+    // real file fails to stat. Re-cleaning the post-split path strips it. Still
+    // trim-only (returns a &str sub-slice) so it can never add a `../`
+    // component — SSRF-safe. Empty after the peel = an empty ref.
+    let path_str = clean_reference(path_str);
+    if path_str.is_empty() {
+        return (SourceStatus::EmptyRef, "empty source reference".into());
+    }
     let path = Path::new(path_str);
 
     // Absolute → existence-only, host-path-translated for Docker. No jail.
@@ -1180,6 +1264,30 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
                 return (
                     SourceStatus::NotFound,
                     format!("bare name `{path_str}` matches {n} files — ambiguous, cite the full path"),
+                );
+            }
+            BasenameResolution::NotFound => {}
+        }
+    } else {
+        // Multi-segment relative path unresolved at root level — it may live
+        // deeper (cited relative to an app subdir, e.g. `apps/x/Foo.php` actually
+        // at `application/apps/x/Foo.php`) or in a sibling repo by name
+        // (`front_apollo/plugins/…`). Walk for a UNIQUE segment-aligned suffix
+        // match across the roots (incl. linked_repos) before giving up.
+        match resolve_unique_path_suffix(path_str, roots) {
+            BasenameResolution::Unique(found) => {
+                let (status, detail) = line_bounds_status(&found, line_spec);
+                let shown = roots
+                    .iter()
+                    .find_map(|r| found.strip_prefix(r).ok())
+                    .unwrap_or(found.as_path())
+                    .display();
+                return (status, format!("{detail} — resolved by unique path suffix → {shown}"));
+            }
+            BasenameResolution::Ambiguous(n) => {
+                return (
+                    SourceStatus::NotFound,
+                    format!("path `{path_str}` matches {n} files — ambiguous, cite the full path"),
                 );
             }
             BasenameResolution::NotFound => {}
@@ -1339,6 +1447,7 @@ pub fn finalize_lint_report(
     text: &str,
     workspace_path: Option<&str>,
     project_path: &str,
+    linked_repo_paths: &[String],
 ) -> Option<LintReport> {
     if !current_mode().is_active() {
         return None;
@@ -1349,6 +1458,22 @@ pub fn finalize_lint_report(
     }
     if !project_path.is_empty() {
         roots.push(crate::core::scanner::resolve_host_path(project_path));
+    }
+    // 0.8.8 — also resolve citations against the project's declared linked_repos
+    // (filesystem locations only). Triage/dev agents legitimately cite sibling
+    // repos they were told about (front_apollo, …); without these as roots a
+    // real cross-repo path reads as "couldn't verify". resolve_host_path-
+    // translated; kept only if it actually exists in-container (repos under
+    // $HOME are mounted at /host-home), else skipped so a genuinely-unavailable
+    // repo's refs stay soft-unverified rather than erroring.
+    for lp in linked_repo_paths {
+        if lp.is_empty() {
+            continue;
+        }
+        let resolved = crate::core::scanner::resolve_host_path(lp);
+        if resolved.exists() && !roots.contains(&resolved) {
+            roots.push(resolved);
+        }
     }
     let root_refs: Vec<&Path> = roots.iter().map(|p| p.as_path()).collect();
     let report = analyze_roots(text, &root_refs);
@@ -2370,7 +2495,7 @@ mod tests {
         // 1. Mode off → always None, even with a perfectly-verified citation.
         set_mode("off");
         assert!(
-            finalize_lint_report("Implemented [src: file: src/foo.rs:2].", None, root.to_str().unwrap())
+            finalize_lint_report("Implemented [src: file: src/foo.rs:2].", None, root.to_str().unwrap(), &[])
                 .is_none(),
             "off mode must not produce a report"
         );
@@ -2381,6 +2506,7 @@ mod tests {
             "Retry logic [src: file: src/foo.rs:2].",
             None,
             root.to_str().unwrap(),
+            &[],
         )
         .expect("verified report must be stored");
         assert_eq!(green.fabricated_count, 0);
@@ -2388,13 +2514,14 @@ mod tests {
         assert!(green.verified_count() >= 1, "{:?}", green.sources);
 
         // 3. Plain prose, no cue, no citation → no signal → None.
-        assert!(finalize_lint_report("Voilà, c'est fait.", None, "").is_none());
+        assert!(finalize_lint_report("Voilà, c'est fait.", None, "", &[]).is_none());
 
         // 4. Worktree root tried FIRST: file exists only in the worktree.
         let wt = finalize_lint_report(
             "See `src/foo.rs:1`.",
             Some(worktree.to_str().unwrap()),
             main.to_str().unwrap(),
+            &[],
         )
         .expect("worktree-local file must verify (green)");
         assert!(wt.verified_count() >= 1, "{:?}", wt.sources);
@@ -2434,6 +2561,97 @@ mod tests {
         assert_eq!(clean_reference("\"src/a.rs\""), "src/a.rs");
         assert_eq!(clean_reference("(src/a.rs)."), "src/a.rs");
         assert_eq!(clean_reference("src/a.rs"), "src/a.rs");
+    }
+
+    // Regression (2026-06): the dominant citation false-positive. Agents write
+    // a markdown-backticked path with the line spec OUTSIDE the backticks —
+    // `src/foo.rs`:3 — so the closing backtick is internal at clean time and
+    // survives onto path_str after the :line split. Re-cleaning path_str fixes
+    // it. (The `src/foo.rs:3` form, line INSIDE, was already handled.)
+    #[test]
+    fn verify_backticked_path_with_line_spec_outside() {
+        let root = temp_project(); // src/foo.rs = 5 lines
+        let abs = format!("`{}/src/foo.rs`:3", root.display());
+        let cases: &[(&str, SourceStatus)] = &[
+            ("`src/foo.rs`:3", SourceStatus::Verified),
+            ("`src/foo.rs`:2-4", SourceStatus::Verified),
+            ("`src/foo.rs`:6", SourceStatus::OutOfBounds), // path resolved AND bounds ran
+            ("`src/foo.rs`", SourceStatus::Verified),
+            ("file: `src/foo.rs`:3", SourceStatus::Verified), // file: prefix + backticks combined
+            (abs.as_str(), SourceStatus::Verified),           // absolute, backticked, line outside
+            ("`src/ghost.rs`:3", SourceStatus::NotFound),     // clean path, genuinely absent
+        ];
+        for (raw, want) in cases {
+            let c = verify_source_marker(raw, Some(&root));
+            assert_eq!(c.status, *want, "raw={raw:?} -> {c:?}");
+        }
+        // A reference that's nothing but a wrapper + line must not false-Verify
+        // against the root directory.
+        let empty = verify_source_marker("`:3", Some(&root));
+        assert_eq!(empty.status, SourceStatus::EmptyRef, "{empty:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn path_segment_suffix_is_aligned() {
+        assert!(path_has_segment_suffix("apps/x.php", "apps/x.php")); // equal
+        assert!(path_has_segment_suffix("/r/application/apps/x.php", "apps/x.php"));
+        assert!(!path_has_segment_suffix("/r/myapps/x.php", "apps/x.php")); // not segment-aligned
+        assert!(!path_has_segment_suffix("/r/apps/xx.php", "apps/x.php")); // filename differs
+    }
+
+    // The dominant inline-anchor FP: project code lives under `application/`, so
+    // a path cited relative to the app root (`apps/website/src/X.php`) misses at
+    // the project root and must be resolved by a unique segment-aligned suffix.
+    #[test]
+    fn verify_resolves_app_subdir_relative_by_suffix() {
+        let root = temp_project();
+        std::fs::create_dir_all(root.join("application/apps/website/src")).unwrap();
+        std::fs::write(root.join("application/apps/website/src/Justin.php"), "a\nb\nc\n").unwrap();
+        let c = verify_source_marker("apps/website/src/Justin.php:2", Some(&root));
+        assert_eq!(c.status, SourceStatus::Verified, "{c:?}");
+        assert!(c.detail.contains("unique path suffix"), "{c:?}");
+        // Bounds still enforced on the resolved file.
+        let oob = verify_source_marker("apps/website/src/Justin.php:9", Some(&root));
+        assert_eq!(oob.status, SourceStatus::OutOfBounds, "{oob:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_suffix_ambiguous_stays_not_found() {
+        let root = temp_project();
+        std::fs::create_dir_all(root.join("a/dir")).unwrap();
+        std::fs::create_dir_all(root.join("b/dir")).unwrap();
+        std::fs::write(root.join("a/dir/Same.php"), "x\n").unwrap();
+        std::fs::write(root.join("b/dir/Same.php"), "x\n").unwrap();
+        let c = verify_source_marker("dir/Same.php", Some(&root));
+        assert_eq!(c.status, SourceStatus::NotFound, "ambiguous suffix must not verify: {c:?}");
+        assert!(c.detail.contains("ambiguous"), "{c:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn verify_cross_repo_path_via_linked_root() {
+        // A sibling repo passed as a second root: a repo-name-prefixed citation
+        // `front_apollo/plugins/...` resolves against the linked root.
+        let main = temp_project();
+        let parent = std::env::temp_dir().join(format!("kronn_apollo_{}", uuid::Uuid::new_v4()));
+        let apollo = parent.join("front_apollo");
+        std::fs::create_dir_all(apollo.join("plugins/timeline")).unwrap();
+        std::fs::write(apollo.join("plugins/timeline/index.js"), "a\nb\n").unwrap();
+        let c = verify_source_marker_roots(
+            "front_apollo/plugins/timeline/index.js:1",
+            &[main.as_path(), apollo.as_path()],
+        );
+        assert_eq!(c.status, SourceStatus::Verified, "{c:?}");
+        // A genuinely absent cross-repo path still fails.
+        let ghost = verify_source_marker_roots(
+            "front_apollo/plugins/ghost/nope.js",
+            &[main.as_path(), apollo.as_path()],
+        );
+        assert_eq!(ghost.status, SourceStatus::NotFound, "{ghost:?}");
+        std::fs::remove_dir_all(&main).ok();
+        std::fs::remove_dir_all(&parent).ok();
     }
 
     #[test]
@@ -3500,6 +3718,7 @@ mod tests {
                     "Retry [src: file: src/foo.rs:2].",
                     None,
                     root.to_str().unwrap(),
+                    &[],
                 )
                 .is_none(),
                 "off mode must produce no report",
@@ -3510,12 +3729,13 @@ mod tests {
                 "Retry [src: file: src/foo.rs:2].",
                 None,
                 root.to_str().unwrap(),
+                &[],
             )
             .expect("warn mode must store a verified report");
             assert!(rep.verified_count() >= 1, "{:?}", rep.sources);
             // no-signal prose → None even in warn.
             assert!(
-                finalize_lint_report("Voilà, terminé pour aujourd'hui.", None, "").is_none(),
+                finalize_lint_report("Voilà, terminé pour aujourd'hui.", None, "", &[]).is_none(),
                 "no-signal prose must produce no report",
             );
             std::fs::remove_dir_all(&root).ok();
@@ -3774,6 +3994,7 @@ mod tests {
                 "Voilà, c'est terminé pour aujourd'hui. Bonne soirée.",
                 None,
                 root.to_str().unwrap(),
+                &[],
             );
             assert!(out.is_none(), "no-signal prose must finalize to None");
             set_mode(DEFAULT_MODE_STR);

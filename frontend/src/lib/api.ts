@@ -941,6 +941,10 @@ export const mcps = {
 
 export const discussions = {
   list: () => api<Discussion[]>('GET', '/discussions'),
+  /** 2026-06-24 — disc ids with an in-flight agent run RIGHT NOW, server-side
+   *  (incl. background/batch children). Polled so a run still working after you
+   *  navigate away keeps showing as running, instead of looking dead. */
+  getRunning: () => api<string[]>('GET', '/discussions/running'),
   get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
@@ -1031,6 +1035,20 @@ export const discussions = {
   // ── Context Files ──
   listContextFiles: (id: string) => api<ContextFile[]>('GET', `/discussions/${id}/context-files`),
   deleteContextFile: (id: string, fileId: string) => api<void>('DELETE', `/discussions/${id}/context-files/${fileId}`),
+  /** Pin all pending (composer-staged) files of a discussion to a message.
+   *  Used by the creation popup to attach uploads to the first message —
+   *  the in-disc composer links implicitly at send time. */
+  linkPendingContextFiles: (id: string, messageId: string) =>
+    api<number>('POST', `/discussions/${id}/context-files/link-pending`, { message_id: messageId }),
+  /** Fetch an uploaded image's raw bytes (auth'd) so the UI can render a
+   *  thumbnail via an object URL — `<img src>` can't carry auth headers. */
+  contextFileBlob: async (id: string, fileId: string): Promise<Blob> => {
+    const res = await fetch(`${_apiBase}/api/discussions/${id}/context-files/${fileId}/content`, {
+      headers: { ...authHeaders() },
+    });
+    if (!res.ok) throw new Error(`Failed to load attachment (${res.status})`);
+    return res.blob();
+  },
   uploadContextFile: async (id: string, file: File): Promise<UploadContextFileResponse> => {
     const form = new FormData();
     form.append('file', file);
@@ -1039,6 +1057,15 @@ export const discussions = {
       headers: { ...authHeaders() },
       body: form,
     });
+    // A too-large upload (413) or other framework-level rejection has no JSON
+    // body — calling res.json() then throws an opaque parse error that surfaces
+    // as a generic toast. Surface the status so userError() maps it ("413" →
+    // "fichier trop volumineux").
+    if (!res.ok) {
+      let detail = '';
+      try { const j = await res.json(); detail = j?.error ?? ''; } catch { /* non-JSON body */ }
+      throw new Error(detail || `Upload failed (HTTP ${res.status})`);
+    }
     const json = await res.json();
     if (!json.success) throw new Error(json.error ?? 'Upload failed');
     return json.data;

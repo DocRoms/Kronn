@@ -107,6 +107,10 @@ export interface DiscussionsPageProps {
 // ─── TTS imports ──
 import { speakText, stopTts, pauseTts, resumeTts, isTtsPaused } from '../lib/tts-engine';
 
+// Stable empty array so messages with no attachments keep the same prop
+// reference across renders (don't bust MessageBubble's memo).
+const EMPTY_ATTACHMENTS: ContextFile[] = [];
+
 let ttsWorker: Worker | null = null;
 function getTtsWorker(): Worker {
   if (!ttsWorker) {
@@ -991,6 +995,20 @@ export function DiscussionsPage({
           toast(`${file.name}: ${userError(e)}`, 'error');
         }
       }
+      // Pin them to the FIRST message (the initial_prompt). Unlike the in-disc
+      // composer, the popup uploads after the first message exists and runs via
+      // runAgent (which doesn't link), so without this they'd stay pending and
+      // get vacuumed into message #2 on the next send. create() returns the
+      // initial User message, so its id is right here.
+      const firstMsgId = disc.messages?.find(m => m.role === 'User')?.id ?? disc.messages?.[0]?.id;
+      if (firstMsgId) {
+        try {
+          await discussionsApi.linkPendingContextFiles(disc.id, firstMsgId);
+          await loadContextFiles(disc.id);
+        } catch (e) {
+          console.warn('[create] link pending files failed:', e);
+        }
+      }
     }
 
     const discId = disc.id;
@@ -1120,6 +1138,16 @@ export function DiscussionsPage({
       () => {
         refetchDiscussions();
         setSendingMap(prev => ({ ...prev, [discId]: true }));
+        // The backend just persisted the user message (real id) and pinned any
+        // composer-staged files to it (0.8.8). Reload BOTH so the attachment
+        // binds immediately: reloadDiscussion swaps the optimistic message
+        // (id `optimistic-…`) for the real one, and loadContextFiles refreshes
+        // each file's message_id. Without the disc reload the files stay keyed
+        // to a message id the UI doesn't have yet, so the thumbnail wouldn't
+        // appear until the agent finished (cleanupStream's reload) — defeating
+        // the whole point of showing your attachment the instant you send.
+        reloadDiscussion(discId);
+        loadContextFiles(discId);
         // The optimistic update above bumped both counts by 1 (the freshly
         // queued User message); seed lastSeen with the matching non-System
         // basis so the badge resolves to 0 without waiting on the next tick.
@@ -1234,6 +1262,22 @@ export function DiscussionsPage({
       toast(userError(e), 'error');
     }
   }, [activeDiscussionId, toast]);
+
+  // Split the discussion's files into "pending" (still in the composer, no
+  // message_id) and "attached" (pinned to a message, grouped by message id).
+  // The composer shows only pending; each message bubble shows its own (0.8.8).
+  const activeDiscFiles = contextFilesMap[activeDiscussionId ?? ''] ?? [];
+  const pendingContextFiles = useMemo(
+    () => activeDiscFiles.filter(f => !f.message_id),
+    [activeDiscFiles],
+  );
+  const attachmentsByMessageId = useMemo(() => {
+    const map: Record<string, ContextFile[]> = {};
+    for (const f of activeDiscFiles) {
+      if (f.message_id) (map[f.message_id] ??= []).push(f);
+    }
+    return map;
+  }, [activeDiscFiles]);
 
   const handleRetry = async () => {
     if (!activeDiscussionId || sending) return;
@@ -1972,6 +2016,7 @@ export function DiscussionsPage({
                       key={msg.id}
                       msg={msg}
                       idx={idx}
+                      attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
                       isLastUser={msg.role === 'User' && idx === lastUserIdx}
                       isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
                       isEditing={editingMsgId === msg.id}
@@ -2802,7 +2847,7 @@ export function DiscussionsPage({
               onWorktreeErrorDismiss={() => setWorktreeError(null)}
               onWorktreeRetry={handleWorktreeRetry}
               isAgentRestricted={isAgentRestricted}
-              contextFiles={contextFilesMap[activeDiscussionId ?? ''] ?? []}
+              contextFiles={pendingContextFiles}
               onUploadFiles={handleUploadFiles}
               onDeleteContextFile={handleDeleteContextFile}
               uploadingFiles={uploadingFiles}

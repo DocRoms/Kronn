@@ -1,6 +1,7 @@
 import { useState, useRef, useMemo, useEffect, memo, type ReactNode } from 'react';
 import ReactMarkdown from 'react-markdown';
 import { useTheme } from '../lib/ThemeContext';
+import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
@@ -8,12 +9,14 @@ import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
-import type { DiscussionMessage, AgentType, QuickPrompt } from '../types/generated';
+import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile } from '../types/generated';
+import { MessageAttachments } from './MessageAttachments';
 import { agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
+  ChevronRight,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
@@ -130,13 +133,17 @@ export interface MessageBubbleProps {
   chainableQPs?: QuickPrompt[];
   /** Fires the referenced QP in this discussion (sends its prompt). */
   onLaunchQp?: (qp: QuickPrompt) => void;
+  /** 0.8.8 — files the user attached to THIS message (pinned at send).
+   * Rendered as a strip under the content: image thumbnails (fetched as
+   * auth'd blobs) and filename chips for non-images. Empty for most msgs. */
+  attachments?: ContextFile[];
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
 
@@ -370,11 +377,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY|CHAIN_QP:[0-9a-fA-F-]+)/gi, '').trim();
             return (
               <>
-                <MarkdownContent content={cleaned} discussionId={discussionId} />
+                <MessageBody content={cleaned} discussionId={discussionId} />
                 {seed && <KronnSeedToggle seed={seed} />}
               </>
             );
           })()
+        )}
+        {attachments && attachments.length > 0 && discussionId && (
+          <MessageAttachments files={attachments} discussionId={discussionId} t={t} />
         )}
         {msg.role === 'Agent' && (
           <button
@@ -478,6 +488,24 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                       : lintSeverity === 'unchecked'
                         ? <>{unverifiableCount} {t('disc.lintUnverifiable')}</>
                         : <>{verifiedCount} {t('disc.lintVerified')}</>}
+              </button>
+            )}
+            {/* When the headline pill is a WARNING but the reply also has
+                verified citations, show the verified count alongside so the
+                footer never hides the good news (e.g. "1 sans source" + "14
+                vérifiée(s)"). Both chips open the same detail drawer. */}
+            {msg.role === 'Agent' && lint && lintSeverity && lintSeverity !== 'verified' && verifiedCount > 0 && (
+              <button
+                type="button"
+                className="disc-msg-lint-pill"
+                data-severity="verified"
+                onClick={() => setShowLint(v => !v)}
+                aria-expanded={showLint}
+                aria-controls={`lint-detail-${msg.id}`}
+                title={t('disc.lintPillHintVerified')}
+                data-testid="lint-pill-verified"
+              >
+                <Check size={8} /> {verifiedCount} {t('disc.lintVerified')}
               </button>
             )}
           </div>
@@ -678,7 +706,53 @@ const mdComponents = {
 // portable (some CLIs choke on raw multi-byte emoji sequences).
 const remarkPluginsList = [remarkGfm, remarkEmoji];
 
+/** Above this, a message is NOT sent through ReactMarkdown + remark-gfm +
+ *  syntax highlight: those are super-linear in input size and a multi-MB
+ *  message blows up the heap and CRASHES the browser tab. (2026-06-23: a
+ *  killed Codex run persisted a 2.4 MB stderr/reasoning dump as its reply;
+ *  opening that discussion froze then crashed Chrome.) ~200 KB is far above
+ *  any normal agent reply (triage replies are < 10 KB) so this only ever
+ *  trips on pathological dumps. */
+const MAX_MARKDOWN_CHARS = 200_000;
+/** How much of an oversized message we render inline as plain text. The rest
+ *  is reachable via "copy full message" — plain text is cheap, but we still
+ *  cap the DOM so a 50 MB dump can't lag the page either. */
+const LARGE_MSG_DISPLAY_CHARS = 100_000;
+
+/** Plain-text fallback for a pathologically large message — no markdown, no
+ *  highlight, so it renders instantly instead of crashing the tab. */
+const LargeMessageFallback = memo(({ content }: { content: string }) => {
+  const { t } = useT();
+  const kb = Math.round(content.length / 1024);
+  const truncated = content.length > LARGE_MSG_DISPLAY_CHARS;
+  const shown = truncated ? content.slice(0, LARGE_MSG_DISPLAY_CHARS) : content;
+  return (
+    <div className="disc-md">
+      <div
+        role="note"
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          fontSize: 11, color: 'var(--kr-text-secondary)',
+          background: 'var(--kr-bg-subtle, rgba(128,128,128,0.08))',
+          border: '1px solid var(--kr-border-faint)', borderRadius: 4,
+          padding: '4px 8px', marginBottom: 6,
+        }}
+      >
+        <AlertTriangle size={12} />
+        <span>{t('disc.largeMessage', kb.toLocaleString())}</span>
+      </div>
+      <pre style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0 }}>
+        {shown}{truncated ? `\n\n${t('disc.largeMessageTruncated')}` : ''}
+      </pre>
+    </div>
+  );
+});
+
 export const MarkdownContent = memo(({ content, discussionId }: { content: string; discussionId?: string }) => {
+  // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
+  if (content.length > MAX_MARKDOWN_CHARS) {
+    return <LargeMessageFallback content={content} />;
+  }
   // Override the `pre` handler when we have a discussion id: fenced
   // blocks tagged `kronn-doc-preview` get replaced with the DocPreview
   // component (sandboxed iframe + export buttons). Everything else
@@ -743,6 +817,80 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
         {content}
       </ReactMarkdown>
     </div>
+  );
+});
+
+/** 2026-06-24 — a message segment: either the QP's own instructions (`text`)
+ *  or a block of context Kronn injected at variable-substitution time
+ *  (`context`, e.g. a ticket payload), wrapped server-side in a
+ *  `<!-- kronn:context title="…" -->…<!-- /kronn:context -->` marker. */
+export type MsgSegment =
+  | { kind: 'text'; body: string }
+  | { kind: 'context'; title: string; body: string };
+
+const INJECTED_CONTEXT_RE = /<!-- kronn:context title="([^"]*)" -->\n?([\s\S]*?)\n?<!-- \/kronn:context -->/g;
+
+/** Split a message into instruction text vs injected-context blocks. With no
+ *  marker it returns a single text segment (old messages render unchanged). */
+export function splitInjectedContext(content: string): MsgSegment[] {
+  const segs: MsgSegment[] = [];
+  let last = 0;
+  for (const m of content.matchAll(INJECTED_CONTEXT_RE)) {
+    const idx = m.index ?? 0;
+    if (idx > last) segs.push({ kind: 'text', body: content.slice(last, idx) });
+    segs.push({ kind: 'context', title: m[1], body: m[2] });
+    last = idx + m[0].length;
+  }
+  if (last < content.length) segs.push({ kind: 'text', body: content.slice(last) });
+  return segs.length ? segs : [{ kind: 'text', body: content }];
+}
+
+/** Collapsible card for a block of injected context (a ticket, a file, …).
+ *  Collapsed by default so the agent's instructions stay the visible signal;
+ *  click to expand the (markdown-rendered) payload. */
+const InjectedContextCard = memo(({ title, body, discussionId }: { title: string; body: string; discussionId?: string }) => {
+  const { t } = useT();
+  const [open, setOpen] = useState(false);
+  const lineCount = useMemo(() => body.trim().split('\n').length, [body]);
+  return (
+    <div className="disc-injected-context">
+      <button
+        type="button"
+        className="disc-injected-context-toggle"
+        aria-expanded={open}
+        onClick={() => setOpen(o => !o)}
+      >
+        <ChevronRight size={12} className="wf-chevron" data-expanded={open} />
+        <span className="disc-injected-context-label">📋 {t('disc.injectedContext')}{title ? ` · ${title}` : ''}</span>
+        {!open && <span className="disc-injected-context-meta">{t('disc.injectedContextLines', lineCount)}</span>}
+      </button>
+      {open && (
+        <div className="disc-injected-context-body">
+          <MarkdownContent content={body} discussionId={discussionId} />
+        </div>
+      )}
+    </div>
+  );
+});
+
+/** Render a message body: instructions as markdown, each injected-context
+ *  block as a collapsible card. The fast path (no marker) is byte-identical
+ *  to the previous direct `<MarkdownContent>` render. */
+export const MessageBody = memo(({ content, discussionId }: { content: string; discussionId?: string }) => {
+  const segs = useMemo(() => splitInjectedContext(content), [content]);
+  if (segs.length === 1 && segs[0].kind === 'text') {
+    return <MarkdownContent content={content} discussionId={discussionId} />;
+  }
+  return (
+    <>
+      {segs.map((s, i) =>
+        s.kind === 'context'
+          ? <InjectedContextCard key={i} title={s.title} body={s.body} discussionId={discussionId} />
+          : (s.body.trim()
+              ? <MarkdownContent key={i} content={s.body} discussionId={discussionId} />
+              : null),
+      )}
+    </>
   );
 });
 

@@ -139,10 +139,13 @@ pub async fn detect_all() -> Vec<AgentDetection> {
         "starting agent detection sweep",
     );
 
-    let mut agents = Vec::new();
-    for def in KNOWN_AGENTS {
-        agents.push(detect_agent(def).await);
-    }
+    // Probe every agent CONCURRENTLY. Each `detect_agent` spawns a `<binary>
+    // --version` subprocess (and possibly an npx fallback), so running them
+    // sequentially made the sweep ~N×(spawn latency) — ~13s on a 7-agent
+    // host-managed WSL setup. join_all fires them at once → ~the slowest single
+    // probe. Order is preserved (join_all keeps input order).
+    let agents: Vec<AgentDetection> =
+        futures::future::join_all(KNOWN_AGENTS.iter().map(detect_agent)).await;
 
     // Summary — lets the user grep `kronn::agent_detect` and see in one
     // place which agents the container found and which are missing.
@@ -160,6 +163,82 @@ pub async fn detect_all() -> Vec<AgentDetection> {
     agents
 }
 
+/// TTL for the whole-sweep cache below.
+const DETECT_ALL_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Soft wall on a single sweep when a STALE result already exists: under heavy
+/// concurrent-agent load `get_version_from`'s `<binary> --version` spawns can
+/// stall, and `setup/status` (which the boot blocks on) shouldn't hang — so on
+/// overrun we keep serving the previous (still-valid) sweep. Generous, because
+/// a legitimate sweep on a multi-agent host runs ~4-5s and we'd rather let it
+/// COMPLETE (and refresh the cache) than churn. NEVER applied to a cold cache:
+/// returning an empty agent list breaks discussion creation + the Agents page,
+/// so a first/cold sweep always runs to completion (see detect_all_cached).
+const DETECT_ALL_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+/// Cache payload: the last completed sweep + the instant it was taken.
+type DetectAllCache = Mutex<Option<(Vec<AgentDetection>, Instant)>>;
+static DETECT_ALL_CACHE: std::sync::LazyLock<DetectAllCache> =
+    std::sync::LazyLock::new(|| Mutex::new(None));
+
+/// Cached agent-detection sweep. `detect_all` spawns `<binary> --version` for
+/// every installed agent on every call (~5s idle; under concurrent-agent load
+/// the subprocess spawns contend and the call can hang for tens of seconds).
+/// `setup/status` runs on every dashboard boot AND the frontend boot blocks on
+/// it, so an uncached sweep froze the whole app on "Almost ready…" whenever a
+/// batch/WF was spawning agents. Cache the result for `DETECT_ALL_TTL`.
+/// `force = true` bypasses + refreshes (right after an install/uninstall).
+pub async fn detect_all_cached(force: bool) -> Vec<AgentDetection> {
+    if !force {
+        if let Ok(guard) = DETECT_ALL_CACHE.lock() {
+            if let Some((cached, at)) = guard.as_ref() {
+                if at.elapsed() < DETECT_ALL_TTL {
+                    return cached.clone();
+                }
+            }
+        }
+    }
+    // Snapshot any previous (stale) sweep to fall back on.
+    let stale: Option<Vec<AgentDetection>> = DETECT_ALL_CACHE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|(v, _)| v.clone()));
+
+    let store = |fresh: Vec<AgentDetection>| -> Vec<AgentDetection> {
+        if let Ok(mut guard) = DETECT_ALL_CACHE.lock() {
+            *guard = Some((fresh.clone(), Instant::now()));
+        }
+        fresh
+    };
+
+    match stale {
+        // COLD cache: an empty agent list breaks discussion creation + the
+        // Agents page, so the first sweep MUST produce real results — run it to
+        // completion, no budget. (The frontend boot has its own timeout-and-
+        // proceed, so a slow first sweep never freezes the UI.)
+        None => store(detect_all().await),
+        // Warm-ish: bound the refresh; on overrun keep serving the previous
+        // (still-valid) sweep rather than block. Never empty here.
+        Some(prev) => match tokio::time::timeout(DETECT_ALL_BUDGET, detect_all()).await {
+            Ok(fresh) => store(fresh),
+            Err(_) => {
+                tracing::warn!(
+                    target: "kronn::agent_detect",
+                    "detect_all exceeded {}s — serving the previous sweep ({} agents)",
+                    DETECT_ALL_BUDGET.as_secs(), prev.len(),
+                );
+                prev
+            }
+        },
+    }
+}
+
+/// Drop the cached sweep so the next `detect_all_cached(false)` re-probes.
+/// Called after install/uninstall so the UI reflects the change immediately.
+pub fn invalidate_detect_cache() {
+    if let Ok(mut guard) = DETECT_ALL_CACHE.lock() {
+        *guard = None;
+    }
+}
+
 /// Detect a single agent by checking if its binary exists in PATH or host bin dirs.
 /// If no local binary is found but the agent has an npx package, probe runtime availability.
 async fn detect_agent(def: &AgentDef) -> AgentDetection {
@@ -175,8 +254,18 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
     let runtime_warning = detect_runtime_warning(&def.agent_type);
 
     if let Some(loc) = found {
-        // Version detection may fail if symlinks are broken inside container
-        let version = get_version_from(&loc.path).await.ok();
+        // Version detection may fail (broken symlinks) OR hang — some agent
+        // CLIs do a network/update check on `--version` and can stall for
+        // 10s+, which gated the whole sweep. Cap it: the agent is already
+        // confirmed INSTALLED (find_binary hit); a slow/failed `--version`
+        // just means no version string, never a missing agent.
+        let version = match tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            get_version_from(&loc.path),
+        ).await {
+            Ok(Ok(v)) => Some(v),
+            _ => None,
+        };
         let host_label = if loc.via_wsl {
             Some("WSL".to_string())
         } else if loc.host_managed {
@@ -668,6 +757,37 @@ mod tests {
         let output = super::run_shell_cmd("echo hello").await.expect("run_shell_cmd should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("hello"), "stdout should contain 'hello', got: {}", stdout);
+    }
+
+    // ─── detect_all cache (boot-hang fix) ────────────────────────────────────
+
+    #[tokio::test]
+    #[serial]
+    async fn detect_all_cached_serves_fresh_entry_without_resweeping() {
+        // Seed a fresh sentinel: an EMPTY sweep, which a real `detect_all`
+        // never produces (it lists every KNOWN_AGENT). If `detect_all_cached`
+        // returns empty, it served the cache instead of spawning subprocesses.
+        {
+            let mut g = DETECT_ALL_CACHE.lock().unwrap();
+            *g = Some((Vec::new(), Instant::now()));
+        }
+        let hit = detect_all_cached(false).await;
+        assert!(hit.is_empty(), "within TTL the cached sweep must be served as-is (no re-probe)");
+        invalidate_detect_cache(); // leave the static clean for other tests
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn invalidate_detect_cache_drops_the_entry() {
+        {
+            let mut g = DETECT_ALL_CACHE.lock().unwrap();
+            *g = Some((Vec::new(), Instant::now()));
+        }
+        invalidate_detect_cache();
+        assert!(
+            DETECT_ALL_CACHE.lock().unwrap().is_none(),
+            "invalidate must drop the cached entry so the next call re-probes",
+        );
     }
 
     // ─── check_prerequisite ──────────────────────────────────────────────────

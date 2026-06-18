@@ -65,6 +65,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     make gh openssh-client unzip \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Playwright / Chromium for agent browser tooling ────────────────────────
+# Agents drive a REAL browser through the Playwright MCP (inspect prod pages,
+# verify runtime behaviour — e.g. is an Adobe opt-in object present). This slim
+# runtime image ships none of Chromium's system libs (libnss3, libgbm1, the
+# GTK/X11/alsa stack), and the non-root `kronn` agent has no working sudo/apt —
+# so `mcp__Playwright__browser_navigate` failed with "missing libraries" and the
+# browser could never launch (only the host CLI, with a full desktop, worked).
+# Bake the browser AND its deps into the image, in a shared world-rwx path that
+# the kronn-run MCP both reads from and (if its pinned build differs) can refresh.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+# Two distinct things: (1) the apt system libs Chromium needs (version-
+# independent), and (2) the EXACT browser the Playwright MCP drives. The MCP
+# (even invoked as `--browser chromium`) uses the **chrome-for-testing** build,
+# a different artifact than `playwright install chromium` — so we install THAT
+# one via the MCP's own command. Without it, `browser_navigate` returned
+# "Browser chrome-for-testing is not installed" and the agent's browser tooling
+# never worked. World-rwx so the kronn agent reads it (and can refresh if a
+# newer MCP pins a different build).
+RUN npx -y playwright@latest install-deps chromium \
+    && npx -y @playwright/mcp@latest install-browser chrome-for-testing \
+    && chmod -R a+rwx /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install glab (GitLab CLI) for MR creation
 RUN ARCH=$(dpkg --print-architecture) && \
     curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v1.52.0/downloads/glab_1.52.0_linux_${ARCH}.deb" -o /tmp/glab.deb && \

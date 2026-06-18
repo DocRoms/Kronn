@@ -183,9 +183,9 @@ jobs:
       - name: cargo llvm-cov — enforce coverage floor
         run: |
           cargo llvm-cov --lib --tests --summary-only \
-            --fail-under-lines 77 \
-            --fail-under-functions 81 \
-            --fail-under-regions 78
+            --fail-under-lines 78 \
+            --fail-under-functions 82 \
+            --fail-under-regions 80
         env:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"

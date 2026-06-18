@@ -23,6 +23,22 @@ use crate::AppState;
 use super::streaming::make_agent_stream;
 use super::{SseStream, MAX_CONTENT_LEN};
 
+/// GET /api/discussions/running — disc ids with an in-flight agent run RIGHT
+/// NOW, server-side. Source of truth is the cancel registry: every agent run
+/// registers a `CancelGuard` there for its entire lifetime (removed on ANY
+/// exit — completion, error, timeout, cancel), so its keys are exactly the
+/// currently-running discussions, foreground OR background/batch. Page-
+/// independent: the frontend polls this so a run still working after you
+/// navigate away keeps showing as running, instead of looking dead and
+/// tempting a needless re-launch (2026-06-24).
+pub async fn running_discussions(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
+    let ids: Vec<String> = match state.cancel_registry.lock() {
+        Ok(reg) => reg.keys().cloned().collect(),
+        Err(poisoned) => poisoned.into_inner().keys().cloned().collect(),
+    };
+    Json(ApiResponse::ok(ids))
+}
+
 /// POST /api/discussions/:id/messages
 pub async fn send_message(
     State(state): State<AppState>,
@@ -95,6 +111,12 @@ pub async fn send_message(
 
     if let Err(e) = state.db.with_conn(move |conn| {
         crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
+        // Pin any files the user staged in the composer to THIS message (0.8.8),
+        // so they render in its bubble and clear from the input. Non-fatal: a
+        // link failure must not drop the message the user just sent.
+        if let Err(e) = crate::db::discussions::link_pending_context_files_to_message(conn, &disc_id, &msg.id) {
+            tracing::warn!("Failed to link pending context files to message {}: {e}", msg.id);
+        }
         // Track new participant
         if let Some(ref t) = target_clone {
             let disc = crate::db::discussions::get_discussion(conn, &disc_id)?;

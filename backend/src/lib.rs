@@ -693,6 +693,8 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))
+        // Static segment BEFORE the `{id}` capture so it isn't swallowed by it.
+        .route("/api/discussions/running", get(api::discussions::running_discussions))
         .route("/api/discussions/{id}", get(api::discussions::get))
         .route("/api/discussions/{id}", delete(api::discussions::delete).patch(api::discussions::update))
         .route("/api/discussions/{id}/messages", post(api::discussions::send_message))
@@ -752,8 +754,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/discussions/{id}/test-mode/enter", post(api::disc_git::test_mode_enter))
         .route("/api/discussions/{id}/test-mode/exit", post(api::disc_git::test_mode_exit))
         // ── Context Files ──
-        .route("/api/discussions/{id}/context-files", get(api::discussions::list_context_files).post(api::discussions::upload_context_file))
+        // Upload accepts files up to 64MB (axum's default body limit is ~2MB —
+        // far too small for a HAR / log / dataset attached to be read off disk).
+        // The handler still routes images (≤10MB) + office docs to their own
+        // caps; everything else lands on disk with only a preview inlined.
+        .route(
+            "/api/discussions/{id}/context-files",
+            get(api::discussions::list_context_files)
+                .post(api::discussions::upload_context_file)
+                .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/api/discussions/{id}/context-files/{file_id}", delete(api::discussions::delete_context_file))
+        .route("/api/discussions/{id}/context-files/{file_id}/content", get(api::discussions::get_context_file_content))
+        .route("/api/discussions/{id}/context-files/link-pending", post(api::discussions::link_pending_context_files))
         // ── WebSocket ──
         .route("/api/ws", get(api::ws::ws_handler))
         // ── Contacts ──

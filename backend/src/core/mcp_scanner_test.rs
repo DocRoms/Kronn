@@ -1176,19 +1176,25 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
-    fn build_api_context_block_emits_curl_example_with_credentials() {
+    fn build_api_context_block_is_lean_not_a_full_endpoint_dump() {
+        // 2026-06-24 — the block must NOT dump every endpoint (that bloated
+        // every agent prompt by tens of KB). It surfaces the count + ONE
+        // example + pointers to the `api_call` / `mcp_list` tools.
         let (server, env) = api_server("api-test", "https://api.example.com");
         let out = build_api_context_block(&[(server, "cfg-1".into(), env)]);
         assert!(out.contains("REST APIs available"), "header present");
         assert!(out.contains("https://api.example.com"), "base URL rendered");
-        assert!(out.contains("/hello"), "endpoint path listed");
-        assert!(out.contains("/ping"), "second endpoint listed");
-        // Credentials are inlined in the curl example so the agent can
-        // copy-paste the shape (as the doc comment promises).
-        assert!(out.contains("apikey=supersecret-123"), "api key inlined");
-        assert!(out.contains("test_host=example.com"), "config key inlined");
-        // Docs URL linked so the agent can self-extend beyond the 18
-        // endpoints we seeded.
+        // Discovery via the broker, not a catalogue.
+        assert!(out.contains("api_call"), "points at the api_call MCP tool");
+        assert!(out.contains("mcp_list"), "points at mcp_list for endpoint discovery");
+        assert!(out.contains("2 endpoints"), "endpoint COUNT surfaced, got: {out}");
+        // First endpoint shown as a shape example…
+        assert!(out.contains("/hello"), "first endpoint shown as example");
+        // …but the rest are NOT dumped (this is the whole point).
+        assert!(!out.contains("/ping"), "second endpoint must NOT be dumped: {out}");
+        // Auth/config still inlined so direct curl stays possible.
+        assert!(out.contains("apikey=supersecret-123"), "auth still available for curl");
+        assert!(out.contains("test_host=example.com"), "config key still available");
         assert!(out.contains("https://example.com/api-docs"), "docs link present");
     }
 
