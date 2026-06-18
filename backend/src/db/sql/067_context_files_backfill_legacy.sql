@@ -1,0 +1,19 @@
+-- 0.8.8 backfill — separate legacy disc-wide files from genuinely-pending ones.
+--
+-- Migration 066 added context_files.message_id with a NULL default, but the
+-- runtime treats `message_id IS NULL` as "pending in the composer" (linked to
+-- the next message the user sends). Files uploaded BEFORE 066 are also NULL —
+-- so without this backfill, every pre-existing disc-wide file would get
+-- vacuumed into the next message sent in its discussion and wrongly render as
+-- that message's attachment.
+--
+-- Stamp those pre-existing rows with an inert sentinel: not NULL (so they're
+-- not "pending" and never get linked on send), and not a real message id (so
+-- no bubble renders them). They stay injected as disc-wide prompt context via
+-- get_context_files_for_prompt, which filters on discussion_id only — exactly
+-- the pre-0.8.8 behaviour. Only uploads made AFTER all migrations run stay
+-- NULL/pending, which is what we want.
+--
+-- One-shot: tracked in _migrations, so it never re-stamps a file that a user
+-- uploads-but-hasn't-sent across a later backend restart.
+UPDATE context_files SET message_id = '__legacy_disc_wide__' WHERE message_id IS NULL;

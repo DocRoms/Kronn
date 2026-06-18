@@ -623,13 +623,35 @@ fn parse_items_rich(rendered: &str) -> Vec<serde_json::Value> {
     out
 }
 
+/// Above this many chars, a substituted value is treated as **injected
+/// context** (a ticket payload, a file dump, a big JSON) and wrapped in a
+/// `kronn:context` marker so the UI renders it as a collapsible card, visually
+/// distinct from the QP's static instructions. Below → inline as before (a
+/// date / key / id doesn't deserve a card). 2026-06-24.
+const CONTEXT_MARKER_MIN_CHARS: usize = 400;
+
+/// Wrap a large substituted value in the `kronn:context` marker that
+/// `MessageBubble` renders as a collapsible "injected context" card. The
+/// marker is an HTML-comment pair — inert markdown, invisible to the agent —
+/// and the inner content stays raw so the front renders it as markdown inside
+/// the card. Small values pass through unchanged. `title` labels the card
+/// (the variable name). Idempotent-ish: a value already wrapped isn't
+/// double-wrapped.
+fn wrap_injected_context(value: &str, title: &str) -> String {
+    if value.len() < CONTEXT_MARKER_MIN_CHARS || value.contains("<!-- kronn:context") {
+        return value.to_string();
+    }
+    let safe_title = title.replace('"', "'").replace(['<', '>'], "");
+    format!("<!-- kronn:context title=\"{safe_title}\" -->\n{value}\n<!-- /kronn:context -->")
+}
+
 /// Render a Quick Prompt template by filling its first variable with `value`.
 /// Uses the same `{{var_name}}` pattern as the frontend `renderTemplate`.
 fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -> String {
     let mut out = template.to_string();
     if let Some(name) = first_var_name {
         let placeholder = format!("{{{{{}}}}}", name);
-        out = out.replace(&placeholder, value);
+        out = out.replace(&placeholder, &wrap_injected_context(value, name));
     }
     out
 }
@@ -640,7 +662,7 @@ fn render_qp_prompt(template: &str, first_var_name: Option<&str>, value: &str) -
 fn render_qp_template_vars(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
-        out = out.replace(&format!("{{{{{}}}}}", k), v);
+        out = out.replace(&format!("{{{{{}}}}}", k), &wrap_injected_context(v, k));
     }
     out
 }
@@ -833,6 +855,56 @@ mod tests {
     fn render_qp_prompt_no_var_returns_template_as_is() {
         let out = render_qp_prompt("Static template", None, "EW-1234");
         assert_eq!(out, "Static template");
+    }
+
+    // ── 2026-06-24 — injected-context marker (UI collapsible card) ──
+
+    #[test]
+    fn small_value_is_not_wrapped() {
+        // A short id/key stays inline — no card for trivia.
+        assert_eq!(wrap_injected_context("EW-1234", "ticket"), "EW-1234");
+        let out = render_qp_prompt("Analyse {{ticket}}", Some("ticket"), "EW-1234");
+        assert!(!out.contains("kronn:context"), "small value must not be wrapped: {out}");
+    }
+
+    #[test]
+    fn large_value_is_wrapped_with_title() {
+        let big = "Description du ticket : ".to_string() + &"bla ".repeat(200); // >400 chars
+        let wrapped = wrap_injected_context(&big, "ticket");
+        assert!(wrapped.starts_with("<!-- kronn:context title=\"ticket\" -->"), "{}", &wrapped[..80]);
+        assert!(wrapped.ends_with("<!-- /kronn:context -->"));
+        assert!(wrapped.contains(&big), "inner content preserved verbatim");
+    }
+
+    #[test]
+    fn large_value_wrapped_through_render() {
+        let big = "x".repeat(500);
+        let out = render_qp_prompt("## Le ticket\n{{ticket}}\n## Méthode", Some("ticket"), &big);
+        assert!(out.contains("<!-- kronn:context title=\"ticket\" -->"), "render must wrap the big injected value");
+        // surrounding instructions stay outside the marker
+        assert!(out.starts_with("## Le ticket"));
+        assert!(out.trim_end().ends_with("## Méthode"));
+    }
+
+    #[test]
+    fn wrap_is_not_doubled_and_title_sanitized() {
+        let big = "y".repeat(500);
+        let once = wrap_injected_context(&big, "a\"b<c>");
+        // title quotes/angle-brackets neutralised
+        assert!(once.contains("title=\"a'bc\""), "{}", &once[..60]);
+        // already-wrapped → not wrapped again
+        assert_eq!(wrap_injected_context(&once, "ticket"), once);
+    }
+
+    #[test]
+    fn render_template_vars_wraps_only_large_values() {
+        let mut vars = HashMap::new();
+        vars.insert("key".to_string(), "EW-9".to_string());          // small → inline
+        vars.insert("body".to_string(), "z".repeat(500));            // large → carded
+        let out = render_qp_template_vars("{{key}} :: {{body}}", &vars);
+        assert!(out.contains("EW-9"), "small value inline");
+        assert!(!out.contains("title=\"key\""), "small value not carded");
+        assert!(out.contains("title=\"body\""), "large value carded");
     }
 
     // ── Multi-variable batch items (object shape) ───────────────────────
@@ -1117,6 +1189,7 @@ mod tests {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,

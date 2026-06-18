@@ -93,6 +93,12 @@ export function Dashboard({ onReset }: DashboardProps) {
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
   const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
   const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
+  // 2026-06-24 — server-side truth of which discs have an in-flight agent run
+  // RIGHT NOW (incl. background/batch children). Polled, so it stays correct
+  // after you navigate away — fixes "looks like nothing's running, so I
+  // re-launch" while a workflow was in fact still going. Kept here in the
+  // persistent Dashboard shell so the nav badge survives page changes.
+  const [runningDiscIds, setRunningDiscIds] = useState<string[]>([]);
   const abortControllers = useRef<Record<string, AbortController>>({});
   // ─── Stale-stream watchdog (TD-20260504) ──────────────────────────────────
   // Tracks the last time we observed activity on a streaming discussion
@@ -212,6 +218,30 @@ export function Dashboard({ onReset }: DashboardProps) {
     }, 30_000);
     return () => clearInterval(interval);
   }, [cleanupStream, refetchDiscussions, toast, t, sendingMap, sendingStartMap]);
+
+  // ─── Running-agents poll (2026-06-24) ─────────────────────────────────
+  // Server-side truth of in-flight runs, every 5 s. Page-independent (lives
+  // in the persistent Dashboard shell), so the nav badge keeps showing
+  // "N running" even after you leave the discussion — no more re-launching a
+  // workflow that's actually still going. Deliberately a SEPARATE state from
+  // `sendingMap`: feeding the poll into sendingMap would trip the stale-stream
+  // watchdog above (background children have no local chunks → falsely "stale").
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const ids = await discussionsApi.getRunning();
+        if (!cancelled) setRunningDiscIds(prev => {
+          // Avoid a re-render when nothing changed.
+          if (prev.length === ids.length && prev.every((x, i) => x === ids[i])) return prev;
+          return ids;
+        });
+      } catch { /* transient (backend blip) — keep last known */ }
+    };
+    void tick();
+    const interval = setInterval(tick, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
 
   // Poll workflows — fast when running, slow otherwise
   const runningWorkflows = useMemo(() =>
@@ -756,6 +786,18 @@ export function Dashboard({ onReset }: DashboardProps) {
         })}
         </div>
         <div className="dash-nav-spacer" data-mobile={isMobile} />
+        {runningDiscIds.length > 0 && (
+          <button
+            type="button"
+            className="dash-running-badge"
+            title={t('nav.agentsRunningHint')}
+            onClick={() => setPage('discussions')}
+          >
+            <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+            {!isMobile && <span>{t('nav.agentsRunning', String(runningDiscIds.length))}</span>}
+            {isMobile && <span>{runningDiscIds.length}</span>}
+          </button>
+        )}
         <button className="dash-scan-btn" data-tour-id="new-project-btn" onClick={() => setShowBootstrap(true)} title={t('projects.bootstrap')}>
           <Plus size={14} /> {!isMobile && t('projects.bootstrap')}
         </button>

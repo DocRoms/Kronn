@@ -52,6 +52,38 @@ mod tests {
         (status, json)
     }
 
+    // ─── GET /api/discussions/running (2026-06-24) ────────────────────────────
+
+    /// Surfaces in-flight runs so a background/batch agent still working after
+    /// you navigate away keeps showing as running (no needless re-launch).
+    /// Pins: the static `/running` route isn't swallowed by `/{id}`, the
+    /// response reflects the cancel registry, and the `CancelGuard` Drop clears
+    /// the entry (the RAII that guarantees no ghost "running" state).
+    #[tokio::test]
+    async fn running_discussions_reflects_registry_and_clears_on_drop() {
+        let state = test_state();
+        let get = || Request::builder()
+            .uri("/api/discussions/running")
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, json) = send(state.clone(), false, get()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["success"], true);
+        assert_eq!(json["data"].as_array().unwrap().len(), 0, "nothing running initially");
+
+        {
+            let _g = crate::CancelGuard::insert(&state.cancel_registry, "disc-running-1".to_string());
+            let (_s, json) = send(state.clone(), false, get()).await;
+            let ids: Vec<&str> = json["data"].as_array().unwrap()
+                .iter().map(|v| v.as_str().unwrap()).collect();
+            assert_eq!(ids, vec!["disc-running-1"], "in-flight run must be listed");
+        } // CancelGuard dropped here → registry entry removed
+
+        let (_s, json) = send(state.clone(), false, get()).await;
+        assert_eq!(json["data"].as_array().unwrap().len(), 0, "CancelGuard Drop must clear the running entry");
+    }
+
     // ─── Q1: Workflow execution integration test ──────────────────────────────
 
     /// Create a workflow, trigger it, and verify a run is recorded.

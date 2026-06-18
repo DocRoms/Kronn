@@ -22,10 +22,12 @@
 //!   executor's structured response.
 //!
 //! ## Deliberately deferred to a follow-up (cf. [[project_agent_api_broker_0_8_6]])
-//! - `side_effect` opt-in gate. The executor currently honours the
-//!   plugin's spec allowlist; if the plugin marks an endpoint as
-//!   side-effecting, the broker still calls it. Future safety layer
-//!   needs the caller to pass `allow_side_effects: true`.
+//! - `side_effect` opt-in gate. The executor does NOT enforce an endpoint
+//!   allow-list: `ApiSpec.endpoints` is INDICATIVE (it drives method resolution
+//!   and display only); ANY valid path on the plugin's API is forwarded with
+//!   auth. The real guard is the host-match plus public-IP `SecurityPolicy`, so
+//!   even a side-effecting call goes through today — a future safety layer
+//!   would need the caller to pass `allow_side_effects: true`.
 //! - Per-disc rate-limit.
 //! - Persistent audit log (cf. [[project_api_call_logs_0_8_6]]).
 //! - UI counter pill in `ChatHeader`.
@@ -74,13 +76,18 @@ pub struct AgentApiCallRequest {
     #[serde(default)]
     pub quick_api_id: Option<String>,
 
-    /// Endpoint path as declared in `ApiSpec.endpoints[].path`. The
-    /// executor's allowlist refuses anything not declared, so the
-    /// broker inherits that guarantee.
+    /// Endpoint path on the plugin's API. NOTE (2026-06-24): the declared
+    /// `ApiSpec.endpoints` are INDICATIVE, not an allow-list — the executor
+    /// does NOT reject undeclared paths; it forwards ANY path to the plugin's
+    /// base URL with auth injected (the declared list only drives method
+    /// resolution + display). So agents can call valid-but-undeclared
+    /// endpoints; the API itself is the real authority. The host-match +
+    /// public-IP `SecurityPolicy` is the actual guard, not the endpoint list.
     pub endpoint_path: String,
 
-    /// HTTP method override. Defaults to the method declared in the
-    /// plugin spec for this endpoint.
+    /// HTTP method override. For a DECLARED path the method defaults to the
+    /// one in the plugin spec; for an UNDECLARED path it defaults to GET — so
+    /// a write (POST/PUT/…) on an undeclared path MUST set this explicitly.
     #[serde(default)]
     pub method: Option<String>,
 
@@ -147,6 +154,32 @@ fn normalize_body(b: serde_json::Value) -> serde_json::Value {
         }
     }
     b
+}
+
+/// After `normalize_body`, a body that's STILL a `String` yet starts with `{`
+/// or `[` is JSON the model failed to make valid (a brace/quote/escape slip —
+/// `normalize_body` only unwraps *parseable* JSON). Forwarding it raw makes the
+/// target API reject it with an opaque 400 ("Invalid request payload") that
+/// reads like truncation. Return an actionable message so the agent fixes the
+/// JSON instead of guessing. Pure → unit-tested. (The kronn-internal MCP bridge
+/// rejects the same case first; this is defense-in-depth for any other caller.)
+fn json_body_error(body: &Option<serde_json::Value>) -> Option<String> {
+    if let Some(serde_json::Value::String(s)) = body {
+        let head = s.trim_start();
+        if head.starts_with('{') || head.starts_with('[') {
+            // Only an ACTUAL parse failure is an error — a valid JSON string is
+            // fine (normalize_body would already have unwrapped it upstream).
+            if let Err(e) = serde_json::from_str::<serde_json::Value>(s) {
+                return Some(format!(
+                    "`body` looks like JSON but is not valid JSON ({} chars, NOT truncated). \
+                     The full body was received — the error is in the JSON itself \
+                     (check braces / quotes / escaping). Detail: {e}",
+                    s.len(),
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// `POST /api/agent-api/call`
@@ -225,6 +258,12 @@ pub async fn agent_api_call(
     //    Every other field defaults to a no-op (cf. WorkflowStep::default
     //    in models/workflows.rs).
     let body = req.body.clone().map(normalize_body);
+
+    // Reject a JSON-looking-but-invalid body LOUDLY rather than forward it raw
+    // (→ opaque target 400 that reads like truncation).
+    if let Some(err) = json_body_error(&body) {
+        return Json(ApiResponse::err(err));
+    }
 
     let step = WorkflowStep {
         // Step name surfaces in executor error messages — be explicit so
@@ -642,5 +681,44 @@ mod tests {
         // object/array unwrap — a scalar was plausibly intentional).
         let n = serde_json::Value::String("42".into());
         assert_eq!(super::normalize_body(n.clone()), n);
+    }
+
+    // ─── json_body_error (2026-06-23, EW-7403 opaque Jira 400) ───
+    // A JSON-looking body that doesn't parse (an LLM brace/quote slip) must be
+    // rejected loudly, not forwarded raw → opaque target 400 reading like a
+    // ~2KB truncation.
+
+    #[test]
+    fn json_body_error_flags_malformed_object_string() {
+        // The exact EW-7403 shape: one extra trailing brace.
+        let b = Some(serde_json::Value::String(r#"{"fields":{"description":"x"}}}"#.into()));
+        let err = super::json_body_error(&b).expect("malformed JSON object must be rejected");
+        assert!(err.contains("not valid JSON"), "{err}");
+        assert!(err.contains("NOT truncated"), "must dispel the truncation red herring: {err}");
+    }
+
+    #[test]
+    fn json_body_error_flags_malformed_array_string() {
+        let b = Some(serde_json::Value::String(r#"[{"a":1},]"#.into())); // trailing comma
+        assert!(super::json_body_error(&b).is_some(), "malformed JSON array must be rejected");
+    }
+
+    #[test]
+    fn json_body_error_passes_legit_non_json_string() {
+        // A genuine plain-text body (some APIs want one) is fine.
+        let b = Some(serde_json::Value::String("plain text payload".into()));
+        assert!(super::json_body_error(&b).is_none());
+    }
+
+    #[test]
+    fn json_body_error_passes_object_none_and_valid_json_string() {
+        // An already-parsed object → fine.
+        assert!(super::json_body_error(&Some(serde_json::json!({"k":"v"}))).is_none());
+        // No body → fine.
+        assert!(super::json_body_error(&None).is_none());
+        // A VALID JSON string (would have been unwrapped upstream) is not an
+        // error if it ever reaches here.
+        let valid = Some(serde_json::Value::String(r#"{"a":1}"#.into()));
+        assert!(super::json_body_error(&valid).is_none());
     }
 }

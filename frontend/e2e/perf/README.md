@@ -73,3 +73,27 @@ the tests false-flag.
 The seeded backend takes ~60 s warm-up on first migration + Vite
 cold-start, which would slow the green CI loop. Run these manually
 before a release or after a perf-sensitive refactor.
+
+## Large-message render guard (2026-06-23)
+
+A killed agent (Codex `exec`, silent-until-end) once persisted a 2.4 MB
+stderr/reasoning dump as its reply; opening that discussion sent it through
+ReactMarkdown + syntax highlight and **crashed the browser tab**. Two layers
+now prevent it: a backend byte-cap at persistence (`cap_agent_response`) and a
+frontend plain-text fallback past ~200 KB (`MarkdownContent`).
+
+Run the real-browser regression check:
+
+```bash
+# after booting the sandbox backend (see "Setup" above)
+python3 e2e/perf/seed_large_message.py          # adds ONE 3 MB-message disc
+pnpm exec playwright test --config=playwright.perf.config.ts large-message-render
+```
+
+| Action | Budget | Notes |
+|---|---|---|
+| Open a ~3 MB-message discussion → guard banner visible | < 8000 ms | pre-fix: timed out / tab crashed |
+| Inline rendered chars (DOM) | < 200 000 | guard truncates; full payload never mounted |
+
+The unit test `MessageBubble.largeMessage.test.tsx` pins the guard logic in CI
+(jsdom can't catch a real OOM — hence this real-Chromium spec).

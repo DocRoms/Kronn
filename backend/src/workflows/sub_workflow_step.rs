@@ -302,6 +302,30 @@ pub(crate) fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static st
     else { ("PARTIAL", "PARTIAL") }
 }
 
+/// 2026-06-24 — expose the current foreach item to the CHILD's template engine
+/// as `{{current_task.<field>}}`, mirroring the `.kronn/current_task.json` file
+/// name (so an ApiCall path can be `/pulls/{{current_task.number}}/reviews`
+/// without an extra read step). Top-level scalars stringify directly
+/// (`number` → "1234", bool → "true"); nested arrays/objects render as compact
+/// JSON; the whole item is also available as `{{current_task}}`. These land as
+/// string-valued top-level keys in the child's `trigger_context`, which the
+/// runner's generic injector ([`inject_trigger_context`]) turns into template
+/// vars. Pure for tests.
+pub(crate) fn current_task_template_vars(item: &serde_json::Value) -> Vec<(String, String)> {
+    let mut out = vec![("current_task".to_string(), item.to_string())];
+    if let Some(obj) = item.as_object() {
+        for (k, v) in obj {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            };
+            out.push((format!("current_task.{k}"), s));
+        }
+    }
+    out
+}
+
 /// Phase 3b — sequential per-item fan-out of the child workflow over the
 /// items of `foreach_file` (workspace-relative JSON array). Each iteration
 /// writes the item to `.kronn/current_task.json` (shared worktree) so the
@@ -438,12 +462,24 @@ async fn execute_foreach(
             return fail(step, start, format!("Cannot write .kronn/current_task.json: {e}"));
         }
 
+        // Build the child's trigger_context: the fan-out bookkeeping keys PLUS
+        // the item flattened to `current_task.<field>` string vars so the
+        // child's step templates can interpolate the item directly
+        // (`{{current_task.number}}`) instead of only reading the file.
+        let mut tctx = serde_json::Map::new();
+        tctx.insert("__subwf_depth__".into(), json!(child_depth));
+        tctx.insert("__subwf_item__".into(), json!(idx));
+        tctx.insert("__subwf_item_id__".into(), json!(item_id));
+        for (k, v) in current_task_template_vars(item) {
+            tctx.insert(k, serde_json::Value::String(v));
+        }
+
         let now = Utc::now();
         let mut child_run = WorkflowRun {
             id: Uuid::new_v4().to_string(),
             workflow_id: child_wf.id.clone(),
             status: RunStatus::Pending,
-            trigger_context: Some(json!({ "__subwf_depth__": child_depth, "__subwf_item__": idx, "__subwf_item_id__": item_id })),
+            trigger_context: Some(serde_json::Value::Object(tctx)),
             step_results: vec![],
             tokens_used: 0,
             workspace_path: None,
@@ -631,6 +667,37 @@ mod tests {
         assert_eq!(aggregate_foreach(3, 0), ("OK", "OK"));
         assert_eq!(aggregate_foreach(2, 1), ("PARTIAL", "PARTIAL"));
         assert_eq!(aggregate_foreach(0, 3), ("SUBWF_FAILED", "SUBWF_FAILED"));
+    }
+
+    #[test]
+    fn current_task_vars_expose_scalars_for_templating() {
+        let item = serde_json::json!({
+            "id": "pr-42", "number": 42, "draft": false,
+            "title": "Fix bug", "labels": ["a", "b"], "meta": null,
+        });
+        let vars: std::collections::HashMap<_, _> =
+            super::current_task_template_vars(&item).into_iter().collect();
+        // scalar fields stringify so `{{current_task.number}}` resolves to "42"
+        assert_eq!(vars["current_task.number"], "42");
+        assert_eq!(vars["current_task.id"], "pr-42");
+        assert_eq!(vars["current_task.title"], "Fix bug");
+        assert_eq!(vars["current_task.draft"], "false");
+        // null → empty string (no literal "null" leaking into a path)
+        assert_eq!(vars["current_task.meta"], "");
+        // nested arrays/objects render as compact JSON
+        assert_eq!(vars["current_task.labels"], "[\"a\",\"b\"]");
+        // the whole item is also available
+        assert!(vars["current_task"].contains("\"number\":42"));
+    }
+
+    #[test]
+    fn current_task_vars_tolerate_a_non_object_item() {
+        // a bare-scalar work-list item (e.g. `["EW-1","EW-2"]`) still yields
+        // the whole-item var without panicking.
+        let vars: std::collections::HashMap<_, _> =
+            super::current_task_template_vars(&serde_json::json!("EW-1")).into_iter().collect();
+        assert_eq!(vars["current_task"], "\"EW-1\"");
+        assert!(!vars.keys().any(|k| k.starts_with("current_task.")));
     }
 
     // ── Flip économique — tier routing + mechanical files ───────────────

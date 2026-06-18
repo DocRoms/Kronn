@@ -213,6 +213,7 @@ describe('api.discussions (rest)', () => {
     const b = await exec(discussions.share('d-1', ['c1', 'c2']), 'POST', '/discussions/d-1/share');
     expect(b).toEqual({ contact_ids: ['c1', 'c2'] });
   });
+  it('getRunning', async () => { await exec(discussions.getRunning(), 'GET', '/discussions/running'); });
   it('participants', async () => { await exec(discussions.participants('d-1'), 'GET', '/discussions/d-1/participants'); });
   it('invitePeer', async () => { await exec(discussions.invitePeer('d-1'), 'POST', '/discussions/d-1/invite-peer'); });
   it('stop', async () => { await exec(discussions.stop('d-1'), 'POST', '/discussions/d-1/stop'); });
@@ -241,6 +242,22 @@ describe('api.discussions (rest)', () => {
   it('testModeExit', async () => { await exec(discussions.testModeExit('d-1'), 'POST', '/discussions/d-1/test-mode/exit'); });
   it('listContextFiles', async () => { await exec(discussions.listContextFiles('d-1'), 'GET', '/discussions/d-1/context-files'); });
   it('deleteContextFile', async () => { await exec(discussions.deleteContextFile('d-1', 'f-1'), 'DELETE', '/discussions/d-1/context-files/f-1'); });
+  it('linkPendingContextFiles → POST with message_id', async () => {
+    const b = await exec(discussions.linkPendingContextFiles('d-1', 'm-1'), 'POST', '/discussions/d-1/context-files/link-pending');
+    expect(b).toEqual({ message_id: 'm-1' });
+  });
+  it('contextFileBlob → GET content URL, returns the blob', async () => {
+    const blob = new Blob(['png'], { type: 'image/png' });
+    fetchMock.mockResolvedValue({ ok: true, status: 200, blob: async () => blob });
+    const out = await discussions.contextFileBlob('d-1', 'f-1');
+    expect(out).toBe(blob);
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/api\/discussions\/d-1\/context-files\/f-1\/content$/);
+  });
+  it('contextFileBlob throws on non-ok', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 403, blob: async () => new Blob([]) });
+    await expect(discussions.contextFileBlob('d-1', 'f-1')).rejects.toThrow(/403/);
+  });
   it('uploadContextFile → POST FormData', async () => {
     const body = await execRaw(
       discussions.uploadContextFile('d-1', new File(['x'], 'spec.md')),
@@ -251,6 +268,10 @@ describe('api.discussions (rest)', () => {
   it('uploadContextFile throws on success=false', async () => {
     fetchMock.mockResolvedValue({ ok: true, json: async () => ({ success: false, error: 'too big' }) });
     await expect(discussions.uploadContextFile('d-1', new File([''], 'x'))).rejects.toThrow(/too big/);
+  });
+  it('uploadContextFile surfaces HTTP status on a 413 with no JSON body', async () => {
+    fetchMock.mockResolvedValue({ ok: false, status: 413, json: async () => { throw new Error('not json'); } });
+    await expect(discussions.uploadContextFile('d-1', new File([''], 'big.har'))).rejects.toThrow(/413/);
   });
   it('deleteLastAgentMessages', async () => { await exec(discussions.deleteLastAgentMessages('d-1'), 'DELETE', '/discussions/d-1/messages/last'); });
   it('editLastUserMessage', async () => {

@@ -70,6 +70,22 @@ pub struct DiscussionMessageRead {
     pub agent_type: Option<AgentType>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub tokens_used: u64,
+    /// Files attached to this message (0.8.8). Lets an agent that navigates to
+    /// an old message see what was uploaded with it instead of being blind to
+    /// a discussed image. Empty for messages with no attachments.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<MessageAttachment>,
+}
+
+/// Lean attachment descriptor surfaced to agents via `disc_get_message`. The
+/// `disk_path` lets a file-tool-capable agent open the image directly.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageAttachment {
+    pub id: String,
+    pub filename: String,
+    pub mime_type: String,
+    pub disk_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -196,6 +212,18 @@ pub async fn disc_get_message(
     }
 
     let msg = &disc.messages[resolved_idx];
+    let msg_id = msg.id.clone();
+    let attachments = state.db.with_conn(move |conn| {
+        crate::db::discussions::list_context_files_for_message(conn, &msg_id).map_err(|e| anyhow::anyhow!(e))
+    }).await.unwrap_or_default()
+        .into_iter()
+        .map(|f| MessageAttachment {
+            id: f.id,
+            filename: f.filename,
+            mime_type: f.mime_type,
+            disk_path: f.disk_path,
+        })
+        .collect();
     Json(ApiResponse::ok(DiscussionMessageRead {
         idx: resolved_idx as u32,
         id: msg.id.clone(),
@@ -204,6 +232,7 @@ pub async fn disc_get_message(
         agent_type: msg.agent_type.clone(),
         timestamp: msg.timestamp,
         tokens_used: msg.tokens_used,
+        attachments,
     }))
 }
 

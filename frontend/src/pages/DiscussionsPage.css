@@ -2358,6 +2358,65 @@
   background: rgba(var(--kr-accent-rgb), 0.05);
 }
 
+/* 0.8.8 — attachments pinned to a sent message, rendered under its content. */
+.disc-msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.disc-attach-thumb {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 84px;
+  height: 84px;
+  border-radius: var(--kr-r-sm);
+  border: 1px solid var(--kr-border-light);
+  background: var(--kr-bg-hover-strong);
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+
+.disc-attach-thumb:hover {
+  border-color: rgba(var(--kr-accent-rgb), 0.4);
+}
+
+.disc-attach-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.disc-attach-thumb-loading {
+  color: var(--kr-text-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.disc-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-hover-strong);
+  border: 1px solid var(--kr-border-light);
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-secondary);
+  max-width: 200px;
+}
+
+.disc-attach-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .disc-new-files-row {
   display: flex;
   flex-wrap: wrap;
@@ -4051,4 +4110,38 @@
   font-style: italic;
   color: var(--kr-text-dim);
   opacity: 0.85;
+}
+
+/* ── Injected-context card (2026-06-24) ──────────────────────────────────
+   A QP/batch message wraps its injected payload (a ticket, a file…) in a
+   kronn:context marker; MessageBubble renders it as this collapsible card so
+   the agent's instructions stay the visible signal, the injected data folds
+   away. Distinct from plain markdown via the accent left-border + tint. */
+.disc-injected-context {
+  margin: var(--kr-sp-2, 8px) 0;
+  border: 1px solid var(--kr-border-light, rgba(127,127,127,0.2));
+  border-left: 3px solid rgba(var(--kr-accent-rgb, 99,102,241), 0.55);
+  border-radius: var(--kr-r-md, 6px);
+  background: rgba(var(--kr-accent-rgb, 99,102,241), 0.04);
+  overflow: hidden;
+}
+.disc-injected-context-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2, 8px);
+  width: 100%;
+  padding: var(--kr-sp-2, 6px) var(--kr-sp-3, 10px);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--kr-fs-xs, 11px);
+  color: var(--kr-text-tertiary, #888);
+}
+.disc-injected-context-toggle:hover { background: rgba(var(--kr-accent-rgb, 99,102,241), 0.07); }
+.disc-injected-context-label { color: var(--kr-text-secondary, #aaa); font-weight: 600; }
+.disc-injected-context-meta { margin-left: auto; opacity: 0.7; font-variant-numeric: tabular-nums; }
+.disc-injected-context-body {
+  padding: 0 var(--kr-sp-3, 10px) var(--kr-sp-2, 8px);
+  border-top: 1px solid var(--kr-border-light, rgba(127,127,127,0.15));
 }

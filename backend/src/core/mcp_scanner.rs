@@ -2330,8 +2330,10 @@ pub fn build_api_context_block(
     }
 
     let mut out = String::from("## REST APIs available\n\n");
-    out.push_str("The following plugins are HTTP APIs (not MCP tools). Call them via `curl` from Bash.\n");
-    out.push_str("Auth + non-secret config are pre-filled below; never print the credentials back to the user.\n\n");
+    out.push_str("The following REST APIs are configured for this project. **Prefer the `api_call` MCP tool** — \
+                  Kronn injects auth and already knows each API's endpoints (call `mcp_list` to see them). \
+                  Direct `curl` from Bash also works; auth + non-secret config are pre-filled per API below. \
+                  Never print credentials back to the user.\n\n");
 
     for (server, env, spec) in api_plugins {
         out.push_str(&format!("### {}\n", server.name));
@@ -2454,42 +2456,35 @@ pub fn build_api_context_block(
             }
         }
 
-        // Resolved base URL — substitute {ENV_KEY} placeholders (Adobe uses
-        // this to put the company_id in the path). Chartbeat has no
-        // placeholders → the template equals the literal URL.
-        let resolved_base = interpolate_env_template(&spec.base_url, env);
-
-        // Endpoint list — curl example on the first one so the agent has a
-        // template to copy. The rest are one-liners.
-        out.push_str("Endpoints:\n");
-        for (i, ep) in spec.endpoints.iter().enumerate() {
-            out.push_str(&format!("- `{} {}` — {}\n", ep.method, ep.path, ep.description));
-            if i == 0 {
-                let mut sample_url = format!("{}{}", resolved_base, ep.path);
-                let mut params: Vec<String> = Vec::new();
-                // Only fold auth + config_keys into query params when the
-                // base URL did NOT template them in (i.e. the plugin opted
-                // for path-style interpolation).
-                let is_templated = spec.base_url.contains('{');
-                if let ApiAuthKind::ApiKeyQuery { param_name, env_key } = &spec.auth {
-                    let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<KEY>");
-                    params.push(format!("{}={}", param_name, val));
-                }
-                if !is_templated {
-                    for k in &spec.config_keys {
-                        let val = env.get(&k.env_key).map(|s| s.as_str()).unwrap_or("");
-                        if !val.is_empty() {
-                            params.push(format!("{}={}", k.env_key.to_lowercase(), val));
-                        }
-                    }
-                }
-                if !params.is_empty() {
-                    sample_url.push('?');
-                    sample_url.push_str(&params.join("&"));
-                }
-                out.push_str(&format!("  Example: `curl -s \"{}\"`\n", sample_url));
-            }
+        // 2026-06-24 — LEAN endpoint summary. We used to dump EVERY endpoint
+        // (+ a curl example) of EVERY active plugin into EVERY agent prompt
+        // (all of Chartbeat / Adobe / JIRA / customs, on every run, even when
+        // the agent never touches an API) — tens of KB of redundant context
+        // per run. The `api_call` MCP broker already knows the endpoints and
+        // injects auth server-side, and `mcp_list` lists them on demand. So we
+        // surface only the COUNT + the FIRST endpoint as a shape example, and
+        // point at those tools for the rest — not the whole catalogue.
+        let n = spec.endpoints.len();
+        out.push_str(&format!(
+            "{} endpoint{} listed — invoke via the `api_call` MCP tool (Kronn injects auth), \
+             or list the exact paths on demand with `mcp_list`.\n",
+            n,
+            if n == 1 { "" } else { "s" },
+        ));
+        if let Some(ep) = spec.endpoints.first() {
+            out.push_str(&format!("e.g. `{} {}` — {}\n", ep.method, ep.path, ep.description));
         }
+        // The listed endpoints are INDICATIVE, not an allow-list: the broker
+        // forwards ANY path on this API (auth injected), so other endpoints
+        // from the API's own docs work too — consult them for the full +
+        // CURRENT surface (APIs add/change endpoints over time). ⚠ A path NOT
+        // in the list defaults to GET, so for a WRITE on an undeclared path
+        // you MUST pass `api_method` explicitly (e.g. POST).
+        out.push_str(
+            "The list is INDICATIVE (common calls), NOT exhaustive — any valid path on this API \
+             works via `api_call`; check the API's own docs for the rest (and for updates). \
+             For a non-GET on an UNLISTED path, set `api_method` explicitly (unlisted paths default to GET).\n",
+        );
 
         if let Some(docs) = &spec.docs_url {
             out.push_str(&format!("Full reference: {}\n", docs));

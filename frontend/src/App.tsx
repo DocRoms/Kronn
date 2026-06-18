@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { setup as setupApi } from './lib/api';
+import { setup as setupApi, config as configApi } from './lib/api';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -13,6 +13,20 @@ const Dashboard = lazy(() => import('./pages/Dashboard').then(m => ({ default: m
 export let RETRY_DELAY = 2000;
 export function setRetryDelay(ms: number) { RETRY_DELAY = ms; }
 
+// Per-request boot timeout. Kept short so a slow setup/status can't wedge the
+// boot — exported so tests can shrink it.
+export let STATUS_TIMEOUT_MS = 8000;
+export function setStatusTimeout(ms: number) { STATUS_TIMEOUT_MS = ms; }
+
+/** Reject if `p` doesn't settle within `ms`. Lets the boot treat a HANGING
+ *  request (which never rejects on its own) like a failure it can retry. */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('timeout')), ms)),
+  ]);
+}
+
 export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -23,7 +37,12 @@ export function App() {
     if (resetRetries) retries.current = 0;
     setLoading(true);
     setApiError(false);
-    setupApi.getStatus()
+    // CRITICAL: time out the request. `getStatus` can HANG (not reject) when
+    // the backend is slow — e.g. agent detection contends under concurrent-
+    // agent load — and a hung promise fires neither .then nor .catch, so the
+    // boot stays on "Almost ready…" forever (the retry logic only triggers on
+    // rejection). A timeout converts a hang into a retry.
+    withTimeout(setupApi.getStatus(), STATUS_TIMEOUT_MS)
       .then((status) => {
         retries.current = 0;
         setSetupStatus(status);
@@ -34,11 +53,32 @@ export function App() {
         if (retries.current < 5) {
           retries.current += 1;
           setTimeout(fetchStatus, RETRY_DELAY);
-        } else {
-          setSetupStatus(null);
-          setApiError(true);
-          setLoading(false);
+          return;
         }
+        // Retries exhausted. Distinguish "backend slow" from "backend down":
+        // if a fast endpoint answers, the backend IS up — setup/status is just
+        // wedged — so proceed optimistically as a returning (non-first-run)
+        // user instead of holding the whole app hostage to one slow probe.
+        // Only a genuinely unreachable backend shows the error screen.
+        withTimeout(configApi.getLanguage(), 4000)
+          .then(() => {
+            console.warn('setup/status timed out but backend is reachable — proceeding optimistically.');
+            setSetupStatus({
+              is_first_run: false,
+              current_step: 'Complete',
+              agents_detected: [],
+              scan_paths_set: true,
+              repos_detected: [],
+              default_scan_path: null,
+            });
+            setApiError(false);
+            setLoading(false);
+          })
+          .catch(() => {
+            setSetupStatus(null);
+            setApiError(true);
+            setLoading(false);
+          });
       });
   };
 

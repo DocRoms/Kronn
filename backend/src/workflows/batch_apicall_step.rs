@@ -394,13 +394,20 @@ fn inject_item_vars(ctx: &mut TemplateContext, item: &Value, idx: usize) {
                 // `batch.item.<key>` — explicit/namespaced (workflow steps
                 // that pass items_from = a previous step's data array).
                 ctx.set(format!("batch.item.{}", k), val.clone());
+                // `item.<key>` — forgiving alias: agents intuitively reach for
+                // `{{item.commentId}}` (it's the natural per-item name), so we
+                // accept it alongside `batch.item.<key>` rather than 404 on a
+                // literal placeholder.
+                ctx.set(format!("item.{}", k), val.clone());
                 // `<key>` — bare top-level (QA-batch path: the QA's
                 // `{{host}}` template needs `host` resolved directly).
                 ctx.set(k.clone(), val);
             }
-            // `batch.item` itself = the JSON-stringified object, useful if
+            // `batch.item` / `item` = the JSON-stringified object, useful if
             // the user wants to dump the whole item into a body.
-            ctx.set("batch.item", serde_json::to_string(item).unwrap_or_default());
+            let whole = serde_json::to_string(item).unwrap_or_default();
+            ctx.set("batch.item", whole.clone());
+            ctx.set("item", whole);
         }
         Value::String(s) => {
             // String item: expose as `batch.item` directly. Users with a
@@ -496,6 +503,10 @@ mod tests {
         assert_eq!(ctx.render("{{batch.item.count}}").unwrap(), "42");
         assert_eq!(ctx.render("{{batch.item.type}}").unwrap(), "auto_ai");
         assert_eq!(ctx.render("{{batch.index}}").unwrap(), "7");
+        // forgiving alias: `{{item.<field>}}` resolves identically — agents
+        // reach for this intuitively (it used to 404 as a literal placeholder).
+        assert_eq!(ctx.render("{{item.title}}").unwrap(), "Foo");
+        assert_eq!(ctx.render("{{item.count}}").unwrap(), "42");
     }
 
     #[test]

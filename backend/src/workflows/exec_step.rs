@@ -30,6 +30,8 @@
 
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncWriteExt;
+
 use crate::core::cmd::async_cmd;
 use crate::models::*;
 
@@ -268,13 +270,34 @@ pub async fn execute_exec_step(
         workdir = %work_dir,
         "executing"
     );
+    // ── 0.8.8 — optional stdin payload (bypasses the argv ARG_MAX ceiling) ──
+    // Rendered through the template engine like `exec_args`, but fed to the
+    // MAIN command's stdin instead of the argument list — so a large reshaped
+    // payload (e.g. an enriched Jira backlog, which blows the ~128 KB ARG_MAX
+    // past ~16 tickets) can reach a `jq` / reshape script. `None` (or an
+    // all-whitespace template) → stdin stays `/dev/null`, unchanged behaviour.
+    let stdin_bytes: Option<Vec<u8>> = match step.exec_stdin.as_deref() {
+        Some(t) if !t.trim().is_empty() => match ctx.render(t) {
+            Ok(rendered) => Some(rendered.into_bytes()),
+            Err(e) => return fail(step, start, format!(
+                "Exec step `{}`: template render error on `exec_stdin`: {}",
+                step.name, e
+            )),
+        },
+        _ => None,
+    };
+
     let mut cmd = async_cmd(raw_command);
     cmd.args(&rendered_args)
         .current_dir(work_dir)
-        .stdin(std::process::Stdio::null())
+        .stdin(if stdin_bytes.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        // SIGKILL the exec'd binary if the `output()` future is dropped
+        // SIGKILL the exec'd binary if the output future is dropped
         // before completion. Required so workflow-run cancellation
         // actually stops a long-running `cargo test` / `npm install`
         // when the runner drops the step-dispatch future. Without this,
@@ -288,7 +311,25 @@ pub async fn execute_exec_step(
     let main_timeout_secs = timeout_secs
         .saturating_sub(start.elapsed().as_secs())
         .max(1);
-    let output_future = cmd.output();
+    // When stdin is piped, stream it on a DETACHED task so stdout/stderr are
+    // drained concurrently — a write-all-then-read sequence would deadlock the
+    // moment the payload + the child's own output exceed the pipe buffers
+    // (~64 KB), i.e. exactly the large-backlog case this field exists for.
+    let output_future = async {
+        match stdin_bytes {
+            Some(bytes) => {
+                let mut child = cmd.spawn()?;
+                if let Some(mut si) = child.stdin.take() {
+                    tokio::spawn(async move {
+                        let _ = si.write_all(&bytes).await;
+                        let _ = si.shutdown().await;
+                    });
+                }
+                child.wait_with_output().await
+            }
+            None => cmd.output().await,
+        }
+    };
     let timed_out = match tokio::time::timeout(Duration::from_secs(main_timeout_secs), output_future).await {
         Ok(Ok(out)) => Ok(out),
         Ok(Err(e)) => {
@@ -558,6 +599,7 @@ mod tests {
             exec_timeout_secs: timeout_secs,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -903,5 +945,74 @@ mod tests {
         assert!(outcome.result.output.contains("only-main"));
         assert!(!outcome.result.output.contains("── Setup"),
             "no setup → no setup header: {}", outcome.result.output);
+    }
+
+    // ── 0.8.8 — exec_stdin (pipe input past the argv ARG_MAX ceiling) ──
+
+    #[tokio::test]
+    async fn stdin_piped_reaches_command() {
+        // `cat` with no args echoes its stdin → proves the payload is piped.
+        let mut step = exec_step("pipe", Some("cat"), vec![], None);
+        step.exec_stdin = Some("HELLO-FROM-STDIN-42".into());
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["cat".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        assert!(outcome.result.output.contains("HELLO-FROM-STDIN-42"),
+            "stdin payload must reach the command's stdout: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn stdin_delivers_full_payload_past_argv_limit() {
+        // 200 KB exceeds Linux's per-arg ceiling (MAX_ARG_STRLEN ~128 KB):
+        // this CANNOT be passed as a single argv element, only via stdin.
+        // `wc -c` counts the bytes it reads → proves EVERY byte arrived.
+        let mut step = exec_step("count", Some("wc"), vec!["-c"], None);
+        step.exec_stdin = Some("y".repeat(200_000));
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["wc".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        assert!(outcome.result.output.contains("200000"),
+            "wc -c must report the full 200000-byte payload: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn stdin_large_bidirectional_does_not_deadlock() {
+        // `cat` reads 300 KB stdin AND writes 300 KB stdout. A
+        // write-all-then-read sequence would deadlock once both pipes fill
+        // (~64 KB). With concurrent streaming it completes fast; the bounded
+        // timeout makes a regression fail in seconds instead of hanging.
+        let mut step = exec_step("echo_big", Some("cat"), vec![], Some(30));
+        step.exec_stdin = Some("x".repeat(300_000));
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["cat".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "large bidirectional pipe must not deadlock/timeout: {}", outcome.result.output);
+        // >100 KB came back → stdout truncation marker proves the big echo ran.
+        assert!(outcome.result.output.contains("tronqué"),
+            "expected truncation marker after a 300 KB echo: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn stdin_is_templated_before_piping() {
+        let mut step = exec_step("pipe", Some("cat"), vec![], None);
+        step.exec_stdin = Some("{{steps.fetch.output}}".into());
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("fetch", "RENDERED-PAYLOAD-FROM-PREVIOUS-STEP");
+        let outcome = execute_exec_step(&step, &["cat".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        assert!(outcome.result.output.contains("RENDERED-PAYLOAD-FROM-PREVIOUS-STEP"),
+            "exec_stdin must be template-rendered, not piped verbatim: {}", outcome.result.output);
+    }
+
+    #[tokio::test]
+    async fn stdin_absent_keeps_null_no_hang() {
+        // No exec_stdin → stdin is /dev/null → `cat` gets immediate EOF and
+        // exits instead of blocking forever. The short timeout guards against
+        // a regression that left stdin a dangling pipe.
+        let step = exec_step("nopipe", Some("cat"), vec![], Some(15));
+        let ctx = TemplateContext::new();
+        let outcome = execute_exec_step(&step, &["cat".into()], "/tmp", &ctx).await;
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "cat with null stdin must EOF immediately, not hang: {}", outcome.result.output);
     }
 }

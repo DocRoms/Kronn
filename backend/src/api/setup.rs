@@ -65,7 +65,10 @@ pub async fn get_status(
         // For the status check we only need to know if at least one is installed,
         // so we still detect but the scan is skipped entirely.
         drop(config);
-        let agents_detected = agents::detect_all().await;
+        // Cached: the boot hits this on every dashboard load and the frontend
+        // blocks on it — an uncached sweep spawns `<binary> --version` per
+        // agent and froze the app under concurrent-agent load.
+        let agents_detected = agents::detect_all_cached(false).await;
         return Json(ApiResponse::ok(SetupStatus {
             is_first_run: false,
             current_step: SetupStep::Complete,
@@ -100,7 +103,7 @@ pub async fn get_status(
 
     // Parallel: detect agents + scan repos simultaneously
     let (agents_detected, repos_result) = tokio::join!(
-        agents::detect_all(),
+        agents::detect_all_cached(false),
         tokio::time::timeout(
             std::time::Duration::from_secs(scan_timeout),
             scanner::scan_paths_with_depth(&scan_paths, &scan_ignore, scan_depth),

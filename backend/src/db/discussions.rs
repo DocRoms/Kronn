@@ -903,25 +903,60 @@ pub fn insert_context_file(
 
 pub fn list_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
     let mut stmt = conn.prepare(
-        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, created_at
+        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
          FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
     )?;
-    let rows = stmt.query_map(rusqlite::params![discussion_id], |row| {
-        Ok(crate::models::ContextFile {
-            id: row.get(0)?,
-            discussion_id: row.get(1)?,
-            filename: row.get(2)?,
-            mime_type: row.get(3)?,
-            original_size: row.get::<_, i64>(4).unwrap_or(0) as u64,
-            extracted_size: row.get::<_, i64>(5).unwrap_or(0) as u64,
-            disk_path: row.get(6)?,
-            created_at: row.get::<_, String>(7)
-                .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
-                    .unwrap_or_default().and_utc())
-                .unwrap_or_else(|_| Utc::now()),
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    let rows = stmt.query_map(rusqlite::params![discussion_id], map_context_file_row)?
+        .filter_map(|r| r.ok()).collect();
     Ok(rows)
+}
+
+/// Row → ContextFile mapper shared by the disc-wide and per-message list queries.
+/// Both SELECT the same column order: ... disk_path, message_id, created_at.
+fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::ContextFile> {
+    Ok(crate::models::ContextFile {
+        id: row.get(0)?,
+        discussion_id: row.get(1)?,
+        filename: row.get(2)?,
+        mime_type: row.get(3)?,
+        original_size: row.get::<_, i64>(4).unwrap_or(0) as u64,
+        extracted_size: row.get::<_, i64>(5).unwrap_or(0) as u64,
+        disk_path: row.get(6)?,
+        message_id: row.get(7)?,
+        created_at: row.get::<_, String>(8)
+            .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                .unwrap_or_default().and_utc())
+            .unwrap_or_else(|_| Utc::now()),
+    })
+}
+
+/// Files pinned to a single message (0.8.8). Used by the per-message bubble
+/// render and the `disc_get_message` MCP tool so an agent navigating to an old
+/// message knows what was attached to it.
+pub fn list_context_files_for_message(conn: &Connection, message_id: &str) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
+         FROM context_files WHERE message_id = ?1 ORDER BY created_at"
+    )?;
+    let rows = stmt.query_map(rusqlite::params![message_id], map_context_file_row)?
+        .filter_map(|r| r.ok()).collect();
+    Ok(rows)
+}
+
+/// Pin every still-pending (message_id IS NULL) context file of a discussion to
+/// a freshly-sent message, so they render in that message's bubble instead of
+/// staying sticky in the composer. Returns the count linked. Idempotent for a
+/// given send: a second call links nothing because the rows are no longer NULL.
+pub fn link_pending_context_files_to_message(
+    conn: &Connection,
+    discussion_id: &str,
+    message_id: &str,
+) -> rusqlite::Result<usize> {
+    let n = conn.execute(
+        "UPDATE context_files SET message_id = ?2 WHERE discussion_id = ?1 AND message_id IS NULL",
+        rusqlite::params![discussion_id, message_id],
+    )?;
+    Ok(n)
 }
 
 pub fn count_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::Result<usize> {

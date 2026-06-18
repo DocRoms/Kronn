@@ -407,6 +407,12 @@ pub struct DiscLoadOtherMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_type: Option<AgentType>,
     pub timestamp: String,
+    /// Files attached to this message (0.8.8). Mirrors `disc_get_message` so a
+    /// cross-disc reader can discover an image's `disk_path` and open it with
+    /// its file tools — without this, an agent browsing ANOTHER disc only sees
+    /// the text and is blind to the attached images. Empty for most messages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::api::disc_introspection::MessageAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -496,6 +502,26 @@ pub async fn disc_load_other(
     let to = q.to.unwrap_or(total).min(total);
     let (from, to) = if from > to { (to, from) } else { (from, to) };
 
+    // Group the disc's attachments by message id in one read, so each returned
+    // message can carry the files pinned to it (0.8.8). list_context_files is
+    // a single indexed query — cheaper than one query per message.
+    let did_files = q.disc_id.clone();
+    let files = state.db.with_conn(move |conn| {
+        crate::db::discussions::list_context_files(conn, &did_files).map_err(|e| anyhow::anyhow!(e))
+    }).await.unwrap_or_default();
+    let mut by_msg: std::collections::HashMap<String, Vec<crate::api::disc_introspection::MessageAttachment>> =
+        std::collections::HashMap::new();
+    for f in files {
+        if let Some(mid) = f.message_id.clone() {
+            by_msg.entry(mid).or_default().push(crate::api::disc_introspection::MessageAttachment {
+                id: f.id,
+                filename: f.filename,
+                mime_type: f.mime_type,
+                disk_path: f.disk_path,
+            });
+        }
+    }
+
     let msgs = non_system[(from as usize)..(to as usize)].iter().enumerate().map(|(rel, m)| {
         DiscLoadOtherMessage {
             idx: from + rel as u32,
@@ -503,6 +529,7 @@ pub async fn disc_load_other(
             content: m.content.clone(),
             agent_type: m.agent_type.clone(),
             timestamp: m.timestamp.to_rfc3339(),
+            attachments: by_msg.get(&m.id).cloned().unwrap_or_default(),
         }
     }).collect();
 

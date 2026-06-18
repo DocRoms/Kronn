@@ -1141,6 +1141,7 @@ fn sample_workflow(id: &str) -> Workflow {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -1316,6 +1317,90 @@ fn workflow_runs_produced_branches_round_trip() {
     assert_eq!(loaded.produced_branches[0].ahead, 3);
     assert!(!loaded.produced_branches[0].pushed_upstream);
     assert!(loaded.produced_branches[1].pushed_upstream);
+}
+
+// ─── claim_waiting_run (TOCTOU gate claim, audit P1) ────────────────────────
+//
+// The atomic claim is the guard against two concurrent gate decisions (a
+// double-click, or a human racing the auto-approve timer) BOTH passing a
+// read-then-check and spawning two `resume_run`s on the same run. The
+// conditional `UPDATE ... WHERE status='WaitingApproval'` must let exactly one
+// caller win. These tests pin that contract at the DB layer — the only place
+// the atomicity actually lives.
+
+/// Build a run already parked in `WaitingApproval` (a run sitting at a Gate).
+fn waiting_run(id: &str, workflow_id: &str) -> WorkflowRun {
+    let mut run = sample_run(id, workflow_id);
+    run.status = RunStatus::WaitingApproval;
+    run
+}
+
+#[test]
+fn claim_waiting_run_first_caller_wins_second_loses() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    crate::db::workflows::insert_run(&conn, &waiting_run("r1", "w1")).unwrap();
+
+    // First claim (the human who clicked Approve first) flips it to Running.
+    let won_first =
+        crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Running).unwrap();
+    assert!(won_first, "first claimer must win");
+
+    // Second claim (the racing auto-approve timer, or a double-click) sees the
+    // run is no longer WaitingApproval and loses — NO second resume spawned.
+    let won_second =
+        crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Cancelled).unwrap();
+    assert!(!won_second, "second claimer must lose once the run left WaitingApproval");
+
+    // The winner's status sticks; the loser's Cancelled never applied.
+    let run = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Running, "first claim's status must persist");
+}
+
+#[test]
+fn claim_waiting_run_rejects_a_run_that_is_not_waiting() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    // sample_run defaults to Running — never sat at a Gate.
+    crate::db::workflows::insert_run(&conn, &sample_run("r1", "w1")).unwrap();
+
+    let claimed =
+        crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Cancelled).unwrap();
+    assert!(!claimed, "a Running run is not claimable — only WaitingApproval is");
+
+    let run = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(run.status, RunStatus::Running, "status must be untouched");
+}
+
+#[test]
+fn claim_waiting_run_supports_the_reject_transition() {
+    // The gate-reject path claims into Cancelled. Same atomic guard, different
+    // target status — assert it transitions and is then no longer re-claimable.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    crate::db::workflows::insert_run(&conn, &waiting_run("r1", "w1")).unwrap();
+
+    let won = crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Cancelled).unwrap();
+    assert!(won);
+    assert_eq!(
+        crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap().status,
+        RunStatus::Cancelled,
+    );
+
+    // Re-claiming a cancelled run loses.
+    let again =
+        crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Running).unwrap();
+    assert!(!again);
+}
+
+#[test]
+fn claim_waiting_run_on_unknown_id_is_false_not_error() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    // No run inserted — the UPDATE matches zero rows.
+    let claimed =
+        crate::db::workflows::claim_waiting_run(&conn, "ghost", &RunStatus::Running).unwrap();
+    assert!(!claimed, "claiming a non-existent run is a clean false, not an error");
 }
 
 #[test]
@@ -2318,6 +2403,7 @@ fn workflow_multi_step_roundtrip() {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -2376,6 +2462,7 @@ fn workflow_multi_step_roundtrip() {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -2431,6 +2518,7 @@ fn workflow_multi_step_roundtrip() {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -2528,6 +2616,7 @@ fn workflow_update_steps_count() {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,

@@ -709,6 +709,126 @@ mod tests {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
+    // 0.8.8 — per-message attachments. A freshly uploaded file is "pending"
+    // (message_id NULL); send_message pins every pending file of the disc to
+    // the new user message so it renders in that bubble instead of the input.
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn freshly_inserted_context_file_is_pending() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-pend")).unwrap();
+        insert_context_file(&conn, "cf1", "d-pend", "shot.png", "image/png", 10, "[Image]", Some("/tmp/shot.png")).unwrap();
+
+        // Uploaded but not yet sent → no message_id.
+        let files = list_context_files(&conn, "d-pend").unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].message_id, None, "an upload is pending until a message is sent");
+    }
+
+    #[test]
+    fn link_pending_pins_only_unattached_files_and_returns_count() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-link")).unwrap();
+        // Two pending uploads + one already attached to an older message.
+        insert_context_file(&conn, "cf1", "d-link", "a.png", "image/png", 10, "[Image]", Some("/tmp/a.png")).unwrap();
+        insert_context_file(&conn, "cf2", "d-link", "b.png", "image/png", 10, "[Image]", Some("/tmp/b.png")).unwrap();
+        insert_context_file(&conn, "cf3", "d-link", "old.png", "image/png", 10, "[Image]", Some("/tmp/old.png")).unwrap();
+        link_pending_context_files_to_message(&conn, "d-link", "msg-old").unwrap();
+
+        // Two MORE pending uploads arrive, then the user sends a new message.
+        insert_context_file(&conn, "cf4", "d-link", "c.png", "image/png", 10, "[Image]", Some("/tmp/c.png")).unwrap();
+        insert_context_file(&conn, "cf5", "d-link", "d.png", "image/png", 10, "[Image]", Some("/tmp/d.png")).unwrap();
+        let n = link_pending_context_files_to_message(&conn, "d-link", "msg-new").unwrap();
+
+        assert_eq!(n, 2, "only the two still-pending files get pinned to the new message");
+        let on_new = list_context_files_for_message(&conn, "msg-new").unwrap();
+        assert_eq!(on_new.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["cf4", "cf5"]);
+        // The earlier batch stays on its original message — never re-pinned.
+        let on_old = list_context_files_for_message(&conn, "msg-old").unwrap();
+        assert_eq!(on_old.len(), 3);
+    }
+
+    #[test]
+    fn link_pending_is_a_no_op_when_nothing_is_pending() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-noop")).unwrap();
+        insert_context_file(&conn, "cf1", "d-noop", "a.png", "image/png", 10, "[Image]", Some("/tmp/a.png")).unwrap();
+        link_pending_context_files_to_message(&conn, "d-noop", "msg-1").unwrap();
+
+        // A second send with no new uploads links nothing.
+        let n = link_pending_context_files_to_message(&conn, "d-noop", "msg-2").unwrap();
+        assert_eq!(n, 0);
+        assert!(list_context_files_for_message(&conn, "msg-2").unwrap().is_empty());
+    }
+
+    #[test]
+    fn link_pending_is_scoped_to_one_discussion() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-x")).unwrap();
+        insert_discussion(&conn, &make_discussion("d-y")).unwrap();
+        insert_context_file(&conn, "cfx", "d-x", "x.png", "image/png", 10, "[Image]", Some("/tmp/x.png")).unwrap();
+        insert_context_file(&conn, "cfy", "d-y", "y.png", "image/png", 10, "[Image]", Some("/tmp/y.png")).unwrap();
+
+        let n = link_pending_context_files_to_message(&conn, "d-x", "msg-x").unwrap();
+        assert_eq!(n, 1, "a send in d-x must not touch pending files of d-y");
+        // d-y's file is still pending.
+        let y = list_context_files(&conn, "d-y").unwrap();
+        assert_eq!(y[0].message_id, None);
+    }
+
+    #[test]
+    fn migration_067_backfill_separates_legacy_files_from_pending() {
+        // Reproduce a pre-0.8.8 state: files uploaded before message_id existed
+        // (so they're NULL = would be "pending") alongside one already pinned.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-legacy")).unwrap();
+        insert_context_file(&conn, "old1", "d-legacy", "spec.pdf", "application/pdf", 10, "ref", None).unwrap();
+        insert_context_file(&conn, "old2", "d-legacy", "data.csv", "text/csv", 10, "a,b", None).unwrap();
+        insert_context_file(&conn, "pinned", "d-legacy", "shot.png", "image/png", 10, "[Image]", Some("/tmp/s.png")).unwrap();
+        link_pending_context_files_to_message(&conn, "d-legacy", "msg-real").unwrap(); // pins old1, old2, pinned
+
+        // Re-create the "uploaded before the column" case: two fresh NULL rows.
+        insert_context_file(&conn, "legacyA", "d-legacy", "a.txt", "text/plain", 1, "A", None).unwrap();
+        insert_context_file(&conn, "legacyB", "d-legacy", "b.txt", "text/plain", 1, "B", None).unwrap();
+
+        // Apply the exact backfill migration SQL.
+        conn.execute_batch(include_str!("sql/067_context_files_backfill_legacy.sql")).unwrap();
+
+        // The NULL rows are now the inert sentinel — NOT pending.
+        let a: Option<String> = conn.query_row("SELECT message_id FROM context_files WHERE id='legacyA'", [], |r| r.get(0)).unwrap();
+        let b: Option<String> = conn.query_row("SELECT message_id FROM context_files WHERE id='legacyB'", [], |r| r.get(0)).unwrap();
+        assert_eq!(a.as_deref(), Some("__legacy_disc_wide__"));
+        assert_eq!(b.as_deref(), Some("__legacy_disc_wide__"));
+        // The already-pinned files keep their real message id.
+        let p: Option<String> = conn.query_row("SELECT message_id FROM context_files WHERE id='old1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(p.as_deref(), Some("msg-real"));
+
+        // Crucially: a later send links NOTHING — legacy files are no longer
+        // pending, so they can't be vacuumed into a new message.
+        let n = link_pending_context_files_to_message(&conn, "d-legacy", "msg-next").unwrap();
+        assert_eq!(n, 0, "backfilled legacy files must not attach to the next message");
+        assert!(list_context_files_for_message(&conn, "msg-next").unwrap().is_empty());
+        // ...and they stay disc-wide context (still listed for the discussion).
+        assert_eq!(list_context_files(&conn, "d-legacy").unwrap().len(), 5);
+    }
+
+    #[test]
+    fn list_for_message_returns_message_id_on_each_row() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-roundtrip")).unwrap();
+        insert_context_file(&conn, "cf1", "d-roundtrip", "a.png", "image/png", 10, "[Image]", Some("/tmp/a.png")).unwrap();
+        link_pending_context_files_to_message(&conn, "d-roundtrip", "msg-rt").unwrap();
+
+        let per_msg = list_context_files_for_message(&conn, "msg-rt").unwrap();
+        assert_eq!(per_msg.len(), 1);
+        assert_eq!(per_msg[0].message_id, Some("msg-rt".to_string()));
+        // The disc-wide listing now also reflects the link.
+        let all = list_context_files(&conn, "d-roundtrip").unwrap();
+        assert_eq!(all[0].message_id, Some("msg-rt".to_string()));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
     // 0.8.7 — non_system_message_count: the unread-badge basis.
     //
     // The streaming layer persists every tool call + every cached-summary

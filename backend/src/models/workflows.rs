@@ -579,6 +579,16 @@ pub struct WorkflowStep {
     /// `[\"-c\", \"<oneliner>\"]` if you need to wrap a shell line.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exec_setup_args: Vec<String>,
+    /// 0.8.8 — Optional data piped to the MAIN command's **stdin**.
+    /// Templated like `exec_args` (`{{steps.X.data_json}}` etc.) and
+    /// rendered to a literal string, but unlike argv it is NOT subject to
+    /// the OS `ARG_MAX` ceiling (~128 KB on Linux) — so a large reshaped
+    /// payload (e.g. an enriched Jira backlog) can be fed to a `jq` /
+    /// reshape / node script without exploding the argument list. When
+    /// `None`, stdin stays `/dev/null` (backward-compatible). Applies to
+    /// the main `exec_command` only, not `exec_setup_command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exec_stdin: Option<String>,
 
     // ─── JsonData fields (0.7+ — déterministe data source) ───────────────
     // Only meaningful when `step_type == JsonData`. Zéro token, zéro

@@ -99,6 +99,8 @@ Runs a binary listed in `Workflow.exec_allowlist` directly from the Rust engine,
 
 The output exposes `{{steps.run-tests.data.exit_code}}` (number), `{{steps.run-tests.data.stdout}}` (truncated to 100 KB), `{{steps.run-tests.data.stderr}}`, and `{{steps.run-tests.data.duration_ms}}`. Downstream `Agent` steps can read these.
 
+**Large input → `exec_stdin` (not args).** A single argv string is capped at ~128 KB by the OS (`ARG_MAX`), so a big reshaped payload (e.g. an enriched ticket backlog) blows up `exec_args`. Set `"exec_stdin": "{{steps.fetch.data_json}}"` instead — templated like args but piped to the command's **stdin** (no size ceiling), streamed concurrently so a `jq`/`cat`-style command can't deadlock. Omitted → stdin stays `/dev/null` (unchanged).
+
 ### 4. `Gate` — human approval (0 tokens, asynchronous)
 
 Pauses the run with `RunStatus::WaitingApproval` until a human decides via UI or `POST /api/workflows/.../decide`. Three outcomes: `approve` (resume next step), `request_changes` (Goto a previous step — typically `implement` in an auto-dev loop), `reject` (run terminates as `Failed`).
@@ -143,6 +145,8 @@ When you need to run the same task on N items in parallel (e.g. "review each PR"
 - **An array of scalars** (`["EW-1","EW-2"]`) — each value fills the QP's **first** variable and doubles as the discussion title (legacy single-var fan-out).
 - **An array of objects** (`[{"id":"EW-1","summary":"…","descriptionWiki":"…"}, …]`) — each object's keys map onto the QP's `{{var}}` placeholders **by name** (multi-variable, identical to the MCP `qp_batch_run` path). The disc title is the first present & non-empty of `_title` / `id` / `key` / `number` (reserved keys; `_title` is title-only and not injected as a variable). This is how you feed a multi-variable Quick Prompt (e.g. a triage QP taking `id` + `descriptionWiki` + `summary` + `status` + `parentKey` + `labels`) from pre-fetched data — **0 tokens** spent shaping it, no per-child MCP fetch. JSONPath can't rename/restructure keys, so produce the flat objects with an upstream `Exec` (`python3`/`jq`) step whose object keys exactly match the QP variable names, then point `batch_items_from` at `{{steps.<reshape>.data.stdout}}`.
 
+> **⚠ Output is metadata-only — you CANNOT pipe a BatchQuickPrompt's produced content into a deterministic step.** `{{steps.<name>.data}}` here is `{ batch_run_id, discussion_ids, ok, total }` — batch counters, not the table/JSON each run emitted. **The QP's produced output lives in the child discussions**, and there is no `{{steps.<name>.results[]}}` / `.outputs` accessor. So if a downstream `ApiCall`/`Exec` needs the *result* the LLM produced (e.g. post a review's `verdict`/`comments` to an API), **do NOT model that LLM step as a `BatchQuickPrompt`** — use a single **`Agent` step with `output_format: TypedSchema`** (§7), whose `{{steps.<name>.data.<field>}}` resolves to the emitted JSON. BatchQuickPrompt is for fan-out-to-discussions (kick off N runs people/agents then read), not for piping a result onward. (An *agent* step can still read a child disc via the `disc_get_message`/`disc_summarize` MCP tools — but a deterministic step cannot.)
+
 ### 6. `BatchApiCall` — fan out an API call over a list (0 tokens)
 
 The mechanical counterpart of `BatchQuickPrompt`: same fan-out semantics, but **each child fires a templated HTTP request**, not an LLM run. Use this whenever the user wants to "create N tickets", "post N comments", "update N statuses", "test 8 sub-domains" — anything that's the same call with varying inputs. **Zero tokens consumed**, parallel HTTP capped by `batch_concurrent_limit` (default 5, max 20). The aggregated envelope reports per-item status so a downstream Agent step can correlate inputs with outcomes (e.g. setting `blocks` links between freshly-created tickets).
@@ -151,9 +155,12 @@ Two ways to configure the request:
 - **Inline** (no QuickApi reference) — fill the same `api_*` fields you'd set on a regular `ApiCall` step.
 - **Reference a saved `QuickApi`** via `quick_api_id` — the runtime loads the QuickApi from DB and pulls all `api_*` fields from it. Per-field overrides on the step still win when set, so you can keep the shared body template but override e.g. `api_extract` for one workflow.
 
-Per-item templating exposes **two namespaces** in body / query / headers / path-params:
-- `{{batch.item.<key>}}` — explicit, namespaced (works for inline configs and any items_from shape)
+Per-item templating exposes the item's fields in **`api_endpoint_path`** (so a path that varies per item works — `/comments/{{batch.item.commentId}}/reactions`), body, query, headers, and path-params. Three equivalent accessors:
+- `{{batch.item.<key>}}` — canonical, namespaced (works for inline configs and any items_from shape)
+- `{{item.<key>}}` — forgiving alias (the intuitive name; resolves identically)
 - `{{<key>}}` — bare top-level (works for QuickApi-referenced steps; matches the QA's variable naming convention so the same template works in the QA editor and as a batch step)
+
+Plus `{{batch.index}}` (0-based) and `{{batch.item}}` (the whole item as JSON). NOTE: this is a **different name** from a SubWorkflow-foreach item (`{{current_task.*}}`, §9) — batch fan-out uses `batch.item.*`/`item.*`.
 
 ```json
 {
@@ -195,6 +202,8 @@ Reserve `Agent` for steps that **require reasoning, generation, or judgement**: 
   "agent_settings": { "tier": "default" }
 }
 ```
+
+- **Piping a structured result into a deterministic step.** Set `output_format: { "type": "TypedSchema", "schema": {…} }` (or `Structured`) → the agent's emitted JSON is captured as `{{steps.<name>.data}}`, with nested access `{{steps.<name>.data.<field>}}` / `{{steps.<name>.data.arr.0.key}}` (`data_json.<field>` is an alias). **This is the ONLY way to feed an `ApiCall`/`Exec` step from an LLM step.** **Typed injection in an `api_body`:** a field whose value is *exactly one* `{{…}}` placeholder is replaced by the **real typed JSON** (a nested array/object stays an array/object, not an escaped string) — write it quoted as a normal string leaf. E.g. a review step emits `{ verdict, generalComment, inlineComments }`, then an `ApiCall` posts `api_body: { "event": "{{steps.review.data.verdict}}", "body": "{{steps.review.data.generalComment}}", "comments": "{{steps.review.data.inlineComments}}" }` and `comments` arrives as a real array. (A placeholder embedded in surrounding text — `"PR #{{n}}"` — stays a string; injection only kicks in for a lone whole-value placeholder, which keeps it injection-safe.) **To run a saved Quick Prompt's logic in this pipeable way, put its `quick_prompt_id` on an `Agent` step (below) and add `output_format: TypedSchema` — NOT a `BatchQuickPrompt`** (whose output is metadata-only, see §5).
 
 - **Reference a saved `QuickPrompt`** via `quick_prompt_id` — the runtime loads the QP and pulls `prompt_template`, `tier`, and `skill_ids` from it. Per-field overrides on the step still win when set, so you can keep the shared template but override e.g. the agent or add specific skills for one workflow. The QP's `{{var}}` placeholders resolve against the workflow's normal `TemplateContext` (launch variables, state, previous_step…) — there are no per-step variables. Use this when 3+ workflows would share the same prompt; one QP, many workflows. (0.7+, mirror of `quick_api_id`.)
 
@@ -248,6 +257,14 @@ Runs an **existing, saved workflow** as a nested child run. Use when a step "IS 
 ```
 
 (`agent` and `prompt_template` are required by the schema but ignored — set them to `ClaudeCode` and `""`. The child runs in **its own workspace**; the parent does not share state with it directly — see the data-passing note below.)
+
+**Per-item fan-out (`sub_workflow_foreach_file`).** Set it to a workspace-relative JSON-array file (e.g. `"sub_workflow_foreach_file": ".kronn/tasks.json"`, written by an upstream triage step) → the child runs **once per item**, sequentially, in the SHARED parent worktree. Omit it → a single child run (Phase 1/2 behaviour). This is how the feasibility-AutoPilot fans its `implement` child over each triaged ticket.
+
+**Accessing the current item in the child (run-breaking — get this right).** The engine exposes each item to the child **two ways**, both keyed `current_task` (fixed name — *not* `{{item.*}}`, *not* derived from the source-file name):
+- **Template vars** `{{current_task.<field>}}` — each top-level field of the item, ready to interpolate in any step. Scalars stringify (`number` → `42`), `null` → empty string, nested arrays/objects render as compact JSON, and the whole item is `{{current_task}}`. Use this for an ApiCall path (`/repos/o/r/pulls/{{current_task.number}}/reviews`), a worktree name (`.kronn/pr-{{current_task.number}}`), a prompt, etc.
+- **File** `.kronn/current_task.json` (shared worktree) — the same item as a file, for an Agent/Exec step that wants the full object.
+
+Bookkeeping vars `{{__subwf_item_id__}}` (= the item's `id`) and `{{__subwf_item__}}` (0-based index) are also set.
 
 **Token cost** = the cost of the child run. The whole run tree shares ONE budget (`SharedBudget`): the child's LLM calls and tokens count against the same tree-wide quota as the parent, so a sub-workflow doesn't let you escape `guards.max_llm_calls`.
 
@@ -542,8 +559,8 @@ If a referenced field doesn't resolve, the placeholder stays literal (`{{steps.X
 ### Trigger types
 
 - `{ "type": "Manual" }` — triggered by clicking a button. If `Workflow.variables` is non-empty, the launch UI shows a form first
-- `{ "type": "Cron", "schedule": "0 9 * * 1-5" }` — cron schedule (e.g., weekdays at 9am)
-- `{ "type": "Tracker", "source": { "type": "GitHub", "owner": "X", "repo": "Y" }, "query": "label:bug" }` — fires on tracker events (GitHub issues today, more sources later). The triggering issue's fields auto-inject as `{{issue.*}}` in step prompts
+- `{ "type": "Cron", "schedule": "0 9 * * 1-5" }` — cron schedule (e.g., weekdays at 9am). **Set `concurrency_limit: 1`** (see field #9) unless you explicitly want overlap — a long run that outlasts the next tick would otherwise spawn a second run on top of itself (double work + duplicate side-effects). The scheduler *skips* a tick while a run is active (it does not queue it). The `workflow_create_draft` MCP tool auto-defaults this to 1 for Cron/Tracker.
+- `{ "type": "Tracker", "source": { "type": "GitHub", "owner": "X", "repo": "Y" }, "query": "label:bug" }` — fires on tracker events (GitHub issues today, more sources later). The triggering issue's fields auto-inject as `{{issue.*}}` in step prompts. Same self-overlap caveat as Cron → `concurrency_limit: 1`.
 
 ## Optimization Rules
 

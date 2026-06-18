@@ -126,7 +126,7 @@ pub async fn orchestrate(
     // up-front message.
     {
         // AgentType doesn't impl Hash/Eq, so we build a small Vec instead.
-        let detections = crate::agents::detect_all().await;
+        let detections = crate::agents::detect_all_cached(false).await;
         let usable: Vec<AgentType> = detections.iter()
             .filter(|d| (d.installed || d.runtime_available) && d.enabled)
             .map(|d| d.agent_type.clone())
@@ -1011,14 +1011,25 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
         ));
     }
 
-    // Credit / billing
+    // Credit / billing / usage-limit. Codex (ChatGPT plan) phrases it
+    // "You've hit your usage limit … purchase more credits … try again at <time>";
+    // OpenAI API says "insufficient_quota"; others "billing"/"402". Catch all.
     if lower.contains("insufficient_quota") || lower.contains("billing")
         || lower.contains("payment required") || lower.contains("402")
+        || lower.contains("usage limit") || lower.contains("hit your limit")
+        || lower.contains("purchase more credits") || lower.contains("upgrade to pro")
+        || lower.contains("quota") || lower.contains("out of credits")
     {
-        return Some(
-            "⚠️ **Quota exhausted or billing issue.**\n\
-             Check your subscription and API credits.".to_string()
-        );
+        // Surface the "try again at <time>" the provider gives, if present.
+        let retry_at = output.lines()
+            .find(|l| l.to_lowercase().contains("try again at"))
+            .and_then(|l| l.split_once("try again at").or_else(|| l.split_once("réessaie")).map(|(_, t)| t.trim().trim_end_matches('.').to_string()))
+            .filter(|s| !s.is_empty() && s.len() < 40);
+        let when = retry_at.map(|t| format!(" Réessaie après **{t}**.")).unwrap_or_default();
+        return Some(format!(
+            "⛔ **Limite du plan atteinte.** Le quota/les crédits de cet agent sont épuisés.{when}\n\
+             Recharge des crédits ou attends le reset, puis relance.",
+        ));
     }
 
     // Network errors
@@ -1232,15 +1243,27 @@ mod error_hint_tests {
     fn quota_exhausted_insufficient_quota_matches() {
         let hint = detect_agent_error_hint("insufficient_quota: free tier exhausted", &AgentType::Codex)
             .expect("quota should match");
-        assert!(hint.contains("Quota") || hint.contains("billing"),
+        assert!(hint.contains("Limite du plan") || hint.to_lowercase().contains("quota"),
             "got: {hint}");
+    }
+
+    #[test]
+    fn quota_codex_usage_limit_wording_matches() {
+        // The EXACT Codex (ChatGPT plan) wording that slipped through before.
+        let out = "ERROR: You've hit your usage limit. Upgrade to Pro \
+                   (https://chatgpt.com/explore/pro), visit … to purchase more credits \
+                   or try again at 5:04 PM.";
+        let hint = detect_agent_error_hint(out, &AgentType::Codex).expect("usage limit must match");
+        assert!(hint.contains("Limite du plan atteinte"), "clean headline, got: {hint}");
+        // The "try again at <time>" is surfaced so the user knows when.
+        assert!(hint.contains("5:04 PM"), "retry time surfaced, got: {hint}");
     }
 
     #[test]
     fn quota_payment_required_402_matches() {
         let hint = detect_agent_error_hint("Payment required: 402", &AgentType::ClaudeCode)
             .expect("402 should match");
-        assert!(hint.contains("Quota") || hint.contains("billing"));
+        assert!(hint.contains("Limite du plan") || hint.to_lowercase().contains("crédit"));
     }
 
     #[test]

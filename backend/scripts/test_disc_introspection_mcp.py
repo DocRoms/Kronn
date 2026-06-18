@@ -2823,5 +2823,600 @@ class CallLearningProposeTests(unittest.TestCase):
         self.assertEqual(body["source_agent"], "Codex")
 
 
+class WorkflowQpCrudToolTests(unittest.TestCase):
+    """0.8.8 (2026-06-23) — read · clone · update · enable wrappers for
+    workflows + Quick Prompts. Thin wrappers over existing REST routes;
+    we assert the right method/path/body, the Cron enable guard, and the
+    PromptVariable label/placeholder normalisation."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env_patch = mock.patch.dict(
+            os.environ,
+            {"KRONN_DISCUSSION_ID": "disc-abc", "KRONN_BACKEND_URL": "http://127.0.0.1:3140"},
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+
+    @staticmethod
+    def _env(data):
+        """An `ApiResponse` envelope `_unwrap` will unwrap to `data`."""
+        return {"success": True, "data": data}
+
+    # ── _normalize_variables ─────────────────────────────────────────
+    def test_normalize_variables_fills_label_and_placeholder(self):
+        out = self.mod._normalize_variables([{"name": "ticket"}])
+        self.assertEqual(out[0]["label"], "ticket")
+        self.assertEqual(out[0]["placeholder"], "")
+
+    def test_normalize_variables_preserves_existing(self):
+        v = {"name": "x", "label": "L", "placeholder": "P"}
+        self.assertEqual(self.mod._normalize_variables([v])[0], v)
+
+    def test_normalize_variables_passes_through_non_list(self):
+        self.assertIsNone(self.mod._normalize_variables(None))
+
+    # ── _normalize_steps (tagged-enum wrapping) ──────────────────────
+    def test_normalize_steps_wraps_bare_string_step_type(self):
+        out = self.mod._normalize_steps([{"name": "s", "step_type": "Agent"}])
+        self.assertEqual(out[0]["step_type"], {"type": "Agent"})
+
+    def test_normalize_steps_wraps_output_format_and_mode(self):
+        out = self.mod._normalize_steps([
+            {"name": "s", "step_type": "Agent", "output_format": "Structured", "mode": "Normal"}
+        ])
+        self.assertEqual(out[0]["output_format"], {"type": "Structured"})
+        self.assertEqual(out[0]["mode"], {"type": "Normal"})
+
+    def test_normalize_steps_is_idempotent_on_tagged_objects(self):
+        already = [{"name": "s", "step_type": {"type": "ApiCall"}}]
+        self.assertEqual(self.mod._normalize_steps(already), already)
+
+    def test_create_draft_normalizes_step_type_before_post(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake), \
+             mock.patch.object(self.mod, "_current_project_id", return_value=None):
+            self.mod.call_workflow_create_draft({
+                "name": "W", "trigger": {"type": "Manual"},
+                "steps": [{"name": "s", "step_type": "Agent", "agent": "ClaudeCode",
+                           "prompt_template": "x"}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["steps"][0]["step_type"], {"type": "Agent"},
+                         "bare-string step_type must be wrapped before the POST")
+        self.assertFalse(body["enabled"])
+
+    def test_create_draft_defaults_concurrency_1_for_cron(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake), \
+             mock.patch.object(self.mod, "_current_project_id", return_value=None):
+            self.mod.call_workflow_create_draft({
+                "name": "Nightly", "trigger": {"type": "Cron", "schedule": "0 9 * * *"},
+                "steps": [{"name": "s", "step_type": "ApiCall", "api_plugin_slug": "x",
+                           "api_config_id": "y", "api_endpoint_path": "/z"}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["concurrency_limit"], 1,
+                         "Cron with no concurrency_limit must default to 1 (no self-overlap)")
+
+    def test_create_draft_respects_explicit_concurrency(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake), \
+             mock.patch.object(self.mod, "_current_project_id", return_value=None):
+            self.mod.call_workflow_create_draft({
+                "name": "Parallel", "trigger": {"type": "Cron", "schedule": "*/5 * * * *"},
+                "concurrency_limit": 5,
+                "steps": [{"name": "s", "step_type": "Notify", "notify_config": {}}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["concurrency_limit"], 5, "explicit concurrency_limit must win")
+
+    def test_create_draft_no_concurrency_default_for_manual(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake), \
+             mock.patch.object(self.mod, "_current_project_id", return_value=None):
+            self.mod.call_workflow_create_draft({
+                "name": "OnDemand", "trigger": {"type": "Manual"},
+                "steps": [{"name": "s", "step_type": "Notify", "notify_config": {}}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertIsNone(body.get("concurrency_limit"),
+                          "Manual trigger must NOT force a concurrency_limit (user-initiated)")
+
+    def test_update_normalizes_step_type(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_update({
+                "workflow_id": "wf-1",
+                "steps": [{"name": "s", "step_type": "Exec", "exec_command": "make"}],
+            })
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["steps"][0]["step_type"], {"type": "Exec"})
+
+    # ── workflow_get ─────────────────────────────────────────────────
+    def test_workflow_get_calls_full_route(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1", "steps": []}))
+        with mock.patch.object(self.mod, "_http", fake):
+            out = self.mod.call_workflow_get({"workflow_id": "wf-1"})
+        method, path, *_ = fake.call_args.args
+        self.assertEqual((method, path), ("GET", "/api/workflows/wf-1"))
+        self.assertEqual(out["id"], "wf-1")
+
+    def test_workflow_get_requires_id(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_get({})
+
+    # ── workflow_update ──────────────────────────────────────────────
+    def test_workflow_update_forwards_only_patchable_keys(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_update({"workflow_id": "wf-1", "name": "New", "bogus": 1})
+        method, path, body = fake.call_args.args
+        self.assertEqual((method, path), ("PUT", "/api/workflows/wf-1"))
+        self.assertEqual(body, {"name": "New"})  # bogus stripped, id not in body
+
+    def test_workflow_update_normalizes_variables(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_update({"workflow_id": "wf-1", "variables": [{"name": "v"}]})
+        _, _, body = fake.call_args.args
+        self.assertEqual(body["variables"][0]["label"], "v")
+
+    def test_workflow_update_requires_a_patch_field(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_update({"workflow_id": "wf-1"})
+
+    # ── workflow_clone ───────────────────────────────────────────────
+    def test_workflow_clone_export_import_then_disable_and_default_name(self):
+        fake_text = mock.MagicMock(return_value='{"kind":"x"}')
+        fake_http = mock.MagicMock(side_effect=[
+            self._env({"id": "wf-new", "name": "Src"}),               # import
+            self._env({"id": "wf-new", "name": "Src (copie)"}),       # PUT
+        ])
+        with mock.patch.object(self.mod, "_http_text", fake_text), \
+             mock.patch.object(self.mod, "_http", fake_http):
+            self.mod.call_workflow_clone({"workflow_id": "wf-1", "project_id": "proj-1"})
+        self.assertEqual(fake_text.call_args.args, ("GET", "/api/workflows/wf-1/export"))
+        m1, p1, b1 = fake_http.call_args_list[0].args
+        self.assertEqual((m1, p1), ("POST", "/api/workflows/import"))
+        self.assertEqual(b1["content"], '{"kind":"x"}')
+        self.assertEqual(b1["project_id"], "proj-1")
+        m2, p2, b2 = fake_http.call_args_list[1].args
+        self.assertEqual((m2, p2), ("PUT", "/api/workflows/wf-new"))
+        self.assertFalse(b2["enabled"])                  # clone never auto-fires
+        self.assertEqual(b2["name"], "Src (copie)")      # default distinct name
+
+    def test_workflow_clone_respects_new_name(self):
+        fake_text = mock.MagicMock(return_value="{}")
+        fake_http = mock.MagicMock(side_effect=[
+            self._env({"id": "wf-new", "name": "Src"}),
+            self._env({"id": "wf-new"}),
+        ])
+        with mock.patch.object(self.mod, "_http_text", fake_text), \
+             mock.patch.object(self.mod, "_http", fake_http):
+            self.mod.call_workflow_clone({"workflow_id": "wf-1", "new_name": "Custom", "project_id": "p"})
+        self.assertEqual(fake_http.call_args_list[1].args[2]["name"], "Custom")
+
+    def test_workflow_clone_requires_id(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_clone({})
+
+    # ── workflow_set_enabled ─────────────────────────────────────────
+    def test_set_enabled_disable_puts_directly_without_get(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1", "enabled": False}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": False})
+        self.assertEqual(fake.call_count, 1)             # no trigger GET when disabling
+        method, path, body = fake.call_args.args
+        self.assertEqual((method, path), ("PUT", "/api/workflows/wf-1"))
+        self.assertFalse(body["enabled"])
+
+    def test_set_enabled_manual_enables(self):
+        fake = mock.MagicMock(side_effect=[
+            self._env({"id": "wf-1", "trigger": {"type": "Manual"}}),   # GET
+            self._env({"id": "wf-1", "enabled": True}),                  # PUT
+        ])
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": True})
+        self.assertEqual(fake.call_args_list[1].args[:2], ("PUT", "/api/workflows/wf-1"))
+
+    def test_set_enabled_cron_refused_without_force(self):
+        fake = mock.MagicMock(return_value=self._env(
+            {"id": "wf-1", "trigger": {"type": "Cron", "schedule": "* * * * *"}}))
+        with mock.patch.object(self.mod, "_http", fake):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": True})
+        self.assertIn("Cron", str(ctx.exception))
+        self.assertEqual(fake.call_count, 1)             # GET only, never PUT
+
+    def test_set_enabled_cron_allowed_with_force_skips_guard(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "wf-1", "enabled": True}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_set_enabled({"workflow_id": "wf-1", "enabled": True, "force": True})
+        self.assertEqual(fake.call_count, 1)             # force → straight PUT, no GET
+        self.assertEqual(fake.call_args.args[:2], ("PUT", "/api/workflows/wf-1"))
+
+    def test_set_enabled_requires_enabled(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_set_enabled({"workflow_id": "wf-1"})
+
+    # ── qp_update ────────────────────────────────────────────────────
+    def test_qp_update_merges_patch_over_existing(self):
+        fake = mock.MagicMock(side_effect=[
+            self._env([{"id": "qp-1", "name": "Old", "prompt_template": "T", "agent": "ClaudeCode"}]),
+            self._env({"id": "qp-1", "name": "Old", "prompt_template": "NEW"}),
+        ])
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_qp_update({"qp_id": "qp-1", "prompt_template": "NEW"})
+        m, p, body = fake.call_args_list[1].args
+        self.assertEqual((m, p), ("PUT", "/api/quick-prompts/qp-1"))
+        self.assertEqual(body["prompt_template"], "NEW")  # patched
+        self.assertEqual(body["name"], "Old")             # preserved from existing
+
+    def test_qp_update_not_found_raises(self):
+        fake = mock.MagicMock(return_value=self._env([{"id": "other"}]))
+        with mock.patch.object(self.mod, "_http", fake):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_qp_update({"qp_id": "qp-1", "name": "x"})
+
+    def test_qp_update_requires_id(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_update({})
+
+    # ── qp_delete ────────────────────────────────────────────────────
+    def test_qp_delete_calls_delete_route(self):
+        fake = mock.MagicMock(return_value=self._env(None))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_qp_delete({"qp_id": "qp-1"})
+        self.assertEqual(fake.call_args.args[:2], ("DELETE", "/api/quick-prompts/qp-1"))
+
+    def test_qp_delete_requires_id(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_delete({})
+
+    # ── qp_get (read the FULL QP incl prompt_template) ───────────────
+    def test_qp_get_returns_full_qp_with_template(self):
+        full = {"id": "qp-1", "name": "Triage", "prompt_template": "Analyse {{ticket}} …",
+                "variables": [{"name": "ticket"}], "agent": "ClaudeCode", "skill_ids": ["s1"]}
+        fake = mock.MagicMock(return_value=self._env([full, {"id": "other"}]))
+        with mock.patch.object(self.mod, "_http", fake):
+            out = self.mod.call_qp_get({"qp_id": "qp-1"})
+        # the FULL body (which qp_list drops) is returned
+        self.assertEqual(out["prompt_template"], "Analyse {{ticket}} …")
+        self.assertEqual(out["agent"], "ClaudeCode")
+        self.assertEqual(fake.call_args.args[:2], ("GET", "/api/quick-prompts"))
+
+    def test_qp_get_not_found_raises(self):
+        fake = mock.MagicMock(return_value=self._env([{"id": "other"}]))
+        with mock.patch.object(self.mod, "_http", fake):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_qp_get({"qp_id": "qp-1"})
+
+    def test_qp_get_requires_id(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_qp_get({})
+
+    # ── workflow_create_draft must document the FULL step_type taxonomy ──
+    # (2026-06-24) An agent missed that SubWorkflow exists because it inferred
+    # the available types from one workflow it opened. The create_draft tool
+    # description must enumerate the whole closed set so no agent generalises
+    # from a poor sample. If a new StepType ships, this fails → document it.
+    def test_workflow_create_draft_documents_all_step_types(self):
+        entry = next(t for t in self.mod.TOOLS if t["name"] == "workflow_create_draft")
+        desc = entry["description"]
+        for st in ["Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt",
+                   "Exec", "Gate", "Notify", "JsonData", "SubWorkflow"]:
+            self.assertIn(st, desc, f"step_type '{st}' must be documented in workflow_create_draft")
+
+    # ── initialize `instructions` must ORIENT the agent (what Kronn is + a
+    # map of the tool areas + how to navigate), so it doesn't reverse-engineer
+    # capabilities from 40+ tools or generalise from one sample. (2026-06-24)
+    def test_initialize_instructions_orient_the_agent(self):
+        resp = self.mod._handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        instr = resp["result"]["instructions"]
+        for needle in ["Kronn", "Discussions", "Workflows", "Quick Prompts",
+                       "workflow_get", "qp_get", "workflow_create_draft", "Navigation"]:
+            self.assertIn(needle, instr, f"MCP orientation must mention {needle}")
+
+
+class StepSchemaAndBindingListTests(unittest.TestCase):
+    """0.8.8 (2026-06-24) — `workflow_step_schema` (canonical schema as an
+    untruncatable tool RESULT) + the Agent-step binding catalogs
+    (`skills_list`/`profiles_list`/`directives_list`). Closes the gap where the
+    only schema doc was a client-truncatable tool description and the binding
+    ids couldn't be enumerated at all."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    @staticmethod
+    def _env(data):
+        return {"success": True, "data": data}
+
+    # ── workflow_step_schema ─────────────────────────────────────────
+    def test_step_schema_lists_the_closed_nine_set(self):
+        out = self.mod.call_workflow_step_schema({})
+        self.assertEqual(
+            set(out["step_types_closed_set"]),
+            {"Agent", "ApiCall", "BatchApiCall", "BatchQuickPrompt", "Exec",
+             "Gate", "Notify", "JsonData", "SubWorkflow"},
+        )
+        # every type has a field spec
+        for st in out["step_types_closed_set"]:
+            self.assertIn(st, out["fields_by_type"])
+
+    def test_step_schema_documents_foreach_runtime_contract(self):
+        out = self.mod.call_workflow_step_schema({})
+        contract = out["fields_by_type"]["SubWorkflow"]["FOREACH_RUNTIME_CONTRACT"]
+        # the run-breaking fact: fixed target name, not derived from source
+        self.assertIn(".kronn/current_task.json", contract)
+        self.assertIn("FIXED", contract)
+
+    def test_step_schema_is_a_tool_and_dispatchable(self):
+        self.assertIn("workflow_step_schema", self.mod.DISPATCH)
+        names = [t["name"] for t in self.mod.TOOLS]
+        self.assertIn("workflow_step_schema", names)
+
+    def test_step_schema_exec_documents_stdin(self):
+        out = self.mod.call_workflow_step_schema({})
+        opt = " ".join(out["fields_by_type"]["Exec"]["optional"])
+        self.assertIn("exec_stdin", opt)
+
+    def test_step_schema_warns_batchqp_output_is_metadata_only(self):
+        out = self.mod.call_workflow_step_schema({})
+        bqp = out["fields_by_type"]["BatchQuickPrompt"]["OUTPUT_IS_METADATA_ONLY"]
+        # the trap: data is counters, the produced content is in discussions
+        self.assertIn("metadata", bqp.lower())
+        self.assertIn("discussions", bqp.lower())
+        self.assertIn("results[]", bqp)
+
+    def test_step_schema_agent_documents_typedschema_piping(self):
+        out = self.mod.call_workflow_step_schema({})
+        piping = out["fields_by_type"]["Agent"]["OUTPUT_PIPING"]
+        # the accessor that DOES pipe an LLM result into a deterministic step
+        self.assertIn("{{steps.<name>.data}}", piping)
+        self.assertIn("TypedSchema", piping)
+
+    def test_step_schema_documents_template_var_namespaces(self):
+        out = self.mod.call_workflow_step_schema({})
+        tv = out["template_vars"]
+        ns = tv["namespaces"]
+        # the namespaces an automating agent must know to wire a WF end-to-end
+        for key in ["steps.<name>.data", "steps.<name>.data_json",
+                    "previous_step.{output,data,data_json,summary,status}",
+                    "current_task / current_task.<field>", "state.<key>",
+                    "artifacts.<name>", "issue.{title,body,number,url,labels}"]:
+            self.assertIn(key, ns)
+        # api_body typed injection must be documented (the inline-array footgun)
+        self.assertIn("typed JSON", ns["steps.<name>.data"])
+        self.assertIn("alias", ns["steps.<name>.data_json"])
+
+    # ── skills_list / profiles_list / directives_list ────────────────
+    def test_skills_list_is_lean_and_drops_content(self):
+        fake = self._env([
+            {"id": "sk-1", "name": "Reviewer", "description": "d",
+             "category": "code", "is_builtin": True, "token_estimate": 120,
+             "content": "# huge markdown body", "icon": "x", "license": "MIT"},
+        ])
+        with mock.patch.object(self.mod, "_http", return_value=fake):
+            out = self.mod.call_skills_list({})
+        self.assertEqual(out[0]["id"], "sk-1")
+        self.assertIn("name", out[0])
+        self.assertNotIn("content", out[0], "skills_list must drop the markdown body")
+
+    def test_profiles_list_drops_persona_prompt(self):
+        fake = self._env([
+            {"id": "pr-1", "name": "Archi", "role": "architect",
+             "persona_name": "Ada", "category": "eng", "default_engine": "ClaudeCode",
+             "is_builtin": True, "token_estimate": 80, "persona_prompt": "long..."},
+        ])
+        with mock.patch.object(self.mod, "_http", return_value=fake):
+            out = self.mod.call_profiles_list({})
+        self.assertEqual(out[0]["role"], "architect")
+        self.assertNotIn("persona_prompt", out[0])
+
+    def test_directives_list_keeps_conflicts_drops_content(self):
+        fake = self._env([
+            {"id": "di-1", "name": "Terse", "description": "be brief",
+             "category": "style", "conflicts": ["di-2"], "is_builtin": True,
+             "token_estimate": 30, "content": "long body", "icon": "x"},
+        ])
+        with mock.patch.object(self.mod, "_http", return_value=fake):
+            out = self.mod.call_directives_list({})
+        self.assertEqual(out[0]["conflicts"], ["di-2"])
+        self.assertNotIn("content", out[0])
+
+    def test_binding_list_tools_are_registered(self):
+        names = [t["name"] for t in self.mod.TOOLS]
+        for n in ["skills_list", "profiles_list", "directives_list"]:
+            self.assertIn(n, names)
+            self.assertIn(n, self.mod.DISPATCH)
+
+    def test_orientation_mentions_step_schema_and_binding_lists(self):
+        resp = self.mod._handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        instr = resp["result"]["instructions"]
+        for needle in ["workflow_step_schema", "skills_list", "profiles_list", "directives_list"]:
+            self.assertIn(needle, instr)
+
+    def test_step_schema_foreach_contract_documents_current_task_template_vars(self):
+        out = self.mod.call_workflow_step_schema({})
+        contract = out["fields_by_type"]["SubWorkflow"]["FOREACH_RUNTIME_CONTRACT"]
+        # the templating accessor an agent kept guessing — now pinned
+        self.assertIn("{{current_task.<field>}}", contract)
+        self.assertIn("current_task.number", contract)
+        # explicitly rules OUT the wrong guesses
+        self.assertIn("item.*", contract)
+
+
+class WorkflowRunHistoryTests(unittest.TestCase):
+    """0.8.8 (2026-06-25) — run history (`workflow_runs`), per-run detail
+    (`workflow_run_get`), and cancel (`workflow_cancel_run`). Closes the gap
+    where only active/latest runs were reachable via MCP."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    @staticmethod
+    def _env(data):
+        return {"success": True, "data": data}
+
+    def test_workflow_runs_is_lean_keeps_parent_run_id_drops_steps(self):
+        runs = [{
+            "id": "run-1", "workflow_id": "wf", "status": "Success", "run_type": "cron",
+            "started_at": "t0", "finished_at": "t1", "tokens_used": 12,
+            "batch_total": 0, "parent_run_id": None,
+            "step_results": [{"output": "x" * 9999}], "state": {"big": "y"},
+        }]
+        with mock.patch.object(self.mod, "_http", return_value=self._env(runs)):
+            out = self.mod.call_workflow_runs({"workflow_id": "wf"})
+        self.assertEqual(out[0]["id"], "run-1")
+        self.assertEqual(out[0]["status"], "Success")
+        self.assertIn("parent_run_id", out[0], "parent_run_id kept (child enumeration)")
+        self.assertNotIn("step_results", out[0], "heavy step_results dropped from the list")
+        self.assertNotIn("state", out[0])
+
+    def test_workflow_runs_limit_truncates(self):
+        runs = [{"id": f"r{i}"} for i in range(10)]
+        with mock.patch.object(self.mod, "_http", return_value=self._env(runs)):
+            out = self.mod.call_workflow_runs({"workflow_id": "wf", "limit": 3})
+        self.assertEqual(len(out), 3)
+
+    def test_workflow_runs_forwards_history_route(self):
+        fake = mock.MagicMock(return_value=self._env([]))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_runs({"workflow_id": "wf-9"})
+        method, path = fake.call_args.args[:2]
+        self.assertEqual((method, path), ("GET", "/api/workflows/wf-9/runs"))
+
+    def test_workflow_run_get_truncates_long_step_output(self):
+        run = {"id": "r", "step_results": [
+            {"step_name": "big", "status": "Failed", "duration_ms": 5,
+             "output": "E" * 5000},
+        ]}
+        with mock.patch.object(self.mod, "_http", return_value=self._env(run)):
+            out = self.mod.call_workflow_run_get({"workflow_id": "wf", "run_id": "r"})
+        s = out["step_results"][0]
+        self.assertEqual(s["step_name"], "big")
+        self.assertLess(len(s["output"]), 2000)
+        self.assertIn("truncated", s["output"])
+
+    def test_workflow_run_get_requires_both_ids(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_workflow_run_get({"workflow_id": "wf"})
+
+    def test_workflow_cancel_run_posts_cancel_route(self):
+        fake = mock.MagicMock(return_value=self._env({"cancelled": True}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_workflow_cancel_run({"workflow_id": "wf", "run_id": "r5"})
+        method, path = fake.call_args.args[:2]
+        self.assertEqual((method, path), ("POST", "/api/workflows/wf/runs/r5/cancel"))
+
+    def test_run_history_tools_registered(self):
+        names = [t["name"] for t in self.mod.TOOLS]
+        for n in ["workflow_runs", "workflow_run_get", "workflow_cancel_run"]:
+            self.assertIn(n, names)
+            self.assertIn(n, self.mod.DISPATCH)
+
+
+class AgentLibraryCrudTests(unittest.TestCase):
+    """0.8.8 (2026-06-24) — create/update/delete for skills · profiles ·
+    directives (the Agent-step bindings). Load-merge-write update, category
+    validation, custom-only enforced server-side. Closes the loop with the
+    `*s_list` read tools."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    @staticmethod
+    def _env(data):
+        return {"success": True, "data": data}
+
+    # ── create ───────────────────────────────────────────────────────
+    def test_skill_create_posts_required_and_optional_fields(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "custom-x", "name": "Rev"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            out = self.mod.call_skill_create({
+                "name": "Rev", "description": "d", "icon": "🔍",
+                "category": "Domain", "content": "# body", "license": "MIT",
+            })
+        method, path, body = fake.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/skills"))
+        self.assertEqual(body["category"], "Domain")
+        self.assertEqual(body["license"], "MIT")
+        self.assertEqual(out["id"], "custom-x")
+
+    def test_skill_create_rejects_bad_category(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_skill_create({
+                "name": "x", "description": "d", "icon": "i",
+                "category": "Nope", "content": "c",
+            })
+
+    def test_create_missing_required_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_directive_create({"name": "x"})  # missing description/icon/category/content
+
+    def test_profile_create_posts_to_profiles(self):
+        fake = mock.MagicMock(return_value=self._env({"id": "custom-p"}))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_profile_create({
+                "name": "Archi", "role": "architect", "avatar": "🏛",
+                "color": "#6C5CE7", "category": "Technical", "persona_prompt": "p",
+            })
+        method, path, _ = fake.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/profiles"))
+
+    # ── update (load-merge-write) ─────────────────────────────────────
+    def test_directive_update_merges_over_existing(self):
+        existing = [{
+            "id": "custom-d", "name": "Old", "description": "od", "icon": "i",
+            "category": "Output", "content": "oc", "conflicts": ["x"], "is_builtin": False,
+        }]
+        calls = []
+
+        def fake_http(method, path, body=None):
+            calls.append((method, path, body))
+            if method == "GET":
+                return self._env(existing)
+            return self._env({"id": "custom-d", "name": "New"})
+
+        with mock.patch.object(self.mod, "_http", fake_http):
+            self.mod.call_directive_update({"directive_id": "custom-d", "name": "New"})
+
+        put = next(c for c in calls if c[0] == "PUT")
+        self.assertEqual(put[1], "/api/directives/custom-d")
+        # patched field overridden, untouched fields carried from existing
+        self.assertEqual(put[2]["name"], "New")
+        self.assertEqual(put[2]["content"], "oc")
+        self.assertEqual(put[2]["conflicts"], ["x"])
+
+    def test_update_unknown_id_raises(self):
+        with mock.patch.object(self.mod, "_http", return_value=self._env([])):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_skill_update({"skill_id": "nope"})
+
+    # ── delete ────────────────────────────────────────────────────────
+    def test_profile_delete_calls_delete_route(self):
+        fake = mock.MagicMock(return_value=self._env(True))
+        with mock.patch.object(self.mod, "_http", fake):
+            self.mod.call_profile_delete({"profile_id": "custom-p"})
+        method, path = fake.call_args.args[:2]
+        self.assertEqual((method, path), ("DELETE", "/api/profiles/custom-p"))
+
+    def test_delete_missing_id_raises(self):
+        with self.assertRaises(RuntimeError):
+            self.mod.call_skill_delete({})
+
+    # ── registration ──────────────────────────────────────────────────
+    def test_all_crud_tools_registered(self):
+        names = [t["name"] for t in self.mod.TOOLS]
+        for n in ["skill_create", "skill_update", "skill_delete",
+                  "profile_create", "profile_update", "profile_delete",
+                  "directive_create", "directive_update", "directive_delete"]:
+            self.assertIn(n, names, f"{n} missing from TOOLS")
+            self.assertIn(n, self.mod.DISPATCH, f"{n} missing from DISPATCH")
+
+
 if __name__ == "__main__":
     unittest.main()

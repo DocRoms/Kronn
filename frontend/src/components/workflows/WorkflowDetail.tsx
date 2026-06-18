@@ -16,6 +16,16 @@ import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
 
+/** 0.8.8 — which "step in progress" placeholder to show in the live-run view.
+ *  Only `Agent` steps stream chunks into `currentStepText`; every other type
+ *  (ApiCall, Exec, Gate, Notify, JsonData, Batch*, SubWorkflow) produces its
+ *  output at the END of the step, so the "L'agent démarre…" copy was wrong
+ *  there — a user with a `fetch` ApiCall step (no agent at all) saw it. */
+export function liveStepWaitingKey(step: Pick<WorkflowStep, 'step_type'>): string {
+  const isAgentLike = !step.step_type || step.step_type.type === 'Agent';
+  return isAgentLike ? 'wf.live.stepStreamingWaiting' : 'wf.live.stepRunningNoStream';
+}
+
 /** Module-level tracker for in-flight and completed step tests.
  *
  *  A StepCard that starts a test doesn't own the SSE stream — it delegates
@@ -1590,7 +1600,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                         ? (completed.output || t('wf.live.stepNoOutput'))
                         : (liveRun.currentStepText
                             ? <>{liveRun.currentStepText}<span className="wf-streaming-cursor" style={{ opacity: 0.6 }}>▊</span></>
-                            : t('wf.live.stepStreamingWaiting'))}
+                            : t(liveStepWaitingKey(step)))}
                     </pre>
                   </div>
                 )}

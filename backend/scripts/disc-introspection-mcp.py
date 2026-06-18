@@ -435,6 +435,63 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "workflow_runs",
+        "description": (
+            "RUN HISTORY of one workflow (most recent first) — the past runs, "
+            "not just active (`workflow_active_runs`) or the latest. Lean per-run "
+            "summary: status · run_type · started/finished · tokens · batch "
+            "counts · parent_run_id. Use it to debrief a cron/scheduled workflow "
+            "(how many runs, which failed). To enumerate the foreach/batch "
+            "CHILDREN of a parent run, call this on the CHILD workflow's id and "
+            "filter by `parent_run_id == <parent run id>`. Drill into one run "
+            "with `workflow_run_get`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string"},
+                "limit": {"type": "integer", "description": "Optional: keep only the N most recent."},
+            },
+            "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_run_get",
+        "description": (
+            "Full detail of ONE run, incl per-step results (step_name · status · "
+            "duration_ms · tokens · kind · agent · truncated output) — for "
+            "debriefing a failed/finished run: which step failed and why. For an "
+            "agent step's full produced content, read the run's discussions via "
+            "`workflow_run_discussions`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string"},
+                "run_id": {"type": "string"},
+            },
+            "required": ["workflow_id", "run_id"],
+        },
+    },
+    {
+        "name": "workflow_cancel_run",
+        "description": (
+            "Cancel a RUNNING run (MCP equivalent of the UI 'Arrêter'). "
+            "DESTRUCTIVE — stops the run + its in-flight agents; completed "
+            "steps/commits are kept. Use to stop a stuck or duplicate run (e.g. "
+            "an overlapping cron tick). Confirm with the user before cancelling a "
+            "run you didn't start."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string"},
+                "run_id": {"type": "string"},
+            },
+            "required": ["workflow_id", "run_id"],
+        },
+    },
+    {
         "name": "qp_list",
         "description": (
             "List every Quick Prompt in the user's library — compact "
@@ -565,28 +622,43 @@ TOOLS = [
             "`KRONN:WORKFLOW_READY` block and let the user one-click "
             "deploy via the existing UI CTA.\n\n"
             "**⚠ Discovery first — DO NOT INVENT.** A fabricated step "
-            "fails at run time, not at draft time. Before calling this "
-            "tool, verify every reference: every `step_type` is in the "
-            "closed enum (Agent / ApiCall / BatchApiCall / Exec / Gate "
-            "/ Notify / BatchQuickPrompt); every ApiCall step's "
-            "`api_plugin_slug` + `api_config_id` exists in `mcp_list` "
-            "(call it first if you haven't this session); every Agent "
-            "step's `skill_ids` / `profile_ids` / `directive_ids` "
-            "exists in the relevant Kronn config (skills/profiles/"
-            "directives endpoints — see the `workflow-architect` skill "
-            "for the canonical lists). If a binding cannot be enumerated "
-            "AT CALL TIME, ASK the user — never guess. A workflow drafted "
-            "with hallucinated slugs/ids passes schema validation and "
-            "fails opaquely at the first run, wasting both your output "
-            "and the user's debug time.\n\n"
+            "fails at run time, not at draft time. Verify every reference "
+            "AT CALL TIME: each `step_type` is in the closed 9-set below; "
+            "each ApiCall's `api_plugin_slug`+`api_config_id` exists in "
+            "`mcp_list`; each Agent's `skill_ids`/`profile_ids`/"
+            "`directive_ids` exists (enumerate them with `skills_list` / "
+            "`profiles_list` / `directives_list`). If you can't enumerate a "
+            "binding, ASK — never guess (hallucinated ids pass schema "
+            "validation and fail opaquely at the first run).\n\n"
             "Payload mirrors `CreateWorkflowRequest`: name (required), "
             "trigger (required, e.g. `{ \"type\": \"Manual\" }`), steps "
             "(required, ≥ 1 ≤ 20 items). Optional: project_id, "
             "actions, safety, workspace_config, concurrency_limit, "
             "guards, artifacts, on_failure, exec_allowlist, variables.\n\n"
-            "Returns the created workflow JSON (id, all fields) so the "
-            "agent can echo the id back to the user (`Workflow drafted "
-            "as <id> — review and enable in your Workflows page`)."
+            "**WorkflowStep shape:** the type-specific fields sit at the TOP "
+            "LEVEL (never nested under a sub-object), BUT `step_type` itself is a "
+            "TAGGED OBJECT `{\"type\": \"Agent\"}` — NOT a bare string (serde "
+            "`#[serde(tag=\"type\")]`). Same for `output_format` "
+            "(`{\"type\":\"Structured\"}`) and the workflow `trigger` "
+            "(`{\"type\":\"Manual\"}`). (This tool is forgiving — it also accepts a "
+            "bare-string `step_type` and wraps it — but the canonical form, the "
+            "one `workflow_get` returns, is the tagged object.) `step_type.type` is "
+            "a CLOSED set — one of: **Agent · ApiCall · BatchApiCall · "
+            "BatchQuickPrompt · Exec · Gate · Notify · JsonData · SubWorkflow**. "
+            "(Don't infer the available types from one workflow you happened to "
+            "open — it may use only Agent steps. This list is the whole taxonomy.)\n"
+            "Common shapes (copy then adapt):\n"
+            "  • Agent: `{\"name\":\"Triage\",\"step_type\":{\"type\":\"Agent\"},\"agent\":\"ClaudeCode\",\"prompt_template\":\"Analyse {{previous_step.output}}\",\"output_format\":{\"type\":\"Structured\"}}`\n"
+            "  • ApiCall: `{\"name\":\"Fetch\",\"step_type\":{\"type\":\"ApiCall\"},\"api_plugin_slug\":\"mcp-atlassian\",\"api_config_id\":\"<id from mcp_list>\",\"api_endpoint_path\":\"/rest/api/2/search\",\"api_method\":\"GET\",\"api_query\":{\"jql\":\"...\"}}`\n"
+            "  • Exec: `{\"name\":\"Tests\",\"step_type\":{\"type\":\"Exec\"},\"exec_command\":\"make\",\"exec_args\":[\"test\"],\"exec_timeout_secs\":600}` (binary must be in the workflow `exec_allowlist`; for a LARGE input use `\"exec_stdin\":\"{{steps.fetch.data_json}}\"` — piped to stdin, no argv size limit — instead of a huge arg)\n"
+            "  • Gate: `{\"name\":\"Validate\",\"step_type\":{\"type\":\"Gate\"},\"gate_message\":\"Approve?\",\"gate_request_changes_target\":\"<step name to loop back to>\"}`\n"
+            "  • Notify: `{\"name\":\"Done\",\"step_type\":{\"type\":\"Notify\"},\"notify_config\":{...}}`\n"
+            "  • BatchQuickPrompt: `{\"name\":\"Fan out\",\"step_type\":{\"type\":\"BatchQuickPrompt\"},\"batch_quick_prompt_id\":\"<qp id>\",\"batch_items_from\":\"{{previous_step.data}}\",\"batch_wait_for_completion\":true}`\n"
+            "  • BatchApiCall: `{\"name\":\"Bulk\",\"step_type\":{\"type\":\"BatchApiCall\"},\"batch_items_from\":\"{{previous_step.data}}\",\"api_plugin_slug\":\"…\",\"api_config_id\":\"…\",\"api_endpoint_path\":\"…\",\"api_method\":\"POST\"}` (fan one ApiCall over a list, zero tokens)\n"
+            "  • JsonData: `{\"name\":\"Seed\",\"step_type\":{\"type\":\"JsonData\"},\"json_data_payload\":\"[{...}]\"}` (deterministic data source, zero tokens — feeds `{{steps.Seed.data}}`)\n"
+            "  • SubWorkflow: `{\"name\":\"Implement\",\"step_type\":{\"type\":\"SubWorkflow\"},\"sub_workflow_id\":\"<child id>\"}` — runs ANOTHER workflow as a step. Add `\"sub_workflow_foreach_file\":\".kronn/tasks.json\"` to run the child ONCE PER ITEM. **FOREACH RUNTIME CONTRACT (run-breaking): the engine exposes each item to the child as template vars `{{current_task.<field>}}` (e.g. path `/pulls/{{current_task.number}}/reviews`) AND as the file `.kronn/current_task.json`. Accessor is FIXED `current_task.*` — NOT `{{item.*}}`, NOT derived from the foreach file name.** Child must exist first. Call `workflow_step_schema` for the full contract.\n"
+            "Advanced (Agent step): `output_format` = `{\"type\":\"TypedSchema\",\"schema\":{…}}` (validates+repairs the agent's JSON) or `{\"type\":\"Structured\"}`; `multi_agent_review:true` = second agent debates the output.\n"
+            "Better than hand-authoring: `workflow_get`/`workflow_clone` a RICH workflow (e.g. AutoPilot) and adapt. Returns the created workflow JSON (id + all fields)."
         ),
         "inputSchema": {
             "type": "object",
@@ -594,11 +666,23 @@ TOOLS = [
                 "name": {"type": "string", "description": "Workflow name (1-200 chars)."},
                 "trigger": {
                     "type": "object",
-                    "description": "Workflow trigger spec (Manual / Cron / Tracker). E.g. `{ \"type\": \"Manual\" }` or `{ \"type\": \"Cron\", \"schedule\": \"0 9 * * 1-5\" }`.",
+                    "description": "Workflow trigger spec (Manual / Cron / Tracker). E.g. `{ \"type\": \"Manual\" }` or `{ \"type\": \"Cron\", \"schedule\": \"0 9 * * 1-5\" }`. For Cron/Tracker, `concurrency_limit` auto-defaults to 1 (no self-overlap) unless you set it — see that field.",
                 },
                 "steps": {
                     "type": "array",
-                    "description": "Workflow steps (1-20 items). Each step matches the `WorkflowStep` shape — see the `workflow-architect` skill for the canonical schema.",
+                    "description": (
+                        "Workflow steps (1-20). Type-specific fields at top level, but "
+                        "`step_type` is a TAGGED OBJECT `{\"type\":\"Agent\"}` (not a bare "
+                        "string; bare string is tolerated + wrapped). `step_type.type` ∈ "
+                        "closed 9-set: Agent · ApiCall · BatchApiCall · BatchQuickPrompt · "
+                        "Exec · Gate · Notify · JsonData · SubWorkflow. SubWorkflow foreach runtime contract: "
+                        "`sub_workflow_foreach_file` is your SOURCE list; the engine exposes "
+                        "each item to the child as `{{current_task.<field>}}` template vars "
+                        "(e.g. `{{current_task.number}}`) AND as the FIXED file "
+                        "`.kronn/current_task.json`. Accessor is `current_task.*` (fixed — not "
+                        "`{{item.*}}`, not the source-file name). Call `workflow_step_schema` "
+                        "for the full per-type schema + examples."
+                    ),
                 },
                 "project_id": {"type": "string", "description": "Optional Kronn project id to bind the workflow to."},
                 "variables": {"type": "array", "description": "Optional manual-launch variables (each `{ name, label?, placeholder?, required?, description? }`)."},
@@ -606,7 +690,7 @@ TOOLS = [
                 "on_failure": {"type": "array", "description": "Optional rollback step chain (Notify / Agent / ApiCall steps)."},
                 "exec_allowlist": {"type": "array", "items": {"type": "string"}, "description": "Whitelisted binaries for any Exec steps."},
                 "artifacts": {"type": "object", "description": "Optional artifact declarations (name → spec)."},
-                "concurrency_limit": {"type": "integer", "description": "Optional max concurrent runs."},
+                "concurrency_limit": {"type": "integer", "description": "Max concurrent runs of THIS workflow. When active runs ≥ limit, the scheduler SKIPS the tick (not queued). For a Cron/Tracker trigger, leave unset → it defaults to 1 (no self-overlap); set explicitly higher only if you truly want overlapping runs. Overlap on a state-mutating cron = double work + duplicate side-effects."},
                 "safety": {"type": "object", "description": "Optional WorkflowSafety overrides."},
                 "actions": {"type": "array", "description": "Optional actions (legacy slot)."},
                 "workspace_config": {"type": "object", "description": "Optional workspace mode (Direct / Isolated)."},
@@ -657,6 +741,361 @@ TOOLS = [
             },
             "required": ["name", "prompt_template", "agent"],
         },
+    },
+    {
+        "name": "workflow_get",
+        "description": (
+            "Fetch a workflow's FULL definition (every step + all fields) "
+            "by id. Unlike `workflow_list` (compact summary, no steps), "
+            "this returns the exact shape `workflow_create_draft` / "
+            "`workflow_update` accept — so READ a real workflow here "
+            "before cloning or patching, instead of guessing the step "
+            "schema and discovering required fields one 422 at a time."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id (from `workflow_list`)."},
+            },
+            "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_clone",
+        "description": (
+            "Duplicate an existing workflow. Mints fresh ids, re-bundles "
+            "and rewrites referenced Quick Prompt ids, strips per-user "
+            "notify URLs. The clone lands DISABLED with a distinct name "
+            "(default `<name> (copie)`) so it never auto-fires and you "
+            "never get two identically-named workflows. Typical loop: "
+            "`workflow_clone` → `workflow_update` (patch a few fields) → "
+            "`workflow_set_enabled` (test). Cheaper + safer than "
+            "re-authoring from scratch."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string", "description": "Source workflow id to clone."},
+                "new_name": {"type": "string", "description": "Optional name for the clone (default `<source name> (copie)`)."},
+                "project_id": {"type": "string", "description": "Optional project to bind the clone to (default: current discussion's project)."},
+            },
+            "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_update",
+        "description": (
+            "Patch an existing workflow IN PLACE. TRUE patch semantics: "
+            "any field you omit keeps its current value; send a field to "
+            "replace it. Same field shapes as `workflow_create_draft` "
+            "(name, trigger, steps, variables, guards, on_failure, "
+            "exec_allowlist, artifacts, …) plus `enabled`. NOTE: `steps` "
+            "is replaced WHOLESALE, not merged — to edit one step, fetch "
+            "the full `steps` via `workflow_get`, change what you need, "
+            "and send the whole array back."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id to patch."},
+                "name": {"type": "string"},
+                "trigger": {"type": "object", "description": "e.g. `{ \"type\": \"Manual\" }`."},
+                "steps": {"type": "array", "description": "Full replacement steps array (1-20). Fetch + edit via `workflow_get` first."},
+                "variables": {"type": "array", "description": "Launch-time variables. `label`/`placeholder` auto-default to the name/empty if omitted."},
+                "guards": {"type": "object"},
+                "on_failure": {"type": "array"},
+                "exec_allowlist": {"type": "array", "items": {"type": "string"}},
+                "artifacts": {"type": "object"},
+                "enabled": {"type": "boolean", "description": "Toggle enabled. For Cron/Tracker triggers prefer `workflow_set_enabled` (it gates auto-firing)."},
+                "project_id": {"type": "string"},
+                "concurrency_limit": {"type": "integer"},
+                "safety": {"type": "object"},
+                "workspace_config": {"type": "object"},
+                "actions": {"type": "array"},
+            },
+            "required": ["workflow_id"],
+        },
+    },
+    {
+        "name": "workflow_set_enabled",
+        "description": (
+            "Enable or disable a workflow. Disabling is always allowed. "
+            "Enabling a MANUAL workflow is free (it only runs when "
+            "explicitly triggered). Enabling a CRON/TRACKER workflow is "
+            "REFUSED unless you pass `force: true` — that would schedule "
+            "autonomous runs with no human in the loop; prefer letting the "
+            "user enable scheduled workflows from the Kronn UI."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "workflow_id": {"type": "string", "description": "Workflow id."},
+                "enabled": {"type": "boolean", "description": "true to enable, false to disable."},
+                "force": {"type": "boolean", "description": "Pass true to enable a Cron/Tracker-triggered workflow (otherwise refused)."},
+            },
+            "required": ["workflow_id", "enabled"],
+        },
+    },
+    {
+        "name": "qp_update",
+        "description": (
+            "Patch an existing Quick Prompt IN PLACE (by id). Loads the "
+            "current QP, applies your patch field-by-field, saves the "
+            "merged result — tweak just `prompt_template` or `agent` "
+            "without resetting the rest. Use this to iterate a QP "
+            "(e.g. v2 → v2.1) instead of creating an orphan copy. "
+            "Same field shapes as `qp_create_draft`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qp_id": {"type": "string", "description": "Quick Prompt id (from `qp_list`)."},
+                "name": {"type": "string"},
+                "prompt_template": {"type": "string"},
+                "agent": {"type": "string"},
+                "variables": {"type": "array", "description": "`label`/`placeholder` auto-default to the name/empty if omitted."},
+                "description": {"type": "string"},
+                "icon": {"type": "string"},
+                "tier": {"type": "string"},
+                "project_id": {"type": "string"},
+                "skill_ids": {"type": "array", "items": {"type": "string"}},
+                "profile_ids": {"type": "array", "items": {"type": "string"}},
+                "directive_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["qp_id"],
+        },
+    },
+    {
+        "name": "qp_get",
+        "description": (
+            "Fetch a Quick Prompt's FULL definition by id — including the "
+            "`prompt_template` BODY that `qp_list` omits, plus all bindings "
+            "(variables, skill/profile/directive ids, agent, tier). Use it to "
+            "understand what a QP actually does so you can RUN it yourself "
+            "(render the template with the variables, then act), or to read a "
+            "QP before editing it with `qp_update`. `qp_list` only tells you a "
+            "QP exists; `qp_get` tells you what it does."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qp_id": {"type": "string", "description": "Quick Prompt id (from `qp_list`)."},
+            },
+            "required": ["qp_id"],
+        },
+    },
+    {
+        "name": "qp_delete",
+        "description": (
+            "Delete a Quick Prompt by id. Use to clean up an orphan draft "
+            "(e.g. after replacing a QP rather than patching it via "
+            "`qp_update`)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "qp_id": {"type": "string", "description": "Quick Prompt id to delete."},
+            },
+            "required": ["qp_id"],
+        },
+    },
+    {
+        "name": "skills_list",
+        "description": (
+            "List Kronn SKILLS (builtin + custom) — id · name · description · "
+            "category. These are the valid values for an Agent step's "
+            "`skill_ids` (and a QP's). Drops the markdown body for brevity. Call "
+            "this to PICK skill ids when authoring/editing a workflow or QP "
+            "instead of guessing slugs or asking the user to paste them."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "profiles_list",
+        "description": (
+            "List Kronn PROFILES / personas (builtin + custom) — id · name · "
+            "role · persona_name · default_engine. Valid values for an Agent "
+            "step's `profile_ids` (and a QP's). Drops the persona prompt body; "
+            "list to PICK ids."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "directives_list",
+        "description": (
+            "List Kronn DIRECTIVES (builtin + custom) — id · name · description "
+            "· conflicts. Valid values for an Agent step's `directive_ids` (and "
+            "a QP's). Keeps `conflicts` so you don't pick mutually-exclusive "
+            "directives; list to PICK ids."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "skill_create",
+        "description": (
+            "Create a CUSTOM skill in the user's library. Required: `name`, "
+            "`description`, `icon`, `category` (one of Language/Domain/Business), "
+            "`content` (the markdown skill body). Optional: `license`, "
+            "`allowed_tools`. The new skill is immediately bindable via an Agent "
+            "step's / QP's `skill_ids`. Returns the created skill incl its id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "icon": {"type": "string", "description": "Emoji or short icon token."},
+                "category": {"type": "string", "enum": ["Language", "Domain", "Business"]},
+                "content": {"type": "string", "description": "Markdown body of the skill."},
+                "license": {"type": "string"},
+                "allowed_tools": {"type": "string"},
+            },
+            "required": ["name", "description", "icon", "category", "content"],
+        },
+    },
+    {
+        "name": "skill_update",
+        "description": (
+            "Patch a CUSTOM skill (load-merge-write; only fields you pass change). "
+            "Builtin skills are rejected. ⚠ The backend recreates the skill so its "
+            "id CHANGES — use the id in the returned object afterwards."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "Id of the custom skill to patch."},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "icon": {"type": "string"},
+                "category": {"type": "string", "enum": ["Language", "Domain", "Business"]},
+                "content": {"type": "string"},
+                "license": {"type": "string"},
+                "allowed_tools": {"type": "string"},
+            },
+            "required": ["skill_id"],
+        },
+    },
+    {
+        "name": "skill_delete",
+        "description": "Delete a custom skill by id (builtins are protected).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"skill_id": {"type": "string"}},
+            "required": ["skill_id"],
+        },
+    },
+    {
+        "name": "profile_create",
+        "description": (
+            "Create a CUSTOM profile/persona. Required: `name`, `role`, `avatar`, "
+            "`color`, `category` (Technical/Business/Meta), `persona_prompt`. "
+            "Optional: `persona_name`, `default_engine`. Bindable via an Agent "
+            "step's `profile_ids`. Returns the created profile incl id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "role": {"type": "string"},
+                "avatar": {"type": "string", "description": "Emoji/avatar token."},
+                "color": {"type": "string", "description": "Hex or token, e.g. #6C5CE7."},
+                "category": {"type": "string", "enum": ["Technical", "Business", "Meta"]},
+                "persona_prompt": {"type": "string"},
+                "persona_name": {"type": "string"},
+                "default_engine": {"type": "string"},
+            },
+            "required": ["name", "role", "avatar", "color", "category", "persona_prompt"],
+        },
+    },
+    {
+        "name": "profile_update",
+        "description": "Patch a custom profile (load-merge-write; builtins rejected).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "profile_id": {"type": "string"},
+                "name": {"type": "string"},
+                "role": {"type": "string"},
+                "avatar": {"type": "string"},
+                "color": {"type": "string"},
+                "category": {"type": "string", "enum": ["Technical", "Business", "Meta"]},
+                "persona_prompt": {"type": "string"},
+                "persona_name": {"type": "string"},
+                "default_engine": {"type": "string"},
+            },
+            "required": ["profile_id"],
+        },
+    },
+    {
+        "name": "profile_delete",
+        "description": "Delete a custom profile by id (builtins are protected).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"profile_id": {"type": "string"}},
+            "required": ["profile_id"],
+        },
+    },
+    {
+        "name": "directive_create",
+        "description": (
+            "Create a CUSTOM directive. Required: `name`, `description`, `icon`, "
+            "`category` (Output/Language), `content`. Optional: `conflicts` (list "
+            "of directive ids it's mutually exclusive with). Bindable via an Agent "
+            "step's `directive_ids`. Returns the created directive incl id."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "icon": {"type": "string"},
+                "category": {"type": "string", "enum": ["Output", "Language"]},
+                "content": {"type": "string"},
+                "conflicts": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["name", "description", "icon", "category", "content"],
+        },
+    },
+    {
+        "name": "directive_update",
+        "description": "Patch a custom directive (load-merge-write; builtins rejected).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "directive_id": {"type": "string"},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "icon": {"type": "string"},
+                "category": {"type": "string", "enum": ["Output", "Language"]},
+                "content": {"type": "string"},
+                "conflicts": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["directive_id"],
+        },
+    },
+    {
+        "name": "directive_delete",
+        "description": "Delete a custom directive by id (builtins are protected).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"directive_id": {"type": "string"}},
+            "required": ["directive_id"],
+        },
+    },
+    {
+        "name": "workflow_step_schema",
+        "description": (
+            "Return the CANONICAL WorkflowStep schema as a tool RESULT (never "
+            "truncated, unlike a tool description): the closed 9-set of "
+            "`step_type`s, the flat shape, the required + optional fields PER "
+            "type, and the RUNTIME CONTRACTS that break a workflow at run time "
+            "if missed (e.g. SubWorkflow foreach → the engine writes each item "
+            "to the fixed path `.kronn/current_task.json`). Zero args. Call this "
+            "BEFORE authoring or editing a workflow instead of inferring the "
+            "schema from one `workflow_get` sample or from the (possibly "
+            "client-truncated) `workflow_create_draft` description."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "qa_create_draft",
@@ -1974,8 +2413,8 @@ def call_workflow_active_runs(_args):
 def call_qp_list(_args):
     # 0.8.5 — compact list. Keeps variable names so the agent can decide
     # if an existing QP fits the user's use case before drafting a new
-    # one. Drops the full `prompt_template` body (the agent can call
-    # `GET /api/quick-prompts/<id>` if it really needs the body).
+    # one. Drops the full `prompt_template` body — call `qp_get(qp_id)` to
+    # read it (understand what the QP does / run it yourself / pre-edit).
     data = _unwrap(_http("GET", "/api/quick-prompts")) or []
     out = []
     for q in data:
@@ -2247,6 +2686,22 @@ def call_workflow_create_draft(args):
     # ("drafts never auto-fire").
     body = dict(args)
     body["enabled"] = False
+    # 0.8.8 — wrap bare-string step_type/output_format/mode into the tagged
+    # `{"type": ...}` form serde requires (see _normalize_steps).
+    body["steps"] = _normalize_steps(body["steps"])
+    # 0.8.8 — SAFETY DEFAULT: a Cron/Tracker workflow with no concurrency_limit
+    # lets a new tick start while the previous run is STILL going → overlapping
+    # runs = double work + duplicate side-effects (real incident: a 2.5h PR-review
+    # cron fired its 10h tick on top of itself). Default to 1 (scheduler skips a
+    # tick while a run is active) unless the agent set it explicitly. To allow
+    # overlap, pass a higher concurrency_limit on purpose.
+    trig_type = (args.get("trigger") or {}).get("type")
+    if trig_type in ("Cron", "Tracker") and args.get("concurrency_limit") is None:
+        body["concurrency_limit"] = 1
+    # 0.8.8 — fill PromptVariable's required label/placeholder (see
+    # _normalize_variables) so launch-time vars don't 422 on `{name}` alone.
+    if "variables" in body:
+        body["variables"] = _normalize_variables(body["variables"])
     # 0.8.5 — auto-inherit project binding from the current discussion
     # when the agent doesn't pass one explicitly. Same UX rationale as
     # `disc_create` — an agent operating in a project's disc shouldn't
@@ -2271,6 +2726,11 @@ def call_qp_create_draft(args):
             f"qp_create_draft: 'name' too long ({len(args['name'])} chars, max 200)"
         )
     body = dict(args)
+    # 0.8.8 — fill PromptVariable's required label/placeholder so the agent
+    # can pass `{name}` alone instead of 422-ing (cf.
+    # [[project_mcp_workflow_crud_gap]]).
+    if "variables" in body:
+        body["variables"] = _normalize_variables(body["variables"])
     # 0.8.5 — auto-inherit project binding from the current discussion
     # when the agent doesn't pass one explicitly.
     if "project_id" not in body or body.get("project_id") is None:
@@ -2278,6 +2738,285 @@ def call_qp_create_draft(args):
         if inherited:
             body["project_id"] = inherited
     return _unwrap(_http("POST", "/api/quick-prompts", body))
+
+
+# ─── 0.8.8 (2026-06-23) WF/QP read · clone · update tools ────────────────
+# Thin wrappers over REST routes the UI already uses. Closes the gap an
+# agent hit when it had to draft a workflow BLIND — `workflow_list` is
+# compact (no steps) and there was no get/clone/update, so the agent
+# reverse-engineered the WorkflowStep schema from a chain of 422s and
+# left an orphan QP on every edit. Cf. [[project_mcp_workflow_crud_gap]].
+
+def _normalize_variables(vars_list):
+    """`PromptVariable` (Rust model) requires `name` + `label` +
+    `placeholder` — all non-Option. Agents routinely pass only `name`,
+    which 422s. Fill the two cosmetic fields so the agent can omit them:
+    `label` → the name, `placeholder` → "". Idempotent; leaves anything
+    already-present untouched."""
+    if not isinstance(vars_list, list):
+        return vars_list
+    out = []
+    for v in vars_list:
+        if isinstance(v, dict) and v.get("name"):
+            v = dict(v)
+            v.setdefault("label", v["name"])
+            v.setdefault("placeholder", "")
+        out.append(v)
+    return out
+
+
+# `WorkflowStep` has serde `#[serde(tag = "type")]` enum fields — on the wire
+# they are TAGGED OBJECTS `{"type": "Agent"}`, NOT bare strings. An LLM very
+# often writes `"step_type": {"type": "Agent"}`, which fails deserialization with an
+# opaque 422 ("invalid type: string ... expected internally tagged enum"). We
+# wrap any bare-string value of these fields into `{"type": <value>}` so BOTH
+# forms work — killing a whole class of 422 ping-pong. Idempotent: an already-
+# tagged object (e.g. from `workflow_get` round-trip) is left untouched.
+_TAGGED_STEP_FIELDS = ("step_type", "output_format", "mode")
+
+
+def _normalize_steps(steps):
+    if not isinstance(steps, list):
+        return steps
+    out = []
+    for s in steps:
+        if isinstance(s, dict):
+            s = dict(s)
+            for f in _TAGGED_STEP_FIELDS:
+                if isinstance(s.get(f), str):
+                    s[f] = {"type": s[f]}
+        out.append(s)
+    return out
+
+
+def call_workflow_get(args):
+    """Full workflow definition (steps + every field) — NOT the compact
+    `workflow_list` shape. This is what an agent reads before cloning or
+    patching an existing workflow."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_get: missing required 'workflow_id'")
+    return _unwrap(_http("GET", f"/api/workflows/{wid}"))
+
+
+def _run_summary(r):
+    """Lean projection of a WorkflowRun for the history list — drops the heavy
+    `step_results` + `state`. `parent_run_id` is KEPT so foreach/batch children
+    are identifiable (a child run carries the parent RUN's id here)."""
+    return {
+        "id": r.get("id"),
+        "status": r.get("status"),
+        "run_type": r.get("run_type"),
+        "started_at": r.get("started_at"),
+        "finished_at": r.get("finished_at"),
+        "tokens_used": r.get("tokens_used"),
+        "batch_total": r.get("batch_total"),
+        "batch_completed": r.get("batch_completed"),
+        "batch_failed": r.get("batch_failed"),
+        "parent_run_id": r.get("parent_run_id"),
+        "produced_branches": r.get("produced_branches"),
+    }
+
+
+def call_workflow_runs(args):
+    """List the RUN HISTORY of a workflow (most recent first) — not just the
+    active ones (`workflow_active_runs`) or the last one. Lean per-run summary
+    (status · run_type · started/finished · tokens · batch counts ·
+    parent_run_id); call `workflow_run_get` for a run's per-step detail.
+    Enumerate foreach/batch CHILDREN of a parent run by calling this on the
+    CHILD workflow's id and filtering by `parent_run_id == <parent run id>`
+    (children belong to the child workflow, each tagged with the parent RUN)."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_runs: missing required 'workflow_id'")
+    runs = _unwrap(_http("GET", f"/api/workflows/{wid}/runs")) or []
+    out = [_run_summary(r) for r in runs]
+    limit = args.get("limit")
+    if isinstance(limit, int) and limit > 0:
+        out = out[:limit]
+    return out
+
+
+def call_workflow_run_get(args):
+    """Full detail of ONE workflow run, incl per-step results — for debriefing
+    a finished/failed run (which step failed, durations, tokens). Step outputs
+    are truncated to keep the payload manageable; for an agent's produced
+    content read the run's discussions via `workflow_run_discussions`."""
+    wid = args.get("workflow_id") or args.get("id")
+    rid = args.get("run_id")
+    if not wid or not rid:
+        raise RuntimeError("workflow_run_get: requires 'workflow_id' and 'run_id'")
+    run = _unwrap(_http("GET", f"/api/workflows/{wid}/runs/{rid}"))
+    if isinstance(run, dict) and isinstance(run.get("step_results"), list):
+        steps = []
+        for s in run["step_results"]:
+            out = s.get("output")
+            if isinstance(out, str) and len(out) > 1500:
+                out = out[:1500] + f"… [truncated, {len(s['output'])} chars total]"
+            steps.append({
+                "step_name": s.get("step_name"),
+                "status": s.get("status"),
+                "duration_ms": s.get("duration_ms"),
+                "tokens_used": s.get("tokens_used"),
+                "step_kind": s.get("step_kind"),
+                "step_agent": s.get("step_agent"),
+                "output": out,
+            })
+        run = dict(run)
+        run["step_results"] = steps
+    return run
+
+
+def call_workflow_cancel_run(args):
+    """Cancel a RUNNING workflow run (the MCP equivalent of the UI's "Arrêter").
+    DESTRUCTIVE — stops the run + its in-flight agents; already-completed steps
+    /commits are kept. Use to stop a stuck or duplicate run (e.g. an overlapping
+    cron tick). Confirm with the user before cancelling a run you didn't start."""
+    wid = args.get("workflow_id") or args.get("id")
+    rid = args.get("run_id")
+    if not wid or not rid:
+        raise RuntimeError("workflow_cancel_run: requires 'workflow_id' and 'run_id'")
+    return _unwrap(_http("POST", f"/api/workflows/{wid}/runs/{rid}/cancel"))
+
+
+def call_workflow_update(args):
+    """Patch an existing workflow. `UpdateWorkflowRequest` is already a
+    TRUE patch backend-side (any omitted field preserves its current
+    value), so we forward exactly the patchable keys the agent supplied
+    — no GET-merge needed."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_update: missing required 'workflow_id'")
+    patchable = (
+        "name", "project_id", "trigger", "steps", "actions", "safety",
+        "workspace_config", "concurrency_limit", "guards", "artifacts",
+        "on_failure", "exec_allowlist", "variables", "enabled",
+    )
+    body = {k: args[k] for k in patchable if k in args}
+    if not body:
+        raise RuntimeError(
+            "workflow_update: no patchable field provided "
+            f"(allowed: {', '.join(patchable)})"
+        )
+    if "steps" in body:
+        body["steps"] = _normalize_steps(body["steps"])
+    if "variables" in body:
+        body["variables"] = _normalize_variables(body["variables"])
+    return _unwrap(_http("PUT", f"/api/workflows/{wid}", body))
+
+
+def call_workflow_clone(args):
+    """Duplicate a workflow via export→import: mints fresh ids, re-bundles
+    + rewrites referenced QP ids, strips per-user notify URLs. Safer than
+    GET→POST (which would share QP ids and reuse the source name verbatim).
+    The clone always lands DISABLED (draft discipline — clones never
+    auto-fire) with a distinct name, so the user never stares at two
+    identically-named workflows. The agent enables it via
+    `workflow_set_enabled` when ready to test."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_clone: missing required 'workflow_id'")
+    envelope = _http_text("GET", f"/api/workflows/{wid}/export")
+    import_body = {"content": envelope}
+    pid = args.get("project_id")
+    if pid is None:
+        pid = _current_project_id()
+    if pid is not None:
+        import_body["project_id"] = pid
+    cloned = _unwrap(_http("POST", "/api/workflows/import", import_body))
+    new_id = cloned.get("id")
+    new_name = args.get("new_name") or f"{cloned.get('name', 'Workflow')} (copie)"
+    return _unwrap(_http("PUT", f"/api/workflows/{new_id}",
+                         {"enabled": False, "name": new_name}))
+
+
+def call_workflow_set_enabled(args):
+    """Enable/disable a workflow. Disabling is always allowed. ENABLING a
+    Cron/Tracker workflow is refused unless `force=true` — that would
+    schedule autonomous runs without a human in the loop. Manual
+    workflows (only run when explicitly triggered) enable freely."""
+    wid = args.get("workflow_id") or args.get("id")
+    if not wid:
+        raise RuntimeError("workflow_set_enabled: missing required 'workflow_id'")
+    if "enabled" not in args:
+        raise RuntimeError("workflow_set_enabled: missing required 'enabled' (bool)")
+    enabled = bool(args["enabled"])
+    if enabled and not bool(args.get("force")):
+        wf = _unwrap(_http("GET", f"/api/workflows/{wid}"))
+        ttype = (wf.get("trigger") or {}).get("type")
+        if ttype in ("Cron", "Tracker"):
+            raise RuntimeError(
+                f"workflow_set_enabled: refusing to enable a {ttype}-triggered "
+                "workflow — that would schedule autonomous runs with no human in "
+                "the loop. Enable it from the Kronn UI, or pass force=true if you "
+                "are certain. (Manual workflows enable freely.)"
+            )
+    return _unwrap(_http("PUT", f"/api/workflows/{wid}", {"enabled": enabled}))
+
+
+def call_qp_update(args):
+    """Patch an existing Quick Prompt. `PUT /api/quick-prompts/<id>` takes
+    the FULL request and REPLACES (omitted fields reset — same footgun as
+    `qa_update`), and there is no single-QP GET route, so we load the QP
+    from `qp_list`, apply the patch field-by-field, and PUT the merged
+    body. Lets the qp-improver / QP-iteration loop patch a QP in place
+    instead of creating an orphan vN.1."""
+    qid = args.get("qp_id") or args.get("id")
+    if not qid:
+        raise RuntimeError("qp_update: missing required 'qp_id'")
+    existing_list = _unwrap(_http("GET", "/api/quick-prompts")) or []
+    existing = next((q for q in existing_list if q.get("id") == qid), None)
+    if not existing:
+        raise RuntimeError(
+            f"qp_update: quick prompt {qid!r} not found — call qp_list to see "
+            "what exists"
+        )
+    patchable = (
+        "name", "icon", "prompt_template", "variables", "agent",
+        "project_id", "skill_ids", "profile_ids", "directive_ids",
+        "tier", "description",
+    )
+    body = {}
+    for field in patchable:
+        if field in args:
+            body[field] = args[field]
+        elif field in existing:
+            body[field] = existing[field]
+    if "variables" in body:
+        body["variables"] = _normalize_variables(body["variables"])
+    if not body.get("name"):
+        raise RuntimeError("qp_update: merged body has empty 'name' — re-check qp_list output")
+    if len(body["name"]) > 200:
+        raise RuntimeError(f"qp_update: 'name' too long ({len(body['name'])} chars, max 200)")
+    return _unwrap(_http("PUT", f"/api/quick-prompts/{qid}", body))
+
+
+def call_qp_get(args):
+    """Full Quick Prompt definition — including the `prompt_template` BODY that
+    `qp_list` drops for brevity (and all bindings: variables, skill/profile/
+    directive ids, agent, tier). This is what you need to (a) understand what a
+    QP actually does so you can RUN it yourself, or (b) read it before a
+    `qp_update` surgery. There is no single-QP GET route, so we fetch the list
+    and filter by id — same lossless source as `qp_update`."""
+    qid = args.get("qp_id") or args.get("id")
+    if not qid:
+        raise RuntimeError("qp_get: missing required 'qp_id'")
+    qps = _unwrap(_http("GET", "/api/quick-prompts")) or []
+    qp = next((q for q in qps if q.get("id") == qid), None)
+    if not qp:
+        raise RuntimeError(
+            f"qp_get: quick prompt {qid!r} not found — call qp_list to see what exists"
+        )
+    return qp
+
+
+def call_qp_delete(args):
+    """Delete a Quick Prompt by id. Use to clean up an orphan draft (e.g.
+    after replacing a QP rather than patching it via `qp_update`)."""
+    qid = args.get("qp_id") or args.get("id")
+    if not qid:
+        raise RuntimeError("qp_delete: missing required 'qp_id'")
+    return _unwrap(_http("DELETE", f"/api/quick-prompts/{qid}"))
 
 
 def call_qa_update(args):
@@ -2448,12 +3187,26 @@ def call_api_call(args):
     # The backend broker normalizes too — this is defense-in-depth and
     # takes effect without a backend rebuild (the script is bind-mounted).
     if isinstance(body.get("body"), str):
+        raw = body["body"]
         try:
-            parsed = json.loads(body["body"])
+            parsed = json.loads(raw)
             if isinstance(parsed, (dict, list)):
                 body["body"] = parsed
-        except (ValueError, TypeError):
-            pass  # a plain-string body is legit for some APIs — keep it
+        except (ValueError, TypeError) as e:
+            # A plain-string body is legit for some APIs — keep it. BUT a body
+            # that clearly MEANT to be JSON (starts with { or [) yet fails to
+            # parse is an LLM brace/quote/escape slip. Forwarding it as a raw
+            # string makes the target API reject it with an opaque 400
+            # ("Invalid request payload") that looks like truncation. Fail LOUD
+            # and actionable so the agent fixes the JSON instead of guessing.
+            if raw.lstrip()[:1] in ("{", "["):
+                raise RuntimeError(
+                    f"api_call: the `body` looks like JSON but is not valid JSON "
+                    f"({e}). The full body was received ({len(raw)} chars — NOT "
+                    f"truncated); the error is in the JSON itself (check braces, "
+                    f"quotes, escaping near the reported column). Fix it and retry."
+                )
+            # else: genuine non-JSON string body — forward as-is.
 
     return _unwrap(_http("POST", "/api/agent-api/call", body))
 
@@ -2675,6 +3428,433 @@ def call_learning_propose(args):
     return _unwrap(_http("POST", "/api/learnings/propose", body))
 
 
+def call_skills_list(_args):
+    """Lean catalog of Kronn SKILLS (builtin + custom). These are the valid
+    values for an Agent step's `skill_ids` (and a QP's `skill_ids`). Drops the
+    full markdown `content` for brevity — list to PICK ids, then the step
+    injects the skill at run time. Call this instead of guessing skill ids or
+    asking the user to paste them."""
+    data = _unwrap(_http("GET", "/api/skills")) or []
+    return [
+        {
+            "id": s.get("id"),
+            "name": s.get("name"),
+            "description": s.get("description"),
+            "category": s.get("category"),
+            "is_builtin": s.get("is_builtin"),
+            "token_estimate": s.get("token_estimate"),
+        }
+        for s in data
+    ]
+
+
+def call_profiles_list(_args):
+    """Lean catalog of Kronn PROFILES (personas — builtin + custom). Valid
+    values for an Agent step's `profile_ids` (and a QP's `profile_ids`). Drops
+    the full `persona_prompt` body; list to PICK ids."""
+    data = _unwrap(_http("GET", "/api/profiles")) or []
+    return [
+        {
+            "id": p.get("id"),
+            "name": p.get("name"),
+            "role": p.get("role"),
+            "persona_name": p.get("persona_name"),
+            "category": p.get("category"),
+            "default_engine": p.get("default_engine"),
+            "is_builtin": p.get("is_builtin"),
+            "token_estimate": p.get("token_estimate"),
+        }
+        for p in data
+    ]
+
+
+def call_directives_list(_args):
+    """Lean catalog of Kronn DIRECTIVES (builtin + custom). Valid values for an
+    Agent step's `directive_ids` (and a QP's `directive_ids`). Drops the full
+    `content` body; keeps `conflicts` so you don't pick mutually-exclusive
+    directives. List to PICK ids."""
+    data = _unwrap(_http("GET", "/api/directives")) or []
+    return [
+        {
+            "id": d.get("id"),
+            "name": d.get("name"),
+            "description": d.get("description"),
+            "category": d.get("category"),
+            "conflicts": d.get("conflicts") or [],
+            "is_builtin": d.get("is_builtin"),
+            "token_estimate": d.get("token_estimate"),
+        }
+        for d in data
+    ]
+
+
+# ── Agent-library CRUD (skills / profiles / directives) ─────────────────────
+# 0.8.8 (2026-06-24) — symmetry with the QP/QA/workflow CRUD cluster. The
+# `*s_list` tools only READ; these author + edit + delete the bindings an
+# Agent step references. Thin wrappers over the existing REST routes
+# (POST/PUT/DELETE /api/{skills,profiles,directives}); update is load-merge-
+# write (the bare PUT replaces the full body) and is CUSTOM-only (the backend
+# rejects edits to builtin entries). Cf. [[project_mcp_workflow_crud_gap]].
+_AGENT_LIB = {
+    "skill": {
+        "path": "/api/skills",
+        "required": ("name", "description", "icon", "category", "content"),
+        "optional": ("license", "allowed_tools"),
+        "categories": ("Language", "Domain", "Business"),
+        # skill update = delete+recreate server-side → the id CHANGES.
+        "update_remints_id": True,
+    },
+    "profile": {
+        "path": "/api/profiles",
+        "required": ("name", "role", "avatar", "color", "category", "persona_prompt"),
+        "optional": ("persona_name", "default_engine"),
+        "categories": ("Technical", "Business", "Meta"),
+        "update_remints_id": False,
+    },
+    "directive": {
+        "path": "/api/directives",
+        "required": ("name", "description", "icon", "category", "content"),
+        "optional": ("conflicts",),
+        "categories": ("Output", "Language"),
+        "update_remints_id": False,
+    },
+}
+
+
+def _lib_create(kind, args):
+    spec = _AGENT_LIB[kind]
+    for f in spec["required"]:
+        if args.get(f) in (None, "", []):
+            raise RuntimeError(f"{kind}_create: missing required '{f}'")
+    cat = args.get("category")
+    if cat not in spec["categories"]:
+        raise RuntimeError(
+            f"{kind}_create: category {cat!r} invalid — one of {list(spec['categories'])}"
+        )
+    body = {f: args[f] for f in spec["required"]}
+    for f in spec["optional"]:
+        if f in args:
+            body[f] = args[f]
+    return _unwrap(_http("POST", spec["path"], body))
+
+
+def _lib_update(kind, args):
+    spec = _AGENT_LIB[kind]
+    iid = args.get(f"{kind}_id") or args.get("id")
+    if not iid:
+        raise RuntimeError(f"{kind}_update: missing required '{kind}_id'")
+    items = _unwrap(_http("GET", spec["path"])) or []
+    existing = next((x for x in items if x.get("id") == iid), None)
+    if not existing:
+        raise RuntimeError(
+            f"{kind}_update: {iid!r} not found — call {kind}s_list to see what exists"
+        )
+    body = {}
+    for f in spec["required"] + spec["optional"]:
+        if f in args:
+            body[f] = args[f]
+        elif f in existing:
+            body[f] = existing[f]
+    if body.get("category") not in spec["categories"]:
+        raise RuntimeError(
+            f"{kind}_update: category {body.get('category')!r} invalid — one of {list(spec['categories'])}"
+        )
+    return _unwrap(_http("PUT", f"{spec['path']}/{iid}", body))
+
+
+def _lib_delete(kind, args):
+    iid = args.get(f"{kind}_id") or args.get("id")
+    if not iid:
+        raise RuntimeError(f"{kind}_delete: missing required '{kind}_id'")
+    return _unwrap(_http("DELETE", f"{_AGENT_LIB[kind]['path']}/{iid}"))
+
+
+def call_skill_create(args):
+    """Create a custom SKILL (POST /api/skills). Required: name, description,
+    icon, category (Language|Domain|Business), content (the markdown body).
+    Optional: license, allowed_tools. Use to author a reusable skill an Agent
+    step / QP can then bind via `skill_ids`. Returns the created skill (incl id)."""
+    return _lib_create("skill", args)
+
+
+def call_skill_update(args):
+    """Patch a CUSTOM skill (load-merge-write over PUT /api/skills/<id>). Builtin
+    skills are rejected by the backend. ⚠ The backend recreates the skill, so
+    the id CHANGES — use the `id` in the returned object afterwards."""
+    return _lib_update("skill", args)
+
+
+def call_skill_delete(args):
+    """Delete a custom skill by id (builtins are protected)."""
+    return _lib_delete("skill", args)
+
+
+def call_profile_create(args):
+    """Create a custom PROFILE / persona (POST /api/profiles). Required: name,
+    role, avatar, color, category (Technical|Business|Meta), persona_prompt.
+    Optional: persona_name, default_engine. Bind via an Agent step's
+    `profile_ids`. Returns the created profile (incl id)."""
+    return _lib_create("profile", args)
+
+
+def call_profile_update(args):
+    """Patch a custom profile (load-merge-write over PUT /api/profiles/<id>)."""
+    return _lib_update("profile", args)
+
+
+def call_profile_delete(args):
+    """Delete a custom profile by id (builtins are protected)."""
+    return _lib_delete("profile", args)
+
+
+def call_directive_create(args):
+    """Create a custom DIRECTIVE (POST /api/directives). Required: name,
+    description, icon, category (Output|Language), content. Optional: conflicts
+    (list of directive ids it's mutually exclusive with). Bind via an Agent
+    step's `directive_ids`. Returns the created directive (incl id)."""
+    return _lib_create("directive", args)
+
+
+def call_directive_update(args):
+    """Patch a custom directive (load-merge-write over PUT /api/directives/<id>)."""
+    return _lib_update("directive", args)
+
+
+def call_directive_delete(args):
+    """Delete a custom directive by id (builtins are protected)."""
+    return _lib_delete("directive", args)
+
+
+def call_workflow_step_schema(_args):
+    """Canonical WorkflowStep schema, returned as a tool RESULT (untruncatable).
+
+    The `workflow_create_draft` description carries the same info, but some MCP
+    clients truncate long tool descriptions mid-text — so the run-breaking bits
+    (the SubWorkflow foreach contract in particular) can get cut before the
+    agent ever sees them. A tool result is never truncated, so this is the
+    authoritative, on-demand source for the step schema."""
+    return {
+        "shape": (
+            "Each step's type-specific fields sit at the TOP LEVEL (never under a "
+            "sub-object); `name` is required on every step. BUT `step_type` is a "
+            "TAGGED OBJECT `{\"type\":\"Agent\"}`, NOT a bare string (serde "
+            "internally-tagged); same for `output_format` (`{\"type\":\"Structured\"}`) "
+            "and the workflow `trigger` (`{\"type\":\"Manual\"}`). "
+            "`workflow_create_draft`/`workflow_update` also accept a bare-string "
+            "`step_type` and wrap it, but the canonical form `workflow_get` returns "
+            "is the tagged object."
+        ),
+        "step_types_closed_set": [
+            "Agent",
+            "ApiCall",
+            "BatchApiCall",
+            "BatchQuickPrompt",
+            "Exec",
+            "Gate",
+            "Notify",
+            "JsonData",
+            "SubWorkflow",
+        ],
+        "fields_by_type": {
+            "Agent": {
+                "required": ["agent", "prompt_template"],
+                "optional": [
+                    "output_format (FreeText | {type:Structured} | {type:TypedSchema, schema:{...}})",
+                    "skill_ids",
+                    "profile_ids",
+                    "directive_ids",
+                    "multi_agent_review (bool — second agent debates the output)",
+                ],
+                "OUTPUT_PIPING": (
+                    "With output_format {type:TypedSchema,schema:{...}} (or Structured), the "
+                    "agent's emitted JSON is captured as `{{steps.<name>.data}}`, with nested "
+                    "access `{{steps.<name>.data.<field>}}` / `{{steps.<name>.data.arr.0.k}}` "
+                    "(`data_json.<field>` works identically). THIS is how you feed a "
+                    "deterministic ApiCall/Exec step from an LLM step. TYPED INJECTION in an "
+                    "api_body: a field whose value is EXACTLY one placeholder is replaced by the "
+                    "REAL typed JSON (arrays/objects preserved, not stringified) — write it "
+                    "QUOTED as a normal string leaf. E.g. a review step emits "
+                    "{verdict, generalComment, inlineComments[]} and the next ApiCall posts "
+                    "api_body = {\"event\":\"{{steps.review.data.verdict}}\", "
+                    "\"body\":\"{{steps.review.data.generalComment}}\", "
+                    "\"comments\":\"{{steps.review.data.inlineComments}}\"} — `comments` arrives "
+                    "as a real array. (A placeholder embedded in surrounding text, e.g. "
+                    "\"PR #{{n}}\", stays a string.) To run a Quick Prompt's logic in a PIPEABLE "
+                    "way, put its `quick_prompt_id` on an Agent step with TypedSchema — NOT "
+                    "BatchQuickPrompt (see its note)."
+                ),
+                "example": {
+                    "name": "Triage",
+                    "step_type": {"type": "Agent"},
+                    "agent": "ClaudeCode",
+                    "prompt_template": "Analyse {{previous_step.output}}",
+                    "output_format": {"type": "Structured"},
+                },
+            },
+            "ApiCall": {
+                "required": ["api_plugin_slug", "api_config_id", "api_endpoint_path"],
+                "optional": ["api_method (default GET)", "api_query", "api_body", "api_extract"],
+                "note": "plugin_slug + config_id MUST exist in mcp_list. endpoint_path is INDICATIVE — any valid path on the API works; set api_method explicitly for a non-GET on an unlisted path.",
+                "example": {
+                    "name": "Fetch",
+                    "step_type": {"type": "ApiCall"},
+                    "api_plugin_slug": "mcp-atlassian",
+                    "api_config_id": "<id from mcp_list>",
+                    "api_endpoint_path": "/rest/api/2/search",
+                    "api_method": "GET",
+                    "api_query": {"jql": "..."},
+                },
+            },
+            "Exec": {
+                "required": ["exec_command"],
+                "optional": [
+                    "exec_args",
+                    "exec_timeout_secs",
+                    "exec_stdin (piped to stdin — use for LARGE input instead of a huge arg, no argv size limit)",
+                ],
+                "note": "exec_command binary MUST be in the workflow `exec_allowlist`.",
+                "example": {
+                    "name": "Tests",
+                    "step_type": {"type": "Exec"},
+                    "exec_command": "make",
+                    "exec_args": ["test"],
+                    "exec_timeout_secs": 600,
+                    "exec_stdin": "{{steps.fetch.data_json}}",
+                },
+            },
+            "Gate": {
+                "required": ["gate_message"],
+                "optional": [
+                    "gate_request_changes_target (step name to loop back to on 'request changes')",
+                    "gate_checkpoint_before (auto-commit before the gate)",
+                    "gate_auto_approve_secs",
+                ],
+                "example": {
+                    "name": "Validate",
+                    "step_type": {"type": "Gate"},
+                    "gate_message": "Approve?",
+                    "gate_request_changes_target": "Implement",
+                },
+            },
+            "Notify": {
+                "required": ["notify_config"],
+                "example": {"name": "Done", "step_type": {"type": "Notify"}, "notify_config": {}},
+            },
+            "BatchQuickPrompt": {
+                "required": ["batch_quick_prompt_id", "batch_items_from"],
+                "optional": ["batch_wait_for_completion"],
+                "OUTPUT_IS_METADATA_ONLY": (
+                    "RUN-BREAKING gotcha: `{{steps.<name>.data}}` is batch METADATA only — "
+                    "`{batch_run_id, discussion_ids, ok, total}`. The QP's PRODUCED content "
+                    "(the table/JSON each run emits) lives in the child DISCUSSIONS, NOT in the "
+                    "step data, and there is NO `{{steps.<name>.results[]}}` / `.outputs` "
+                    "accessor. So you CANNOT pipe a BatchQuickPrompt's output into a downstream "
+                    "ApiCall/Exec. BatchQuickPrompt is FAN-OUT-to-discussions (kick off N runs, "
+                    "humans/agents read the threads). If you need the produced result piped "
+                    "onward deterministically, use a single Agent step with TypedSchema instead "
+                    "(see Agent.OUTPUT_PIPING). An agent CAN still read a child disc via the "
+                    "`disc_get_message`/`disc_summarize` MCP tools, but a deterministic step "
+                    "cannot."
+                ),
+                "example": {
+                    "name": "Fan out",
+                    "step_type": {"type": "BatchQuickPrompt"},
+                    "batch_quick_prompt_id": "<qp id>",
+                    "batch_items_from": "{{previous_step.data}}",
+                    "batch_wait_for_completion": True,
+                },
+            },
+            "BatchApiCall": {
+                "required": ["batch_items_from", "api_plugin_slug", "api_config_id", "api_endpoint_path"],
+                "optional": ["api_method"],
+                "note": "fan one ApiCall over a list, zero tokens.",
+                "PER_ITEM_VARS": (
+                    "Each item's fields are templatable in api_endpoint_path AND api_body/"
+                    "api_query as `{{batch.item.<field>}}` (canonical), `{{item.<field>}}` "
+                    "(alias), and bare `{{<field>}}`. So a per-item path works: "
+                    "`/comments/{{batch.item.commentId}}/reactions`. Also `{{batch.index}}` "
+                    "(0-based) and `{{batch.item}}` (whole item as JSON). NOTE: this is a "
+                    "DIFFERENT name from the SubWorkflow-foreach item (`current_task.*`) — "
+                    "batch fan-out uses `batch.item.*`/`item.*`."
+                ),
+                "example": {
+                    "name": "Bulk",
+                    "step_type": {"type": "BatchApiCall"},
+                    "batch_items_from": "{{previous_step.data}}",
+                    "api_plugin_slug": "…",
+                    "api_config_id": "…",
+                    "api_endpoint_path": "/repos/o/r/pulls/comments/{{batch.item.commentId}}/reactions",
+                    "api_method": "POST",
+                    "api_body": {"content": "{{batch.item.reaction}}"},
+                },
+            },
+            "JsonData": {
+                "required": ["json_data_payload"],
+                "note": "deterministic data source, zero tokens — feeds {{steps.<name>.data}}.",
+                "example": {"name": "Seed", "step_type": {"type": "JsonData"}, "json_data_payload": "[{...}]"},
+            },
+            "SubWorkflow": {
+                "required": ["sub_workflow_id"],
+                "optional": ["sub_workflow_foreach_file (workspace-relative JSON array → child runs once per item)"],
+                "FOREACH_RUNTIME_CONTRACT": (
+                    "RUN-BREAKING. `sub_workflow_foreach_file` is YOUR source list "
+                    "(any name, e.g. .kronn/prs.json). Before each child run the "
+                    "engine exposes the CURRENT item to the child TWO ways: "
+                    "(1) TEMPLATE VARS — each top-level field as `{{current_task.<field>}}` "
+                    "(e.g. an ApiCall path `/repos/o/r/pulls/{{current_task.number}}/reviews`, "
+                    "a worktree `.kronn/pr-{{current_task.number}}`); scalars stringify, "
+                    "null→\"\", nested arrays/objects render as compact JSON, and the whole "
+                    "item is `{{current_task}}`. The accessor name is FIXED `current_task.*` "
+                    "(it mirrors the file, NOT the source-file name; it is NOT `{{item.*}}` "
+                    "or `{{foreach.*}}`). (2) FILE — the same item is written to the FIXED "
+                    "path `.kronn/current_task.json` in the shared worktree, for an Agent/Exec "
+                    "step that needs the full object. Bookkeeping vars `{{__subwf_item_id__}}` "
+                    "(=item `id`) and `{{__subwf_item__}}` (index) are also set."
+                ),
+                "example": {
+                    "name": "Implement",
+                    "step_type": {"type": "SubWorkflow"},
+                    "sub_workflow_id": "<child workflow id>",
+                    "sub_workflow_foreach_file": ".kronn/tasks.json",
+                },
+            },
+        },
+        "discovery_rule": (
+            "Do NOT infer the available step types from one workflow you opened — "
+            "it may use only Agent steps. This 9-set IS the whole taxonomy. For a "
+            "rich real example to adapt, workflow_get/workflow_clone the AutoPilot "
+            "workflow (multi-step), not a single-Agent one."
+        ),
+        "template_vars": {
+            "syntax": (
+                "`{{namespace.path}}` in any string field (prompt_template, "
+                "api_endpoint_path, api_query/api_body values, exec_args/exec_stdin, "
+                "gate_message, notify_config, …). Dotted nested access works incl. "
+                "array index: `{{steps.plan.data.subtasks.0.title}}`. An UNKNOWN ref "
+                "is left VERBATIM (not blanked) so a typo is visible at run time "
+                "rather than silently empty."
+            ),
+            "namespaces": {
+                "steps.<name>.output": "raw text the step produced (FreeText).",
+                "steps.<name>.data": "structured payload (Structured/TypedSchema agent, ApiCall/Exec/JsonData envelope). Nested fields: `steps.<name>.data.<field>` (incl. array index). Strings unwrapped for clean interpolation. In an api_body, a field whose value is EXACTLY one such placeholder is injected as the REAL typed JSON (array/object preserved) — write it quoted, e.g. `\"comments\": \"{{steps.review.data.inlineComments}}\"`.",
+                "steps.<name>.data_json": "same payload; `data_json.<field>` resolves identically to `data.<field>` (alias). In a prompt/string it renders verbatim JSON; in an api_body whole-placeholder field it injects typed JSON just like `data`.",
+                "steps.<name>.summary / .status": "the envelope summary line / OK|… status.",
+                "previous_step.{output,data,data_json,summary,status}": "shorthand for the immediately preceding step.",
+                "batch.item.<field> / item.<field> / <field>": "the current item inside a BatchApiCall / BatchQuickPrompt fan-out (templatable in api_endpoint_path + body/query). `{{batch.index}}` = 0-based index, `{{batch.item}}` = whole item JSON.",
+                "current_task / current_task.<field>": "the current item inside a SubWorkflow foreach child (DIFFERENT name from batch fan-out's `batch.item.*`; see SubWorkflow.FOREACH_RUNTIME_CONTRACT).",
+                "state.<key>": "run state written by a step via a `---STATE:<k>=<v>---` line; persists across Gate pauses + Goto loops.",
+                "artifacts.<name>": "content a step emitted via a `---ARTIFACT:<name>---` block.",
+                "issue.{title,body,number,url,labels}": "tracker-trigger fields (Cron/Tracker workflows).",
+                "<launch_var>": "any manual-launch `variables[].name` is referenced bare as `{{name}}`.",
+            },
+            "gotcha": (
+                "A BatchQuickPrompt's `steps.<name>.data` is batch METADATA only — its "
+                "produced content is NOT here (see BatchQuickPrompt.OUTPUT_IS_METADATA_ONLY)."
+            ),
+        },
+    }
+
+
 DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
@@ -2704,6 +3884,13 @@ DISPATCH = {
     # new workflow without asking the user to paste them.
     "workflow_list": call_workflow_list,
     "workflow_active_runs": call_workflow_active_runs,
+    # 0.8.8 (2026-06-25) — run HISTORY + per-run detail + cancel. The MCP only
+    # exposed active runs / latest run; an agent debriefing a cron couldn't
+    # enumerate past runs or their foreach children, and couldn't stop a
+    # duplicate/overlapping run. Thin wrappers over existing REST routes.
+    "workflow_runs": call_workflow_runs,
+    "workflow_run_get": call_workflow_run_get,
+    "workflow_cancel_run": call_workflow_cancel_run,
     "qp_list": call_qp_list,
     "qa_list": call_qa_list,
     "mcp_list": call_mcp_list,
@@ -2716,6 +3903,42 @@ DISPATCH = {
     # cascade into prod cron.
     "workflow_create_draft": call_workflow_create_draft,
     "qp_create_draft": call_qp_create_draft,
+    # 0.8.8 (2026-06-23) — read · clone · update · enable for WF + QP.
+    # Closes the gap where agents could only CREATE drafts, forcing them
+    # to reverse-engineer the step schema from 422s and orphan QPs on
+    # every edit. Thin wrappers over existing REST routes. Cf.
+    # [[project_mcp_workflow_crud_gap]].
+    "workflow_get": call_workflow_get,
+    "workflow_clone": call_workflow_clone,
+    "workflow_update": call_workflow_update,
+    "workflow_set_enabled": call_workflow_set_enabled,
+    "qp_update": call_qp_update,
+    "qp_get": call_qp_get,
+    "qp_delete": call_qp_delete,
+    # 0.8.8 (2026-06-24) — canonical step schema as an untruncatable tool
+    # RESULT. Closes the gap where the create_draft description (the only
+    # schema doc) gets client-truncated mid-text, hiding the SubWorkflow
+    # foreach runtime contract. Cf. [[project_mcp_workflow_crud_gap]].
+    "workflow_step_schema": call_workflow_step_schema,
+    # 0.8.8 (2026-06-24) — enumerate the Agent-step bindings (skill_ids /
+    # profile_ids / directive_ids). Before this the create_draft desc said
+    # "see the workflow-architect skill for the canonical lists" but the
+    # agent had no way to READ them → guessed ids or asked the user.
+    "skills_list": call_skills_list,
+    "profiles_list": call_profiles_list,
+    "directives_list": call_directives_list,
+    # 0.8.8 (2026-06-24) — author/edit/delete the Agent-step bindings, closing
+    # the loop so an agent can retain · retrieve · evaluate · modify skills (+
+    # profiles/directives), not just read them. Custom-only edits.
+    "skill_create": call_skill_create,
+    "skill_update": call_skill_update,
+    "skill_delete": call_skill_delete,
+    "profile_create": call_profile_create,
+    "profile_update": call_profile_update,
+    "profile_delete": call_profile_delete,
+    "directive_create": call_directive_create,
+    "directive_update": call_directive_update,
+    "directive_delete": call_directive_delete,
     # 0.8.6 phase 4 — symmetry fix : QA drafting was missing from the
     # *_create_draft cluster. QAs have no enabled flag — drafting = creation.
     "qa_create_draft": call_qa_create_draft,
@@ -2776,23 +3999,30 @@ def _handle(req):
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
                 "serverInfo": {"name": "kronn-internal", "version": "0.1.0"},
-                # One-shot precedence the client surfaces to the model, so the
-                # token-economy ordering doesn't depend on which tool desc it
-                # happens to read. Reuse > construct > persist.
+                # Top-level orientation the client surfaces to the model: WHAT
+                # Kronn is + a MAP of the tool surface by area + how to navigate
+                # it, so an agent doesn't have to reverse-engineer capabilities
+                # from 40+ tool descriptions (and doesn't generalise the
+                # system's abilities from one sample it happened to open — the
+                # `workflow_get`-only-saw-Agent-steps trap). Kept concise: a
+                # CLOSED map + pointers, not a manual (open catalogues stay
+                # behind on-demand tools like `mcp_list`).
                 "instructions": (
-                    "External API actions — follow this order to avoid burning "
-                    "tokens rebuilding calls that already exist:\n"
-                    "1. REUSE: `qa_list` → if a saved Quick API matches, run it "
-                    "via `qa_run` (zero construction cost, identical across "
-                    "agents).\n"
-                    "2. CONSTRUCT: else `mcp_list` → `api_call` a configured "
-                    "plugin (never re-specify endpoints from memory; never paste "
-                    "credentials — Kronn injects them server-side).\n"
-                    "3. PERSIST: after a hand-built call the user will rerun, "
-                    "propose `qa_create_draft` (PROBE-then-PERSIST) so next time "
-                    "is a cheap `qa_run`.\n"
-                    "Same idea for prompts/workflows: prefer existing "
-                    "`qp_list` / `workflow_list` entries over rebuilding."
+                    "You're connected to **Kronn** — it orchestrates agents, "
+                    "discussions, multi-step workflows and external APIs, and "
+                    "owns ALL credentials server-side (never paste secrets). "
+                    "Your tools, by area:\n"
+                    "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
+                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid `skill_ids`/`profile_ids`/`directive_ids`; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
+                    "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
+                    "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"
+                    "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"
+                    "**Navigation rule:** to understand a CAPABILITY, read the relevant tool's description AND `*_get` a REAL, rich example — never infer what the system can do from a single workflow/QP you happened to open.\n\n"
+                    "**API actions — order to avoid burning tokens:** "
+                    "1) REUSE: `qa_list` → matching saved Quick API? run it via `qa_run`. "
+                    "2) CONSTRUCT: else `mcp_list` → `api_call` (never re-specify endpoints from memory; never paste creds). "
+                    "3) PERSIST: after a hand-built call the user will rerun, propose `qa_create_draft`. "
+                    "Same for prompts/workflows: prefer existing `qp_list`/`workflow_list` entries over rebuilding."
                 ),
             },
         }

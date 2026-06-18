@@ -5,8 +5,17 @@
 
 use anyhow::{Result, bail};
 
-/// Max extracted text size (500KB)
+/// Max extracted text size (500KB) — applies to OFFICE docs whose binary is
+/// converted to text inline. Plain files go to disk (no inline cap), see
+/// `ExtractedContent::DiskFile`.
 const MAX_EXTRACTED_SIZE: usize = 512_000;
+/// How many bytes of a disk-backed file to surface as an inline PREVIEW in the
+/// agent's context (the full file lives on disk; the agent reads it with its
+/// tools). Small files (≤ this) are therefore fully visible inline.
+const PREVIEW_BYTES: usize = 8 * 1024;
+/// Office/binary docs that are converted to text inline (the raw binary is not
+/// useful to read on disk; the extracted text is).
+const OFFICE_DOC_EXTENSIONS: &[&str] = &["xlsx", "xls", "docx", "pptx", "pdf"];
 /// Max context files per discussion
 pub const MAX_FILES_PER_DISCUSSION: usize = 20;
 
@@ -30,10 +39,17 @@ const TEXT_EXTENSIONS: &[&str] = &[
 
 /// Result of processing an uploaded file.
 pub enum ExtractedContent {
-    /// Text content (code, documents) — stored in DB
+    /// Text content (office docs converted to text) — stored inline in the DB
+    /// and injected into the agent's context. Capped at `MAX_EXTRACTED_SIZE`.
     Text(String),
-    /// Image — must be saved to disk, agents reference by path
+    /// Image — saved to disk, agents reference by path.
     Image { data: Vec<u8>, ext: String },
+    /// Any other file (text, code, log, HAR, JSON, …) — the RAW bytes are saved
+    /// to disk and only a short `preview` goes into context. The agent reads /
+    /// parses the full file with its tools (or loads it in a browser) — no
+    /// whole-file token cost. No inline-size cap (bounded by the upload body
+    /// limit). This is the "attach a file on disc, don't inline it" path.
+    DiskFile { data: Vec<u8>, preview: String },
 }
 
 /// Check if a file is an image based on extension.
@@ -55,6 +71,26 @@ pub fn save_image_to_dir(dir: &std::path::Path, id: &str, filename: &str, _ext: 
     // Use original filename for readability (agent sees a meaningful name)
     let safe_name = format!("{}_{}", &id[..8], filename.replace(['/', '\\', ' '], "_"));
     let path = ctx_dir.join(&safe_name);
+    std::fs::write(&path, data)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+/// Save arbitrary attachment bytes to the discussion's on-disk context-file
+/// dir (same location/scheme as images — `.kronn/context-files/`). The agent
+/// reads the file by the returned path. Generic over file type.
+pub fn save_file_to_dir(dir: &std::path::Path, id: &str, filename: &str, data: &[u8]) -> Result<String> {
+    save_image_to_dir(dir, id, filename, "", data)
+}
+
+/// Fallback save (persistent config dir) when no project work_dir resolves —
+/// keeps the original filename so the agent sees a meaningful path.
+pub fn save_file_to_disk(id: &str, filename: &str, data: &[u8]) -> Result<String> {
+    let dir = crate::core::config::config_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("/tmp"))
+        .join("context-files");
+    std::fs::create_dir_all(&dir)?;
+    let safe_name = format!("{}_{}", &id[..8], filename.replace(['/', '\\', ' '], "_"));
+    let path = dir.join(&safe_name);
     std::fs::write(&path, data)?;
     Ok(path.to_string_lossy().to_string())
 }
@@ -88,8 +124,23 @@ pub fn extract_content(filename: &str, data: &[u8]) -> Result<ExtractedContent> 
         return Ok(ExtractedContent::Image { data: data.to_vec(), ext });
     }
 
-    let text = extract_text(filename, data)?;
-    Ok(ExtractedContent::Text(text))
+    if data.is_empty() {
+        bail!("File is empty");
+    }
+
+    // Office/binary docs → convert to text inline (the raw binary isn't useful
+    // to read on disk; the extracted text is). Keeps the inline-size cap.
+    if OFFICE_DOC_EXTENSIONS.contains(&ext.as_str()) {
+        let text = extract_text(filename, data)?;
+        return Ok(ExtractedContent::Text(text));
+    }
+
+    // Everything else (text, code, logs, HAR, JSON, NDJSON, …) → save the RAW
+    // file to disk and surface only a short preview in context. The agent reads
+    // the full file with its tools — no whole-file token cost, no 500KB cap.
+    let preview_len = data.len().min(PREVIEW_BYTES);
+    let preview = String::from_utf8_lossy(&data[..preview_len]).to_string();
+    Ok(ExtractedContent::DiskFile { data: data.to_vec(), preview })
 }
 
 /// Extract text content from a file's raw bytes.
@@ -314,14 +365,27 @@ pub fn build_context_prompt(files: &[ContextEntry]) -> String {
 
     let mut parts = Vec::new();
     for entry in files {
-        if let Some(ref path) = entry.disk_path {
-            // Image: instruct the agent to read it with its vision/file tool
-            parts.push(format!(
-                "--- {} (image) ---\nIMPORTANT: This is an image file attached by the user. You MUST read and analyze it using your file reading tool.\nFile path: {}\nDo NOT describe the image without reading it first.",
-                entry.filename, path
-            ));
-        } else {
-            parts.push(format!("--- {} ---\n{}", entry.filename, entry.text));
+        match entry.disk_path {
+            Some(ref path) if is_image(&entry.filename) => {
+                // Image: instruct the agent to read it with its vision/file tool
+                parts.push(format!(
+                    "--- {} (image) ---\nIMPORTANT: This is an image file attached by the user. You MUST read and analyze it using your file reading tool.\nFile path: {}\nDo NOT describe the image without reading it first.",
+                    entry.filename, path
+                ));
+            }
+            Some(ref path) => {
+                // File on disk: surface only the preview + the path. The agent
+                // reads/parses the FULL file with its tools (Read/grep/jq, or a
+                // headless browser) — the whole file is NOT inlined, so a large
+                // attachment (e.g. a 5MB HAR) costs no context tokens here.
+                parts.push(format!(
+                    "--- {} (file on disk) ---\nThis file is attached on disk and NOT fully inlined (to save context). Read or parse the FULL file with your file tools at:\n{}\n\nPreview (first {} chars — read the path above for the rest):\n{}",
+                    entry.filename, path, entry.text.len(), entry.text
+                ));
+            }
+            None => {
+                parts.push(format!("--- {} ---\n{}", entry.filename, entry.text));
+            }
         }
     }
     parts.join("\n\n")
@@ -340,6 +404,17 @@ pub fn mime_from_extension(filename: &str) -> &'static str {
         "xlsx" | "xls" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        // Images — these MUST be real types, not text/plain: the
+        // context-file content route serves these bytes for in-bubble
+        // thumbnails (0.8.8), and the browser renders by Content-Type.
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "tiff" | "tif" => "image/tiff",
+        "ico" => "image/x-icon",
         _ => "text/plain",
     }
 }
@@ -427,6 +502,71 @@ mod tests {
     }
 
     #[test]
+    fn build_context_prompt_disk_file_is_reference_not_inline() {
+        // A non-image file with a disk_path → referenced by path + preview,
+        // NOT treated as an image, NOT fully inlined.
+        let files = vec![ContextEntry {
+            filename: "trace.har".into(),
+            text: "{\"log\":{\"entries\":[".into(), // the preview, not the whole file
+            disk_path: Some("/work/.kronn/context-files/ab_trace.har".into()),
+        }];
+        let prompt = build_context_prompt(&files);
+        assert!(prompt.contains("file on disk"), "got: {prompt}");
+        assert!(prompt.contains("/work/.kronn/context-files/ab_trace.har"));
+        assert!(prompt.contains("Preview"));
+        assert!(!prompt.contains("image"), "a .har must not be described as an image");
+    }
+
+    #[test]
+    fn extract_content_routes_har_to_disk_with_preview() {
+        let body = b"{\"log\":{\"version\":\"1.2\",\"entries\":[]}}";
+        match extract_content("session.har", body).unwrap() {
+            ExtractedContent::DiskFile { data, preview } => {
+                assert_eq!(data, body, "raw bytes preserved for disk write");
+                assert!(preview.contains("\"log\""));
+            }
+            _ => panic!("a .har must route to DiskFile, not Text/Image"),
+        }
+    }
+
+    #[test]
+    fn extract_content_large_text_not_rejected_goes_to_disk() {
+        // 5MB of text would have tripped the old 500KB inline cap; now it just
+        // goes to disk with a bounded preview.
+        let big = vec![b'x'; 5 * 1024 * 1024];
+        match extract_content("huge.log", &big).unwrap() {
+            ExtractedContent::DiskFile { data, preview } => {
+                assert_eq!(data.len(), big.len());
+                assert_eq!(preview.len(), PREVIEW_BYTES, "preview bounded to PREVIEW_BYTES");
+            }
+            _ => panic!("large text must route to DiskFile"),
+        }
+    }
+
+    #[test]
+    fn extract_content_small_text_preview_is_full_content() {
+        match extract_content("notes.txt", b"short note").unwrap() {
+            ExtractedContent::DiskFile { preview, .. } => assert_eq!(preview, "short note"),
+            _ => panic!("expected DiskFile"),
+        }
+    }
+
+    #[test]
+    fn mime_from_extension_maps_images_not_text() {
+        // Regression: images must NOT fall through to text/plain, or the
+        // content route serves them so the browser renders bytes as text.
+        assert_eq!(mime_from_extension("a.png"), "image/png");
+        assert_eq!(mime_from_extension("Photo.JPG"), "image/jpeg");
+        assert_eq!(mime_from_extension("x.jpeg"), "image/jpeg");
+        assert_eq!(mime_from_extension("anim.gif"), "image/gif");
+        assert_eq!(mime_from_extension("p.webp"), "image/webp");
+        assert_eq!(mime_from_extension("logo.svg"), "image/svg+xml");
+        // Non-images keep their mapping.
+        assert_eq!(mime_from_extension("notes.txt"), "text/plain");
+        assert_eq!(mime_from_extension("data.csv"), "text/csv");
+    }
+
+    #[test]
     fn is_image_detection() {
         assert!(is_image("photo.png"));
         assert!(is_image("CHART.JPG"));
@@ -445,8 +585,10 @@ mod tests {
 
     #[test]
     fn extract_content_text() {
+        // Plain text now routes to disk (raw file + preview), not inline Text.
+        // Inline `Text` is reserved for office docs converted from binary.
         let result = extract_content("hello.txt", b"Hello").unwrap();
-        assert!(matches!(result, ExtractedContent::Text(_)));
+        assert!(matches!(result, ExtractedContent::DiskFile { .. }));
     }
 
     #[test]

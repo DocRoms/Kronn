@@ -1622,3 +1622,24 @@ html[data-density="large"] .dash-main {
   color: var(--kr-accent-ink) !important;
   font-weight: 600;
 }
+
+/* ── Running-agents badge (2026-06-24) ───────────────────────────────────
+   Persistent nav indicator: agents still running server-side (incl.
+   background/batch) so the user doesn't think nothing's happening and
+   re-launch. Sits in the always-mounted dash-nav, survives page changes. */
+.dash-running-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  margin-right: 6px;
+  font-size: var(--kr-fs-xs, 12px);
+  font-weight: 600;
+  color: var(--kr-accent-ink, #4f46e5);
+  background: rgba(var(--kr-accent-rgb, 99,102,241), 0.12);
+  border: 1px solid rgba(var(--kr-accent-rgb, 99,102,241), 0.35);
+  border-radius: 999px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dash-running-badge:hover { background: rgba(var(--kr-accent-rgb, 99,102,241), 0.2); }

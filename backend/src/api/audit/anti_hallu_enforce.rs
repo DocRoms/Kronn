@@ -262,4 +262,162 @@ mod tests {
         let no_nl = "<!-- kronn:section name=\"s\" curated=\"ai\" -->";
         assert!(!stamp_curated_audit_dates(no_nl, "2026-06-14").unwrap().ends_with('\n'));
     }
+
+    // ─── Multi-attempt gate SEQUENCE (the full.rs loop contract) ────────────
+    //
+    // The unit tests above pin each helper in ISOLATION. The streaming
+    // generator in `super::full` composes them in a specific order across a
+    // bounded retry loop (full.rs:623-925): each attempt re-lints the written
+    // file → `decide()` → on Retry it re-injects `corrective_feedback` (which
+    // must name the still-broken refs) and re-runs → on Pass it `stamp`s the
+    // dates → on Fail it ends the step. None of that SEQUENCING is exercised
+    // by the per-helper tests, so a regression in the loop wiring (an
+    // off-by-one in the attempt budget, feedback that drops the broken refs,
+    // a missing stamp on the winning attempt) would slip through.
+    //
+    // We can't call full.rs's loop directly — it owns a live agent subprocess
+    // with no injection seam (the agent CLI is spawned in-place). So this
+    // harness reproduces the loop's CONTROL FLOW faithfully and feeds it a
+    // scripted sequence of "what the agent wrote this attempt", driving the
+    // REAL gate functions + REAL temp-file linting. It pins the contract the
+    // generator must honour; if full.rs's branching ever diverges from this
+    // shape, that's the signal to update both together.
+
+    /// Outcome of driving the enforce gate over a scripted attempt sequence.
+    struct GateRun {
+        decision: GateDecision,
+        attempts_used: usize,
+        /// `Some(stamped)` iff the winning (Pass) attempt produced a stamp.
+        stamped: Option<String>,
+        /// One corrective-feedback string per Retry, in order.
+        feedbacks: Vec<String>,
+    }
+
+    /// Faithful re-creation of full.rs's per-step enforce loop. `scripted` is
+    /// the content the (fake) agent writes on each attempt — attempt N reads
+    /// `scripted[N-1]`. Returns the terminal decision + side-effects.
+    fn drive_enforce_gate(
+        scripted: &[&str],
+        roots: &[&Path],
+        today: &str,
+        max_attempts: usize,
+    ) -> GateRun {
+        let mut feedbacks = Vec::new();
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            // The agent (here: the script) writes the file for this attempt.
+            // A real run re-injects the prior feedback into the prompt; we
+            // model that by the script simply providing a fixed/fixed-up file.
+            let written = scripted
+                .get(attempt - 1)
+                .copied()
+                // If the script runs dry, reuse the last content (an agent that
+                // can't fix it keeps emitting the same broken file).
+                .or_else(|| scripted.last().copied())
+                .unwrap_or("");
+
+            let verdict = lint_step_file(written, roots);
+            match decide(&verdict, attempt, max_attempts) {
+                GateDecision::Pass => {
+                    return GateRun {
+                        decision: GateDecision::Pass,
+                        attempts_used: attempt,
+                        stamped: stamp_curated_audit_dates(written, today),
+                        feedbacks,
+                    };
+                }
+                GateDecision::Retry => {
+                    feedbacks.push(corrective_feedback("docs/AGENTS.md", &verdict));
+                    continue;
+                }
+                GateDecision::Fail => {
+                    return GateRun {
+                        decision: GateDecision::Fail,
+                        attempts_used: attempt,
+                        stamped: None,
+                        feedbacks,
+                    };
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn gate_passes_on_first_clean_attempt_and_stamps() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("real.rs"), "a\nb\nc\n").unwrap();
+        let clean = "<!-- kronn:section name=\"stack\" curated=\"ai\" -->\n\
+                     Uses real.rs [src: file: real.rs:2].\n\
+                     <!-- kronn:section:end -->\n";
+
+        let run = drive_enforce_gate(&[clean], &[dir.path()], "2026-06-17", MAX_ATTEMPTS);
+
+        assert_eq!(run.decision, GateDecision::Pass);
+        assert_eq!(run.attempts_used, 1, "a clean first pass must not retry");
+        assert!(run.feedbacks.is_empty(), "no corrective feedback on a clean pass");
+        let stamped = run.stamped.expect("a Pass on an ai-curated section must stamp");
+        assert!(stamped.contains("audit=\"2026-06-17\""), "stamp applied: {stamped}");
+    }
+
+    #[test]
+    fn gate_retries_then_passes_when_the_agent_fixes_the_citation() {
+        // Attempt 1: cites a ghost file → Retry (feedback names the ghost).
+        // Attempt 2: the agent corrects it to a real path → Pass + stamp.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("real.rs"), "x\ny\n").unwrap();
+        let dirty = "<!-- kronn:section name=\"s\" curated=\"ai\" -->\n\
+                     See [src: file: ghost.rs:1].\n<!-- kronn:section:end -->\n";
+        let fixed = "<!-- kronn:section name=\"s\" curated=\"ai\" -->\n\
+                     See [src: file: real.rs:1].\n<!-- kronn:section:end -->\n";
+
+        let run = drive_enforce_gate(&[dirty, fixed], &[dir.path()], "2026-06-17", MAX_ATTEMPTS);
+
+        assert_eq!(run.decision, GateDecision::Pass);
+        assert_eq!(run.attempts_used, 2, "one retry, then the fix passes");
+        assert_eq!(run.feedbacks.len(), 1, "exactly one corrective round");
+        assert!(
+            run.feedbacks[0].contains("ghost.rs:1"),
+            "the retry feedback must name the broken ref so the agent can fix it: {}",
+            run.feedbacks[0],
+        );
+        assert!(run.stamped.is_some(), "the winning attempt stamps the dates");
+    }
+
+    #[test]
+    fn gate_fails_after_exhausting_attempts_without_stamping() {
+        // The agent never fixes the fabricated citation. After MAX_ATTEMPTS the
+        // step must Fail (→ audit ends Interrupted) and NEVER stamp the doc as
+        // verified — the whole point of enforce is to not commit hallucinations.
+        let dir = tempdir().unwrap();
+        let forever_broken = "<!-- kronn:section name=\"s\" curated=\"ai\" -->\n\
+                              [src: file: nope.rs:42].\n<!-- kronn:section:end -->\n";
+
+        let run = drive_enforce_gate(&[forever_broken], &[dir.path()], "2026-06-17", MAX_ATTEMPTS);
+
+        assert_eq!(run.decision, GateDecision::Fail);
+        assert_eq!(run.attempts_used, MAX_ATTEMPTS, "uses the full budget before failing");
+        assert_eq!(
+            run.feedbacks.len(),
+            MAX_ATTEMPTS - 1,
+            "a corrective round between each attempt, none after the last",
+        );
+        assert!(run.stamped.is_none(), "a failed step must NOT stamp the doc as verified");
+    }
+
+    #[test]
+    fn gate_passes_immediately_when_file_has_no_formal_citations() {
+        // Prose with no `[src: …]` markers can't be fabricated — the gate must
+        // not block a citation-free step (e.g. a REVIEW summary). Pass on
+        // attempt 1, no retries, no feedback.
+        let dir = tempdir().unwrap();
+        let prose = "<!-- kronn:section name=\"s\" curated=\"ai\" -->\n\
+                     Plain prose, no formal provenance.\n<!-- kronn:section:end -->\n";
+
+        let run = drive_enforce_gate(&[prose], &[dir.path()], "2026-06-17", MAX_ATTEMPTS);
+
+        assert_eq!(run.decision, GateDecision::Pass);
+        assert_eq!(run.attempts_used, 1);
+        assert!(run.feedbacks.is_empty());
+    }
 }

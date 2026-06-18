@@ -398,7 +398,7 @@ pub async fn execute_run(
             .map(|s| s.name.as_str())
             .collect();
         if !agent_steps.is_empty() {
-            let detections = crate::agents::detect_all().await;
+            let detections = crate::agents::detect_all_cached(false).await;
             let usable: Vec<crate::models::AgentType> = detections.iter()
                 .filter(|d| (d.installed || d.runtime_available) && d.enabled)
                 .map(|d| d.agent_type.clone())
@@ -2268,6 +2268,7 @@ mod tests {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -2558,6 +2559,7 @@ mod tests {
             exec_timeout_secs: None,
             exec_setup_command: None,
             exec_setup_args: vec![],
+            exec_stdin: None,
             quick_prompt_id: None,
             json_data_payload: None,
             sub_workflow_id: None,
@@ -2962,6 +2964,157 @@ mod tests {
 
         let written = dir.path().join(".kronn/review.yaml");
         assert_eq!(std::fs::read_to_string(&written).unwrap(), "v2 with more");
+    }
+
+    // ─── execute_run end-to-end (orchestrator drive + DB persist) ──────────
+    //
+    // P0-1 (test-quality audit, 2026-06-17): the runner's *pure* helpers are
+    // densely unit-tested (resume index, budget, artifact persist, gate
+    // feedback) but NOTHING drove the real `execute_run` orchestrator loop:
+    // status transitions, the per-step dispatch, and the DB write-back. The
+    // Agent path needs a live CLI (no injection seam above
+    // `run_agent_with_timeout`), but the DETERMINISTIC step types don't —
+    // `JsonData` emits a literal payload with zero tokens / network /
+    // subprocess. A project-less workflow skips worktree creation entirely
+    // (`project_path` empty → no `Workspace::create`), so this is a clean,
+    // hermetic drive of the whole loop.
+
+    fn json_data_step(name: &str, payload: serde_json::Value) -> crate::models::WorkflowStep {
+        let mut s = fake_step(name);
+        s.step_type = crate::models::StepType::JsonData;
+        s.json_data_payload = Some(payload);
+        s
+    }
+
+    fn test_state_and_configs() -> (
+        crate::AppState,
+        crate::models::TokensConfig,
+        crate::models::AgentsConfig,
+    ) {
+        let db = std::sync::Arc::new(
+            crate::db::Database::open_in_memory().expect("in-memory DB"),
+        );
+        let cfg = crate::core::config::default_config();
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(cfg));
+        let state =
+            crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        (state, tokens, agents)
+    }
+
+    fn pending_run(id: &str, workflow_id: &str) -> WorkflowRun {
+        WorkflowRun {
+            id: id.into(),
+            workflow_id: workflow_id.into(),
+            status: RunStatus::Pending,
+            trigger_context: None,
+            step_results: vec![],
+            tokens_used: 0,
+            workspace_path: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
+            parent_run_id: None,
+            state: ::std::collections::HashMap::new(),
+            produced_branches: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_run_drives_deterministic_steps_to_success_and_persists() {
+        let (state, tokens, agents) = test_state_and_configs();
+
+        // Two JsonData steps — exercises the multi-step loop, not just a
+        // single dispatch. No project → no worktree, no agent, no network.
+        let mut wf = make_workflow_with_artifacts(::std::collections::HashMap::new());
+        wf.id = "wf-det".into();
+        wf.steps = vec![
+            json_data_step("emit_first", serde_json::json!({ "phase": "one" })),
+            json_data_step("emit_second", serde_json::json!({ "phase": "two", "n": 2 })),
+        ];
+
+        let mut run = pending_run("run-det", "wf-det");
+
+        // Persist workflow + run so the runner's DB write-backs have rows.
+        let wf_db = wf.clone();
+        let run_db = run.clone();
+        state.db.with_conn(move |conn| {
+            crate::db::workflows::insert_workflow(conn, &wf_db)?;
+            crate::db::workflows::insert_run(conn, &run_db)?;
+            Ok(())
+        }).await.unwrap();
+
+        execute_run(state.clone(), &wf, &mut run, &tokens, &agents, None, None, None)
+            .await
+            .expect("a deterministic run must not error");
+
+        // In-memory run object reflects success.
+        assert_eq!(run.status, RunStatus::Success, "the whole run succeeds");
+        assert_eq!(run.step_results.len(), 2, "both steps executed");
+        assert!(
+            run.step_results.iter().all(|r| r.status == RunStatus::Success),
+            "every step succeeded",
+        );
+        assert_eq!(run.step_results[0].step_name, "emit_first");
+        assert_eq!(run.step_results[1].step_name, "emit_second");
+        // The JsonData payload is surfaced in the step output envelope.
+        assert!(
+            run.step_results[1].output.contains("\"phase\""),
+            "step output carries the literal payload: {}",
+            run.step_results[1].output,
+        );
+
+        // And the orchestrator persisted the terminal state to the DB — the
+        // write-back path that the pure helpers never touch.
+        let persisted = state.db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, "run-det"))
+            .await
+            .unwrap()
+            .expect("run row exists");
+        assert_eq!(persisted.status, RunStatus::Success, "DB row reflects success");
+        assert_eq!(persisted.step_results.len(), 2, "DB persisted both step results");
+    }
+
+    #[tokio::test]
+    async fn execute_run_records_failure_when_a_step_fails() {
+        // A JsonData step with no payload fails (its executor returns a
+        // failing StepResult). The orchestrator must surface that as a failed
+        // run and persist it — not silently report Success.
+        let (state, tokens, agents) = test_state_and_configs();
+
+        let mut wf = make_workflow_with_artifacts(::std::collections::HashMap::new());
+        wf.id = "wf-fail".into();
+        // step_type JsonData but payload left None → executor fails it.
+        let mut broken = fake_step("broken_emit");
+        broken.step_type = crate::models::StepType::JsonData;
+        broken.json_data_payload = None;
+        wf.steps = vec![broken];
+
+        let mut run = pending_run("run-fail", "wf-fail");
+        let wf_db = wf.clone();
+        let run_db = run.clone();
+        state.db.with_conn(move |conn| {
+            crate::db::workflows::insert_workflow(conn, &wf_db)?;
+            crate::db::workflows::insert_run(conn, &run_db)?;
+            Ok(())
+        }).await.unwrap();
+
+        execute_run(state.clone(), &wf, &mut run, &tokens, &agents, None, None, None)
+            .await
+            .expect("a failing STEP is a run outcome, not an execute_run error");
+
+        assert_eq!(run.status, RunStatus::Failed, "a failed step fails the run");
+        let persisted = state.db
+            .with_conn(move |conn| crate::db::workflows::get_run(conn, "run-fail"))
+            .await
+            .unwrap()
+            .expect("run row exists");
+        assert_eq!(persisted.status, RunStatus::Failed, "failure persisted to DB");
     }
 }
 
