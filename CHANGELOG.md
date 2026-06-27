@@ -9,6 +9,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`AiDocViewer` no longer shows "no project documentation" on a failed fetch.** A failed `list_ai_files` request was caught silently and rendered the *same* empty-state message as a genuinely-undocumented project — so a transient 500/network error looked like "this project has no docs". A failed load now shows a distinct error + **Retry** button (i18n FR/EN/ES), separate from the empty state (+2 tests). Detection itself was verified correct (the `ai/` → `docs/` pivot works end-to-end). Follow-up architecture captured in `TD-20260627-configurable-docs-dir` (make the docs root configurable: global default + per-project override).
+
+## [0.8.9] - 2026-06-27
+
 ### Added — Continual Learning (0.9.0, behind a default-OFF beta toggle)
 
 Agents can propose **durable learnings** (conventions, preferences, facts, pitfalls) that a human validates before they're persisted into injected truth files — closing the "every discussion re-explains the same context" gap. Full design + the multi-agent review that hardened it: `docs/research/continual-learning-0.9.0-spec.md`.
@@ -22,9 +28,60 @@ Agents can propose **durable learnings** (conventions, preferences, facts, pitfa
 - **UI**: pending-count badge in `ChatHeader` (polls; opens a validation modal) + `LearningsModal` (type chip, confidence, evidence list, Gate-2 chip when present, Validate/Reject). i18n FR/EN/ES.
 - Migration `063_continual_learning` (`learnings` + `learning_rejections`). ~65 backend + frontend tests; reviewed clean over 5 rounds (≈18 findings, all addressed). *Remaining (optional, not blocking): manual-archive→modal intercept; wiring the LLM-judge backend; SSE-driven badge.*
 
+### Added — `kronn start-dev`: one-command native launch (no Docker)
+
+- **New CLI command `./kronn start-dev`.** Runs Kronn **natively** — backend + Vite with hot-reload — in a single command, driving the **host** CLIs with their real logins. This is the macOS path (Docker can't execute Darwin binaries nor read the Keychain) and a fast dev loop on every platform. Previously this meant two manual terminals (`make dev-backend` + `make dev-frontend`); those still work and `start-dev` simply orchestrates them.
+- **Preflight** checks the toolchain (`cargo` / `node` / `pnpm`, plus `cargo-watch`) and prints targeted install hints for whatever is missing instead of failing cryptically. The "what's missing" logic is a pure, unit-tested helper (`dev_missing_tools` in `lib/ui.sh`). It also **prepends the standard toolchain dirs** (`~/.cargo/bin`, `/opt/homebrew/bin`) to `PATH` for the checks and the spawned `make` children — so it finds rustup's `cargo` even when the user never sourced `~/.cargo/env` in their shell rc (the common "works in one shell, not another" trap), and the backend it launches inherits the right `PATH`.
+- **Prints the correct URL.** The backend serves **API-only on :3140** in native mode — the UI is Vite on **:5173**. `start-dev` shows `UI → http://localhost:5173` explicitly so you don't open :3140 and get a blank page (a common Docker-habit trap; in Docker the gateway serves the UI on :3140). It also detects a Docker Kronn already bound to :3140 and warns before the port clash.
+- **Backend startup banner is now native-dev aware.** `start-dev` exports `KRONN_DEV_UI_URL`, and the backend's `→` banner line points there (the Vite UI) instead of its own API port, with a "this port is the API only" note — previously the banner always advertised `→ http://…:3140`, contradicting the `:5173` the launcher prints. Logic extracted to `main.rs::banner_entry_url` (3 unit tests); unchanged in Docker (the gateway serves the UI on that port) and for a bare `make dev-backend`.
+- **Clickable UI link (OSC 8 hyperlinks).** The UI URL is emitted as an OSC 8 terminal hyperlink — clickable in Terminal.app, iTerm2, **Windows Terminal / WSL**, WezTerm, kitty, VS Code, etc. — in both the `start-dev` launcher line (`lib/ui.sh::hyperlink`) and the backend's post-banner line (`main.rs::osc8_link`/`osc8`). **Not macOS-specific**: gated only on stdout being a TTY, so piped/redirected output (CI, logs) keeps the plain URL with no escape bytes. +5 tests (2 Rust `osc8`, 3 bats `hyperlink`).
+- **Auto-opens the browser** to the UI once Vite is actually serving (polls `:5173`, then opens via `lib/ui.sh::open_url` → `open`/`wslview`/`xdg-open`, cross-platform). This is the reliable path because **macOS Terminal.app has no OSC 8 support**, so the clickable link never works there — the browser open does. Opener selection is the pure, tested `pick_opener` (+4 bats tests). Opt out with `KRONN_NO_OPEN=1`.
+- **Fix: `kronn start-dev` crashed on exit with `backend_pid: unbound variable`.** The cleanup trap referenced a `local` that was already out of scope when the `EXIT` trap fired (after the function returned) under `set -u`. Now a script-global PID + `${:-}` guard — teardown is robust whether the trap fires on Ctrl+C or at exit.
+- **Fix: the "Create a symlink in ~/.local/bin?" prompt reappeared on every launch** even once created, when `~/.local/bin` isn't on the user's PATH (`ensure_in_path` only checked PATH resolution). It now detects an existing symlink that points at this checkout and silently adds the dir to PATH for the session instead of re-prompting. Decision extracted to the pure `lib/ui.sh::path_link_action` (+4 bats tests).
+- Backend runs in the background, frontend in the foreground; `Ctrl+C` stops the frontend and a trap tears down the backend so no detached `cargo-watch` is leaked.
+- Cross-platform (Linux/WSL/macOS) — no OS gating. Listed in `kronn help`, `docs/install.md` (macOS native section), and `docs/AGENTS.md`. +7 bats tests (`tests/bats/ui.bats`, suite 205 → 212).
+
+### Changed — Ollama first-pull suggestions refreshed + hardware-aware
+
+- **Fixed a bogus suggestion (`gemma4:26b` — never existed in the registry)** and refreshed the hardcoded first-pull list (`OllamaCard.tsx`) against `ollama.com/library`. The new list spans the **hardware range** — Kronn also runs on no-GPU Windows/WSL boxes, not just powerful Macs: `llama3.2:1b` (~1.3 GB, CPU) → `llama3.2` → `qwen3:4b` → `qwen2.5-coder:14b` → `gemma3:27b` → `qwen3:30b` (MoE, ~19 GB).
+- **Each suggestion now carries a hardware-tier badge** (`CPU ✓ (no GPU)` / `≥ 16 GB RAM` / `GPU or ≥ 32 GB`) so users don't pull a 19 GB model onto an 8 GB laptop. Model descriptions moved from a hardcoded French string to i18n (FR/EN/ES).
+- **The canirun.ai "can my hardware run this?" link is now a prominent clickable callout** (was a faint footnote-style link) with stronger copy, surfaced right where models are picked.
+- Suggestions list exported + covered by tests (`OllamaCard.models.test.ts`: no `gemma4`, real tags, a CPU-tier option, every descKey/tier label resolves in all three locales).
+
 ---
 
 ## [0.8.8] - 2026-06-21
+
+### Added — `kronn start` warns on macOS that Docker can't run host CLIs (points to native)
+
+A Docker container on macOS runs in a Linux VM and **cannot execute the user's host CLIs** (Darwin binaries can't run in the Linux container; agent OAuth creds live in the macOS Keychain, unreachable from the container). So `kronn start` on a Mac would spin up a stack that can't actually run agents — confusing. `cmd_web` now detects macOS (pure `is_macos_host` in `lib/ui.sh`) and, before launching Docker, explains the limitation and points to the native paths (**desktop app** for solo use, or **`make dev-backend` + `make dev-frontend`** for hot-reload dev), then asks whether to continue in Docker anyway (web UI + API still work). Skippable with `KRONN_SKIP_MACOS_WARN=1`. **Linux/WSL are untouched** — Docker is the right path there (host binaries are Linux and run directly in the container via the mount / `via_wsl`); a bats test pins that WSL/Linux are never flagged. 4 new `ui.bats` tests.
+
+### Fixed — RTK detection reported the container's binary, hiding the "install on host" flow (macOS)
+
+`rtk_binary_available()` did a plain `which rtk`, which under Docker finds the container's **baked** `/usr/local/bin/rtk` and always returns `true`. So the RTK card showed "Activate" (never "Install"), the "Activate on all" wired hooks against the container's rtk — useless for the host CLIs where the user actually runs agents — and `rtk` stayed `command not found` in their terminal. Same container-vs-host mismatch as the agent-install fix: Kronn is the bridge; RTK belongs on the **host**.
+
+- `rtk_binary_available()` is now **host-aware**: under Docker it checks the host bins (`KRONN_HOST_BIN`, already mounted) for `rtk`; native (Tauri/CLI) keeps `which`. So on a Mac without host-side RTK it correctly returns `false` → the existing CompressionSection **Install** button + curl modal appear, guiding the user to install RTK on their machine (where the hooks, written to the bind-mounted `~/.claude`/`~/.codex`/`~/.gemini`, then actually resolve `rtk` and `rtk gain` works).
+- **Symlink-aware** (the Mach-O-launcher trap again): a Homebrew-installed `rtk` is a symlink into `../Cellar/rtk/<v>/bin/rtk`, and the host Cellar isn't mounted — so the link dangles in the container and `exists()` (which follows symlinks) returned false even though RTK was installed. The check now accepts a symlink entry via `symlink_metadata()` too. Verified live: after `brew`-installing RTK on the host, detection flips to `rtk_available=true` and the agents show `RTK actif`.
+- Regression test `rtk_binary_available_in_docker_checks_host_bins` (hermetic via `KRONN_DATA_DIR` + `KRONN_HOST_BIN`; covers empty / real-file / dangling-symlink). clippy `-D warnings` clean, rtk_detect suite green (13).
+
+### Added — New-discussion form warns (red) when launching an agent without active RTK
+
+When you launch an RTK-capable agent (Claude Code / Codex / Gemini CLI) from the new-discussion form and RTK isn't active for it, shell output isn't compressed → noticeably more tokens consumed. The form now shows a **red alert at the top**: *"RTK n'est pas actif — vous risquez de consommer plus de tokens que nécessaire"* + a link to enable it (Config > Agents). Skipped for non-RTK agents (Kiro/Copilot/Vibe/Ollama) and when RTK is active (`rtk_available && rtk_hook_configured`).
+
+- `RTK_APPLICABLE` + `isRtkActive()` extracted to `lib/constants.ts` as the single source of truth (CompressionSection now imports them instead of its own copy).
+- `NewDiscussionForm.tsx` gates the alert on `launchAgentNow && RTK_APPLICABLE.has(agent) && !isRtkActive(agent)`; red `.disc-rtk-warn` mirrors the amber `.disc-restricted-warn`. i18n FR/EN/ES (`disc.rtkWarn` / `disc.rtkWarnLink`).
+- 3 new `NewDiscussionForm` unit tests (shows when no RTK / hides when active / hides for non-applicable agents); `tsc` clean, 147 frontend tests green. Verified live via Playwright (open new-discussion → red alert visible).
+
+### Fixed — `kronn-internal` MCP was dropped from projects that had no other MCPs
+
+`sync_project_mcps_to_disk` (`core::mcp_scanner`) **deleted** a project's `.mcp.json` (+ `.kiro/`, `.gemini/`, `.ai/mcp/`) whenever the project had no user-linked MCPs — so the auto-injected `kronn-internal` introspection bridge (57 tools: `disc_get_message`, `disc_summarize`, …) only ever reached projects that *also* had at least one other MCP. A project with only Kronn's own bridge (the common case) lost it entirely: agents in its discussions had no introspection. The MCP server itself was fine (verified via an `initialize` + `tools/list` handshake) — it just wasn't being written to disk.
+
+- The empty-MCP branch now **writes a `kronn-internal`-only** `.mcp.json` (+ Kiro/Gemini/.ai variants) instead of deleting them, via a new `write_kronn_internal_only()` (mirrors `write_general_mcp_json`). Only `.vibe/config.toml` is still removed (Vibe has no bridge — it's prompt-injection fallback). When the bridge path can't be resolved (host-CLI safety), stale files are still cleaned up.
+- Regression test `empty_project_still_writes_kronn_internal_only` (drives the bridge path via env so it's hermetic in any build env). Verified live: `POST /api/mcps/refresh` on an MCP-less project now produces a `.mcp.json` carrying `kronn-internal` (gitignored).
+
+### Added — The built-in `kronn-internal` MCP is now visible (read-only) on the Plugins page
+
+`kronn-internal` (the discussion-introspection MCP, `python3 disc-introspection-mcp.py`) is auto-injected into every project's agent configs at sync time (`core::mcp_scanner::inject_kronn_internal`) — but it was never surfaced in the UI (it's in neither `builtin_registry()` nor the DB), so users couldn't tell it existed. It now shows as a **read-only "system" card on the main Plugins view** (`data-testid="mcp-kronn-internal-card"`), visible directly — not behind the "Ajouter" catalog — and even with zero configured plugins: `Plug` icon, name "Kronn Internal", *Intégré* badge, description "auto-injected into every project — nothing to install or configure", tooltip, **no add/config/link flow**. Pure frontend (no backend/registry change), so it can never be instantiated/linked or collide with the auto-injection. i18n FR/EN/ES (`mcp.builtin.*`). Validated by a `McpPage` unit test (card present on the default view, no interaction) **and** a real Playwright E2E against the running app (navigate to Plugins → card visible without clicking Add).
 
 ### Fixed — A quota/plan-limit error shows a clean message, not a 32 KB stderr dump
 
@@ -210,6 +267,61 @@ A dominant source of false "unverified" amber pills: an agent that cited a file 
 - `verify_file_ref` now falls back to a **unique-basename walk** when a separator-less name doesn't resolve at root level: exactly one matching file in the tree → `Verified` (with line-bounds check + the resolved relative path shown in the pill detail); 2+ matches → stays unresolved but with an actionable *"ambiguous, cite the full path"* reason; 0 → `NotFound` as before. Full paths are unchanged.
 - The walk reuses the `scanner` skip-list (`node_modules`, `vendor`, `target`, **`.kronn`** …) — skipping `.kronn` is load-bearing: its `worktrees/` hold full project copies that otherwise make every basename look ambiguous (real case: front_euronews had 11 copies of one file, 1 real). Multi-root (Isolated worktree + main) is first-root-wins, so a file present in both isn't double-counted as ambiguous. Bounded walk (caps at 60k entries → never a false unique on a partial scan).
 - Verified live on the exact false positive (disc `d344b52b`): `NewslettersManager.ts:107` and `SocialLoginManager.ts:199` now resolve `Verified` against the real checkout. 8 new unit tests (incl. the `.kronn/worktrees` skip, ambiguity, multi-root, out-of-bounds, and the end-to-end inline-anchor case); clippy `-D warnings` clean.
+
+### Fixed — Kiro device-flow login no longer blocks every `kronn start`/`restart` on macOS
+
+On macOS, `maybe_login_kiro` (`kronn`) launched an **interactive, blocking** Kiro device-flow login on every startup whenever `kiro-cli` was present-but-unauthenticated in the backend container. But `entrypoint.sh` installs a Linux `kiro-cli` **into the container** on macOS regardless of the user's host setup — so its presence says nothing about whether the user uses Kiro, and a Claude-Code-only user was nagged at every launch for an agent they never installed.
+
+- Kronn is now **completely silent about Kiro by default** — no prompt, no hint. The device-flow login (and any Kiro message at all) is **opt-in only** via `KRONN_KIRO_LOGIN=1`, which makes Kronn probe the container and run `make kiro-login` when unauthenticated.
+- Decision logic extracted to a **pure, testable** helper `kiro_startup_action(os, authenticated, available, opt_in)` in `lib/agents.sh`; `maybe_login_kiro` only probes (and only when opted in) and runs the docker-exec side effects.
+- **Cross-platform unchanged**: the flow was already macOS-only (`return 0` elsewhere) — non-Darwin and the default (no opt-in) both return `skip`, so Windows / WSL / Linux behaviour is byte-for-byte identical, and the Tauri desktop launcher is unaffected.
+- 6 new bats tests in `tests/bats/agents.bats` cover the matrix (incl. the regression: macOS + available + no opt-in → `skip`, never any output). Full shell suite green (201/201).
+
+### Fixed — Claude Code detected as "Exec format error" on macOS (Darwin binary picked over the Linux copy)
+
+On macOS, the Settings → Agents panel showed Claude Code with the version `Cannot run macOS (Mach-O) executable in Docker: Exec format error` instead of a real version. Two compounding causes, both now fixed:
+
+- **`find_binary` ignored the macOS skip list on its primary lookup** (`backend/src/agents/mod.rs`). The container `PATH` mounts the host's `~/.local/bin` (`/host-bin/local`), so `which::which("claude")` resolved the **Darwin** launcher; the `MACOS_HOST_BIN_SKIP` guard was only consulted in the fallback dir-scan, never on the `which` path. Version detection then exec'd the Darwin binary → "Exec format error". The skip decision is now a pure `should_skip_darwin_host_binary(name, host_managed, host_is_macos)` consulted on **both** resolution paths; a skipped Darwin binary falls through to the Linux copy / the `npx` runtime fallback (Claude Code is npx-probeable, same as Codex/Gemini). 4 new unit tests.
+- **`entrypoint.sh` never installed the Linux Claude** because its `command -v claude` guard matched that same Darwin shadow on `PATH` and concluded Claude was already present. Replaced the boolean `command -v` guard with an **exec-free** `host_darwin_needs_linux_copy()` helper that returns true **only** when the binary resolves exclusively under the host mount (`/host-bin/*`) — i.e. the user has it on their Mac and we mirror a runnable Linux copy (strongly preferred over the npx wrapper, which has crashed on long Claude sessions). Deliberately does **nothing** when the agent is absent everywhere, so Kronn stops silently installing agents the user never had (see the *Changed* entry below). Applied uniformly to `claude` / `codex` / `gemini` / `copilot` / `kiro-cli`.
+
+clippy `--all-targets -- -D warnings` clean; the agents-module unit suite passes (30/30 in the relevant filter).
+
+### Changed — Agents the user never installed are no longer shown as "Activé" (Setup Wizard + Settings)
+
+The Setup Wizard (`SetupWizard.tsx`, the pre-config screen on first launch) and Settings → Agents (`AgentsSection.tsx`) both treated `runtime_available` (npx-reachable) as "installed": any npx-runnable agent got the enable/disable toggle and read **Activé/Désactivé**, even though the user never installed it. Combined with `entrypoint.sh` auto-installing `kiro-cli` into the container, a Mac user who had installed **only Claude Code** saw Codex/Gemini "Activé", Copilot "Désactivé", and Kiro as installed — none of which they'd installed.
+
+- **npx ≠ installed.** Only an agent actually installed in the container now gets the enable/disable toggle. An npx-only agent shows the **Install** button instead, keeping its `runtime OK — via npx` hint so the "still usable without installing" info isn't lost. The status dot is green only for `installed && enabled`.
+- **Kiro is no longer auto-installed** in the container (the `entrypoint.sh` change above): with nothing on the host, Kiro shows the **Install** button like any other not-installed agent. This also removes the root cause of the macOS Kiro-login nag (no `kiro-cli` present → nothing to log into).
+- Net effect on a Claude-only Mac: Claude → installed (native Linux copy mirrored from the host install), everything else → **Install** offered. Exactly "only what I installed is installed".
+- 2 frontend tests updated/added (`SetupWizard.test.tsx`, `AgentsSection.actions.test.tsx`); `tsc --noEmit` clean, both suites green (43 tests in the two files).
+
+### Fixed — npm-based agent install (Install button + boot mirror) failed with EACCES in the container
+
+Installing an npm agent (Codex/Gemini/Copilot/Claude) — via the **Install** button (`POST /api/agents/install` → `install_agent` → `npm install -g <pkg>`) or the macOS boot mirror in `entrypoint.sh` — failed with `EACCES: permission denied, mkdir '/usr/local/lib/node_modules/...'`. The container runs as the non-root `kronn` user, but npm's default global prefix (`/usr/local`) is root-owned.
+
+- **`backend/Dockerfile`** now sets `ENV NPM_CONFIG_PREFIX=/home/kronn/.local` (the user-writable dir already first on `PATH` and `chown`ed to `kronn`). Every `npm install -g` — the Install button, the boot mirror, anything else — now lands in `/home/kronn/.local/bin`. Declared *after* the build-time `npm install -g ccusage` so that root install is unaffected. Container-scoped: the Tauri/host build never uses this Dockerfile, so host npm installs keep their own prefix.
+- The redundant per-call `--prefix` added to `entrypoint.sh` was dropped in favour of this single image-level source of truth.
+- Verified end-to-end live: `POST /api/agents/install "CopilotCli"` → `{"success":true,"data":"added 4 packages"}`, and Claude/Gemini/Copilot resolve to `/home/kronn/.local/bin/<agent>` with real versions. (Image-level env + boot script — no bats/Rust harness covers the Dockerfile; verified against the running container.)
+- **Known follow-up (not fixed here):** button-installed agents live under `~/.local` which is **not** volume-backed, so they don't survive a container rebuild/`kronn restart` (Claude is re-mirrored at boot because it's on the host; the others would need a re-install or a persistent volume). Tracked separately.
+
+### Fixed — "Cannot connect to backend" (401) on Docker Desktop macOS once an auth token exists
+
+`config.rs` generates an auth token on first launch (`auth_enabled = true`), relying on the `auth_middleware` localhost bypass to keep things transparent for self-hosted users. That bypass keys off the client IP (`is_local_ip`), but **Docker Desktop on macOS NATs every published-port request to the Docker network gateway** (e.g. `192.168.97.1`), which `is_local_ip` correctly refuses to treat as local (the `tailscale_lan_and_public_are_not_local` test pins that — broadening it would let LAN peers skip auth). Result: once a token was generated, every API call from the browser got `401` → the UI showed "Cannot connect to backend".
+
+- **`auth_middleware` now honours the `auth_enabled` master switch** (`backend/src/lib.rs`): when `auth_enabled = false`, auth is skipped entirely even if a token is still present in the config. This matches what `setup_status` already reported (`auth_enabled && token.is_some()`) — the middleware was the only place ignoring the flag. Leaving the token in place keeps the switch sticky: `config.rs` only re-generates a token when none exists, so it never re-flips `auth_enabled` back to `true`.
+- This is the supported escape hatch for the Docker Desktop macOS case (and any setup where the localhost bypass can't see the real client IP): set `auth_enabled = false`. `is_local_ip` is intentionally left untouched — no security regression, no LAN bypass.
+- Existing auth users are unaffected: token generation still sets `auth_enabled = true`, so the master switch is on for them by default.
+- New integration test `auth_disabled_master_switch_bypasses_even_with_token` (`api_tests.rs`); the existing `auth_*` suite stays green (51 tests in the filter); clippy `--all-targets -- -D warnings` clean.
+- **Durable default (fixes first-launch for *every* Docker user, not just an existing instance):** `core::config::load` now seeds `auth_enabled = core::env::auth_on_by_default()` (= `!is_docker()`) when it first generates the token, instead of unconditionally `true`. So a fresh config under Docker starts with auth **off** (token still generated, ready for opt-in multi-user) and never 401s on first launch; native (Tauri/CLI) keeps auth **on** (the localhost bypass works there). This survives `/data` resets — without it, every regenerated config flipped auth back on and re-locked Docker-macOS users. **Security note:** an exposed multi-user Docker server now starts without auth and must enable it explicitly (`auth_enabled = true`). 2 new serial env tests (`auth_off_by_default_under_docker`, `auth_on_by_default_when_native`).
+
+### Changed — Agent "Install" is disabled under Docker (installs land in the container, not the host)
+
+Under the Docker deployment, the backend runs in a Linux container that mounts the host bin **read-only** and cannot execute anything on the host — so the "Install" button could only ever install *into the container*, never onto the user's machine. That surprised macOS users who installed an agent expecting `codex` to be runnable in their own terminal. The UI is now transparent about it.
+
+- **`/api/health` exposes `in_docker`** (`backend/src/lib.rs`, raw JSON — no ts-rs/typegen) from `core::env::is_docker()` (keyed on `KRONN_DATA_DIR`, set only by docker-compose/Dockerfile). Cross-platform verified: **Tauri/native → `false`** (`KRONN_DATA_DIR` unset), Docker (macOS/Linux/WSL) → `true`.
+- **Setup Wizard + Settings → Agents**: when `in_docker`, the **Install button is disabled** (tooltip shows the host install command) and a **warning note** points users to install on the host via the `kronn` CLI. Native/Tauri keeps Install fully functional (installs on the host). Threaded as an `inDocker` prop (default `false` → no behaviour change off-Docker, all existing tests green).
+- **Platform intent**: Docker on Linux/WSL → host install yields a Linux binary that Kronn runs via the read-only mount; Docker on macOS → host (Darwin) binaries can't run in the Linux container anyway, so the native macOS path remains the **Tauri desktop app**. Documented in `docs/AGENTS.md`.
+- Tests: backend `health_exposes_in_docker_bool` (`api_tests.rs`); frontend `AgentsSection.actions.test.tsx` + `SetupWizard.test.tsx` (disabled + note when `inDocker`, unchanged otherwise); `App`/`SettingsPage` test mocks extended with `health`. clippy `-D warnings` clean, `tsc --noEmit` clean, 4 frontend suites green (68 tests).
 
 ---
 

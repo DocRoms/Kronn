@@ -27,6 +27,21 @@ export const AGENT_LABELS: Record<string, string> = {
 
 export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama'];
 
+/** Agents RTK can hook to compress shell output (token savings). Kiro/Copilot/
+ *  Vibe/Ollama are out of scope (not in RTK's list / no shell to hook / local).
+ *  Single source of truth — shared by the RTK Settings card and the
+ *  new-discussion "no RTK" cost warning. */
+export const RTK_APPLICABLE: ReadonlySet<AgentType> = new Set<AgentType>([
+  'ClaudeCode', 'Codex', 'GeminiCli',
+]);
+
+/** RTK is "active" for an agent when the binary is installed AND the agent's
+ *  hook is wired. `rtk_available`/`rtk_hook_configured` come from agent
+ *  detection (`AgentDetection`). */
+export function isRtkActive(agent: { rtk_available: boolean; rtk_hook_configured: boolean }): boolean {
+  return agent.rtk_available && agent.rtk_hook_configured;
+}
+
 export const agentColor = (agentType: string | null | undefined): string =>
   AGENT_COLORS[agentType ?? ''] ?? '#8b5cf6';
 

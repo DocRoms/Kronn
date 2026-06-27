@@ -36,6 +36,7 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
   const [content, setContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [treeLoading, setTreeLoading] = useState(true);
+  const [treeError, setTreeError] = useState(false);
   // Seed the expanded-dirs set so the legacy `ai/` root opens by default
   // (back-compat with pre-0.7.1 projects). When `initialExpandFolder` is
   // passed, we add every prefix path of that folder (`docs`, `docs/tech-debt`,
@@ -66,8 +67,9 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
   const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // ─── Load tree ──────────────────────────────────────────────────────────
-  useEffect(() => {
+  const loadTree = useCallback(() => {
     setTreeLoading(true);
+    setTreeError(false);
     projectsApi.listAiFiles(projectId).then(files => {
       setTree(files);
       setTreeLoading(false);
@@ -91,8 +93,17 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
         ?? findFile(files, 'doc/AGENTS.md')
         ?? findFile(files, 'ai/index.md');
       if (entry) setSelectedPath(entry.path);
-    }).catch(() => setTreeLoading(false));
+    }).catch(() => {
+      // Distinguish a fetch FAILURE from a genuinely-empty docs tree: both
+      // used to render the identical "no documentation" message, so a
+      // transient 500 / network error looked exactly like "this project has
+      // no docs". Surface a retry-able error instead.
+      setTreeError(true);
+      setTreeLoading(false);
+    });
   }, [projectId, initialExpandFolder]);
+
+  useEffect(() => { loadTree(); }, [loadTree]);
 
   // ─── Load file content ─────────────────────────────────────────────────
   useEffect(() => {
@@ -232,6 +243,22 @@ export function AiDocViewer({ projectId, onDiscussFile, initialExpandFolder, ban
         {banner}
         <div className="aidoc-loading">
           <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.docAi.loading')}
+        </div>
+      </>
+    );
+  }
+
+  if (treeError) {
+    // A FAILED fetch — distinct from "no docs". Offer a retry instead of
+    // silently implying the project is undocumented.
+    return (
+      <>
+        {banner}
+        <div className="aidoc-empty aidoc-error">
+          <span>{t('projects.docAi.loadError')}</span>
+          <button type="button" className="aidoc-retry" onClick={loadTree}>
+            {t('projects.docAi.retry')}
+          </button>
         </div>
       </>
     );

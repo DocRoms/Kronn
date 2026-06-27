@@ -73,3 +73,4 @@ docker-compose.override.yml
 # fresh anyway, so committing it just churns git history.
 frontend/coverage/
 backend/coverage/
+.rtk/

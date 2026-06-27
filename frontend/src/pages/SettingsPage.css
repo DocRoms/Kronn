@@ -2318,23 +2318,45 @@
 /* canirun.ai hint — surfaced under the Ollama model picker /
  * suggestions to let the user check hardware sizing before
  * pulling a 30 GB model. Discreet, single-line, neutral grey. */
+/* Prominent "can my hardware run this?" callout — clickable box, not a faint
+ * footnote. Shown right where users pick a model to pull. */
 .set-ollama-canirun {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px dashed rgba(var(--kr-border-medium-rgb, 100, 100, 100), 0.25);
-}
-
-.set-ollama-canirun-link {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: var(--kr-fs-2xs);
-  color: var(--kr-text-muted);
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 8px 11px;
+  border: 1px solid rgba(var(--kr-info-rgb, 59, 130, 246), 0.4);
+  border-radius: 6px;
+  background: rgba(var(--kr-info-rgb, 59, 130, 246), 0.08);
+  color: var(--kr-info);
+  font-size: var(--kr-fs-xs);
+  font-weight: 500;
   text-decoration: none;
-  transition: color 0.15s ease;
+  transition: background 0.15s ease, border-color 0.15s ease;
 }
 
-.set-ollama-canirun-link:hover {
-  color: var(--kr-info);
-  text-decoration: underline;
+.set-ollama-canirun:hover {
+  background: rgba(var(--kr-info-rgb, 59, 130, 246), 0.15);
+  border-color: var(--kr-info);
 }
+
+/* Hardware-tier badge on each suggested model. */
+.set-ollama-suggestion-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.set-ollama-tier {
+  font-size: var(--kr-fs-2xs);
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.set-ollama-tier-cpu   { background: rgba(34, 197, 94, 0.16);  color: #16a34a; }
+.set-ollama-tier-mid   { background: rgba(234, 179, 8, 0.16);  color: #b45309; }
+.set-ollama-tier-power { background: rgba(168, 85, 247, 0.16); color: #9333ea; }

@@ -311,16 +311,43 @@ describe('AgentsSection — full-access switch', () => {
 });
 
 describe('AgentsSection — runtime-available rendering', () => {
-  it('renders toggle controls (not Install) for a runtime-available agent', () => {
+  it('offers Install (not the enable toggle) for a runtime-only agent, keeping the via-npx hint', () => {
+    // npx-reachable but not installed in the container: the user never
+    // installed it, so it must be offered for install — never shown as
+    // "Activé" with a toggle. The "runtime OK — via npx" hint stays so the
+    // info that it's still usable isn't lost.
     renderSection({
       agents: [makeAgent({
-        name: 'AgentVibe', agent_type: 'Vibe',
+        name: 'AgentCodex', agent_type: 'Codex',
         installed: false, runtime_available: true, enabled: true,
       })],
     });
-    expect(screen.queryByText(/Installer/)).toBeNull();
+    expect(screen.getByText(/Installer/)).toBeTruthy();
     expect(screen.getByText(/runtime OK/)).toBeTruthy();
-    expect(screen.getByTitle('config.toggleDisable')).toBeTruthy();
+    expect(screen.queryByTitle('config.toggleDisable')).toBeNull();
+    expect(screen.queryByTitle('config.toggleEnable')).toBeNull();
+  });
+
+  it('disables Install + shows the host-CLI note under Docker', () => {
+    // Under Docker the backend can't install on the host, so the button is
+    // disabled and the note points to the host-side kronn CLI.
+    renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: false, runtime_available: true })],
+      inDocker: true,
+    });
+    const installBtn = screen.getByText(/Installer/).closest('button') as HTMLButtonElement;
+    expect(installBtn.disabled).toBe(true);
+    expect(screen.getByText(/config\.dockerInstallNote/)).toBeTruthy();
+  });
+
+  it('keeps Install enabled and hides the note when not under Docker', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: false, runtime_available: true })],
+      inDocker: false,
+    });
+    const installBtn = screen.getByText(/Installer/).closest('button') as HTMLButtonElement;
+    expect(installBtn.disabled).toBe(false);
+    expect(screen.queryByText(/config\.dockerInstallNote/)).toBeNull();
   });
 
   it('surfaces a runtime_warning note when present', () => {

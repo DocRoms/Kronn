@@ -23,6 +23,10 @@ interface AgentsSectionProps {
   refetchAgentAccess: () => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
+  /** Backend runs in the Docker container → an install would land in the
+   *  container, not on the host. We disable the Install button and point to
+   *  the host-side `kronn` CLI instead. Default false (native/Tauri). */
+  inDocker?: boolean;
 }
 
 export function AgentsSection({
@@ -32,6 +36,7 @@ export function AgentsSection({
   refetchAgentAccess,
   toast,
   t,
+  inDocker = false,
 }: AgentsSectionProps) {
   const [installing, setInstalling] = useState<string | null>(null);
   const [newKeyInputs, setNewKeyInputs] = useState<Record<string, { name: string; value: string }>>({});
@@ -280,6 +285,12 @@ export function AgentsSection({
           </div>
         </div>
 
+        {inDocker && (
+          <div className="set-agent-runtime-warning" role="note">
+            ⚠️ {t('config.dockerInstallNote')}
+          </div>
+        )}
+
         {agents.map(agent => {
           // Ollama gets its own dedicated card with health check + model picker
           if (agent.agent_type === 'Ollama') {
@@ -317,9 +328,9 @@ export function AgentsSection({
           <div key={agent.name} className="set-agent-row">
             <div className="flex-row gap-5">
               <div className="relative">
-                <div className="set-dot" data-on={(agent.installed || agent.runtime_available) && agent.enabled} aria-hidden="true" />
+                <div className="set-dot" data-on={agent.installed && agent.enabled} aria-hidden="true" />
                 <span className="set-sr-only">
-                  {(agent.installed || agent.runtime_available) && agent.enabled ? t('config.enabled') : t('config.disabled')}
+                  {agent.installed && agent.enabled ? t('config.enabled') : t('config.disabled')}
                 </span>
               </div>
               <div className="flex-1">
@@ -439,7 +450,13 @@ export function AgentsSection({
                   </div>
                 )}
               </div>
-              {(agent.installed || agent.runtime_available) ? (
+              {/* Only a binary actually installed in the container gets the
+                  enable/uninstall controls. An agent reachable only via the
+                  npx runtime is NOT considered installed — it keeps the
+                  "runtime OK — via npx" hint above and is offered for a real
+                  install, so the user isn't told an agent they never installed
+                  is "Activé". */}
+              {agent.installed ? (
                 <div className="flex-row gap-3">
                   <button
                     className="set-enable-btn"
@@ -489,7 +506,8 @@ export function AgentsSection({
                   className="set-install-btn"
                   style={{ padding: '4px 10px', fontSize: 11 }}
                   onClick={() => handleInstallAgent(agent)}
-                  disabled={installing !== null}
+                  disabled={installing !== null || inDocker}
+                  title={inDocker ? t('config.dockerInstallTooltip', agent.install_command ?? '') : undefined}
                 >
                   {installing === agent.name ? (
                     <><Loader2 size={10} className="set-spin" /> ...</>

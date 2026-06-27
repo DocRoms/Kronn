@@ -1,8 +1,9 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Leaf, ExternalLink, Loader2, Info, X, Square, ChevronDown, ChevronUp, HelpCircle, ArrowUpCircle, Copy } from 'lucide-react';
 import { rtk as rtkApi } from '../../lib/api';
-import type { AgentDetection, AgentType } from '../../types/generated';
+import type { AgentDetection } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
+import { RTK_APPLICABLE } from '../../lib/constants';
 
 interface CompressionSectionProps {
   agents: AgentDetection[];
@@ -15,17 +16,8 @@ interface CompressionSectionProps {
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-/** Agents RTK actually supports. Mirrors `rtk_flag_for` in
- *  `backend/src/api/rtk.rs` — keep in sync.
- *
- *  Kiro: not in RTK's supported list.
- *  CopilotCli: RTK's `--copilot` flag targets VS Code Copilot Chat, not the
- *  `@github/copilot` standalone CLI. Treated as non-applicable.
- *  Vibe: "planned" in RTK docs, no path yet.
- *  Ollama: no shell exec to hook. */
-const RTK_APPLICABLE: ReadonlySet<AgentType> = new Set<AgentType>([
-  'ClaudeCode', 'Codex', 'GeminiCli',
-]);
+// RTK_APPLICABLE now lives in lib/constants.ts (shared with the new-discussion
+// "no RTK" cost warning). Mirrors `rtk_flag_for` in backend/src/api/rtk.rs.
 
 const RTK_GITHUB_URL = 'https://github.com/rtk-ai/rtk';
 const RTK_INSTALL_CMD = 'curl -fsSL https://raw.githubusercontent.com/rtk-ai/rtk/main/install.sh | sh';

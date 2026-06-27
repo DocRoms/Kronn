@@ -145,6 +145,21 @@ describe('McpPage', () => {
     expect(document.body.textContent).toContain('A test server');
   });
 
+  it('shows the read-only built-in kronn-internal card directly on the main view (no Add click)', () => {
+    // kronn-internal is auto-injected into every project — surfaced as a
+    // read-only system card on the MAIN Plugins view (not behind "Ajouter"),
+    // visible even with zero configs.
+    const overview: McpOverview = { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+    wrap(<McpPage projects={[]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />);
+
+    // No interaction: the card is present immediately on the default view.
+    const card = screen.getByTestId('mcp-kronn-internal-card');
+    expect(card).toBeTruthy();
+    // FR strings: name + built-in badge.
+    expect(card.textContent).toContain('Kronn Internal');
+    expect(card.textContent).toContain('Intégré');
+  });
+
   it('shows incompatibility badge in detail panel when card is clicked', () => {
     const servers = [makeServer('mcp-gitlab', 'GitLab')];
     const configs = [makeConfig('c1', 'mcp-gitlab', 'GitLab')];

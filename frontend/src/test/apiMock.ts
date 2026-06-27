@@ -57,6 +57,7 @@ export const API_NAMESPACES = [
   'version',
   'apiCallLogs',
   'learnings',
+  'health',
 ] as const;
 
 /** Flat top-level helpers (non-namespace exports). */
@@ -76,6 +77,7 @@ interface DefaultMock {
   setApiBase: AnyFn;
   getApiBase: AnyFn;
   fetchHealth: AnyFn;
+  health: Record<string, AnyFn>;
   setup: Record<string, AnyFn>;
   config: Record<string, AnyFn>;
   contacts: Record<string, AnyFn>;
@@ -117,6 +119,10 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     setApiBase: vi.fn(),
     getApiBase: vi.fn().mockReturnValue(''),
     fetchHealth: vi.fn().mockResolvedValue({ ok: true }),
+
+    health: {
+      get: resolve({ ok: true, version: '0.0.0', host_os: 'linux', in_docker: false }),
+    },
 
     setup: {
       getStatus: resolve({ is_first_run: false, current_step: 'done', agents_detected: [], repos_detected: [], scan_paths_set: true }),

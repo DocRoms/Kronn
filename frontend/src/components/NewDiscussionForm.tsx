@@ -4,7 +4,7 @@ import { ProfileTooltip } from './ProfileTooltip';
 import { Dropdown } from './Dropdown';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
-import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath } from '../lib/constants';
+import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
 import {
   Folder, ChevronRight, GitBranch,
   MessageSquare, X, AlertTriangle,
@@ -259,6 +259,25 @@ export function NewDiscussionForm({
           <span className="disc-new-title">{t('disc.newTitle')}</span>
           <button className="disc-icon-btn" onClick={handleClose} aria-label="Close"><X size={14} /></button>
         </div>
+
+        {/* No-RTK cost warning: when launching an RTK-capable agent that has no
+            active RTK hook, shell output isn't compressed → more tokens burned.
+            Red, pinned at the top. Skipped for non-RTK agents (Kiro/Copilot/
+            Vibe/Ollama) and when RTK is active. */}
+        {launchAgentNow && RTK_APPLICABLE.has(newDiscAgent as AgentType) && (() => {
+          const sel = agents.find(a => a.agent_type === newDiscAgent);
+          if (sel && isRtkActive(sel)) return null;
+          return (
+            <div className="disc-rtk-warn" data-testid="disc-rtk-warn" role="alert">
+              <AlertTriangle size={12} style={{ color: 'var(--kr-error)', flexShrink: 0 }} />
+              <span className="disc-restricted-warn-text">
+                {t('disc.rtkWarn')}
+                {' — '}
+                <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('disc.rtkWarnLink')}</span>
+              </span>
+            </div>
+          );
+        })()}
 
         <div className="disc-new-grid">
           <div>

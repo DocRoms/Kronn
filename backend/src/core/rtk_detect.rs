@@ -16,9 +16,33 @@
 use crate::models::AgentType;
 use std::path::{Path, PathBuf};
 
-/// Returns true if the `rtk` binary is resolvable via PATH or host bin dirs.
-/// Uses `which` for consistency with the rest of the agent detection.
+/// Returns true when `rtk` is available **for the host CLIs** — where agents
+/// actually run (Kronn is the bridge; CLIs/RTK live on the host, not in the
+/// container).
+///
+/// Under Docker the container ships its OWN `rtk` at `/usr/local/bin` (baked
+/// into the image), but that can't help the user's host CLIs. A plain `which`
+/// would find that container binary and wrongly report "available", so the UI
+/// would never offer to install RTK on the host (and `rtk gain` in the user's
+/// terminal stays `command not found`). We therefore check the HOST bins
+/// (mounted under `KRONN_HOST_BIN`) when in Docker, and fall back to `which`
+/// natively (Tauri/CLI, where `$PATH` already is the host). Mirrors the
+/// host-aware agent detection.
 pub fn rtk_binary_available() -> bool {
+    if crate::core::env::is_docker() {
+        return std::env::var("KRONN_HOST_BIN")
+            .map(|hb| std::env::split_paths(&hb).any(|dir| {
+                let p = dir.join("rtk");
+                // `exists()` follows symlinks. A Homebrew-installed `rtk` is a
+                // symlink into `../Cellar/rtk/<v>/bin/rtk`, and the host Cellar
+                // is NOT mounted in the container — so the link is dangling here
+                // and `exists()` is false even though rtk IS on the host. Also
+                // accept a symlink ENTRY (`symlink_metadata` doesn't follow).
+                // Same trap as the Mach-O host-launcher symlinks.
+                p.exists() || p.symlink_metadata().is_ok()
+            }))
+            .unwrap_or(false);
+    }
     which::which("rtk").is_ok()
 }
 
@@ -153,6 +177,42 @@ mod tests {
             assert!(!rtk_hook_configured_for(&AgentType::ClaudeCode));
             assert!(!rtk_hook_configured_for(&AgentType::Codex));
         });
+    }
+
+    /// Under Docker, `rtk_binary_available` must reflect the HOST (mounted
+    /// `KRONN_HOST_BIN`), NOT the container's baked `/usr/local/bin/rtk` — else
+    /// the UI never offers to install RTK on the user's machine.
+    #[test]
+    fn rtk_binary_available_in_docker_checks_host_bins() {
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = TempDir::new().expect("tempdir");
+        let prev_data = std::env::var("KRONN_DATA_DIR").ok();
+        let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
+        std::env::set_var("KRONN_DATA_DIR", "/data"); // → is_docker() == true
+        std::env::set_var("KRONN_HOST_BIN", tmp.path());
+
+        assert!(!rtk_binary_available(), "Docker + no host rtk → unavailable");
+
+        fs::write(tmp.path().join("rtk"), "#!/bin/sh\n").unwrap();
+        assert!(rtk_binary_available(), "Docker + host rtk present → available");
+
+        // Homebrew case: rtk is a symlink into ../Cellar (not mounted in the
+        // container → dangling here). Must STILL count as available.
+        #[cfg(unix)]
+        {
+            fs::remove_file(tmp.path().join("rtk")).unwrap();
+            std::os::unix::fs::symlink("/no/such/Cellar/rtk/bin/rtk", tmp.path().join("rtk")).unwrap();
+            assert!(rtk_binary_available(), "Docker + dangling host symlink (brew) → still available");
+        }
+
+        match prev_data {
+            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
+        match prev_hb {
+            Some(v) => std::env::set_var("KRONN_HOST_BIN", v),
+            None => std::env::remove_var("KRONN_HOST_BIN"),
+        }
     }
 
     #[test]

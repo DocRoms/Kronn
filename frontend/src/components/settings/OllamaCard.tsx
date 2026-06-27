@@ -16,11 +16,31 @@ interface OllamaCardProps {
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
-const SUGGESTED_MODELS = [
-  { name: 'llama3.2', desc: 'Meta — bon généraliste, léger (2 GB)', size: '~2 GB' },
-  { name: 'gemma4:26b', desc: 'Google — meilleur rapport qualité/vitesse (16 GB)', size: '~16 GB' },
-  { name: 'qwen2.5-coder:14b', desc: 'Alibaba — spécialisé code (9 GB)', size: '~9 GB' },
-  { name: 'codestral', desc: 'Mistral — spécialisé code (13 GB)', size: '~13 GB' },
+// Hardware tier of a suggested model — drives a badge so users don't pull a
+// 19 GB model onto an 8 GB no-GPU laptop. Kronn runs on Windows/WSL boxes with
+// no GPU too, not just beefy Macs.
+export type ModelTier = 'cpu' | 'mid' | 'power';
+
+export interface SuggestedModel {
+  /** Exact `ollama pull` tag. */
+  name: string;
+  /** Approx download size. */
+  size: string;
+  tier: ModelTier;
+  /** i18n key for the one-line description (FR/EN/ES). */
+  descKey: string;
+}
+
+// First-pull suggestions — tags + sizes VERIFIED against ollama.com/library
+// (2026-06). Ordered light → heavy so the no-GPU crowd sees a runnable option
+// first. Update here when the registry moves (it does, often).
+export const SUGGESTED_MODELS: SuggestedModel[] = [
+  { name: 'llama3.2:1b',       size: '~1.3 GB', tier: 'cpu',   descKey: 'ollama.model.llama32_1b' },
+  { name: 'llama3.2',          size: '~2 GB',   tier: 'cpu',   descKey: 'ollama.model.llama32' },
+  { name: 'qwen3:4b',          size: '~2.5 GB', tier: 'cpu',   descKey: 'ollama.model.qwen3_4b' },
+  { name: 'qwen2.5-coder:14b', size: '~9 GB',   tier: 'mid',   descKey: 'ollama.model.qwen25coder' },
+  { name: 'gemma3:27b',        size: '~17 GB',  tier: 'power', descKey: 'ollama.model.gemma3_27b' },
+  { name: 'qwen3:30b',         size: '~19 GB',  tier: 'power', descKey: 'ollama.model.qwen3_30b' },
 ];
 
 /** Discreet "can my hardware run this model?" link.
@@ -31,17 +51,15 @@ const SUGGESTED_MODELS = [
  *  saving the user a 30 GB pull they'd then OOM. */
 function CaniRunHint({ t }: { t: (key: string) => string }) {
   return (
-    <div className="set-ollama-canirun">
-      <a
-        href="https://www.canirun.ai/"
-        target="_blank"
-        rel="noreferrer"
-        className="set-ollama-canirun-link"
-      >
-        <ExternalLink size={9} />
-        <span>{t('ollama.canirunHint')}</span>
-      </a>
-    </div>
+    <a
+      href="https://www.canirun.ai/"
+      target="_blank"
+      rel="noreferrer"
+      className="set-ollama-canirun"
+    >
+      <ExternalLink size={14} />
+      <span>{t('ollama.canirunHint')}</span>
+    </a>
   );
 }
 
@@ -200,8 +218,13 @@ export function OllamaCard({ t }: OllamaCardProps) {
               <div className="set-ollama-suggestions">
                 {SUGGESTED_MODELS.map(m => (
                   <div key={m.name} className="set-ollama-suggestion">
-                    <code className="set-ollama-cmd">ollama pull {m.name}</code>
-                    <span className="set-ollama-suggestion-desc">{m.desc}</span>
+                    <div className="set-ollama-suggestion-head">
+                      <code className="set-ollama-cmd">ollama pull {m.name}</code>
+                      <span className={`set-ollama-tier set-ollama-tier-${m.tier}`}>
+                        {t(`ollama.tier.${m.tier}`)}
+                      </span>
+                    </div>
+                    <span className="set-ollama-suggestion-desc">{t(m.descKey)} · {m.size}</span>
                   </div>
                 ))}
               </div>

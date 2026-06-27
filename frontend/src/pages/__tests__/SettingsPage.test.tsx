@@ -110,6 +110,10 @@ vi.mock('../../lib/api', () => ({
     listDisabled: vi.fn().mockResolvedValue([]),
     toggle: vi.fn().mockResolvedValue(false),
   },
+  // AgentsSection probes /api/health to gate the Install button under Docker.
+  health: {
+    get: vi.fn().mockResolvedValue({ ok: true, version: 'test', host_os: 'test', in_docker: false }),
+  },
   contacts: {
     networkInfo: vi.fn().mockResolvedValue({ tailscale_ip: null, advertised_host: null, detected_ips: [] }),
     list: vi.fn().mockResolvedValue([]),

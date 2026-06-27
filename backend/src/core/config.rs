@@ -51,14 +51,22 @@ pub async fn load() -> Result<Option<AppConfig>> {
         tracing::info!("Generated encryption secret for existing config");
     }
 
-    // Auto-generate auth token on first launch.
-    // Auth is on by default — localhost requests bypass it (see auth_middleware),
-    // but remote peers (multi-user) must provide the token.
+    // Auto-generate auth token on first launch. Auth defaults ON on native
+    // (Tauri/CLI), where the localhost bypass keeps it transparent; OFF under
+    // Docker, where Docker Desktop NATs published-port traffic to the network
+    // gateway so the bypass can't see the real client → auth-on would 401 the
+    // user on first launch. The token is still generated (ready for opt-in
+    // multi-user); the middleware honours `auth_enabled`. See
+    // `core::env::auth_on_by_default`.
     if config.server.auth_token.is_none() {
         config.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
-        config.server.auth_enabled = true;
+        config.server.auth_enabled = super::env::auth_on_by_default();
         needs_save = true;
-        tracing::info!("Generated auth token for API security (localhost exempt, peers require Bearer token)");
+        tracing::info!(
+            "Generated auth token (auth_enabled={}, docker={})",
+            config.server.auth_enabled,
+            super::env::is_docker(),
+        );
     }
 
     // Migrate legacy single-key fields to multi-key system
@@ -308,6 +316,49 @@ mod tests {
             Some("some-local-code"),
             "secret_themes.matrix lost across save/load: {:?}",
             reloaded.secret_themes
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `load()` on a config with no `auth_token` must (1) auto-generate one and
+    /// (2) set `auth_enabled` to the PLATFORM DEFAULT (`env::auth_on_by_default`),
+    /// not blindly trust whatever was on disk. Under `KRONN_DATA_DIR` (= Docker)
+    /// the default is OFF — this is the macOS-Docker 401 fix: a generated token
+    /// must NOT silently turn auth on and lock the user out on first launch.
+    #[tokio::test]
+    async fn load_autogenerates_token_and_defaults_auth_enabled_to_platform() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-authgen-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        // Persist a config with NO token and auth_enabled deliberately TRUE,
+        // so we can prove load() overrides it from the platform default.
+        let mut cfg = default_config();
+        cfg.server.auth_token = None;
+        cfg.server.auth_enabled = true;
+        save(&cfg).await.expect("save must succeed");
+
+        let loaded = load().await.expect("load Ok").expect("Some after save");
+        assert!(
+            loaded.server.auth_token.is_some(),
+            "load() must auto-generate an auth token when none is set"
+        );
+        // KRONN_DATA_DIR is set here → is_docker() == true → auth_on_by_default() == false.
+        assert!(
+            !loaded.server.auth_enabled,
+            "auth must default OFF under Docker even though the saved value was true \
+             (env::auth_on_by_default() == {})",
+            crate::core::env::auth_on_by_default()
         );
 
         std::env::remove_var("KRONN_DATA_DIR");

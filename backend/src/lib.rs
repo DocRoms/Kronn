@@ -278,9 +278,23 @@ async fn auth_middleware(
     }
 
     let config = state.config.read().await;
+    let auth_enabled = config.server.auth_enabled;
     let expected_token = config.server.auth_token.clone();
     let strict_localhost = config.server.auth_strict_localhost;
     drop(config);
+
+    // Master switch. When the user has explicitly disabled auth, skip it
+    // entirely — even if a token is still present in the config (config.rs
+    // only re-generates a token when none exists, so leaving the token in
+    // place is harmless and keeps `auth_enabled = false` sticky across boots).
+    // This is the supported escape hatch for environments where the localhost
+    // bypass below can't work: Docker Desktop on macOS NATs every published-
+    // port request to the Docker network gateway IP, so the backend can't tell
+    // the real client is local. Mirrors `setup_status`, which already reports
+    // auth as `auth_enabled && token.is_some()`.
+    if !auth_enabled {
+        return Ok(next.run(request).await);
+    }
 
     // If no token is configured, skip auth (backward compat / first run)
     let Some(expected) = expected_token else {
@@ -408,6 +422,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 "ok": true,
                 "version": env!("CARGO_PKG_VERSION"),
                 "host_os": crate::agents::detect_host_label_public(),
+                // Lets the UI gate the "Install agent" button: under Docker the
+                // backend runs in a Linux container that can't install onto the
+                // host, so the UI points to the host-side `kronn` CLI instead.
+                // Native (Tauri/CLI) → false → Install works on the host.
+                "in_docker": crate::core::env::is_docker(),
             }))
         }))
         // ── Setup wizard ──

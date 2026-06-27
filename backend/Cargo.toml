@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.8.8"
+version = "0.8.9"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -73,7 +73,7 @@ directories = "6"     # XDG paths
 # Document extraction (context files: xlsx, docx, pptx, pdf)
 calamine = "0.35"                                           # Excel spreadsheets
 zip = { version = "2", default-features = false, features = ["deflate"] }  # Office XML (docx, pptx)
-pdf-extract = "0.10"                                        # PDF text extraction
+pdf-extract = "0.12"                                        # PDF text extraction (0.12 → lopdf ≥0.42, fixes RUSTSEC-2026-0187)
 
 # TypeScript type generation
 ts-rs = { version = "12", features = ["chrono-impl", "uuid-impl", "serde-json-impl"] }

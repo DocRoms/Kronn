@@ -5260,6 +5260,10 @@ mod auth_middleware_tests {
         );
         let mut cfg = kronn::core::config::default_config();
         cfg.server.auth_token = Some(token.to_string());
+        // Master switch must be ON — these tests verify auth ENFORCEMENT.
+        // (0.8.9 added `auth_enabled`; without this the middleware skips auth
+        // entirely and every 401-expecting case returns 200.)
+        cfg.server.auth_enabled = true;
         cfg.server.auth_strict_localhost = strict_localhost;
         let config = Arc::new(RwLock::new(cfg));
         let state = AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS);
@@ -5273,6 +5277,9 @@ mod auth_middleware_tests {
         );
         let mut cfg = kronn::core::config::default_config();
         cfg.server.auth_token = None;
+        // Master switch ON so the test actually exercises the "no token
+        // configured → passthrough" branch, not the `!auth_enabled` short-circuit.
+        cfg.server.auth_enabled = true;
         let config = Arc::new(RwLock::new(cfg));
         let state = AppState::new_defaults(config, db, DEFAULT_MAX_CONCURRENT_AGENTS);
         kronn::build_router_with_auth(state, true)

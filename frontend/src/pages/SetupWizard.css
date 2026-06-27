@@ -219,6 +219,20 @@
   color: var(--kr-warning);
 }
 
+/* Docker: agents install on the host via the kronn CLI, not here. Mirrors the
+   amber note style of `.set-agent-runtime-warning` (Settings), scoped to the
+   wizard's own stylesheet. */
+.setup-docker-warning {
+  margin-bottom: var(--kr-sp-4);
+  padding: 6px 8px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+  background: rgba(var(--kr-warning-rgb), 0.10);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.25);
+}
+
 .setup-badge-hidden {
   font-size: var(--kr-fs-2xs);
   padding: 1px 5px;

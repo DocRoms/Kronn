@@ -72,6 +72,38 @@ const mount = (projects: Project[]) => {
   );
 };
 
+describe('NewDiscussionForm — no-RTK cost warning', () => {
+  const renderForm = (agents: AgentDetection[]) => render(
+    <NewDiscussionForm
+      projects={[]}
+      agents={agents}
+      configLanguage="fr"
+      agentAccess={null}
+      onSubmit={vi.fn()}
+      onClose={vi.fn()}
+      onNavigate={vi.fn()}
+      t={(key: string) => key}
+    />
+  );
+
+  it('shows the red no-RTK warning when the selected agent has no active RTK', () => {
+    renderForm([{ ...AGENT, rtk_available: false, rtk_hook_configured: false }]);
+    const warn = screen.getByTestId('disc-rtk-warn');
+    expect(warn).toBeTruthy();
+    expect(warn.textContent).toContain('disc.rtkWarn');
+  });
+
+  it('hides the warning when RTK is active (binary + hook) for the agent', () => {
+    renderForm([{ ...AGENT, rtk_available: true, rtk_hook_configured: true }]);
+    expect(screen.queryByTestId('disc-rtk-warn')).toBeNull();
+  });
+
+  it('hides the warning for a non-RTK-applicable agent (Kiro)', () => {
+    renderForm([{ ...AGENT, name: 'Kiro', agent_type: 'Kiro', rtk_available: false, rtk_hook_configured: false }]);
+    expect(screen.queryByTestId('disc-rtk-warn')).toBeNull();
+  });
+});
+
 describe('NewDiscussionForm — workspace toggle', () => {
   it('shows the workspace toggle (Direct / Isolated) when the selected project has a repo_url', async () => {
     // Regression guard for 2026-04-13: user reported the Isolated option
