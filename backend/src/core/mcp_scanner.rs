@@ -157,6 +157,37 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
     true
 }
 
+/// Write `.mcp.json` (+ Kiro `.kiro/settings/mcp.json` & `.ai/mcp/mcp.json`,
+/// Gemini `.gemini/settings.json`) containing ONLY the built-in `kronn-internal`
+/// introspection bridge — for a project that has no user-linked MCPs.
+///
+/// Without this, `sync_project_mcps_to_disk` used to *delete* those files when a
+/// project had no other MCPs, so project-bound discussions lost kronn-internal
+/// entirely (reported 2026-06-26). Mirrors `write_general_mcp_json`.
+///
+/// Returns `false` when the bridge path can't be resolved (host-CLI safety, cf.
+/// [`disc_introspection_mcp_path_for_shared_config`]); the caller then removes
+/// any stale files instead.
+pub(crate) fn write_kronn_internal_only(project_path: &str) -> bool {
+    let mut only_internal = McpJsonFile { mcp_servers: HashMap::new() };
+    if !inject_kronn_internal(&mut only_internal) {
+        return false;
+    }
+    let _ = write_mcp_json(project_path, &only_internal);
+    ensure_gitignore(project_path, ".mcp.json");
+    sync_claude_enabled_servers(project_path, &only_internal.mcp_servers);
+    if write_mcp_json_to_subpath(project_path, ".kiro/settings/mcp.json", &only_internal).is_ok() {
+        ensure_gitignore(project_path, ".kiro/settings/");
+    }
+    if write_mcp_json_to_subpath(project_path, ".ai/mcp/mcp.json", &only_internal).is_ok() {
+        ensure_gitignore(project_path, ".ai/mcp/");
+    }
+    if write_mcp_json_to_subpath(project_path, ".gemini/settings.json", &only_internal).is_ok() {
+        ensure_gitignore(project_path, ".gemini/");
+    }
+    true
+}
+
 /// Write a McpJsonFile to an arbitrary subpath within a project directory.
 /// Creates parent directories if needed. Used for Claude (.mcp.json),
 /// Kiro (.kiro/settings/mcp.json + .ai/mcp/mcp.json), and Gemini (.gemini/settings.json).
@@ -703,14 +734,32 @@ pub fn sync_project_mcps_to_disk(
     }
 
     if mcp_servers.is_empty() {
-        // Remove config files if no MCPs
+        // No user MCPs linked — but the built-in `kronn-internal` introspection
+        // bridge must STILL be available to project-bound discussions. So we
+        // don't blank the project: we write `.mcp.json` (+ Kiro/Gemini/.ai
+        // variants) containing ONLY kronn-internal. Mirrors
+        // `write_general_mcp_json` ("always write, even when only the injected
+        // bridge is present"). Without this, a project with no other MCPs lost
+        // kronn-internal entirely (the file was deleted) — reported 2026-06-26.
         let resolved = resolve_host_path(&project.path);
-        for filename in &[".mcp.json", ".vibe/config.toml", ".kiro/settings/mcp.json", ".gemini/settings.json", ".ai/mcp/mcp.json"] {
-            let file = std::path::Path::new(&resolved).join(filename);
-            if file.exists() {
-                let _ = std::fs::remove_file(&file);
-                tracing::info!("Removed {} from {} (no MCPs)", filename, project.path);
+        if write_kronn_internal_only(&project.path) {
+            tracing::info!("Synced kronn-internal-only MCP configs for {} (no user MCPs)", project.path);
+        } else {
+            // Bridge path unresolved (host CLI safety) — remove stale JSON files.
+            for filename in &[".mcp.json", ".kiro/settings/mcp.json", ".gemini/settings.json", ".ai/mcp/mcp.json"] {
+                let file = std::path::Path::new(&resolved).join(filename);
+                if file.exists() {
+                    let _ = std::fs::remove_file(&file);
+                    tracing::info!("Removed {} from {} (no MCPs, bridge unresolved)", filename, project.path);
+                }
             }
+        }
+        // Vibe has no kronn-internal bridge (prompt-injection fallback) — drop
+        // its config when there are no user MCPs.
+        let vibe = std::path::Path::new(&resolved).join(".vibe/config.toml");
+        if vibe.exists() {
+            let _ = std::fs::remove_file(&vibe);
+            tracing::info!("Removed .vibe/config.toml from {} (no MCPs)", project.path);
         }
     } else {
         // ── Claude Code: .mcp.json ──

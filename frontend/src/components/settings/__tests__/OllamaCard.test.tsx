@@ -89,8 +89,9 @@ describe('OllamaCard — 4-state rendering', () => {
     });
     ollama.models.mockResolvedValue({ models: [] });
     await mountCard();
-    // At least one of the suggested models appears in the UI.
-    expect(screen.getByText(/llama3\.2/)).toBeTruthy();
+    // At least one of the suggested models appears in the UI. (The list now
+    // includes both `llama3.2:1b` and `llama3.2`, so match-all + count.)
+    expect(screen.getAllByText(/llama3\.2/).length).toBeGreaterThan(0);
   });
 
   it('online + models → installed model name appears + status reflects count', async () => {
@@ -115,7 +116,7 @@ describe('OllamaCard — 4-state rendering', () => {
 describe('OllamaCard — canirun.ai hint always visible', () => {
   it('renders the canirun link even in not_installed state (2026-05-11 regression guard)', async () => {
     await mountCard();
-    const link = document.querySelector('a.set-ollama-canirun-link') as HTMLAnchorElement | null;
+    const link = document.querySelector('a.set-ollama-canirun') as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
     expect(link!.href).toContain('canirun.ai');
   });
@@ -126,7 +127,7 @@ describe('OllamaCard — canirun.ai hint always visible', () => {
       models_count: 0, hint: null,
     });
     await mountCard();
-    const link = document.querySelector('a.set-ollama-canirun-link') as HTMLAnchorElement | null;
+    const link = document.querySelector('a.set-ollama-canirun') as HTMLAnchorElement | null;
     expect(link).not.toBeNull();
   });
 });
@@ -162,7 +163,7 @@ describe('OllamaCard — default-model picker', () => {
     ollama.models.mockResolvedValue({
       models: [{ name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' }],
     });
-    config.getModelTiers.mockResolvedValue({ ...baseTiers, ollama: { economy: null, reasoning: null, default: 'gemma4:26b' } });
+    config.getModelTiers.mockResolvedValue({ ...baseTiers, ollama: { economy: null, reasoning: null, default: 'gemma3:27b' } });
     config.setModelTiers.mockRejectedValue(new Error('500'));
     await mountCard();
 

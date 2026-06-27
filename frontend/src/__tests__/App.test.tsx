@@ -40,6 +40,11 @@ vi.mock('../lib/api', () => ({
   version: {
     check: vi.fn().mockReturnValue(new Promise(() => {})),
   },
+  // App probes /api/health on mount to learn whether it runs under Docker
+  // (gates the wizard's Install button). Inert in tests.
+  health: {
+    get: vi.fn().mockResolvedValue({ ok: true, version: 'test', host_os: 'test', in_docker: false }),
+  },
 }));
 
 import { setup as setupApi, config as configApi } from '../lib/api';

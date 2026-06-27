@@ -1863,6 +1863,44 @@ args = ["@example/old-mcp"]
         cleanup(&tmp);
     }
 
+    /// Regression (2026-06-26): a project with NO user MCPs must still get
+    /// `.mcp.json` (+ Kiro/Gemini/.ai) carrying kronn-internal — the empty
+    /// branch of `sync_project_mcps_to_disk` used to DELETE those files, so
+    /// project-bound discussions lost the introspection bridge entirely.
+    #[test]
+    #[serial]
+    fn empty_project_still_writes_kronn_internal_only() {
+        let tmp = setup_tmp("kronn-internal-only");
+        // Make the bridge path resolvable regardless of Docker/build env: set
+        // BOTH lookup envs (shared-config checks PUBLIC_PATH first; the dev
+        // path checks DISC_INTROSPECTION_MCP) to a stub file that exists.
+        let bridge = tmp.join("bridge.py");
+        std::fs::write(&bridge, "# stub bridge").unwrap();
+        let b = bridge.to_string_lossy().to_string();
+        std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &b);
+        std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &b);
+
+        let wrote = write_kronn_internal_only(&tmp.to_string_lossy());
+
+        std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
+        std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");
+
+        assert!(wrote, "bridge resolved via env → files should be written");
+        for (path, label) in &[
+            (".mcp.json",               "Claude Code"),
+            (".kiro/settings/mcp.json", "Kiro"),
+            (".ai/mcp/mcp.json",        "Kiro (.ai)"),
+            (".gemini/settings.json",   "Gemini CLI"),
+        ] {
+            let file = tmp.join(path);
+            assert!(file.exists(), "{}: {} not written for an MCP-less project", label, path);
+            let content = std::fs::read_to_string(&file).unwrap();
+            assert!(content.contains("kronn-internal"),
+                "{}: {} must carry the kronn-internal entry. Got:\n{}", label, path, content);
+        }
+        cleanup(&tmp);
+    }
+
     #[test]
     fn write_general_mcp_json_seeds_all_agent_configs_with_kronn_internal() {
         use rusqlite::Connection;

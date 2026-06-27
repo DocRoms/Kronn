@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive } from '../constants';
 
 describe('constants', () => {
   describe('AGENT_COLORS', () => {
@@ -13,6 +13,42 @@ describe('constants', () => {
     it('has display-name aliases for Claude and Gemini', () => {
       expect(AGENT_COLORS['Claude Code']).toBe(AGENT_COLORS['ClaudeCode']);
       expect(AGENT_COLORS['Gemini CLI']).toBe(AGENT_COLORS['GeminiCli']);
+    });
+  });
+
+  describe('RTK_APPLICABLE', () => {
+    it('contains exactly the RTK-hookable agents (Claude / Codex / Gemini)', () => {
+      expect([...RTK_APPLICABLE].sort()).toEqual(['ClaudeCode', 'Codex', 'GeminiCli']);
+    });
+
+    it('excludes agents RTK cannot hook (Kiro, Copilot, Vibe, Ollama)', () => {
+      for (const at of ['Kiro', 'CopilotCli', 'Vibe', 'Ollama'] as const) {
+        expect(RTK_APPLICABLE.has(at)).toBe(false);
+      }
+    });
+
+    it('every applicable agent is a known agent type', () => {
+      for (const at of RTK_APPLICABLE) {
+        expect(ALL_AGENT_TYPES).toContain(at);
+      }
+    });
+  });
+
+  describe('isRtkActive', () => {
+    it('is active only when the binary is available AND the hook is configured', () => {
+      expect(isRtkActive({ rtk_available: true, rtk_hook_configured: true })).toBe(true);
+    });
+
+    it('is inactive when the binary is missing (even if a hook is configured)', () => {
+      expect(isRtkActive({ rtk_available: false, rtk_hook_configured: true })).toBe(false);
+    });
+
+    it('is inactive when the hook is not configured (even if the binary exists)', () => {
+      expect(isRtkActive({ rtk_available: true, rtk_hook_configured: false })).toBe(false);
+    });
+
+    it('is inactive when neither is present', () => {
+      expect(isRtkActive({ rtk_available: false, rtk_hook_configured: false })).toBe(false);
     });
   });
 

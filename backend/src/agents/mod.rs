@@ -69,6 +69,23 @@ pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
     "kiro-cli",
 ];
 
+/// Pure: should a *resolved* binary be ignored because it is a Darwin host
+/// binary that cannot `exec()` in this Linux container?
+///
+/// This must be consulted on EVERY resolution path, including the primary
+/// `which::which` lookup — the container `PATH` includes the host-mounted
+/// `~/.local/bin` (`/host-bin/local`), so on a macOS host `which` happily
+/// returns the Darwin `claude` and, without this guard, version detection
+/// execs it and surfaces an "Exec format error" instead of falling back to the
+/// npx runtime / the Linux copy installed by `entrypoint.sh`.
+pub(crate) fn should_skip_darwin_host_binary(
+    name: &str,
+    host_managed: bool,
+    host_is_macos: bool,
+) -> bool {
+    host_managed && host_is_macos && MACOS_HOST_BIN_SKIP.contains(&name)
+}
+
 /// Public accessor so `/api/health` can stamp the host label into its body
 /// (used by the "Report bug" flow to pre-fill a GitHub issue template).
 /// Keeping the core helper private preserves the module boundary.
@@ -448,12 +465,24 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         let host_managed = host_dirs.iter().any(|dir| {
             path.starts_with(dir)
         });
-        tracing::debug!(
-            target: "kronn::agent_detect",
-            "find_binary('{}'): resolved via PATH -> {} (host_managed={})",
-            name, resolved, host_managed,
-        );
-        return Some(BinaryLocation { path: resolved, host_managed, via_wsl: false });
+        // A Darwin host binary reachable via PATH (the container mounts the
+        // host `~/.local/bin` onto PATH) must NOT be returned — it can't exec
+        // here. Fall through to the host-dir scan / Linux-package probes /
+        // npx runtime fallback instead of surfacing an "Exec format error".
+        if should_skip_darwin_host_binary(name, host_managed, host_is_macos()) {
+            tracing::debug!(
+                target: "kronn::agent_detect",
+                "find_binary('{}'): skipping Darwin host-mounted binary resolved via PATH at {} (macOS host — using Linux copy / npx runtime instead)",
+                name, resolved,
+            );
+        } else {
+            tracing::debug!(
+                target: "kronn::agent_detect",
+                "find_binary('{}'): resolved via PATH -> {} (host_managed={})",
+                name, resolved, host_managed,
+            );
+            return Some(BinaryLocation { path: resolved, host_managed, via_wsl: false });
+        }
     }
 
     // Host-mounted bin directories — fallback when `which` fails (e.g. broken symlinks)
@@ -472,9 +501,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
                     // On macOS hosts, host-mounted binaries are Darwin
                     // binaries that cannot execute in this Linux container.
                     // The entrypoint.sh installs Linux versions via npm/curl.
-                    // Source of truth for the skip list is MACOS_HOST_BIN_SKIP
-                    // above — a test enforces that every npm agent is covered.
-                    if host_is_macos() && MACOS_HOST_BIN_SKIP.contains(&name) {
+                    // These entries live under a host-mount dir, so they are
+                    // host_managed by construction. Source of truth for the
+                    // skip list is MACOS_HOST_BIN_SKIP above — a test enforces
+                    // that every npm agent is covered.
+                    if should_skip_darwin_host_binary(name, true, host_is_macos()) {
                         tracing::debug!(
                             target: "kronn::agent_detect",
                             "find_binary('{}'): skipping Darwin host-mounted binary at {} (macOS host — Linux copy should come from entrypoint.sh)",
@@ -747,7 +778,16 @@ mod tests {
     #[serial]
     fn host_is_not_macos_when_unset() {
         std::env::remove_var("KRONN_HOST_OS");
-        assert!(!host_is_macos(), "Should not be macOS when env is unset on Linux");
+        // With no override, detection falls back to the REAL host OS. Assert
+        // against the actual build target so this is correct whether the suite
+        // runs on Linux (CI/Docker) OR natively on macOS — the latter is now a
+        // supported Mac dev path (`./kronn start-dev`), where a hardcoded
+        // `!host_is_macos()` would wrongly fail.
+        assert_eq!(
+            host_is_macos(),
+            cfg!(target_os = "macos"),
+            "unset env should fall back to the real host OS"
+        );
     }
 
     // ─── run_shell_cmd ───────────────────────────────────────────────────────
@@ -1058,5 +1098,45 @@ mod tests {
             "regression: gemini dropped from macOS skip list");
         assert!(MACOS_HOST_BIN_SKIP.contains(&"copilot"),
             "regression: copilot dropped from macOS skip list");
+    }
+
+    /// The Darwin-host skip decision must fire for a host-managed skip-listed
+    /// binary on a macOS host. Regression for the "claude → Exec format error"
+    /// bug: a Darwin `claude` reachable via the container PATH (host mount)
+    /// was returned by `which::which` because the skip was only checked in the
+    /// fallback dir-scan, never on the primary PATH resolution.
+    #[test]
+    fn should_skip_darwin_host_binary_fires_on_macos_host_managed() {
+        assert!(should_skip_darwin_host_binary("claude", true, true),
+            "host-managed claude on a macOS host must be skipped");
+    }
+
+    /// Must NOT skip when the binary is not host-managed: a Linux `claude`
+    /// installed by entrypoint.sh into the container (e.g. ~/.local/bin) is
+    /// runnable and must be returned even on a macOS host.
+    #[test]
+    fn should_skip_darwin_host_binary_keeps_container_linux_copy() {
+        assert!(!should_skip_darwin_host_binary("claude", false, true),
+            "a non-host-managed (in-container Linux) claude must be kept");
+    }
+
+    /// Must NOT skip on a non-macOS host: a host-mounted binary on Linux/WSL is
+    /// a Linux binary and runs fine in the container.
+    #[test]
+    fn should_skip_darwin_host_binary_inert_off_macos() {
+        assert!(!should_skip_darwin_host_binary("claude", true, false),
+            "host-managed claude on a non-macOS host must NOT be skipped");
+    }
+
+    /// Must NOT skip a binary that isn't in the skip list, even on macOS.
+    #[test]
+    fn should_skip_darwin_host_binary_only_for_listed_names() {
+        assert!(!should_skip_darwin_host_binary("ollama", true, true),
+            "ollama is not in MACOS_HOST_BIN_SKIP and must not be skipped");
+        // Every listed agent is covered when host-managed on macOS.
+        for name in MACOS_HOST_BIN_SKIP {
+            assert!(should_skip_darwin_host_binary(name, true, true),
+                "{} is in the skip list but was not skipped", name);
+        }
     }
 }

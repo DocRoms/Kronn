@@ -9,6 +9,20 @@ pub fn is_docker() -> bool {
     std::env::var("KRONN_DATA_DIR").is_ok()
 }
 
+/// Whether API auth should be ENABLED by default when a fresh config first
+/// generates its token (`core::config::load`).
+///
+/// ON for native (Tauri/CLI): the `auth_middleware` localhost bypass keeps it
+/// transparent for the single-machine user. OFF under Docker: Docker Desktop
+/// (macOS/Windows) NATs every published-port request to the Docker network
+/// gateway, so the bypass can't recognise the real client as local — auth-on
+/// would 401 the user on first launch ("Cannot connect to backend"). The token
+/// is still generated (ready for opt-in multi-user); an exposed Docker server
+/// enables auth explicitly. The middleware honours `auth_enabled` either way.
+pub fn auth_on_by_default() -> bool {
+    !is_docker()
+}
+
 /// Detect the host operating system label.
 pub fn host_os_label() -> String {
     // 1. Trust environment variable (set by docker-compose from Makefile)
@@ -64,6 +78,24 @@ mod tests {
         let old = std::env::var("KRONN_DATA_DIR").ok();
         std::env::remove_var("KRONN_DATA_DIR");
         assert!(!is_docker());
+        if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); }
+    }
+
+    #[test]
+    #[serial]
+    fn auth_off_by_default_under_docker() {
+        let old = std::env::var("KRONN_DATA_DIR").ok();
+        std::env::set_var("KRONN_DATA_DIR", "/data");
+        assert!(!auth_on_by_default(), "Docker → auth must default OFF (localhost bypass can't see the real client behind NAT)");
+        if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); } else { std::env::remove_var("KRONN_DATA_DIR"); }
+    }
+
+    #[test]
+    #[serial]
+    fn auth_on_by_default_when_native() {
+        let old = std::env::var("KRONN_DATA_DIR").ok();
+        std::env::remove_var("KRONN_DATA_DIR");
+        assert!(auth_on_by_default(), "Native (Tauri/CLI) → auth defaults ON; localhost bypass keeps it transparent");
         if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); }
     }
 

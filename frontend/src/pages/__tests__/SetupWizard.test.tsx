@@ -149,6 +149,44 @@ describe('SetupWizard — step 0 (agents detection)', () => {
     expect(installBtn).toBeTruthy();
   });
 
+  it('offers Install (not the enable toggle) for an npx-only agent, keeping the via-npx hint', async () => {
+    // Reachable via npx but not installed in the container: the user never
+    // installed it, so it must be offered for install — never shown with an
+    // "Activé"/"Désactivé" toggle as if it were installed.
+    const agent = makeAgent({
+      name: 'Codex', agent_type: 'Codex',
+      installed: false, runtime_available: true,
+      install_command: 'npm install -g @openai/codex',
+    });
+    vi.mocked(agentsApi.detect).mockResolvedValue([agent]);
+
+    await wrap(<SetupWizard initialStatus={null} onComplete={vi.fn()} />);
+
+    const buttons = Array.from(document.body.querySelectorAll('button'));
+    expect(buttons.some(b => b.textContent?.includes('Installer'))).toBe(true);
+    expect(buttons.some(b => b.textContent === 'Activé' || b.textContent === 'Désactivé')).toBe(false);
+    // The "still usable via npx" hint is preserved.
+    expect(document.body.textContent).toContain('runtime OK');
+  });
+
+  it('under Docker: disables Install and shows the host-CLI note', async () => {
+    const agent = makeAgent({
+      name: 'Codex', agent_type: 'Codex',
+      installed: false, runtime_available: true,
+      install_command: 'npm install -g @openai/codex',
+    });
+    vi.mocked(agentsApi.detect).mockResolvedValue([agent]);
+
+    await wrap(<SetupWizard initialStatus={null} inDocker onComplete={vi.fn()} />);
+
+    const installBtn = Array.from(document.body.querySelectorAll('button'))
+      .find(b => b.textContent?.includes('Installer')) as HTMLButtonElement;
+    expect(installBtn).toBeTruthy();
+    expect(installBtn.disabled).toBe(true);
+    // Host-CLI note rendered (real i18n → fr string mentions the kronn CLI).
+    expect(document.body.textContent).toMatch(/CLI kronn/);
+  });
+
   it('shows agent count message when at least one agent is detected', async () => {
     const agent = makeAgent({ installed: true });
     vi.mocked(agentsApi.detect).mockResolvedValue([agent]);

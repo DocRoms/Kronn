@@ -286,3 +286,45 @@ setup() {
     [[ ${#_AGENT_VERSIONS[@]} -eq $n ]]
     [[ ${#_AGENT_LATESTS[@]} -eq $n ]]
 }
+
+# ─── kiro_startup_action ──────────────────────────────────────────────────────
+# Args order: os authenticated available opt_in
+
+@test "kiro_startup_action: non-macOS always skips" {
+    run kiro_startup_action "Linux" "0" "1" "1"
+    assert_success
+    assert_output "skip"
+}
+
+@test "kiro_startup_action: macOS + no opt-in → skip (silent, even if available)" {
+    # The bug being fixed: kiro-cli is auto-installed into the container on
+    # macOS, so its presence must NEVER produce any Kiro output for a user who
+    # didn't install Kiro. Default = total silence.
+    run kiro_startup_action "Darwin" "0" "1" "0"
+    assert_success
+    assert_output "skip"
+}
+
+@test "kiro_startup_action: macOS + no opt-in → skip even when authenticated" {
+    run kiro_startup_action "Darwin" "1" "1" "0"
+    assert_success
+    assert_output "skip"
+}
+
+@test "kiro_startup_action: macOS + opt-in + kiro not in container → unavailable" {
+    run kiro_startup_action "Darwin" "0" "0" "1"
+    assert_success
+    assert_output "unavailable"
+}
+
+@test "kiro_startup_action: macOS + opt-in + available + authenticated → authenticated" {
+    run kiro_startup_action "Darwin" "1" "1" "1"
+    assert_success
+    assert_output "authenticated"
+}
+
+@test "kiro_startup_action: macOS + opt-in + available + not auth → login" {
+    run kiro_startup_action "Darwin" "0" "1" "1"
+    assert_success
+    assert_output "login"
+}

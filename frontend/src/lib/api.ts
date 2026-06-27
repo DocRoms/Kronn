@@ -102,14 +102,21 @@ import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } 
 // Security note: localStorage is accessible to any JS on the page (XSS risk).
 // For self-hosted/Tauri desktop deployments this is acceptable.
 // For public-facing deployments, consider httpOnly cookies instead.
-let _authToken: string | null = localStorage.getItem('kronn_auth_token');
+//
+// localStorage isn't present in every environment this module is imported into
+// (vitest's isolated runs before the DOM env attaches, SSR, etc.). Guard so a
+// module-load read never throws — falls back to in-memory only. In a real
+// browser / Tauri webview localStorage always exists, so behaviour is unchanged.
+const _ls: Storage | undefined = typeof localStorage !== 'undefined' ? localStorage : undefined;
+
+let _authToken: string | null = _ls?.getItem('kronn_auth_token') ?? null;
 
 export function setAuthToken(token: string | null) {
   _authToken = token;
   if (token) {
-    localStorage.setItem('kronn_auth_token', token);
+    _ls?.setItem('kronn_auth_token', token);
   } else {
-    localStorage.removeItem('kronn_auth_token');
+    _ls?.removeItem('kronn_auth_token');
   }
 }
 
@@ -358,6 +365,26 @@ export const version = {
    *  banner. Backend caches 6h so a UI tab burst doesn't fan out to
    *  GitHub; safe to call from `useEffect` on every mount. */
   check: () => api<VersionCheck>('GET', '/version/check'),
+};
+
+export interface HealthInfo {
+  ok: boolean;
+  version: string;
+  host_os: string;
+  /** True when the backend runs inside the Docker container. The UI uses it
+   *  to gate the agent Install button: under Docker an install lands in the
+   *  container (not the host), so the UI points to the host-side `kronn` CLI
+   *  instead. Native (Tauri/CLI) → false → Install works on the host. */
+  in_docker: boolean;
+}
+
+export const health = {
+  /** `GET /api/health` — unauthed and NOT enveloped (raw JSON), so it bypasses
+   *  the `api<T>()` `{success,data}` unwrap. */
+  get: async (): Promise<HealthInfo> => {
+    const res = await fetch(`${_apiBase}/api/health`, { headers: { ...authHeaders() } });
+    return res.json() as Promise<HealthInfo>;
+  },
 };
 
 // ─── Config ─────────────────────────────────────────────────────────────────

@@ -293,7 +293,13 @@ _ask_yn_fallback() {
     while true; do
         printf "${BOLD}%s${RESET} ${DIM}(y/n)${RESET} " "$prompt"
         local answer
-        read -r answer
+        # `read` fails on EOF (closed/exhausted stdin — non-interactive runs,
+        # pipes, CI). Default to "no" instead of re-prompting forever on an
+        # input we can never get.
+        if ! read -r answer; then
+            echo
+            return 1
+        fi
         case "$answer" in
             y|Y|yes|YES|o|O|oui|OUI)
                 return 0
@@ -306,4 +312,97 @@ _ask_yn_fallback() {
                 ;;
         esac
     done
+}
+
+# ─── Platform helpers ────────────────────────────────────────────────────────
+
+# Pure: true (exit 0) when the host OS is macOS — where the Docker stack can't
+# execute the user's host CLIs (Darwin binaries can't run in the Linux
+# container, and the agents' OAuth creds live in the macOS Keychain, which the
+# container can't read). `cmd_web` uses this to warn and point to the native
+# path (desktop app / `make dev-backend`). Non-macOS (Linux/WSL) → exit 1 → no
+# warning: Docker is the correct path there (host binaries are Linux, run
+# directly in the container). Arg overridable for tests.
+is_macos_host() {
+    [[ "${1:-$(uname -s 2>/dev/null)}" == "Darwin" ]]
+}
+
+# Pure: given whether each native-dev tool is present (1 = present, anything
+# else = missing), echo the space-separated list of MISSING tool names in a
+# stable order (cargo node pnpm), or nothing when all are present. Native dev
+# mode (`kronn start-dev`) runs the Rust backend (cargo) + the Vite frontend
+# (node + pnpm) on the host with no Docker — these three are the hard
+# prerequisites. Kept pure (args, no `command -v`) so it is unit-testable; the
+# caller resolves real presence. Cross-platform: native dev is valid on
+# Linux/WSL/macOS alike, so there is no OS gating here.
+dev_missing_tools() {
+    local have_cargo="${1:-0}" have_node="${2:-0}" have_pnpm="${3:-0}"
+    local missing=""
+    [[ "$have_cargo" == "1" ]] || missing="${missing} cargo"
+    [[ "$have_node"  == "1" ]] || missing="${missing} node"
+    [[ "$have_pnpm"  == "1" ]] || missing="${missing} pnpm"
+    echo "${missing# }"
+}
+
+# Print `url` as an OSC 8 terminal hyperlink (clickable in Terminal.app, iTerm2,
+# Windows Terminal / WSL, WezTerm, kitty, VS Code…). NOT macOS-specific — gated
+# only on stdout being a TTY, so piped/redirected output (CI, logs) gets the
+# plain URL with no escape bytes. Prints directly (no trailing newline) so the
+# caller controls colors/layout; do NOT wrap in $(...) — that pipe would hide
+# the TTY and force the plain fallback. Usage: hyperlink URL [label]
+hyperlink() {
+    local url="$1" label="${2:-$1}"
+    if [[ -t 1 ]]; then
+        printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$url" "$label"
+    else
+        printf '%s' "$label"
+    fi
+}
+
+# Pure decision for `ensure_in_path`. Inputs (1 = true): is `kronn` already on
+# PATH pointing at this checkout, and does the ~/.local/bin symlink already
+# exist pointing here. Echoes the action:
+#   "ok"     → already reachable; do nothing
+#   "adopt"  → symlink exists but ~/.local/bin isn't on PATH; add it for THIS
+#              session, silently — do NOT nag to recreate it on every launch
+#   "create" → nothing yet; offer to create the symlink
+# Split out (pure, no FS) so it's unit-testable; the caller does the FS probes.
+path_link_action() {
+    local on_path="${1:-0}" link_ok="${2:-0}"
+    if [[ "$on_path" == "1" ]]; then
+        echo "ok"
+    elif [[ "$link_ok" == "1" ]]; then
+        echo "adopt"
+    else
+        echo "create"
+    fi
+}
+
+# Pure: pick the browser-opener command by availability (1 = present), in
+# WSL → Linux → macOS priority. Echoes the command name, or "" if none. Testable.
+pick_opener() {
+    local has_wslview="${1:-0}" has_xdg="${2:-0}" has_open="${3:-0}"
+    if [[ "$has_wslview" == "1" ]]; then
+        echo "wslview"
+    elif [[ "$has_xdg" == "1" ]]; then
+        echo "xdg-open"
+    elif [[ "$has_open" == "1" ]]; then
+        echo "open"
+    else
+        echo ""
+    fi
+}
+
+# Open a URL in the default browser, cross-platform (WSL/Linux/macOS). Returns 1
+# when no opener is available so callers can print a manual fallback. Runs the
+# opener detached so it never blocks the caller.
+open_url() {
+    local url="$1" cmd
+    cmd=$(pick_opener \
+        "$(command -v wslview  >/dev/null 2>&1 && echo 1 || echo 0)" \
+        "$(command -v xdg-open >/dev/null 2>&1 && echo 1 || echo 0)" \
+        "$(command -v open     >/dev/null 2>&1 && echo 1 || echo 0)")
+    [[ -n "$cmd" ]] || return 1
+    "$cmd" "$url" >/dev/null 2>&1 &
+    return 0
 }

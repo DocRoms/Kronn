@@ -354,6 +354,15 @@ async fn main() -> anyhow::Result<()> {
     // Start server
     let addr = format!("{}:{}", host, port);
     tracing::info!("Listening on {}", addr);
+
+    // Banner entry URL. `kronn start-dev` exports KRONN_DEV_UI_URL (the Vite
+    // dev UI): in native dev THIS port serves the API only, so the banner must
+    // point at the UI. Without the override — Docker (the gateway serves the UI
+    // on this port) or a bare backend — it shows the backend address as before.
+    let backend_url = format!("http://{}:{}", host, port);
+    let dev_ui = std::env::var("KRONN_DEV_UI_URL").ok().filter(|s| !s.is_empty());
+    let entry = banner_entry_url(&backend_url, dev_ui.as_deref());
+
     println!();
     println!("  ╔═══════════════════════════════════════╗");
     println!("  ║                                       ║");
@@ -361,11 +370,16 @@ async fn main() -> anyhow::Result<()> {
     println!("  ║   ─────────────────                   ║");
     println!("  ║   Entering the grid...                ║");
     println!("  ║                                       ║");
-    println!("  ║   → http://{}:{:<13} ║", host, port);
+    println!("  ║   → {:<32}║", entry);
     println!("  ║   Agents: max {} concurrent          ║", max_agents);
     println!("  ║                                       ║");
     println!("  ╚═══════════════════════════════════════╝");
     println!();
+    if let Some(ref ui) = dev_ui {
+        println!("  Native dev — open the UI at {}", osc8_link(ui));
+        println!("  ({} is the API only, not the UI.)", backend_url);
+        println!();
+    }
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
@@ -376,6 +390,38 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Kronn — Shutdown complete.");
     Ok(())
+}
+
+/// URL shown in the startup banner's "→" line. Returns the dev-UI override when
+/// it is set and non-empty (`kronn start-dev` exports KRONN_DEV_UI_URL — in
+/// native dev the listen port serves the API only), otherwise the backend
+/// address (Docker, where the gateway serves the UI on this port, or a bare
+/// backend with no separate UI server).
+fn banner_entry_url(backend_url: &str, dev_ui: Option<&str>) -> String {
+    match dev_ui {
+        Some(ui) if !ui.is_empty() => ui.to_string(),
+        _ => backend_url.to_string(),
+    }
+}
+
+/// Wrap `url` in an OSC 8 terminal hyperlink so it's clickable (iTerm2,
+/// Terminal.app, WezTerm, kitty, VS Code…) — but only when stdout is a real
+/// terminal. Piped/redirected output (logs, CI) gets the plain URL so no escape
+/// bytes leak into files.
+fn osc8_link(url: &str) -> String {
+    use std::io::IsTerminal;
+    osc8(url, std::io::stdout().is_terminal())
+}
+
+/// Pure core of [`osc8_link`] — split out so the escape construction is unit
+/// testable without a TTY. `tty=false` returns the bare URL.
+fn osc8(url: &str, tty: bool) -> String {
+    if tty {
+        // ESC ] 8 ; ; <url> ST <url> ESC ] 8 ; ; ST   (ST = ESC \)
+        format!("\x1b]8;;{url}\x1b\\{url}\x1b]8;;\x1b\\")
+    } else {
+        url.to_string()
+    }
 }
 
 /// Wait for SIGTERM or SIGINT (Ctrl+C / Docker stop).
@@ -400,5 +446,52 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => tracing::info!("Received Ctrl+C, shutting down gracefully..."),
         _ = terminate => tracing::info!("Received SIGTERM, shutting down gracefully..."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn banner_uses_backend_url_without_override() {
+        assert_eq!(
+            banner_entry_url("http://127.0.0.1:3140", None),
+            "http://127.0.0.1:3140",
+            "no override (Docker / bare backend) → show the backend address"
+        );
+    }
+
+    #[test]
+    fn banner_uses_dev_ui_override_when_set() {
+        // Native dev: :3140 is API-only, so the banner must point at the Vite UI.
+        assert_eq!(
+            banner_entry_url("http://127.0.0.1:3140", Some("http://localhost:5173")),
+            "http://localhost:5173"
+        );
+    }
+
+    #[test]
+    fn banner_ignores_empty_override() {
+        assert_eq!(
+            banner_entry_url("http://127.0.0.1:3140", Some("")),
+            "http://127.0.0.1:3140",
+            "an empty KRONN_DEV_UI_URL must not blank out the banner"
+        );
+    }
+
+    #[test]
+    fn osc8_plain_when_not_a_tty() {
+        // Redirected/piped output (logs, CI) must stay free of escape bytes —
+        // cross-platform, no OS gating.
+        assert_eq!(osc8("http://localhost:5173", false), "http://localhost:5173");
+    }
+
+    #[test]
+    fn osc8_wraps_url_in_hyperlink_on_a_tty() {
+        let s = osc8("http://localhost:5173", true);
+        assert!(s.starts_with("\x1b]8;;http://localhost:5173\x1b\\"), "opens the OSC 8 link: {s:?}");
+        assert!(s.ends_with("\x1b]8;;\x1b\\"), "closes the OSC 8 link: {s:?}");
+        assert!(s.contains("http://localhost:5173"), "keeps the visible URL label");
     }
 }

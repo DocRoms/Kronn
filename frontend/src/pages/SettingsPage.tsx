@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
 import { ApiCallLogsPage } from './ApiCallLogsPage';
-import { config as configApi, skills as skillsApi, directives as directivesApi, autoTriggersApi } from '../lib/api';
+import { config as configApi, skills as skillsApi, directives as directivesApi, autoTriggersApi, health as healthApi } from '../lib/api';
 import { useApi } from '../hooks/useApi';
 import { useT } from '../lib/I18nContext';
 import { UI_LOCALES } from '../lib/i18n';
@@ -252,6 +252,11 @@ export function SettingsPage({
 
   // Internal API calls
   const { data: dbInfo, refetch: refetchDbInfo } = useApi(() => configApi.dbInfo(), []);
+  // Under Docker, agent installs land in the container (not the host) → gate
+  // the Install button in AgentsSection. Defaults to false (native/Tauri) when
+  // health hasn't resolved or the fetch fails — never block install on doubt.
+  const { data: healthInfo } = useApi(() => healthApi.get(), []);
+  const inDocker = healthInfo?.in_docker ?? false;
   useApi(() => configApi.getServerConfig().then(cfg => {
     if (cfg) {
       setServerDomain(cfg.domain ?? '');
@@ -763,6 +768,7 @@ export function SettingsPage({
                 refetchAgentAccess={refetchAgentAccess}
                 toast={toast}
                 t={t}
+                inDocker={inDocker}
               />
             </div>
           )}

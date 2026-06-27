@@ -16,7 +16,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 import {
   config, projects, mcps, discussions, workflows, quickPrompts, quickApis,
-  profiles, stats, apiCallLogs, userContext, setApiBase, setAuthToken,
+  profiles, stats, apiCallLogs, userContext, setApiBase, setAuthToken, health,
 } from '../api';
 
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -399,5 +399,38 @@ describe('api small namespaces (rest)', () => {
     const [url, opts] = fetchMock.mock.calls[0];
     expect(url).toMatch(/\/api\/user-context\/a%20b\.md$/);
     expect((opts as { method: string }).method).toBe('DELETE');
+  });
+});
+
+describe('health.get (raw, unenveloped)', () => {
+  it('GETs /api/health and returns the RAW JSON (no {success,data} unwrap)', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, version: '0.8.9', host_os: 'macOS', in_docker: false }),
+    });
+
+    const info = await health.get();
+
+    // Raw passthrough is the whole point: in_docker must survive. The standard
+    // api<T>() envelope unwrap would have returned `.data` (undefined) instead.
+    expect(info).toEqual({ ok: true, version: '0.8.9', host_os: 'macOS', in_docker: false });
+    expect(info.in_docker).toBe(false);
+
+    const [url, opts] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/api\/health$/);
+    // No explicit method → fetch default GET (never a POST/PUT/etc.).
+    expect((opts as { method?: string } | undefined)?.method).toBeUndefined();
+  });
+
+  it('surfaces in_docker=true (Docker) distinctly from native', async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, version: '0.8.9', host_os: 'Linux', in_docker: true }),
+    });
+
+    const info = await health.get();
+    expect(info.in_docker).toBe(true);
   });
 });

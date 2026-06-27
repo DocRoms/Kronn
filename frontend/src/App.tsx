@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, lazy, Suspense } from 'react';
-import { setup as setupApi, config as configApi } from './lib/api';
+import { setup as setupApi, config as configApi, health as healthApi } from './lib/api';
 import type { SetupStatus } from './types/generated';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { UpdateBanner } from './components/UpdateBanner';
@@ -31,6 +31,10 @@ export function App() {
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [apiError, setApiError] = useState(false);
+  // Under Docker, agent installs land in the container (not the host) → the
+  // wizard disables Install and points to the host `kronn` CLI. Default false
+  // (native/Tauri) until health resolves; a failed probe leaves it false.
+  const [inDocker, setInDocker] = useState(false);
   const retries = useRef(0);
 
   const fetchStatus = (resetRetries = false) => {
@@ -83,6 +87,7 @@ export function App() {
   };
 
   useEffect(() => { fetchStatus(); }, []);
+  useEffect(() => { healthApi.get().then(h => setInDocker(h.in_docker)).catch(() => {}); }, []);
 
   // Intercept external link clicks in Tauri desktop only.
   // Tauri webview doesn't handle target="_blank" — we call /api/open-url
@@ -130,6 +135,7 @@ export function App() {
         <Suspense fallback={<LoadingScreen />}>
           <SetupWizard
             initialStatus={setupStatus}
+            inDocker={inDocker}
             onComplete={() => {
               // Re-fetch status to get fresh state with is_first_run=false
               setupApi.getStatus().then(setSetupStatus).catch(e => console.warn('Setup status refresh failed:', e));

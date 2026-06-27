@@ -159,8 +159,20 @@ RUN chmod 1777 /home
 
 ENV KRONN_DATA_DIR=/data
 ENV PATH="/home/kronn/.local/bin:/usr/local/bin:${PATH}"
+# The container runs as the non-root `kronn` user, but npm's default global
+# prefix (/usr/local) is root-owned → `npm install -g <agent>` fails with
+# EACCES, both at boot (entrypoint) and from the "Install" button. Point the
+# global prefix at the user-writable, already-on-PATH ~/.local so every
+# `npm install -g` lands in /home/kronn/.local/bin. Declared AFTER the
+# build-time `npm install -g ccusage` above so that one still uses /usr/local.
+# Container-scoped only — the Tauri/host build never sees this Dockerfile.
+ENV NPM_CONFIG_PREFIX=/home/kronn/.local
 EXPOSE 3140
 
 USER kronn
 ENTRYPOINT ["entrypoint.sh"]
 CMD ["kronn"]
+
+
+
+

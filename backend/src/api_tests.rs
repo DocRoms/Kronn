@@ -194,6 +194,23 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "GET /api/health should return 200 even with auth enabled");
     }
 
+    /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
+    /// agent Install button — installs land in the container under Docker, so
+    /// the UI must point to the host-side CLI instead. Health is unauthed.
+    #[tokio::test]
+    async fn health_exposes_in_docker_bool() {
+        let state = test_state();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/health")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = send(state, true, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.get("in_docker").map(|v| v.is_boolean()).unwrap_or(false),
+            "health must expose a boolean `in_docker`, got: {body}");
+    }
+
     /// A request without an Authorization header returns 401 when auth is enabled.
     #[tokio::test]
     async fn auth_missing_header_returns_401() {
@@ -224,6 +241,35 @@ mod tests {
 
         let (status, body) = send(state, true, req).await;
         assert_eq!(status, StatusCode::OK, "valid token should return 200: {body}");
+    }
+
+    /// Master switch: when `auth_enabled = false`, auth is skipped even if a
+    /// token is still configured. This is the supported escape hatch for the
+    /// Docker Desktop macOS lockout, where the localhost bypass can't see the
+    /// real client IP (every published-port request is NAT'd to the Docker
+    /// gateway). Regression guard: a token left in the config must NOT keep
+    /// enforcing auth once the user has turned the master switch off.
+    #[tokio::test]
+    async fn auth_disabled_master_switch_bypasses_even_with_token() {
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        let mut config = default_config();
+        config.server.auth_token = Some("present-but-unused".to_string());
+        config.server.auth_enabled = false;
+        let config_arc = Arc::new(RwLock::new(config));
+        let state = AppState::new_defaults(config_arc, db, DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
+
+        let (status, _) = send(state, true, req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "auth_enabled=false must bypass auth even with a token present",
+        );
     }
 
     /// A request with a wrong token returns 401.

@@ -33,6 +33,30 @@
   font-size: var(--kr-fs-base);
 }
 
+/* Fetch FAILURE (distinct from a genuinely-empty docs tree) — offer a retry. */
+.aidoc-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  color: var(--kr-danger, #dc2626);
+}
+
+.aidoc-retry {
+  padding: 4px 12px;
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font-size: var(--kr-fs-sm);
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.aidoc-retry:hover {
+  background: rgba(220, 38, 38, 0.1);
+}
+
 /* ── File tree panel ─────────────────────────────────── */
 .aidoc-tree-panel {
   width: 30%;

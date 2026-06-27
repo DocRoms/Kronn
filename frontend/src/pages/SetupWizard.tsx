@@ -11,9 +11,13 @@ import './SetupWizard.css';
 interface Props {
   initialStatus: SetupStatus | null;
   onComplete: () => void;
+  /** Backend runs in the Docker container → installs land in the container,
+   *  not on the host. We disable the Install button and point to the host-side
+   *  `kronn` CLI instead. Default false (native/Tauri). */
+  inDocker?: boolean;
 }
 
-export function SetupWizard({ initialStatus, onComplete }: Props) {
+export function SetupWizard({ initialStatus, onComplete, inDocker = false }: Props) {
   const { t } = useT();
 
   const STEPS = [
@@ -208,10 +212,16 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                   : t('setup.noAgentDetected')}
               </p>
 
+              {inDocker && (
+                <div className="setup-docker-warning" role="note">
+                  ⚠️ {t('setup.dockerInstallNote')}
+                </div>
+              )}
+
               <div className="setup-agent-list">
                 {agents.map((agent) => (
-                  <div key={agent.name} className="setup-agent-row" data-disabled={!agent.enabled}>
-                    <div className={`dot ${!agent.enabled ? 'dot-off' : agent.installed ? 'dot-on' : agent.runtime_available ? 'dot-warn' : 'dot-off'}`} />
+                  <div key={agent.name} className="setup-agent-row" data-disabled={agent.installed && !agent.enabled}>
+                    <div className={`dot ${agent.installed ? (agent.enabled ? 'dot-on' : 'dot-off') : agent.runtime_available ? 'dot-warn' : 'dot-off'}`} />
                     <div className="flex-1">
                       <div className="flex-row gap-4">
                         <span className="setup-agent-name">{agent.name}</span>
@@ -239,7 +249,12 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                       )}
                     </div>
                     <div className="flex-row gap-3">
-                      {(agent.installed || agent.runtime_available) && (
+                      {/* Enable/disable only for an agent actually installed
+                          in the container. An npx-only agent is NOT installed,
+                          so it gets the Install button below (with its
+                          "runtime OK — via npx" hint kept) rather than being
+                          shown as "Activé". */}
+                      {agent.installed && (
                         <button
                           className="setup-toggle-btn"
                           data-on={agent.enabled}
@@ -261,11 +276,12 @@ export function SetupWizard({ initialStatus, onComplete }: Props) {
                           {agent.enabled ? t('setup.enabled') : t('setup.disabled')}
                         </button>
                       )}
-                      {!agent.installed && !agent.runtime_available && (
+                      {!agent.installed && (
                         <button
                           className="btn btn-accent btn-sm"
                           onClick={() => handleInstallAgent(agent)}
-                          disabled={installing !== null}
+                          disabled={installing !== null || inDocker}
+                          title={inDocker ? t('setup.dockerInstallTooltip', agent.install_command ?? '') : undefined}
                         >
                           {installing === agent.name ? (
                             <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> ...</>

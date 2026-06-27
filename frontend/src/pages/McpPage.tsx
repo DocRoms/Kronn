@@ -979,6 +979,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     || addMcpSearch.toLowerCase().includes('custom')
     || addMcpSearch.toLowerCase().includes('api');
 
+
   // Filter configs by search
   const searchLower = mcpSearch.toLowerCase();
   const filteredConfigsByServer = new Map<string, { serverId: string; serverName: string; configs: McpConfigDisplay[] }>();
@@ -2005,6 +2006,24 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
 
       {/* ── Empty-state banner: no MCP exposed in CLI hors Kronn (UX#7) ── */}
       <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
+
+      {/* ── Built-in system MCP: kronn-internal (discussion introspection) is
+             auto-injected into every project, not user-installable. Shown as a
+             read-only card in the main view (no add/config/link flow). ── */}
+      {!showAddMcp && (
+        <div className="mcp-card" data-testid="mcp-kronn-internal-card" title={t('mcp.builtin.tooltip')}>
+          <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
+            <Plug size={18} className="text-accent" />
+            <div className="flex-1">
+              <div className="flex-row gap-3" style={{ alignItems: 'center' }}>
+                <span className="font-semibold">{t('mcp.builtin.tileTitle')}</span>
+                <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>
+              </div>
+              <div className="text-xs text-faint mt-2">{t('mcp.builtin.tileDesc')}</div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Installed plugins grid (detail expands inline) ── */}
       {totalConfigs > 0 ? (

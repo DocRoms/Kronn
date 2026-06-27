@@ -251,11 +251,26 @@ describe('AiDocViewer — error & empty states', () => {
     expect(await screen.findByText('projects.docAi.empty')).toBeInTheDocument();
   });
 
-  it('renders the empty state (not a crash) when listAiFiles rejects', async () => {
+  it('shows a retry-able error (NOT the empty state) when listAiFiles rejects', async () => {
     listAiFiles.mockRejectedValue(new Error('network down'));
     render(<AiDocViewer projectId="p1" />);
-    // catch branch flips treeLoading off → tree is [] → empty state.
-    expect(await screen.findByText('projects.docAi.empty')).toBeInTheDocument();
+    // A fetch failure must be distinguishable from "no docs": the old code
+    // rendered the identical empty message, so a transient 500/network error
+    // looked like "this project has no documentation". Now: error + retry.
+    expect(await screen.findByText('projects.docAi.loadError')).toBeInTheDocument();
+    expect(screen.getByText('projects.docAi.retry')).toBeInTheDocument();
+    expect(screen.queryByText('projects.docAi.empty')).toBeNull();
+  });
+
+  it('retry re-fetches and renders the tree after a transient failure', async () => {
+    listAiFiles.mockRejectedValueOnce(new Error('network down'));
+    render(<AiDocViewer projectId="p1" />);
+    const retry = await screen.findByText('projects.docAi.retry');
+    // The next call succeeds → clicking retry loads the real tree.
+    listAiFiles.mockResolvedValue(TREE);
+    fireEvent.click(retry);
+    expect(await screen.findByText('docs')).toBeInTheDocument();
+    expect(screen.queryByText('projects.docAi.loadError')).toBeNull();
   });
 
   it('falls back to the select-a-file pane when readAiFile rejects', async () => {

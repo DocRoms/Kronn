@@ -532,3 +532,26 @@ select_agent() {
         success "Primary agent: $SELECTED_AGENT"
     fi
 }
+
+# ─── Kiro startup auth decision (pure) ───────────────────────────────────────
+# Decide what to do about Kiro authentication at startup. Pure: takes the
+# observed state as arguments, prints an action keyword, has no side effects.
+#
+# On macOS, `entrypoint.sh` installs a Linux `kiro-cli` INTO the backend
+# container regardless of what the user has on their host — so the binary's
+# presence says NOTHING about whether the user actually uses Kiro. Kronn must
+# therefore stay completely silent about Kiro by default and only ever touch it
+# when the user explicitly opts in via KRONN_KIRO_LOGIN=1.
+#
+# Args: os authenticated available opt_in   (booleans as "1"/"0")
+# Prints one of: skip | unavailable | authenticated | login
+kiro_startup_action() {
+    local os="$1" authenticated="$2" available="$3" opt_in="$4"
+    # Kiro container bootstrap only matters on macOS hosts.
+    [[ "$os" == "Darwin" ]] || { echo "skip"; return; }
+    # Default: never mention Kiro at all. Opt-in is the only trigger.
+    [[ "$opt_in" == "1" ]] || { echo "skip"; return; }
+    [[ "$available" == "1" ]] || { echo "unavailable"; return; }
+    [[ "$authenticated" == "1" ]] && { echo "authenticated"; return; }
+    echo "login"
+}

@@ -2834,6 +2834,22 @@
   line-height: 1.4;
 }
 
+/* No-RTK cost warning — red variant of .disc-restricted-warn, pinned at the
+   top of the new-discussion form. */
+.disc-rtk-warn {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.28);
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+.disc-rtk-warn .disc-restricted-warn-text {
+  color: rgba(var(--kr-error-rgb), 0.85);
+}
+
 /* ── Workspace mode toggle ────────────────────────────── */
 .disc-workspace-toggle {
   display: flex;

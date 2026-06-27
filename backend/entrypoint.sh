@@ -116,12 +116,46 @@ if [ -d "$UV_TOOLS" ]; then
   done
 fi
 
-# On macOS hosts, never rely on host-mounted kiro-cli (Darwin binary).
-# Ensure a Linux kiro-cli is present in the container.
+# On macOS hosts, an agent the user installed on their Mac is a Darwin binary
+# mounted read-only at /host-bin/local — it can't exec() in this Linux
+# container. For those (and ONLY those) we install a runnable Linux copy.
 PATH="${HOME}/.local/bin:${PATH}"
+
+# True (exit 0) when the user has `$1` installed on their Mac (so we must
+# mirror a runnable Linux copy into the container) AND no in-container Linux
+# copy exists yet.
+#
+# Detection is by PRESENCE of the launcher entry under a host-bin mount
+# (/host-bin/*), NOT by `command -v`: the host launchers are symlinks whose
+# target is a Darwin binary under a host path that doesn't resolve in this
+# Linux container, so `command -v claude` returns *nothing* (the symlink looks
+# dangling) — a `command -v` test would wrongly conclude "absent" and skip the
+# install, leaving Claude stuck on the fragile npx fallback. `[ -L ]` matches a
+# symlink even when its target doesn't resolve here. Exec-free on purpose.
+#
+# Deliberately FALSE when the binary is absent from every host mount: Kronn
+# must not install agents the user never had — the UI offers an explicit
+# "Install" button for those. Also FALSE once a real in-container Linux copy is
+# on PATH outside the host mounts (idempotent across reboots).
+host_darwin_needs_linux_copy() {
+  # A real in-container Linux copy already on PATH (outside the host mounts)?
+  case "$(command -v "$1" 2>/dev/null || true)" in
+    ""|/host-bin/* ) : ;;      # absent here, or only the host shadow → keep checking
+    * )              return 1 ;;  # genuine in-container copy → nothing to do
+  esac
+  # Did the user install it on their Mac? = a (possibly dangling) launcher
+  # entry under any host-bin mount.
+  for _d in /host-bin/*; do
+    if [ -e "$_d/$1" ] || [ -L "$_d/$1" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
-  if ! command -v kiro-cli >/dev/null 2>&1; then
-    echo "[entrypoint] macOS host detected: installing Linux kiro-cli..."
+  if host_darwin_needs_linux_copy kiro-cli; then
+    echo "[entrypoint] macOS host detected: mirroring host Kiro into a Linux kiro-cli..."
     if command -v unzip >/dev/null 2>&1; then
       if ! curl -fsSL https://cli.kiro.dev/install | bash; then
         echo "[entrypoint] warning: kiro-cli install failed (Kiro unavailable until fixed)."
@@ -131,13 +165,15 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
     fi
   fi
 
-  # Same for Claude Code — the host's macOS `claude` binary can't run in
-  # this Linux container. Install a Linux version via npm.
-  if ! command -v claude >/dev/null 2>&1; then
+  # Claude Code — the host's macOS `claude` binary can't run in this Linux
+  # container. A native Linux copy is strongly preferred over the npx fallback,
+  # which has crashed on long (> 20 min) Claude sessions (see the bridge note
+  # above). Install via npm whenever only the Darwin shadow is reachable.
+  if host_darwin_needs_linux_copy claude; then
     echo "[entrypoint] macOS host detected: installing Linux claude via npm..."
     if command -v npm >/dev/null 2>&1; then
       if ! npm install -g @anthropic-ai/claude-code 2>/dev/null; then
-        echo "[entrypoint] warning: claude-code install failed (Claude Code unavailable until fixed)."
+        echo "[entrypoint] warning: claude-code install failed (Claude Code falls back to npx runtime)."
       fi
     else
       echo "[entrypoint] warning: npm missing, cannot install claude-code."
@@ -145,7 +181,7 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
   fi
 
   # Same for Codex
-  if ! command -v codex >/dev/null 2>&1; then
+  if host_darwin_needs_linux_copy codex; then
     echo "[entrypoint] macOS host detected: installing Linux codex via npm..."
     if command -v npm >/dev/null 2>&1; then
       npm install -g @openai/codex 2>/dev/null || true
@@ -155,7 +191,7 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
   # Same for Gemini CLI — bug reported 2026-04-15 where macOS users never
   # saw Gemini detected because the host Darwin binary was silently
   # skipped but nothing replaced it inside the container.
-  if ! command -v gemini >/dev/null 2>&1; then
+  if host_darwin_needs_linux_copy gemini; then
     echo "[entrypoint] macOS host detected: installing Linux gemini via npm..."
     if command -v npm >/dev/null 2>&1; then
       npm install -g @google/gemini-cli 2>/dev/null || true
@@ -163,7 +199,7 @@ if [ "${KRONN_HOST_OS:-}" = "macOS" ]; then
   fi
 
   # Same for GitHub Copilot CLI
-  if ! command -v copilot >/dev/null 2>&1; then
+  if host_darwin_needs_linux_copy copilot; then
     echo "[entrypoint] macOS host detected: installing Linux copilot via npm..."
     if command -v npm >/dev/null 2>&1; then
       npm install -g @github/copilot 2>/dev/null || true

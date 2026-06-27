@@ -76,25 +76,38 @@ kiro_container_authenticated() {
 }
 
 maybe_login_kiro() {
-    # Kiro container bootstrap is required on macOS hosts.
-    [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]] || return 0
+    local os available=0 authenticated=0 opt_in="${KRONN_KIRO_LOGIN:-0}"
+    os="$(uname -s 2>/dev/null || true)"
 
-    if ! kiro_container_available; then
-        warn "kiro-cli is not available in the container (installation in progress or failed)."
-        return 0
+    # Default is total silence about Kiro: `kiro-cli` is installed into the
+    # container by entrypoint.sh on macOS regardless of host setup, so its
+    # presence never implies the user uses Kiro. Only probe + act when the user
+    # explicitly opts in (KRONN_KIRO_LOGIN=1).
+    if [[ "$os" == "Darwin" && "$opt_in" == "1" ]]; then
+        if kiro_container_available; then
+            available=1
+            kiro_container_authenticated && authenticated=1
+        fi
     fi
 
-    info "Kiro detected — checking authentication..."
-    if kiro_container_authenticated; then
-        success "Kiro already authenticated."
-        return 0
-    fi
-
-    warn "Kiro not authenticated in the container."
-    info "Starting Kiro login (device flow)..."
-    if ! (cd "$KRONN_DIR" && make kiro-login); then
-        warn "Kiro login not completed. You can retry: make kiro-login"
-    fi
+    # Pure decision (testable in lib/agents.sh).
+    case "$(kiro_startup_action "$os" "$authenticated" "$available" "$opt_in")" in
+        authenticated)
+            success "Kiro already authenticated."
+            ;;
+        login)
+            info "Kiro login requested (KRONN_KIRO_LOGIN=1) — starting device flow..."
+            if ! (cd "$KRONN_DIR" && make kiro-login); then
+                warn "Kiro login not completed. You can retry: make kiro-login"
+            fi
+            ;;
+        unavailable)
+            warn "Kiro login requested but kiro-cli is not available in the container."
+            ;;
+        skip|*)
+            : # default — say nothing about Kiro
+            ;;
+    esac
 }
 
 # ─── Commands ────────────────────────────────────────────────────────────────
@@ -121,6 +134,26 @@ cmd_start() {
 
 cmd_web() {
     step "Starting web interface"
+
+    # macOS: the Docker stack runs in a Linux VM and CANNOT execute the user's
+    # host CLIs — Darwin binaries can't run in the Linux container, and the
+    # agents' OAuth creds live in the macOS Keychain (unreachable from the
+    # container). Point to the native path before spinning up a Docker that
+    # can't run agents. Skippable via KRONN_SKIP_MACOS_WARN=1. Linux/WSL are
+    # unaffected (host binaries are Linux → run directly in the container).
+    if is_macos_host && [[ "${KRONN_SKIP_MACOS_WARN:-0}" != "1" ]]; then
+        warn "macOS detected — Docker can't run your host CLIs (Claude, Codex, …) or read the Keychain."
+        printf "  ${DIM}Agents that execute on the host won't work via Docker on macOS.${RESET}\n"
+        printf "  ${DIM}For native host-agent execution use either:${RESET}\n"
+        printf "  ${DIM}  • the desktop app — recommended for solo use, or${RESET}\n"
+        printf "  ${DIM}  • make dev-backend + make dev-frontend  (native, hot-reload)${RESET}\n"
+        printf "  ${DIM}Docker still serves the web UI + API (config, plugins, API-only workflows).${RESET}\n"
+        printf "  ${DIM}(set KRONN_SKIP_MACOS_WARN=1 to silence this)${RESET}\n"
+        if ! ask_yn "Continue with Docker anyway?"; then
+            info "Aborted. On macOS, run ${BOLD}make dev-backend${RESET} + ${BOLD}make dev-frontend${RESET} for native execution."
+            return 0
+        fi
+    fi
 
     # Check docker
     if ! command -v docker >/dev/null 2>&1; then
@@ -174,6 +207,113 @@ cmd_web() {
         info "Logs: run ${BOLD}kronn logs${RESET} (or ${BOLD}make logs${RESET}) to tail them."
         printf "  ${DIM}Path: stdout of the Docker containers (no file on disk).${RESET}\n"
     fi
+}
+
+# Launch Kronn NATIVELY (no Docker) in one command — backend + frontend on the
+# host with hot-reload. This is THE macOS path (Docker can't run host CLIs /
+# read the Keychain) and a fast dev loop everywhere. Unlike `make dev`, which
+# only prints "run these in two terminals", this starts both and prints the
+# correct URL (the UI is Vite on :5173, NOT the backend on :3140 — that mistake
+# is why the page looks empty when you open :3140).
+cmd_start_dev() {
+    banner
+    step "Native dev mode (no Docker)"
+
+    info "Runs Kronn against your HOST CLIs (Claude, Codex, …) with their real logins."
+    printf "  ${DIM}No container → the backend resolves your host binaries directly (Keychain/OAuth OK).${RESET}\n"
+    echo
+
+    # Native toolchains often live OUTSIDE an interactive shell's default PATH:
+    # rustup installs into ~/.cargo/bin (only on PATH if ~/.cargo/env is sourced
+    # from the shell rc — frequently it isn't), and Homebrew into /opt/homebrew/bin.
+    # Make those resolvable for BOTH the preflight checks below AND the `make`
+    # children we spawn, so `kronn start-dev` works without requiring the user to
+    # have wired their rc. We prepend only if the dir exists; harmless elsewhere.
+    [[ -d "$HOME/.cargo/bin" ]] && PATH="$HOME/.cargo/bin:$PATH"
+    [[ -d "/opt/homebrew/bin" ]] && PATH="/opt/homebrew/bin:$PATH"
+    export PATH
+
+    # Preflight: native mode needs Rust (cargo) + Node + pnpm on the host. The
+    # decision of WHAT is missing is a pure, unit-tested helper (dev_missing_tools);
+    # here we just resolve real presence and render install hints.
+    local have_cargo=0 have_node=0 have_pnpm=0
+    command -v cargo >/dev/null 2>&1 && have_cargo=1
+    command -v node  >/dev/null 2>&1 && have_node=1
+    command -v pnpm  >/dev/null 2>&1 && have_pnpm=1
+
+    local missing
+    missing="$(dev_missing_tools "$have_cargo" "$have_node" "$have_pnpm")"
+    if [[ -n "$missing" ]]; then
+        fail "Missing native-dev prerequisite(s):$missing"
+        [[ "$have_cargo" == "1" ]] || printf "  ${DIM}  cargo → curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${RESET}\n"
+        [[ "$have_node"  == "1" ]] || printf "  ${DIM}  node  → brew install node   (macOS) · Node ≥ 24${RESET}\n"
+        [[ "$have_pnpm"  == "1" ]] || printf "  ${DIM}  pnpm  → npm install -g pnpm   (or: corepack enable)${RESET}\n"
+        return 1
+    fi
+
+    # cargo-watch is optional: without it `make dev-backend` fails. Check + hint.
+    if ! cargo watch --version >/dev/null 2>&1; then
+        warn "cargo-watch not found — required by 'make dev-backend' (hot-reload)."
+        printf "  ${DIM}  install → cargo install cargo-watch${RESET}\n"
+        return 1
+    fi
+
+    # Something already on :3140 is almost always a Docker Kronn — the native
+    # backend then can't bind the port. Surface it before the cryptic bind error.
+    if curl -fsS -o /dev/null "http://localhost:3140/api/health" 2>/dev/null; then
+        warn "Something is already listening on :3140 (a Docker Kronn?)."
+        printf "  ${DIM}Run ${BOLD}kronn stop${RESET}${DIM} first, or the native backend can't bind the port.${RESET}\n"
+        if ! ask_yn "Continue anyway?"; then
+            info "Aborted — stop the other instance (${BOLD}kronn stop${RESET}), then re-run ${BOLD}kronn start-dev${RESET}."
+            return 0
+        fi
+    fi
+
+    success "Toolchain OK — launching native stack."
+    echo
+    # Clickable hyperlink (OSC 8) when on a TTY; plain URL otherwise. Printed
+    # directly — not via $(...) — so the TTY check sees the real terminal.
+    printf "  ${BOLD}UI  → ${GREEN}"
+    hyperlink "http://localhost:5173"
+    printf "${RESET}   ${DIM}← click (or Cmd/Ctrl-click)${RESET}\n"
+    printf "  ${DIM}API → http://localhost:3140  (backend only — not the UI)${RESET}\n"
+    [[ "${KRONN_NO_OPEN:-0}" != "1" ]] && printf "  ${DIM}Opening your browser when the UI is ready (KRONN_NO_OPEN=1 to disable).${RESET}\n"
+    printf "  ${DIM}Ctrl+C stops both.${RESET}\n\n"
+
+    # Backend (API :3140) in the background; frontend (Vite :5173, which proxies
+    # /api → :3140) in the foreground. Ctrl+C ends the foreground frontend; the
+    # trap then stops the backend so we never leak a detached cargo-watch.
+    #
+    # Tell the backend its startup banner should point users at the Vite UI:
+    # in native dev :3140 serves the API ONLY, so an unqualified "→ :3140" in the
+    # banner is misleading. See main.rs `banner_entry_url`.
+    export KRONN_DEV_UI_URL="http://localhost:5173"
+    ( cd "$KRONN_DIR" && make dev-backend ) &
+    # NOT `local`: the EXIT trap fires AFTER this function returns, so a local
+    # would be out of scope there → `set -u` "unbound variable" (the bug this
+    # replaces). A script-global + ${:-} guard makes teardown robust whether the
+    # trap fires on Ctrl+C (INT, still in-function) or at script EXIT.
+    KRONN_DEV_BACKEND_PID=$!
+    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" 2>/dev/null || true' EXIT INT TERM
+
+    # Open the browser once Vite is actually serving (cross-platform via
+    # open_url: open/wslview/xdg-open). OSC 8 links aren't clickable in every
+    # terminal — notably macOS Terminal.app, which has no OSC 8 support — so
+    # this is what reliably lands you on the UI. KRONN_NO_OPEN=1 to disable.
+    if [[ "${KRONN_NO_OPEN:-0}" != "1" ]]; then
+        (
+            for _ in $(seq 1 90); do
+                if curl -fsS -o /dev/null "http://localhost:5173" 2>/dev/null; then
+                    open_url "http://localhost:5173"
+                    break
+                fi
+                sleep 1
+            done
+        ) >/dev/null 2>&1 &
+    fi
+
+    # Frontend (Vite) in the foreground.
+    ( cd "$KRONN_DIR" && make dev-frontend )
 }
 
 cmd_repos() {
@@ -342,13 +482,7 @@ for p in json.load(sys.stdin):
     printf "  ${DIM}%s${RESET}\n" "$url"
 
     # Cross-platform open: wslview (WSL) / xdg-open (Linux) / open (macOS)
-    if command -v wslview >/dev/null 2>&1; then
-        wslview "$url" 2>/dev/null &
-    elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "$url" 2>/dev/null &
-    elif command -v open >/dev/null 2>&1; then
-        open "$url" 2>/dev/null &
-    else
+    if ! open_url "$url"; then
         info "Open this URL in your browser: $url"
     fi
 }
@@ -654,6 +788,7 @@ cmd_help() {
     printf "${BOLD}Usage:${RESET} kronn [command]\n"
     echo
     printf "  ${CYAN}start${RESET}          Interactive flow (default)\n"
+    printf "  ${CYAN}start-dev${RESET}      Run natively, no Docker (backend + Vite, hot-reload → UI on :5173)\n"
     printf "  ${CYAN}stop${RESET}           Stop services\n"
     printf "  ${CYAN}restart${RESET}        Restart services\n"
     printf "  ${CYAN}logs${RESET}           Show logs\n"
@@ -705,17 +840,39 @@ ensure_in_path() {
     local link_dir="$HOME/.local/bin"
     local link_path="$link_dir/kronn"
 
-    # Already accessible as `kronn`?
+    # Is `kronn` already on PATH and pointing at this checkout?
+    local on_path=0
     local current
     current=$(command -v kronn 2>/dev/null || true)
     if [[ -n "$current" ]]; then
-        # Resolve symlink to check it points here
         local resolved
         resolved=$(readlink -f "$current" 2>/dev/null || echo "$current")
-        if [[ "$resolved" == "$KRONN_DIR/kronn" ]]; then
-            return 0
-        fi
+        [[ "$resolved" == "$KRONN_DIR/kronn" ]] && on_path=1
     fi
+
+    # Does the ~/.local/bin symlink already exist and point here? (Created on a
+    # previous run — the user may simply not have ~/.local/bin on their PATH.)
+    local link_ok=0
+    if [[ -e "$link_path" || -L "$link_path" ]]; then
+        local lresolved
+        lresolved=$(readlink -f "$link_path" 2>/dev/null || echo "$link_path")
+        [[ "$lresolved" == "$KRONN_DIR/kronn" ]] && link_ok=1
+    fi
+
+    case "$(path_link_action "$on_path" "$link_ok")" in
+        ok)
+            return 0
+            ;;
+        adopt)
+            # Already our symlink — just make it reachable for THIS session
+            # instead of re-prompting to create it on every single launch.
+            case ":$PATH:" in
+                *":$link_dir:"*) : ;;
+                *) export PATH="$link_dir:$PATH" ;;
+            esac
+            return 0
+            ;;
+    esac
 
     echo
     info "kronn is not in your PATH."
@@ -784,6 +941,10 @@ main() {
         start)
             ensure_in_path
             cmd_start
+            ;;
+        start-dev)
+            ensure_in_path
+            cmd_start_dev
             ;;
         stop)        cmd_stop ;;
         restart)     cmd_restart ;;
