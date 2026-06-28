@@ -11,6 +11,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Flaky `core::tailscale` tests under parallel CI.** The 8 tests around `parse_host_ips_env` / `detect_via_host_env` each `set_var`/`remove_var` the process-global `KRONN_HOST_IPS`; cargo's default parallel runner let them stomp each other mid-assertion (observed `192.168.1.5` vs `192.168.1.10` — the `malformed_entries` test's value leaking into `skips_localhost_and_docker`). Serialized them behind a poison-tolerant `ENV_LOCK` (`std::sync::Mutex`, same pattern as `core::config` tests). 0 failures over 15 parallel runs (was ~2/5). Pre-existing flake, surfaced on the macOS PR's CI.
 - **`AiDocViewer` no longer shows "no project documentation" on a failed fetch.** A failed `list_ai_files` request was caught silently and rendered the *same* empty-state message as a genuinely-undocumented project — so a transient 500/network error looked like "this project has no docs". A failed load now shows a distinct error + **Retry** button (i18n FR/EN/ES), separate from the empty state (+2 tests). Detection itself was verified correct (the `ai/` → `docs/` pivot works end-to-end). Follow-up architecture captured in `TD-20260627-configurable-docs-dir` (make the docs root configurable: global default + per-project override).
 
 ## [0.8.9] - 2026-06-27
