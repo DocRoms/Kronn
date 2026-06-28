@@ -320,6 +320,19 @@ fn classify_ip(ip: &str, iface: &str) -> Option<(String, String, String)> {
 mod tests {
     use super::*;
 
+    /// `KRONN_HOST_IPS` is a process-global env var that several tests below
+    /// set/remove. cargo runs tests in parallel by default, so without a serial
+    /// guard they stomp each other's value mid-assertion → flaky failures (the
+    /// observed `192.168.1.5` vs `192.168.1.10` race). This mutex serializes the
+    /// env-mutating tests. `std::sync::Mutex` (not tokio) because these are sync
+    /// tests that hold the guard across no `.await`. Poison-tolerant so one
+    /// panicking test can't wedge the rest of the suite.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn is_tailscale_ip_valid() {
         assert!(is_tailscale_ip("100.64.0.1"));
@@ -393,6 +406,7 @@ mod tests {
 
     #[test]
     fn parse_host_ips_env_valid() {
+        let _env = env_guard();
         std::env::set_var("KRONN_HOST_IPS", "eth0:192.168.1.50,tailscale0:100.100.50.1,tun0:10.8.0.5");
         let ips = parse_host_ips_env().unwrap();
         assert_eq!(ips.len(), 3);
@@ -407,6 +421,7 @@ mod tests {
 
     #[test]
     fn parse_host_ips_env_empty() {
+        let _env = env_guard();
         std::env::set_var("KRONN_HOST_IPS", "");
         assert!(parse_host_ips_env().is_none());
         std::env::remove_var("KRONN_HOST_IPS");
@@ -414,12 +429,14 @@ mod tests {
 
     #[test]
     fn parse_host_ips_env_unset() {
+        let _env = env_guard();
         std::env::remove_var("KRONN_HOST_IPS");
         assert!(parse_host_ips_env().is_none());
     }
 
     #[test]
     fn parse_host_ips_env_skips_localhost_and_docker() {
+        let _env = env_guard();
         std::env::set_var("KRONN_HOST_IPS", "lo:127.0.0.1,docker0:172.17.0.1,eth0:192.168.1.10");
         let ips = parse_host_ips_env().unwrap();
         assert_eq!(ips.len(), 1);
@@ -500,6 +517,7 @@ mod tests {
 
     #[test]
     fn detect_via_host_env_returns_tailscale_when_present() {
+        let _env = env_guard();
         std::env::set_var(
             "KRONN_HOST_IPS",
             "eth0:192.168.1.10,tailscale0:100.100.5.5,docker0:172.17.0.1",
@@ -511,6 +529,7 @@ mod tests {
 
     #[test]
     fn detect_via_host_env_returns_none_when_no_tailscale_entry() {
+        let _env = env_guard();
         std::env::set_var(
             "KRONN_HOST_IPS",
             "eth0:192.168.1.10,docker0:172.17.0.1",
@@ -521,12 +540,14 @@ mod tests {
 
     #[test]
     fn detect_via_host_env_returns_none_when_unset() {
+        let _env = env_guard();
         std::env::remove_var("KRONN_HOST_IPS");
         assert!(detect_via_host_env().is_none());
     }
 
     #[test]
     fn parse_host_ips_env_malformed_entries_are_skipped() {
+        let _env = env_guard();
         // No colon, trailing comma, only one part — all skipped silently.
         std::env::set_var("KRONN_HOST_IPS", "garbage,eth0:192.168.1.5,broken,more-garbage,");
         let ips = parse_host_ips_env().expect("should still parse the good entry");
