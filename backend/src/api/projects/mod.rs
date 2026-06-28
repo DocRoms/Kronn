@@ -295,10 +295,23 @@ pub(crate) fn resolve_briefing_notes(
 /// but `docs/index.md` is missing, we drop one in. Idempotent and
 /// silent (best-effort write, debug-logs on failure).
 pub(crate) fn enrich_audit_status(project: &mut Project) {
+    let resolved = scanner::resolve_host_path(&project.path);
+    // A project whose directory is gone — e.g. after a cross-OS import where
+    // absolute paths don't translate (WSL `/home/...` ⇄ macOS `/Users/...`) —
+    // is flagged for remap and skips every filesystem scan + self-heal write
+    // below: they're pointless on a missing dir, and the self-heal writes could
+    // land somewhere unintended. The UI surfaces the flag as a banner + badge.
+    project.path_exists = resolved.exists();
+    if !project.path_exists {
+        project.audit_status = crate::models::AiAuditStatus::default();
+        project.ai_todo_count = 0;
+        project.tech_debt_count = 0;
+        project.needs_docs_migration = false;
+        return;
+    }
     project.audit_status = scanner::detect_audit_status(&project.path);
     project.ai_todo_count = scanner::count_ai_todos(&project.path);
     project.tech_debt_count = scanner::count_tech_debt(&project.path);
-    let resolved = scanner::resolve_host_path(&project.path);
     project.needs_docs_migration = scanner::needs_docs_migration(&resolved);
     crate::core::docs_migration::backfill_docs_index(&resolved);
     // Self-heal `{{PROJECT_NAME}}` / `{{STACK_SUMMARY}}` / `{{TEST_CMD}}`
@@ -441,10 +454,34 @@ mod tests {
             ai_config: AiConfigStatus { detected: false, configs: vec![] },
             audit_status: Default::default(),
             ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+            path_exists: true,
             default_skill_ids: vec![], default_profile_id: None,
             briefing_notes: None, linked_repos: vec![],
             created_at: now, updated_at: now,
         }
+    }
+
+    #[test]
+    fn enrich_flags_missing_path_and_skips_scans() {
+        // A path that cannot exist (post cross-OS import) must be flagged
+        // `path_exists = false` so the UI can offer a remap, and the heavy
+        // filesystem scans must be skipped (defaults left in place).
+        let mut p = mk_project("p1", "ghost", "/nonexistent/kronn/ghost-project-xyz");
+        p.ai_todo_count = 99; // pretend a stale enrichment lingered
+        enrich_audit_status(&mut p);
+        assert!(!p.path_exists, "missing dir must flag path_exists = false");
+        assert_eq!(p.ai_todo_count, 0, "missing dir must reset to defaults, not scan");
+        assert_eq!(p.audit_status, AiAuditStatus::default());
+    }
+
+    #[test]
+    fn enrich_marks_existing_path_present() {
+        // A real directory (the OS temp dir always exists) resolves present.
+        let tmp = std::env::temp_dir();
+        let mut p = mk_project("p2", "real", tmp.to_str().unwrap());
+        p.path_exists = false; // force the opposite to prove enrich sets it
+        enrich_audit_status(&mut p);
+        assert!(p.path_exists, "an existing directory must flag path_exists = true");
     }
 
     #[test]

@@ -41,6 +41,14 @@ pub struct Project {
     /// `ProjectCard`. Not persisted in DB.
     #[serde(default)]
     pub needs_docs_migration: bool,
+    /// True when the project directory resolves on disk. Computed by
+    /// `enrich_audit_status` (the list/get API layer), NOT persisted. The DB
+    /// row mapper defaults it to `true` so a non-enriched read (e.g. the export
+    /// payload) never falsely flags a project. Drives the "chemin introuvable —
+    /// remap" banner + per-card badge after a cross-OS import (WSL ⇄ macOS),
+    /// where absolute paths don't translate.
+    #[serde(default = "default_true")]
+    pub path_exists: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub default_skill_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,6 +67,10 @@ pub struct Project {
     pub linked_repos: Vec<LinkedRepo>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A companion repository linked to a project. The `location` is

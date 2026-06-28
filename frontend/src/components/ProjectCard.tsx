@@ -253,6 +253,16 @@ export function ProjectCard({
    *  feedback before the refetch removes the banner entirely. */
   const [migrationSuccess, setMigrationSuccess] = useState<{ filesMoved: number } | null>(null);
 
+  // Remap state — shown when the project directory no longer resolves on disk
+  // (typically after a cross-OS DB import where absolute paths don't translate).
+  const [remapValue, setRemapValue] = useState('');
+  const [remapping, setRemapping] = useState(false);
+  const [remapError, setRemapError] = useState<string | null>(null);
+  // useRef guard alongside the disabled state: React's state update is async, so
+  // two fast clicks would otherwise both read `remapping === false` and fire
+  // twice. See feedback_race_guards.
+  const remapGuard = useRef(false);
+
   // 0.8.3 (#311) — resumable audit detection. Polled at mount + after
   // each audit completion/error so the "Lancer l'audit" button can
   // flip to "Reprendre Step N/10" when an Interrupted run is on file
@@ -370,6 +380,28 @@ export function ProjectCard({
       setMigrating(false);
     }
   };
+
+  // Point the project at a new directory. The backend validates the path
+  // exists (and rejects `..` traversal) before updating the row, so a bad
+  // value comes back as a thrown error we surface inline. On success we
+  // refetch — `enrich_audit_status` re-checks the path and the banner clears.
+  const handleRemap = useCallback(async () => {
+    const newPath = remapValue.trim();
+    if (!newPath || remapGuard.current) return;
+    remapGuard.current = true;
+    setRemapping(true);
+    setRemapError(null);
+    try {
+      await projectsApi.remapPath(proj.id, newPath);
+      toast(t('projects.remap.successToast', proj.name), 'success');
+      onRefetch();
+    } catch (e) {
+      setRemapError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRemapping(false);
+      remapGuard.current = false;
+    }
+  }, [remapValue, proj.id, proj.name, onRefetch, toast, t]);
 
   // Stop polling the audit-status endpoint and drop the local checkpoint.
   // Called on done, error, cancel, and unmount — anywhere we know the
@@ -952,6 +984,50 @@ export function ProjectCard({
           <span className="dash-meta-item"><MessageSquare size={12} /> {projDiscussions.length}</span>
         </div>
       </div>
+
+      {/* Remap banner — always visible (even on a collapsed card) when the
+          project directory no longer resolves on disk. Lets the operator
+          re-point the project after a cross-OS import without expanding it. */}
+      {proj.path_exists === false && (
+        <div
+          className="dash-remap-banner"
+          data-testid={`remap-banner-${proj.id}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="dash-remap-icon" aria-hidden="true"><AlertTriangle size={16} /></div>
+          <div className="dash-remap-content">
+            <div className="dash-remap-title">{t('projects.remap.title')}</div>
+            <div className="dash-remap-desc">{t('projects.remap.desc', proj.path)}</div>
+            <div className="dash-remap-form">
+              <input
+                className="dash-remap-input"
+                type="text"
+                value={remapValue}
+                placeholder={t('projects.remap.placeholder')}
+                onChange={(e) => { setRemapValue(e.target.value); if (remapError) setRemapError(null); }}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleRemap(); }}
+                disabled={remapping}
+                aria-label={t('projects.remap.title')}
+              />
+              <button
+                type="button"
+                className="dash-remap-btn"
+                onClick={handleRemap}
+                disabled={remapping || !remapValue.trim()}
+              >
+                {remapping
+                  ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.remap.busy')}</>
+                  : t('projects.remap.cta')}
+              </button>
+            </div>
+            {remapError && (
+              <div className="dash-remap-error" role="alert">
+                <AlertTriangle size={11} /> {remapError}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {isOpen && (
         <div className="dash-card-body" onClick={(e) => e.stopPropagation()}>

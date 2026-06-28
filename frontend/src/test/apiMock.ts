@@ -184,6 +184,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       createPr: resolve({ url: '' }),
       bootstrap: resolve({}),
       migrateDocs: resolve({ status: 'NotApplicable' }),
+      remapPath: resolve(undefined),
       antiHalluStatus: resolve({ present: false, file_exists: false }),
       injectAntiHallu: resolve({ status: 'ok', result: 'noop' }),
       syncRedirectors: resolve({ status: 'ok', created: [], already_present: [], failed: [] }),

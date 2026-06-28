@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    AgentProfile, Contact, Directive, Discussion, McpConfig, McpServer, Project, QuickPrompt,
-    Skill, Workflow,
+    AgentProfile, Contact, Directive, Discussion, Learning, McpConfig, McpServer, Project,
+    QuickApi, QuickPrompt, Skill, Workflow,
 };
 
 #[derive(Debug, Serialize, TS)]
@@ -49,6 +49,14 @@ pub struct DbExport {
     pub contacts: Vec<Contact>,
     #[serde(default)]
     pub quick_prompts: Vec<QuickPrompt>,
+    /// 0.8.9 — Quick APIs (reusable saved API calls). `#[serde(default)]` keeps
+    /// v3 exports (which had no `quick_apis` field) importable.
+    #[serde(default)]
+    pub quick_apis: Vec<QuickApi>,
+    /// 0.8.9 — Continual-learning candidates (the agent-proposed durable
+    /// facts/preferences). Same back-compat default as `quick_apis`.
+    #[serde(default)]
+    pub learnings: Vec<Learning>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

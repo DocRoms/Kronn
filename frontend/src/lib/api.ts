@@ -316,12 +316,18 @@ async function api<T>(
   body?: unknown,
 ): Promise<T> {
   const headers: Record<string, string> = { ...authHeaders() };
-  if (body) headers['Content-Type'] = 'application/json';
+  // Distinguish "no body" (undefined — e.g. GET, or POST with no payload)
+  // from a falsy-but-real body. `if (body)` dropped `false`/`0`/`""`, so a
+  // `Json<bool>` endpoint received an empty body and 422'd — that's why
+  // DISABLING the continual-learning toggle (POST `false`) failed while
+  // enabling (POST `true`) worked. Only `undefined` means "send nothing".
+  const hasBody = body !== undefined;
+  if (hasBody) headers['Content-Type'] = 'application/json';
 
   const res = await fetch(`${_apiBase}/api${path}`, {
     method,
     headers,
-    body: body ? JSON.stringify(body) : undefined,
+    body: hasBody ? JSON.stringify(body) : undefined,
   });
 
   const contentType = res.headers.get('content-type') ?? '';

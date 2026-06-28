@@ -5,7 +5,7 @@ import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { ProjectCard } from './ProjectCard';
 import type { Project, AgentDetection, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
-  Folder, ChevronDown, Eye, Search, X,
+  Folder, ChevronDown, Eye, Search, X, AlertTriangle,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 
@@ -58,6 +58,7 @@ export function ProjectList({
   const { t } = useT();
 
   const [showHidden, setShowHidden] = useState(false);
+  const [showOnlyMissing, setShowOnlyMissing] = useState(false);
   const [projectSearch, setProjectSearch] = useState('');
   const [projectDisplayLimit, setProjectDisplayLimit] = useState(20);
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(() => new Set());
@@ -79,11 +80,21 @@ export function ProjectList({
 
   const visibleProjects = useMemo(() => projects.filter(p => !isHiddenPath(p.path)), [projects]);
   const hiddenProjects = useMemo(() => projects.filter(p => isHiddenPath(p.path)), [projects]);
+  // Projects whose directory no longer resolves on disk (e.g. after a
+  // cross-OS DB import). `path_exists === false` is explicit — `undefined`
+  // (legacy payload) is treated as present, never flagged.
+  const missingPathProjects = useMemo(
+    () => projects.filter(p => p.path_exists === false && !isHiddenPath(p.path)),
+    [projects],
+  );
   const baseProjects = showHidden ? projects : visibleProjects;
 
-  const filteredProjects = useMemo(() => deferredSearch
-    ? baseProjects.filter(p => p.name.toLowerCase().includes(searchLower) || p.path.toLowerCase().includes(searchLower))
-    : baseProjects, [baseProjects, deferredSearch, searchLower]);
+  const filteredProjects = useMemo(() => {
+    let list = baseProjects;
+    if (showOnlyMissing) list = list.filter(p => p.path_exists === false);
+    if (deferredSearch) list = list.filter(p => p.name.toLowerCase().includes(searchLower) || p.path.toLowerCase().includes(searchLower));
+    return list;
+  }, [baseProjects, showOnlyMissing, deferredSearch, searchLower]);
 
   const projGroup = (p: Project) => getProjectGroup(p, t('projects.group.local'), t('projects.group.other'));
 
@@ -156,6 +167,27 @@ export function ProjectList({
           )}
         </div>
       </div>
+
+      {/* Missing-path banner — persistent (unlike the import toast) so the
+          operator can act on it any time after a cross-OS import. Offers a
+          one-click filter down to just the projects that need remapping. */}
+      {missingPathProjects.length > 0 && (
+        <div className="dash-missing-banner" role="status" data-testid="missing-path-banner">
+          <AlertTriangle size={15} className="dash-missing-banner-icon" />
+          <span className="dash-missing-banner-text">
+            {missingPathProjects.length > 1
+              ? t('projects.missingBanner.plural', missingPathProjects.length)
+              : t('projects.missingBanner.one')}
+          </span>
+          <button
+            className="dash-missing-banner-btn"
+            onClick={() => setShowOnlyMissing(v => !v)}
+            aria-pressed={showOnlyMissing}
+          >
+            {showOnlyMissing ? t('projects.missingBanner.showAll') : t('projects.missingBanner.showOnly')}
+          </button>
+        </div>
+      )}
 
       {/* Search bar for projects */}
       {baseProjects.length > 3 && (

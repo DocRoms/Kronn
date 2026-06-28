@@ -1048,6 +1048,12 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .map_err(|e| format!("DB error: {}", e))?;
     let quick_prompts = state.db.with_conn(crate::db::quick_prompts::list_quick_prompts).await
         .map_err(|e| format!("DB error: {}", e))?;
+    let quick_apis = state.db.with_conn(crate::db::quick_apis::list_quick_apis).await
+        .map_err(|e| format!("DB error: {}", e))?;
+    // All learnings, every status — pending candidates and promoted facts both
+    // matter on a migrated box (None filters = no status / no project narrowing).
+    let learnings = state.db.with_conn(|conn| crate::db::learnings::list(conn, None, None)).await
+        .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter().filter(|s| !s.is_builtin).collect();
@@ -1057,7 +1063,7 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .into_iter().filter(|p| !p.is_builtin).collect();
 
     Ok(DbExport {
-        version: 3,
+        version: 4,
         exported_at: Utc::now(),
         projects,
         discussions,
@@ -1069,6 +1075,8 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         custom_profiles,
         contacts,
         quick_prompts,
+        quick_apis,
+        learnings,
     })
 }
 
@@ -1156,6 +1164,8 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
              DELETE FROM workflow_runs; DELETE FROM workflows; \
              DELETE FROM contacts; \
              DELETE FROM quick_prompts; \
+             DELETE FROM quick_apis; \
+             DELETE FROM learnings; \
              DELETE FROM projects;"
         )?;
         Ok(())
@@ -1255,6 +1265,24 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         }
     }
 
+    // Import quick APIs
+    for qa in &data.quick_apis {
+        let a = qa.clone();
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &a)).await {
+            tracing::warn!("Import quick API error: {}", e);
+        }
+    }
+
+    // Import continual-learning candidates. `learnings::insert` rejects rows
+    // with empty evidence[] — every stored learning has at least one, so a
+    // failure here is a corrupt export, logged not fatal.
+    for learning in &data.learnings {
+        let l = learning.clone();
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::learnings::insert(conn, &l)).await {
+            tracing::warn!("Import learning error: {}", e);
+        }
+    }
+
     if !invalid_paths.is_empty() {
         warnings.push(format!("{} project(s) have invalid paths — remap them in the Projects page", invalid_paths.len()));
     }
@@ -1276,6 +1304,16 @@ async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<Stri
     }
     if imported.server.bio.is_some() {
         config.server.bio = imported.server.bio.clone();
+    }
+
+    // Merge global context (injected into every agent prompt). It travels in
+    // the exported config.toml but was previously dropped on import — a silent
+    // loss of the user's cross-project instructions. Only overwrite when the
+    // import actually carries one, so re-importing a context-less export onto a
+    // configured box doesn't wipe it.
+    if imported.server.global_context.is_some() {
+        config.server.global_context = imported.server.global_context.clone();
+        config.server.global_context_mode = imported.server.global_context_mode.clone();
     }
 
     // Merge language
@@ -1519,7 +1557,7 @@ mod tests {
     #[test]
     fn extract_zip_roundtrip() {
         let data = DbExport {
-            version: 3,
+            version: 4,
             exported_at: Utc::now(),
             projects: vec![],
             discussions: vec![],
@@ -1531,6 +1569,8 @@ mod tests {
             custom_profiles: vec![],
             contacts: vec![],
             quick_prompts: vec![],
+            quick_apis: vec![],
+            learnings: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -1552,8 +1592,150 @@ mod tests {
 
         // Extract
         let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
-        assert_eq!(extracted_data.version, 3);
+        assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_some());
+    }
+
+    /// A pre-0.8.9 (v3) export has no `quick_apis` / `learnings` keys at all.
+    /// `#[serde(default)]` must keep it importable (empty vecs), never error.
+    #[test]
+    fn v3_export_without_new_fields_still_deserializes() {
+        let v3_json = r#"{
+            "version": 3,
+            "exported_at": "2026-01-01T00:00:00Z",
+            "projects": [],
+            "discussions": []
+        }"#;
+        let parsed: DbExport = serde_json::from_str(v3_json).expect("v3 export must still parse");
+        assert_eq!(parsed.version, 3);
+        assert!(parsed.quick_apis.is_empty());
+        assert!(parsed.learnings.is_empty());
+        assert!(parsed.quick_prompts.is_empty());
+    }
+
+    // ─── Whole-DB export/import round-trip (0.8.9 — blinder l'export) ────────
+
+    /// Tests mutating `KRONN_DATA_DIR` (process-wide) must serialize so they
+    /// don't read back another test's config path. Mirrors the convention in
+    /// `core::config` tests. `tokio::sync::Mutex` because it's held across
+    /// `.await` (clippy `await_holding_lock` rejects a std mutex).
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn test_state() -> AppState {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let config_arc = std::sync::Arc::new(tokio::sync::RwLock::new(config::default_config()));
+        AppState::new_defaults(config_arc, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    fn sample_quick_api(id: &str) -> QuickApi {
+        QuickApi {
+            id: id.into(),
+            name: "Daily Top Articles".into(),
+            icon: "🌐".into(),
+            description: "Chartbeat top 5".into(),
+            project_id: None,
+            api_plugin_slug: "api-chartbeat".into(),
+            api_config_id: "cfg-1".into(),
+            api_endpoint_path: "/live/toppages/v3".into(),
+            api_method: Some("GET".into()),
+            api_query: None,
+            api_path_params: None,
+            api_headers: None,
+            api_body: None,
+            api_extract: None,
+            api_pagination: None,
+            api_timeout_ms: None,
+            api_max_retries: None,
+            variables: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn sample_learning(id: &str) -> Learning {
+        Learning {
+            id: id.into(),
+            claim: "Gateway must be restarted after a frontend rebuild".into(),
+            evidence: vec![Evidence {
+                kind: "user".into(),
+                reference: "2026-06-26".into(),
+                quote: None,
+            }],
+            kind: LearningKind::Fact,
+            status: LearningStatus::Validated,
+            scope: Some(LearningScope::Project),
+            confidence: Some(0.9),
+            faithfulness: None,
+            discussion_id: None,
+            project_id: None,
+            source_agent: Some("ClaudeCode".into()),
+            promoted_target: None,
+            created_at: Utc::now().to_rfc3339(),
+            last_validated_at: None,
+            validated_by: None,
+        }
+    }
+
+    /// The whole point of 0.8.9: a Quick API and a continual-learning row must
+    /// survive a full export → import cycle. Before the fix, `build_export`
+    /// never collected them, so they vanished silently on migration.
+    #[tokio::test]
+    async fn export_import_roundtrips_quick_apis_and_learnings() {
+        let state = test_state();
+
+        let qa = sample_quick_api("qa-1");
+        state.db.with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &qa)).await.unwrap();
+        let l = sample_learning("l-1");
+        state.db.with_conn(move |conn| crate::db::learnings::insert(conn, &l)).await.unwrap();
+
+        let export = build_export(&state).await.expect("build_export");
+        assert_eq!(export.version, 4, "payload bumped to v4");
+        assert_eq!(export.quick_apis.len(), 1, "quick_apis must be exported");
+        assert_eq!(export.learnings.len(), 1, "learnings must be exported");
+
+        // Re-importing the same export clears then re-inserts — neither entity
+        // may duplicate nor disappear.
+        do_import_db(&state, &export).await.expect("do_import_db");
+        let qas = state.db.with_conn(crate::db::quick_apis::list_quick_apis).await.unwrap();
+        let ls = state.db.with_conn(|conn| crate::db::learnings::list(conn, None, None)).await.unwrap();
+        assert_eq!(qas.len(), 1, "quick_api survives import (no dup, no drop)");
+        assert_eq!(qas[0].name, "Daily Top Articles");
+        assert_eq!(ls.len(), 1, "learning survives import");
+        assert_eq!(ls[0].claim, "Gateway must be restarted after a frontend rebuild");
+    }
+
+    /// `global_context` travels in the exported config.toml but was dropped on
+    /// import before 0.8.9. The merge must now re-apply it (+ its mode).
+    #[tokio::test]
+    async fn import_reapplies_global_context() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = std::env::temp_dir().join(format!(
+            "kronn-import-gctx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let state = test_state();
+        let mut imported = config::default_config();
+        imported.server.global_context = Some("Always answer in French.".into());
+        imported.server.global_context_mode = "no_project".into(); // differs from "always" default
+
+        let warnings = merge_import_config(&state, &imported).await;
+        assert!(
+            !warnings.iter().any(|w| w.contains("Failed to save")),
+            "config save must succeed: {warnings:?}"
+        );
+
+        let cfg = state.config.read().await;
+        assert_eq!(cfg.server.global_context.as_deref(), Some("Always answer in French."));
+        assert_eq!(cfg.server.global_context_mode, "no_project");
     }
 
     #[test]
@@ -1577,7 +1759,7 @@ mod tests {
     #[test]
     fn extract_zip_without_config_toml() {
         let data = DbExport {
-            version: 3,
+            version: 4,
             exported_at: Utc::now(),
             projects: vec![],
             discussions: vec![],
@@ -1589,6 +1771,8 @@ mod tests {
             custom_profiles: vec![],
             contacts: vec![],
             quick_prompts: vec![],
+            quick_apis: vec![],
+            learnings: vec![],
         };
         let data_json = serde_json::to_string(&data).unwrap();
 
@@ -1603,7 +1787,7 @@ mod tests {
         let bytes = buf.into_inner();
 
         let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
-        assert_eq!(extracted_data.version, 3);
+        assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_none(), "config.toml should be optional");
     }
 

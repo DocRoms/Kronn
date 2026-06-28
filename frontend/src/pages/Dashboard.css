@@ -1530,6 +1530,148 @@ html[data-density="large"] .dash-main {
   cursor: not-allowed;
 }
 
+/* ── Remap banner (0.8.9) — project directory missing on disk ───────────────
+   Mirrors the migration banner layout but tinted red (error, not warning):
+   a missing path is a broken project, not a soft nudge. Shown on the card
+   even while collapsed so it's actionable straight from the list. */
+.dash-remap-banner {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--kr-sp-6);
+  align-items: start;
+  padding: var(--kr-sp-6) var(--kr-sp-7);
+  margin: var(--kr-sp-5) var(--kr-sp-6);
+  background: rgba(var(--kr-error-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.25);
+  border-radius: var(--kr-r-md);
+}
+
+.dash-remap-icon {
+  color: var(--kr-error-soft);
+  margin-top: 2px;
+}
+
+.dash-remap-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+}
+
+.dash-remap-title {
+  font-weight: 600;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-primary);
+}
+
+.dash-remap-desc {
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-secondary);
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.dash-remap-form {
+  display: flex;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+  margin-top: var(--kr-sp-2);
+}
+
+.dash-remap-input {
+  flex: 1 1 220px;
+  min-width: 0;
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono, monospace);
+  background: var(--kr-bg-input, var(--kr-bg-raised));
+  border: 1px solid var(--kr-border-soft);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-primary);
+}
+
+.dash-remap-input:focus {
+  outline: none;
+  border-color: rgba(var(--kr-error-rgb), 0.5);
+}
+
+.dash-remap-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  background: rgba(var(--kr-error-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.4);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-error-soft);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dash-remap-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-error-rgb), 0.2);
+}
+
+.dash-remap-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dash-remap-error {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-error-soft);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.2);
+  border-radius: var(--kr-r-sm);
+}
+
+/* Page-level missing-path summary banner (0.8.9). One row, error-tinted,
+   with a filter toggle. Sits above the search bar after a cross-OS import. */
+.dash-missing-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-6);
+  margin-bottom: var(--kr-sp-5);
+  background: rgba(var(--kr-error-rgb), 0.07);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.25);
+  border-radius: var(--kr-r-md);
+}
+
+.dash-missing-banner-icon {
+  color: var(--kr-error-soft);
+  flex-shrink: 0;
+}
+
+.dash-missing-banner-text {
+  flex: 1 1 auto;
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-text-secondary);
+}
+
+.dash-missing-banner-btn {
+  flex-shrink: 0;
+  padding: var(--kr-sp-3) var(--kr-sp-5);
+  background: rgba(var(--kr-error-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.4);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-error-soft);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dash-missing-banner-btn:hover {
+  background: rgba(var(--kr-error-rgb), 0.2);
+}
+
 /* 0.8.4 (#285) — Désagentified briefing form (inline, no modal). */
 .briefing-form {
   display: flex;
