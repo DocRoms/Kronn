@@ -178,6 +178,7 @@ pub async fn clone_project(
         ai_todo_count: 0,
             tech_debt_count: 0,
         needs_docs_migration: false,
+        path_exists: true,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,

@@ -61,8 +61,14 @@ RUN if getent group ${APP_GID} >/dev/null 2>&1; then \
     && useradd -u ${APP_UID} -g kronn -m kronn
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl nodejs npm python3 python3-pip \
+    ca-certificates git curl nodejs npm python3 python3-pip python3-venv \
     make gh openssh-client unzip \
+    # kronn-docs sidecar (WeasyPrint) runtime libs. WeasyPrint >=62 renders via
+    # Pango + HarfBuzz; the older cairo/gdk-pixbuf libs are kept as a harmless
+    # superset so any pinned version in the <65 range resolves. fonts-dejavu-core
+    # gives WeasyPrint a default font so PDFs aren't glyphless.
+    libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0 \
+    libgdk-pixbuf-2.0-0 libcairo2 libffi8 fonts-dejavu-core libfontconfig1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Playwright / Chromium for agent browser tooling ────────────────────────
@@ -132,6 +138,20 @@ RUN npm install -g ccusage@${CCUSAGE_VERSION} && npm cache clean --force \
     # ccusage tree to kronn so any runtime self-heal chmod is permitted.
     && chmod -R a+rx /usr/local/lib/node_modules/ccusage \
     && chown -R kronn:kronn /usr/local/lib/node_modules/ccusage
+
+# ── kronn-docs sidecar (PDF/DOCX/XLSX/PPTX generation) ──────────────────────
+# The backend spawns a Python sidecar (FastAPI + WeasyPrint/python-docx/…) from
+# `~/.kronn/venv/docs` to generate downloadable documents. Outside Docker that
+# venv is created by `make docs-setup`; inside the image we BAKE it so document
+# generation works out of the box — no manual step, no "Document sidecar
+# unavailable" 503. `~/.kronn/venv` is NOT a mounted volume (compose only mounts
+# the `~/.kronn/user-context` subdir), so the baked venv survives at runtime,
+# where $HOME=/home/kronn → `venv_python_path()` resolves to it exactly.
+COPY sidecars/docs /app/sidecars/docs
+RUN python3 -m venv /home/kronn/.kronn/venv/docs \
+    && /home/kronn/.kronn/venv/docs/bin/pip install --no-cache-dir --upgrade pip \
+    && /home/kronn/.kronn/venv/docs/bin/pip install --no-cache-dir /app/sidecars/docs \
+    && chown -R kronn:kronn /home/kronn/.kronn
 
 COPY --from=builder /usr/local/bin/kronn /usr/local/bin/kronn
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

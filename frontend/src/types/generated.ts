@@ -330,6 +330,11 @@ export interface Project {
    *  banner on `ProjectCard`. Computed by the API layer from the
    *  filesystem; not persisted in DB. */
   needs_docs_migration?: boolean;
+  /** True when the project directory resolves on disk. Computed by the API
+   *  layer (`enrich_audit_status`); not persisted. `false` drives the
+   *  "chemin introuvable — remap" banner after a cross-OS import. Absent
+   *  (legacy payloads) is treated as present. */
+  path_exists?: boolean;
   default_skill_ids?: string[];
   briefing_notes?: string | null;
   /** 0.8.3 — companion repos the agent on this project should know
@@ -1724,6 +1729,9 @@ export interface DbExport {
   custom_directives?: Directive[];
   custom_profiles?: AgentProfile[];
   contacts?: Contact[];
+  quick_prompts?: any[];
+  quick_apis?: any[];
+  learnings?: any[];
 }
 
 export interface ImportResult {

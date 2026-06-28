@@ -1704,13 +1704,13 @@ async fn config_export_empty_db() {
     let cursor = std::io::Cursor::new(&bytes[..]);
     let mut archive = zip::ZipArchive::new(cursor).unwrap();
 
-    // Verify data.json contains version 3 with empty collections
+    // Verify data.json contains version 4 with empty collections
     {
         let mut data_file = archive.by_name("data.json").unwrap();
         let mut contents = String::new();
         std::io::Read::read_to_string(&mut data_file, &mut contents).unwrap();
         let data: Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(data["version"], 3);
+        assert_eq!(data["version"], 4);
         assert!(data["projects"].as_array().unwrap().is_empty());
         assert!(data["discussions"].as_array().unwrap().is_empty());
         assert!(data["workflows"].as_array().unwrap().is_empty());
@@ -1718,6 +1718,9 @@ async fn config_export_empty_db() {
         assert!(data["mcp_configs"].as_array().unwrap().is_empty());
         assert!(data["contacts"].as_array().unwrap().is_empty());
         assert!(data["quick_prompts"].as_array().unwrap().is_empty());
+        // 0.8.9 — new collections must be present and empty too.
+        assert!(data["quick_apis"].as_array().unwrap().is_empty());
+        assert!(data["learnings"].as_array().unwrap().is_empty());
     }
 
     // Verify config.toml exists
@@ -2376,6 +2379,7 @@ async fn bootstrap_find_common_parent_logic() {
             ai_todo_count: 0,
             tech_debt_count: 0,
             needs_docs_migration: false,
+            path_exists: true,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -2840,6 +2844,7 @@ async fn exec_returns_expected_fields() {
         ai_todo_count: 0,
             tech_debt_count: 0,
         needs_docs_migration: false,
+        path_exists: true,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
@@ -4195,12 +4200,12 @@ async fn export_returns_zip() {
     assert!(archive.by_name("data.json").is_ok(), "ZIP must contain data.json");
     assert!(archive.by_name("config.toml").is_ok(), "ZIP must contain config.toml");
 
-    // Verify data.json has version 3
+    // Verify data.json has version 4 (bumped in 0.8.9 — quick_apis + learnings)
     let mut data_file = archive.by_name("data.json").unwrap();
     let mut contents = String::new();
     std::io::Read::read_to_string(&mut data_file, &mut contents).unwrap();
     let data: Value = serde_json::from_str(&contents).unwrap();
-    assert_eq!(data["version"], 3);
+    assert_eq!(data["version"], 4);
 }
 
 #[tokio::test]
@@ -5137,6 +5142,7 @@ async fn audit_runs_cleanup_flips_running_to_interrupted() {
         ai_todo_count: 0,
         tech_debt_count: 0,
         needs_docs_migration: false,
+        path_exists: true,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
@@ -6274,6 +6280,7 @@ mod cold_api_handlers_tests {
             ai_todo_count: 0,
             tech_debt_count: 0,
             needs_docs_migration: false,
+            path_exists: true,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -6474,6 +6481,7 @@ mod cold_api_handlers_tests {
             ai_todo_count: 0,
             tech_debt_count: 0,
             needs_docs_migration: false,
+            path_exists: true,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,
@@ -7797,6 +7805,7 @@ mod cold_api_handlers_tests {
             ai_todo_count: 0,
             tech_debt_count: 0,
             needs_docs_migration: false,
+            path_exists: true,
             default_skill_ids: vec![],
             default_profile_id: None,
             briefing_notes: None,

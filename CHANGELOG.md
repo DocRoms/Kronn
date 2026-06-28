@@ -15,6 +15,36 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [0.8.9] - 2026-06-27
 
+### Fixed — Document generation works out of the box in Docker ("Document sidecar unavailable")
+
+The PDF/DOCX/XLSX/PPTX feature spawns a Python sidecar (FastAPI + WeasyPrint/python-docx/XlsxWriter/python-pptx) from `~/.kronn/venv/docs`. The skill advertised "no external install needed", but the backend Docker image never created that venv — so clicking a generated document returned `503 Document sidecar unavailable. Run \`make docs-setup\`…`, a manual step that makes no sense in the containerized stack. The image now **bakes the venv** (`backend/Dockerfile`): WeasyPrint's runtime libs (Pango/HarfBuzz + fonts) via apt, then `pip install` of the sidecar into `/home/kronn/.kronn/venv/docs`. That path isn't a mounted volume (compose only mounts the `~/.kronn/user-context` subdir), so it survives at runtime where `$HOME=/home/kronn`. Apply with a backend image rebuild (`docker compose build backend && docker compose up -d`). Non-Docker installs (desktop / bare `make start`) still use `make docs-setup`.
+
+### Fixed — Toggling a boolean setting OFF no longer fails ("Échec de la mise à jour…")
+
+The shared `api()` client built its request body with `if (body)` / `body ? … : undefined`, which treats `false`, `0` and `""` as "no body". So a `POST` carrying a falsy primitive sent an **empty body with no JSON content-type** — and the backend's `Json<bool>` extractor 422'd it. Visible symptom: **disabling the continual-learning toggle** (`POST false`) failed while enabling (`POST true`) worked. Fixed by gating on `body !== undefined` instead, so only a genuinely-absent body is omitted. This silently affected every `Json<bool>`/falsy-primitive endpoint, not just continual learning. Regression tests pin `false`/`true`/no-body request shapes.
+
+### Fixed — Uploads over 1 MB no longer 413 at the gateway ("fichier trop volumineux")
+
+`files-by-message-on-disc` (0.8.8) raised the backend's axum `DefaultBodyLimit` to 64 MiB, but the nginx **gateway** had no `client_max_body_size` directive — so it applied nginx's **1 MiB default** and rejected any context-file upload over ~1 MB with a 413 *before the request ever reached the backend*. Added `client_max_body_size 64m` at the gateway `server` level (`.docker/nginx.conf`) to match the axum limit. The config is volume-mounted (not baked), so applying it is just `docker compose restart gateway` — no rebuild.
+
+### Fixed — Whole-DB export now carries Quick APIs, learnings & global context
+
+Migrating a Kronn install to another box (e.g. WSL → macOS) via Settings → *export ZIP* silently dropped data added since the 0.3.2 export was written. Closed the gaps that hurt a real migration:
+
+- **Quick APIs** (`quick_apis`, migration 045) and **continual-learning rows** (`learnings`, migration 063) are now collected by `build_export` and re-inserted by `do_import_db`. Before, they were never in the payload.
+- **`global_context`** (the cross-project instruction block injected into every agent prompt) travelled in the exported `config.toml` but `merge_import_config` never re-applied it — now merged (with its mode) when the import carries one.
+- `DbExport` payload bumped `version: 3 → 4`. All new fields are `#[serde(default)]`, so **v3 exports still import** (empty vecs). New tests: export→import round-trip for Quick APIs + learnings, global-context re-apply, and v3 back-compat deserialization.
+- **Known residuals** (tracked in tech-debt): QP version *snapshots* (per-version metrics auto-recompute from discussions), uploaded `context_files` blobs (on disk, not in the ZIP), and secrets (API keys + MCP env) which stay stripped by design and must be re-entered.
+
+### Added — Remap a project whose folder is missing (the import's missing half)
+
+After a cross-OS import, every project path is invalid (`/home/...` ⇄ `/Users/...`). The import toast said "remap them in the Projects page" — but that page had no remap affordance, and the toast was ephemeral. Wired it end-to-end:
+
+- **`Project.path_exists`** — computed by `enrich_audit_status` (list/get API layer, not persisted). A missing directory also short-circuits the filesystem scans + self-heal writes that were pointless (and unsafe) on a gone path. The DB row mapper defaults it `true` so non-enriched reads (e.g. the export payload) never false-flag.
+- **Per-card remap banner** (`ProjectCard`) — always visible (even collapsed) when `path_exists === false`: an inline path input + "Remap" button calling the existing `POST /projects/:id/remap-path` (which validates the new path exists and rejects `..`). The previously-orphaned `projectsApi.remapPath` client now has a caller.
+- **Page-level banner + filter** (`ProjectList`) — persistent "N projects have missing folders" summary with a one-click "show only these" toggle to triage a large import.
+- i18n FR/EN/ES. Tests: backend `enrich_audit_status` (missing → flagged + scans skipped, existing → present); frontend remap banner (render gating, call shape, trim, inline error, no-refetch-on-error) + list banner (singular/plural/filter).
+
 ### Added — Continual Learning (0.9.0, behind a default-OFF beta toggle)
 
 Agents can propose **durable learnings** (conventions, preferences, facts, pitfalls) that a human validates before they're persisted into injected truth files — closing the "every discussion re-explains the same context" gap. Full design + the multi-agent review that hardened it: `docs/research/continual-learning-0.9.0-spec.md`.

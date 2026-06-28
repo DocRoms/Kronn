@@ -101,6 +101,35 @@ describe('api.config (blob/form)', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
+// Falsy-but-real bodies must still be sent (regression: the wrapper used to
+// drop `false`/`0`/`""` via `if (body)`, so a `Json<bool>` endpoint 422'd —
+// which broke DISABLING the continual-learning toggle (POST `false`)).
+// ════════════════════════════════════════════════════════════════════════════
+describe('api wrapper — falsy bodies', () => {
+  it('saveContinualLearningEnabled(false) sends a body of `false` with JSON content-type', async () => {
+    await config.saveContinualLearningEnabled(false);
+    const [, opts] = fetchMock.mock.calls[0];
+    const o = opts as { body?: string; headers?: Record<string, string> };
+    expect(o.body).toBe('false');
+    expect(o.headers?.['Content-Type']).toBe('application/json');
+  });
+
+  it('saveContinualLearningEnabled(true) sends a body of `true`', async () => {
+    await config.saveContinualLearningEnabled(true);
+    const [, opts] = fetchMock.mock.calls[0];
+    expect((opts as { body?: string }).body).toBe('true');
+  });
+
+  it('a GET with no body sends no body and no JSON content-type', async () => {
+    await config.getContinualLearningEnabled();
+    const [, opts] = fetchMock.mock.calls[0];
+    const o = opts as { body?: string; headers?: Record<string, string> };
+    expect(o.body).toBeUndefined();
+    expect(o.headers?.['Content-Type']).toBeUndefined();
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
 // projects — the long tail (audit info, anti-hallu, briefing, linked-repos,
 // ai-files, git ops). The SSE audit streams are tested separately.
 // ════════════════════════════════════════════════════════════════════════════
