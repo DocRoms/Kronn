@@ -8,7 +8,7 @@ import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck, ListChecks,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn, Loader2,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -33,6 +33,13 @@ export interface DiscussionSidebarProps {
    *  and updates sendingMap on success. */
   onStopDiscussion?: (discId: string) => void;
   onContactAdd: (code: string) => Promise<void>;
+  /** Unified "join by code": resolves a kr-join token local OR cross-instance
+   *  (mirrors the disc back over WS) and opens it. Rejects with a message on
+   *  failure (expired / not found). Optional — the button is hidden when absent. */
+  onJoinByCode?: (code: string) => Promise<void>;
+  /** Click a contact → open (or create) a 1:1 shared discussion with them.
+   *  Optional — the row is only clickable when provided. */
+  onStartChat?: (contact: Contact) => void;
   onContactDelete: (id: string) => Promise<void>;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
@@ -111,6 +118,8 @@ export function DiscussionSidebar({
   onClose,
   onStopDiscussion,
   onContactAdd,
+  onJoinByCode,
+  onStartChat,
   onContactDelete,
   toast,
   t,
@@ -147,6 +156,9 @@ export function DiscussionSidebar({
   const [showArchives, setShowArchives] = useState(false);
   const [showAddContact, setShowAddContact] = useState(false);
   const [addContactCode, setAddContactCode] = useState('');
+  const [showJoin, setShowJoin] = useState(false);
+  const [joinCode, setJoinCode] = useState('');
+  const [joining, setJoining] = useState(false);
   // Per-project "expanded" set — by default each project group caps at
   // PROJECT_LOOSE_LIMIT loose discs (most users only care about recent
   // activity). Clicking "+N more" adds the project id to this set, which
@@ -306,6 +318,29 @@ export function DiscussionSidebar({
     }
   };
 
+  // Unified "join by code". The backend resolves the token local OR
+  // cross-instance; the latter mirrors the disc back over WS in ~0.5–8 s, so we
+  // hold a `joining` ("resolving…") state for the whole await. Surfaces the
+  // backend's own error message (expired / not found) rather than a generic one.
+  // Ref guard (not the `joining` state, which doesn't flip synchronously)
+  // so two fast Enter/clicks can't fire two joins before the first await.
+  const joinInFlightRef = useRef(false);
+  const handleJoin = async () => {
+    if (joinInFlightRef.current || !joinCode.trim() || !onJoinByCode) return;
+    joinInFlightRef.current = true;
+    setJoining(true);
+    try {
+      await onJoinByCode(joinCode.trim());
+      setJoinCode('');
+      setShowJoin(false);
+    } catch (e) {
+      toast((e as Error)?.message || t('contacts.joinError'), 'error');
+    } finally {
+      setJoining(false);
+      joinInFlightRef.current = false;
+    }
+  };
+
   // ─── Render ───────────────────────────────────────────────────────────
   return (
     <div className="disc-sidebar" data-mobile={isMobile}>
@@ -403,8 +438,17 @@ export function DiscussionSidebar({
                   {contacts.filter(c => contactsOnline[c.id]).length}/{contacts.length}
                 </>
               )}
+              {onJoinByCode && (
+                <button
+                  onClick={() => { setShowJoin(p => !p); setShowAddContact(false); }}
+                  className="disc-contact-add-btn"
+                  title={t('contacts.joinByCode')}
+                >
+                  <LogIn size={12} />
+                </button>
+              )}
               <button
-                onClick={() => setShowAddContact(p => !p)}
+                onClick={() => { setShowAddContact(p => !p); setShowJoin(false); }}
                 className="disc-contact-add-btn"
                 title={t('contacts.add')}
               >
@@ -412,6 +456,33 @@ export function DiscussionSidebar({
               </button>
             </span>
           </div>
+          {/* Join a discussion by code — unified local/cross-instance join */}
+          {showJoin && (
+            <div className="disc-contact-add-form">
+              <input
+                type="text"
+                className="disc-contact-add-input"
+                value={joinCode}
+                onChange={e => setJoinCode(e.target.value)}
+                placeholder={t('contacts.joinPlaceholder')}
+                disabled={joining}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && joinCode.trim()) {
+                    handleJoin();
+                  }
+                }}
+              />
+              <button
+                className="disc-contact-add-submit"
+                onClick={handleJoin}
+                disabled={joining || !joinCode.trim()}
+              >
+                {joining
+                  ? <span className="disc-join-resolving"><Loader2 size={11} className="disc-join-spin" /> {t('contacts.joinResolving')}</span>
+                  : t('contacts.joinByCode')}
+              </button>
+            </div>
+          )}
           {/* Add contact inline form */}
           {showAddContact && (
             <div className="disc-contact-add-form">
@@ -435,9 +506,16 @@ export function DiscussionSidebar({
               </button>
             </div>
           )}
-          {/* Contact list */}
+          {/* Contact list — click a row to open a 1:1 chat with that contact */}
           {contacts.map(c => (
-            <div key={c.id} className="disc-contact-row">
+            <div
+              key={c.id}
+              className="disc-contact-row"
+              role={onStartChat ? 'button' : undefined}
+              style={onStartChat ? { cursor: 'pointer' } : undefined}
+              title={onStartChat ? t('contacts.startChat', c.pseudo) : undefined}
+              onClick={onStartChat ? () => onStartChat(c) : undefined}
+            >
               <span className="disc-contact-dot" data-online={contactsOnline[c.id] ?? false} />
               {c.avatar_email ? (
                 <img src={gravatarUrl(c.avatar_email, 20)} alt="" className="disc-contact-avatar" />
@@ -454,7 +532,7 @@ export function DiscussionSidebar({
                 <span className="disc-contact-offline">offline</span>
               )}
               <button
-                onClick={() => onContactDelete(c.id)}
+                onClick={(e) => { e.stopPropagation(); onContactDelete(c.id); }}
                 className="disc-contact-del-btn"
                 title={t('contacts.delete')}
               >

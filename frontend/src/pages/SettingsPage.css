@@ -1471,6 +1471,32 @@
   border: 1px solid rgba(var(--kr-accent-rgb), 0.08);
 }
 
+/* Network-exposure toggle ("Allow connections from other devices"). */
+.set-expose-box {
+  margin-top: var(--kr-sp-8);
+  padding: var(--kr-sp-5) var(--kr-sp-6);
+  border-radius: var(--kr-r-lg);
+  border: 1px solid var(--kr-border-light);
+}
+
+.set-expose-warn {
+  margin-top: var(--kr-sp-3);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.5;
+  color: var(--kr-warning, #b45309);
+}
+
+.set-expose-restart {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+  margin-top: var(--kr-sp-4);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-info);
+}
+
 .set-invite-code {
   flex: 1;
   font-size: var(--kr-fs-sm);

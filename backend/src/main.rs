@@ -68,13 +68,20 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Config loaded from {}", config_source);
 
     let port = app_config.server.port;
-    // In Docker (KRONN_DATA_DIR is set), always bind to 0.0.0.0
-    // so nginx in its own container can reach us.
-    let host = if std::env::var("KRONN_DATA_DIR").is_ok() {
-        "0.0.0.0".to_string()
-    } else {
-        app_config.server.host.clone()
+    // Host binding priority:
+    //   1. `KRONN_HOST` env — explicit opt-in (e.g. `KRONN_HOST=0.0.0.0` to
+    //      expose a NATIVE instance on the LAN for the contacts / P2P feature,
+    //      which otherwise binds 127.0.0.1 and is unreachable cross-machine).
+    //   2. Docker (`KRONN_DATA_DIR` set) → 0.0.0.0 so nginx can reach us.
+    //   3. `config.server.host` (default 127.0.0.1 — localhost only).
+    let host = match std::env::var("KRONN_HOST") {
+        Ok(h) if !h.trim().is_empty() => h.trim().to_string(),
+        _ if std::env::var("KRONN_DATA_DIR").is_ok() => "0.0.0.0".to_string(),
+        _ => app_config.server.host.clone(),
     };
+    // Record what we actually bound so the "Allow connections from other
+    // devices" toggle can tell the UI whether a restart is still pending.
+    kronn::core::net_expose::record_bound_host(&host);
 
     // Make the backend URL available to every child process we spawn —
     // the kronn-internal MCP bridge running inside the agent's child

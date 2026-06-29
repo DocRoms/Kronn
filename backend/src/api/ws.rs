@@ -11,8 +11,11 @@ use axum::{
 use chrono::Utc;
 use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use tokio::sync::broadcast::error::RecvError;
 
-use crate::{models::WsMessage, AppState};
+use crate::{core::ws_client::PeerEchoGuard, models::WsMessage, AppState};
 
 // ── Invite-code brute-force protection ─────────────────────────────────────
 //
@@ -289,21 +292,74 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
     let mut broadcast_rx = state.ws_broadcast.subscribe();
     let broadcast_tx = state.ws_broadcast.clone();
 
-    // Task 1: forward broadcast events → WS client
+    // Loop guard shared between the two halves of THIS connection: keys of
+    // relayable frames we received from the peer, so the send half never echoes
+    // them straight back. Only consulted for peer connections.
+    let echo_guard: Arc<Mutex<PeerEchoGuard>> = Arc::new(Mutex::new(PeerEchoGuard::default()));
+    let recv_guard = echo_guard.clone();
+
+    // Task 1: forward broadcast events → WS client.
+    //
+    // The local frontend (`is_local`) subscribes to the full bus and must see
+    // every variant. A **remote peer** (`!is_local`) only gets peer-relayable
+    // frames (chat + invites) and never a frame it just sent us — forwarding
+    // Presence/local-UI signals to a peer is what bounced the 256-slot channel
+    // into overflow and dropped the socket (~2 s cross-machine flap).
+    let send_task_is_local = is_local;
     let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = broadcast_rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                // axum 0.8 — `Message::Text` now wraps `Utf8Bytes`
-                // instead of `String`, providing zero-copy from Bytes.
-                // `.into()` covers `String -> Utf8Bytes`.
-                if ws_sender.send(Message::Text(json.into())).await.is_err() {
-                    break;
+        // Keepalive: a remote peer's socket is nearly silent (Presence/heartbeats
+        // are no longer relayed), so without periodic traffic a middlebox (WSL2's
+        // NAT drops idle TCP in ~5 s) kills it with no Close frame → zombie. The
+        // server side pings too so BOTH directions of the flow stay warm. The
+        // local frontend keeps the existing cadence (its own 30 s app-ping), so
+        // its keepalive interval is effectively disabled here.
+        let keepalive_every = if send_task_is_local {
+            Duration::from_secs(86_400)
+        } else {
+            crate::core::ws_client::WS_KEEPALIVE_INTERVAL
+        };
+        let mut keepalive = tokio::time::interval(keepalive_every);
+        keepalive.tick().await; // consume the immediate first tick
+        loop {
+            tokio::select! {
+                _ = keepalive.tick() => {
+                    if ws_sender.send(Message::Ping(Vec::<u8>::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+                recv = broadcast_rx.recv() => match recv {
+                    Ok(msg) => {
+                        if !send_task_is_local {
+                            if !msg.is_peer_relayable() {
+                                continue;
+                            }
+                            if let Some(key) = msg.relay_dedup_key() {
+                                if echo_guard.lock().unwrap_or_else(|e| e.into_inner()).contains(&key) {
+                                    continue;
+                                }
+                            }
+                        }
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            // axum 0.8 — `Message::Text` now wraps `Utf8Bytes`
+                            // instead of `String`, providing zero-copy from Bytes.
+                            // `.into()` covers `String -> Utf8Bytes`.
+                            if ws_sender.send(Message::Text(json.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    // A burst made us fall behind. Skip the gap and keep the socket
+                    // rather than tearing it down (the old `while let Ok` treated
+                    // Lagged as terminal → reconnect storm + dropped UI updates).
+                    Err(RecvError::Lagged(_)) => continue,
+                    Err(RecvError::Closed) => break,
                 }
             }
         }
     });
 
     // Task 2: receive WS messages → broadcast
+    let recv_is_local = is_local;
     let mut recv_task = tokio::spawn(async move {
         // Pre-Presence handshake : `verified=false` until a `Presence`
         // is seen. Heartbeats (`Ping`) are answered before the gate
@@ -314,7 +370,24 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
         // through without a peer-authenticating Presence.
         let mut verified = false;
 
-        while let Some(Ok(msg)) = ws_receiver.next().await {
+        // Idle dead-detection: a remote peer must produce *some* frame (its
+        // keepalive Ping counts) within WS_IDLE_TIMEOUT, else the socket is
+        // presumed dead and dropped (the peer's manager reconnects) instead of
+        // blocking forever on a silently-killed connection. The local frontend
+        // is exempt (effectively-infinite window) — it pings only every 30 s
+        // and must never be dropped just for being quiet.
+        let idle = if recv_is_local {
+            Duration::from_secs(86_400)
+        } else {
+            crate::core::ws_client::WS_IDLE_TIMEOUT
+        };
+
+        loop {
+            let msg = match tokio::time::timeout(idle, ws_receiver.next()).await {
+                Err(_idle) => break,
+                Ok(None) | Ok(Some(Err(_))) => break,
+                Ok(Some(Ok(m))) => m,
+            };
             match msg {
                 Message::Text(text) => {
                     let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) else {
@@ -432,54 +505,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                         // already returned `Drop` for non-Presence frames above.
                     }
 
-                    // Handle incoming chat messages from remote peers:
-                    // insert into local DB, then broadcast to local frontend.
-                    if let WsMessage::ChatMessage {
-                        ref shared_discussion_id,
-                        ref message_id,
-                        ref from_pseudo,
-                        ref from_avatar_email,
-                        ref content,
-                        timestamp,
-                        ..
-                    } = ws_msg
-                    {
-                        let sid = shared_discussion_id.clone();
-                        let mid = message_id.clone();
-                        let pseudo = from_pseudo.clone();
-                        let avatar = from_avatar_email.clone();
-                        let text = content.clone();
-                        let ts = timestamp;
-                        let _ = state
-                            .db
-                            .with_conn(move |conn| {
-                                handle_incoming_chat_message(
-                                    conn, &sid, &mid, &pseudo, avatar.as_deref(), &text, ts,
-                                )
-                            })
-                            .await;
-                    }
+                    // Relayable frames (chat / invite) from a peer are persisted
+                    // here, and re-broadcast onto the local bus ONLY if new — a
+                    // duplicate must not be re-broadcast or it bounces back out to
+                    // peers and loops (duplicate toasts/notifications). Other
+                    // frames (Presence …) are always forwarded to the frontend.
+                    let should_broadcast = if ws_msg.is_peer_relayable() {
+                        ingest_relayable_frame(&state, &ws_msg).await
+                    } else {
+                        true
+                    };
 
-                    // Handle discussion invites: create local discussion copy.
-                    if let WsMessage::DiscussionInvite {
-                        ref shared_discussion_id,
-                        ref title,
-                        ref from_pseudo,
-                        ..
-                    } = ws_msg
-                    {
-                        let sid = shared_discussion_id.clone();
-                        let t = title.clone();
-                        let p = from_pseudo.clone();
-                        let _ = state
-                            .db
-                            .with_conn(move |conn| {
-                                handle_discussion_invite(conn, &sid, &t, &p)
-                            })
-                            .await;
+                    if should_broadcast {
+                        // Record this frame as seen-from-this-peer *before*
+                        // broadcasting, so the send half (Task 1) won't echo it
+                        // straight back to the peer it came from.
+                        if let Some(key) = ws_msg.relay_dedup_key() {
+                            recv_guard.lock().unwrap_or_else(|e| e.into_inner()).record(key);
+                        }
+                        let _ = broadcast_tx.send(ws_msg);
                     }
-
-                    let _ = broadcast_tx.send(ws_msg);
                 }
                 Message::Close(_) => break,
                 _ => {}
@@ -497,6 +542,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
 /// Insert a remote chat message into the local discussion.
 /// If no discussion exists for this shared_id, the message is silently dropped
 /// (the DiscussionInvite should have created it first).
+///
+/// Returns `true` when a NEW message was inserted (caller should re-broadcast
+/// it to the local frontend), `false` for a duplicate or a drop (caller must
+/// NOT re-broadcast — re-broadcasting a frame already applied is what bounces
+/// it back out to peers and loops, producing duplicate notifications).
+#[allow(clippy::too_many_arguments)]
 fn handle_incoming_chat_message(
     conn: &rusqlite::Connection,
     shared_discussion_id: &str,
@@ -505,11 +556,13 @@ fn handle_incoming_chat_message(
     from_avatar_email: Option<&str>,
     content: &str,
     timestamp: i64,
-) -> anyhow::Result<()> {
+    role: crate::models::MessageRole,
+    agent_type: Option<crate::models::AgentType>,
+) -> anyhow::Result<bool> {
     // Find local discussion by shared_id
     let Some(disc_id) = crate::db::discussions::find_discussion_by_shared_id(conn, shared_discussion_id)? else {
         tracing::warn!("WS: ChatMessage for unknown shared_id {}, dropping", shared_discussion_id);
-        return Ok(());
+        return Ok(false);
     };
 
     // Check for duplicate (idempotent — same message_id won't be inserted twice)
@@ -519,17 +572,21 @@ fn handle_incoming_chat_message(
         |row| row.get(0),
     ).unwrap_or(false);
     if exists {
-        return Ok(());
+        return Ok(false);
     }
 
     let ts = chrono::DateTime::from_timestamp_millis(timestamp)
         .unwrap_or_else(Utc::now);
+    // role + agent_type come from the wire (F2): a federated AGENT reply lands
+    // as an Agent message carrying its CLI name, not a generic User. Frames
+    // from an older peer carry no fields → serde defaults (User / None), i.e.
+    // the historical behaviour.
     let msg = crate::models::DiscussionMessage {
         lint_report: None,
         id: message_id.to_string(),
-        role: crate::models::MessageRole::User,
+        role,
         content: content.to_string(),
-        agent_type: None,
+        agent_type,
         timestamp: ts,
         tokens_used: 0,
         auth_mode: None,
@@ -542,58 +599,171 @@ fn handle_incoming_chat_message(
 
     crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
     tracing::info!("WS: inserted remote message from {} in shared disc {}", from_pseudo, shared_discussion_id);
-    Ok(())
+    Ok(true)
 }
 
 /// Create a local discussion from a remote invitation.
+///
+/// Returns `true` when a NEW local copy was created (caller should re-broadcast
+/// so the frontend refreshes + toasts), `false` when the shared disc is already
+/// known (caller must NOT re-broadcast — avoids duplicate toasts and a relay
+/// loop between two instances).
 fn handle_discussion_invite(
     conn: &rusqlite::Connection,
     shared_discussion_id: &str,
     title: &str,
     from_pseudo: &str,
-) -> anyhow::Result<()> {
-    // Check if we already have this shared discussion
+) -> anyhow::Result<bool> {
+    // Check if we already have this shared discussion — if so, NOT new, don't
+    // re-broadcast (loop guard). Otherwise create the mirror via the shared
+    // helper so this path and the HTTP `claim-by-token` join path converge on
+    // an identical local representation (same title format, same defaults).
     if crate::db::discussions::find_discussion_by_shared_id(conn, shared_discussion_id)?.is_some() {
         tracing::debug!("WS: DiscussionInvite for already-known shared_id {}", shared_discussion_id);
-        return Ok(());
+        return Ok(false);
     }
 
-    let now = Utc::now();
-    let disc = crate::models::Discussion {
-        id: uuid::Uuid::new_v4().to_string(),
-        project_id: None,
-        title: format!("{} (shared by {})", title, from_pseudo),
-        agent: crate::models::AgentType::ClaudeCode,
-        language: "fr".into(),
-        participants: vec![],
-        messages: vec![],
-        message_count: 0, non_system_message_count: 0,
-        skill_ids: vec![],
-        profile_ids: vec![],
-        directive_ids: vec![],
-        archived: false,
-            pinned: false,
-        workspace_mode: "Direct".into(),
-        workspace_path: None,
-        worktree_branch: None,
-        tier: crate::models::ModelTier::Default,
-        pin_first_message: false,
-        summary_cache: None,
-        summary_up_to_msg_idx: None,
-        summary_strategy: crate::models::SummaryStrategy::Auto,
-        introspection_call_count: 0,
-        shared_id: Some(shared_discussion_id.to_string()),
-        shared_with: vec![],
-        workflow_run_id: None,
-        test_mode_restore_branch: None,
-        test_mode_stash_ref: None,
-        created_at: now,
-        updated_at: now,
-    };
-
-    crate::db::discussions::insert_discussion(conn, &disc)?;
+    crate::db::discussions::ensure_mirror_by_shared_id(conn, shared_discussion_id, title, from_pseudo)?;
     tracing::info!("WS: created shared discussion '{}' from invite by {}", title, from_pseudo);
-    Ok(())
+    Ok(true)
+}
+
+/// Persist an inbound peer frame (chat message / discussion invite) and report
+/// whether it was **new** — i.e. whether the caller should re-broadcast it onto
+/// the local bus so the frontend updates.
+///
+/// Returning `false` for duplicates is the single guard that breaks the
+/// cross-connection relay loop: between two instances there are two directional
+/// sockets, so a per-connection echo guard can't stop a frame bouncing
+/// A→B→A→B…; gating the re-broadcast on novelty (the DB already has this
+/// message_id / shared_id) stops it dead while still delivering the first copy.
+/// Shared by the inbound `handle_socket` and the outbound `ws_client` receive
+/// halves so a frame is persisted exactly once regardless of which socket it
+/// arrives on.
+pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) -> bool {
+    match msg {
+        WsMessage::ChatMessage {
+            shared_discussion_id,
+            message_id,
+            from_pseudo,
+            from_avatar_email,
+            content,
+            timestamp,
+            role,
+            agent_type,
+            ..
+        } => {
+            let (sid, mid, pseudo, avatar, text, ts, r, at) = (
+                shared_discussion_id.clone(),
+                message_id.clone(),
+                from_pseudo.clone(),
+                from_avatar_email.clone(),
+                content.clone(),
+                *timestamp,
+                role.clone(),
+                agent_type.clone(),
+            );
+            state
+                .db
+                .with_conn(move |conn| {
+                    handle_incoming_chat_message(conn, &sid, &mid, &pseudo, avatar.as_deref(), &text, ts, r, at)
+                })
+                .await
+                .unwrap_or(false)
+        }
+        WsMessage::DiscussionInvite {
+            shared_discussion_id,
+            title,
+            from_pseudo,
+            ..
+        } => {
+            let (sid, t, p) = (shared_discussion_id.clone(), title.clone(), from_pseudo.clone());
+            state
+                .db
+                .with_conn(move |conn| handle_discussion_invite(conn, &sid, &t, &p))
+                .await
+                .unwrap_or(false)
+        }
+        WsMessage::DiscSyncRequest {
+            shared_discussion_id,
+            since_timestamp,
+        } => {
+            // Answer with the missing messages (broadcast → relayed back to the
+            // requester). The request itself is NEVER re-broadcast (return
+            // false) — it is consumed here, so it can't bounce between peers.
+            crate::api::federation::respond_to_sync_request(
+                state,
+                shared_discussion_id,
+                *since_timestamp,
+            )
+            .await;
+            false
+        }
+        WsMessage::FileAttached {
+            shared_discussion_id,
+            message_id,
+            file_id,
+            filename,
+            mime_type,
+            size,
+            from_invite_code,
+            ..
+        } => {
+            // Already have this file? Do nothing. This is the idempotency guard
+            // AND it breaks the pending/ready re-broadcast ping-pong: the origin
+            // peer (which holds the file) receives our local emits below, finds
+            // the file present, and stops — so the frames don't bounce.
+            let exists = {
+                let fid = file_id.clone();
+                state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussions::context_file_exists(conn, &fid).map_err(|e| anyhow::anyhow!(e))
+                    })
+                    .await
+                    .unwrap_or(false)
+            };
+            if exists {
+                return false;
+            }
+
+            // F15+ — announce the incoming file to the LOCAL UI immediately
+            // (pending:true) so it shows a "downloading…" placeholder before the
+            // binary lands. fetch_and_store_attachment emits pending:false once
+            // stored.
+            let _ = state.ws_broadcast.send(WsMessage::FileAttached {
+                shared_discussion_id: shared_discussion_id.clone(),
+                message_id: message_id.clone(),
+                file_id: file_id.clone(),
+                filename: filename.clone(),
+                mime_type: mime_type.clone(),
+                size: *size,
+                from_invite_code: from_invite_code.clone(),
+                pending: true,
+            });
+
+            // Fetch the binary in the background — a network round-trip we must
+            // NOT block the recv loop on.
+            let st = state.clone();
+            let (sid, mid, fid, fname, mime, host) = (
+                shared_discussion_id.clone(),
+                message_id.clone(),
+                file_id.clone(),
+                filename.clone(),
+                mime_type.clone(),
+                from_invite_code.clone(),
+            );
+            let sz = *size;
+            tokio::spawn(async move {
+                crate::api::federation::fetch_and_store_attachment(
+                    &st, &sid, &mid, &fid, &fname, &mime, sz, &host,
+                )
+                .await;
+            });
+            false
+        }
+        _ => false,
+    }
 }
 
 /// Auto-create a pending contact from an incoming invite code.
@@ -666,6 +836,8 @@ mod handshake_tests {
             from_invite_code: "i".into(),
             content: "hello".into(),
             timestamp: 1,
+            role: crate::models::MessageRole::User,
+            agent_type: None,
         };
         assert_eq!(classify_pre_presence(&m), PrePresenceAction::Drop);
     }
@@ -787,5 +959,44 @@ mod handshake_tests {
             assert!(!is_trusted_client_ip(v4(203, 0, 113, 7)));
             assert!(!is_trusted_client_ip("2001:4860:4860::8888".parse().unwrap()));
         }
+    }
+}
+
+/// Novelty-gating invariants that break the cross-connection relay loop:
+/// a relayable frame is re-broadcast (handler returns `true`) only the FIRST
+/// time it is applied; any duplicate returns `false` so it is never bounced
+/// back out to peers (the bug that produced duplicate invites/notifications).
+#[cfg(test)]
+mod relay_dedup_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn conn() -> Connection {
+        let c = Connection::open_in_memory().unwrap();
+        c.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        crate::db::migrations::run(&c).unwrap();
+        c
+    }
+
+    #[test]
+    fn discussion_invite_is_new_once_then_duplicate() {
+        let c = conn();
+        // First invite creates the local copy → new → re-broadcast.
+        assert!(handle_discussion_invite(&c, "shared-1", "Title", "Romu").unwrap());
+        // Same shared_id again → already known → NOT new → no re-broadcast (loop dies).
+        assert!(!handle_discussion_invite(&c, "shared-1", "Title", "Romu").unwrap());
+    }
+
+    #[test]
+    fn chat_message_drops_unknown_then_inserts_once() {
+        let c = conn();
+        use crate::models::MessageRole;
+        // No local disc with this shared_id yet → dropped → NOT new.
+        assert!(!handle_incoming_chat_message(&c, "shared-2", "m1", "Romu", None, "hi", 0, MessageRole::User, None).unwrap());
+        // Create the shared disc, then the same chat inserts once → new…
+        assert!(handle_discussion_invite(&c, "shared-2", "T", "Romu").unwrap());
+        assert!(handle_incoming_chat_message(&c, "shared-2", "m1", "Romu", None, "hi", 0, MessageRole::User, None).unwrap());
+        // …and a duplicate message_id is NOT new (idempotent + loop-safe).
+        assert!(!handle_incoming_chat_message(&c, "shared-2", "m1", "Romu", None, "hi", 0, MessageRole::User, None).unwrap());
     }
 }

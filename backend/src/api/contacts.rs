@@ -124,13 +124,31 @@ pub async fn delete(
     }
 }
 
+/// This instance's pseudo for invite codes, with a safe fallback.
+///
+/// Falls back to `"anonymous"` when no pseudo is configured so the invite
+/// code is always well-formed (`kronn:pseudo@host:port`). An empty pseudo
+/// would yield `kronn:@host:port`, which `parse_invite_code` rejects — that
+/// mismatch is what caused the cross-machine presence flap/ban.
+pub fn invite_pseudo(server: &crate::models::ServerConfig) -> String {
+    server.pseudo.clone().unwrap_or_else(|| "anonymous".into())
+}
+
+/// Build this instance's canonical invite code (`kronn:pseudo@host:port`).
+///
+/// Single source of truth shared by the `/api/contacts/invite-code` endpoint
+/// and the outbound WS presence handshake (`ws_client`) so the code a peer
+/// stores always matches the code we send on the wire.
+pub async fn build_invite_code(server: &crate::models::ServerConfig) -> String {
+    let pseudo = invite_pseudo(server);
+    let host = advertised_host_async(server).await;
+    format!("kronn:{}@{}:{}", pseudo, host, server.port)
+}
+
 /// GET /api/contacts/invite-code — returns this instance's invite code
 pub async fn invite_code(State(state): State<AppState>) -> Json<ApiResponse<String>> {
     let config = state.config.read().await;
-    let pseudo = config.server.pseudo.clone().unwrap_or_else(|| "anonymous".into());
-    let host = advertised_host_async(&config.server).await;
-    let port = config.server.port;
-    let code = format!("kronn:{}@{}:{}", pseudo, host, port);
+    let code = build_invite_code(&config.server).await;
     Json(ApiResponse::ok(code))
 }
 
@@ -182,13 +200,15 @@ pub async fn advertised_host_async(server: &crate::models::ServerConfig) -> Stri
         return ts_ip;
     }
 
-    // 3. Configured host (replace bind-all)
+    // 3. Configured host — but loopback / bind-all isn't reachable by a peer,
+    //    so fall back to the primary LAN IP (std UdpSocket trick) when bound to
+    //    127.0.0.1 / 0.0.0.0 / ::, so the invite code points somewhere a peer
+    //    can actually reach. Keeps "localhost" only when no LAN IP is found.
     let h = &server.host;
-    if h == "0.0.0.0" || h == "::" {
-        "localhost".into()
-    } else {
-        h.clone()
+    if h == "0.0.0.0" || h == "::" || h == "127.0.0.1" || h == "localhost" {
+        return crate::core::tailscale::primary_lan_ipv4().unwrap_or_else(|| "localhost".into());
     }
+    h.clone()
 }
 
 /// GET /api/contacts/:id/ping — check if a contact's Kronn is online
@@ -274,6 +294,48 @@ mod tests {
             advertised_host(&cfg("10.0.0.5", Some(""))),
             "10.0.0.5"
         );
+    }
+
+    #[tokio::test]
+    async fn advertised_host_async_never_advertises_bind_all_or_loopback() {
+        // A peer can't reach 0.0.0.0/::/127.0.0.1 — the async resolver must
+        // replace them with a usable address (primary LAN IP via the UdpSocket
+        // trick, or "localhost" if none). It must NEVER hand back a bind-all.
+        for h in ["0.0.0.0", "::", "127.0.0.1", "localhost"] {
+            let got = advertised_host_async(&cfg(h, None)).await;
+            assert_ne!(got, "0.0.0.0", "must not advertise bind-all (host={h})");
+            assert_ne!(got, "::", "must not advertise bind-all (host={h})");
+            assert!(!got.is_empty());
+        }
+        // An explicit domain still wins over everything.
+        assert_eq!(
+            advertised_host_async(&cfg("0.0.0.0", Some("kronn.example.com"))).await,
+            "kronn.example.com"
+        );
+    }
+
+    #[test]
+    fn invite_pseudo_falls_back_to_anonymous() {
+        // No pseudo configured → must NOT yield an empty pseudo (empty pseudo
+        // produces `kronn:@host:port`, which peers reject → presence flap/ban).
+        assert_eq!(invite_pseudo(&cfg("0.0.0.0", None)), "anonymous");
+        let mut c = cfg("0.0.0.0", None);
+        c.pseudo = Some("Romu".into());
+        assert_eq!(invite_pseudo(&c), "Romu");
+    }
+
+    #[tokio::test]
+    async fn build_invite_code_is_always_parseable() {
+        use crate::db::contacts::parse_invite_code;
+        // Even with no pseudo + bind-all host, the emitted code must round-trip
+        // through the peer's parser (non-empty pseudo, reachable host).
+        for h in ["0.0.0.0", "::", "127.0.0.1", "192.168.1.5"] {
+            let code = build_invite_code(&cfg(h, None)).await;
+            assert!(code.starts_with("kronn:"), "host={h} code={code}");
+            assert!(!code.starts_with("kronn:@"), "empty pseudo leaked: {code}");
+            let parsed = parse_invite_code(&code);
+            assert!(parsed.is_some(), "peer must accept our code (host={h}): {code}");
+        }
     }
 
     #[test]

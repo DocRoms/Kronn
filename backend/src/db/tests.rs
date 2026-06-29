@@ -354,6 +354,108 @@ fn projects_delete_cascade_discussions() {
 }
 
 #[test]
+fn disc_no_agent_flag_round_trips() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
+    assert!(!crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "default agent-capable");
+    assert!(crate::db::discussions::set_disc_no_agent(&conn, "d1", true).unwrap());
+    assert!(crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "flag set");
+    crate::db::discussions::set_disc_no_agent(&conn, "d1", false).unwrap();
+    assert!(!crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "flag cleared");
+}
+
+#[test]
+fn ensure_mirror_by_shared_id_is_idempotent_and_formats_title() {
+    let conn = test_db();
+    // First call creates the mirror and returns its local id.
+    let id1 = crate::db::discussions::ensure_mirror_by_shared_id(
+        &conn, "shared-abc", "Topic", "PeerAlpha",
+    )
+    .unwrap();
+    // Second call with the same shared_id returns the SAME local disc — no dup
+    // (this is what makes the HTTP-create + late-WS-invite paths converge).
+    let id2 = crate::db::discussions::ensure_mirror_by_shared_id(
+        &conn, "shared-abc", "Topic", "PeerAlpha",
+    )
+    .unwrap();
+    assert_eq!(id1, id2, "idempotent on shared_id");
+
+    let all = crate::db::discussions::list_discussions(&conn).unwrap();
+    let mirrors = all
+        .iter()
+        .filter(|d| d.shared_id.as_deref() == Some("shared-abc"))
+        .count();
+    assert_eq!(mirrors, 1, "exactly one mirror disc for the shared_id");
+
+    let disc = crate::db::discussions::get_discussion(&conn, &id1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        disc.title, "Topic (shared by PeerAlpha)",
+        "title must match the WS-invite creation format so both paths converge"
+    );
+    assert_eq!(disc.shared_id.as_deref(), Some("shared-abc"));
+}
+
+#[test]
+fn federated_context_file_insert_exists_and_get() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
+    assert!(!crate::db::discussions::context_file_exists(&conn, "f1").unwrap());
+
+    // F8: insert a file received from a peer, pinned to a message.
+    crate::db::discussions::insert_federated_context_file(
+        &conn, "f1", "d1", "m1", "doc.pdf", "application/pdf", 1234, "/tmp/x.pdf",
+    )
+    .unwrap();
+    assert!(crate::db::discussions::context_file_exists(&conn, "f1").unwrap());
+
+    let cf = crate::db::discussions::get_context_file(&conn, "f1").unwrap().unwrap();
+    assert_eq!(cf.filename, "doc.pdf");
+    assert_eq!(cf.mime_type, "application/pdf");
+    assert_eq!(cf.original_size, 1234);
+    assert_eq!(cf.message_id.as_deref(), Some("m1"), "pinned to the right message");
+    assert_eq!(cf.disk_path.as_deref(), Some("/tmp/x.pdf"));
+    assert!(crate::db::discussions::get_context_file(&conn, "missing").unwrap().is_none());
+}
+
+#[test]
+fn list_shared_sync_points_lists_only_shared_discs() {
+    let conn = test_db();
+    let mut shared = sample_discussion("s1", None);
+    shared.shared_id = Some("shared-1".into());
+    crate::db::discussions::insert_discussion(&conn, &shared).unwrap();
+    // A purely local disc must NOT appear in the sync points.
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("l1", None)).unwrap();
+
+    let pts = crate::db::discussions::list_shared_sync_points(&conn).unwrap();
+    assert_eq!(pts.len(), 1, "only the shared disc is a sync point");
+    assert_eq!(pts[0].0, "shared-1");
+    assert_eq!(pts[0].1, 0, "a disc with no messages reports since = 0");
+}
+
+#[test]
+fn shared_id_unique_index_rejects_duplicate_and_ensure_mirror_absorbs_it() {
+    let conn = test_db();
+    let mut d1 = sample_discussion("d1", None);
+    d1.shared_id = Some("dup-shared".into());
+    let mut d2 = sample_discussion("d2", None);
+    d2.shared_id = Some("dup-shared".into());
+    crate::db::discussions::insert_discussion(&conn, &d1).unwrap();
+    // Migration 068's UNIQUE partial index forbids a second disc on the same
+    // shared_id — the invariant find_discussion_by_shared_id relies on.
+    let second = crate::db::discussions::insert_discussion(&conn, &d2);
+    assert!(
+        second.is_err(),
+        "two discs with the same shared_id must violate the UNIQUE index"
+    );
+    // ensure_mirror_by_shared_id never trips it: it returns the existing disc.
+    let id = crate::db::discussions::ensure_mirror_by_shared_id(&conn, "dup-shared", "T", "Peer")
+        .unwrap();
+    assert_eq!(id, "d1", "ensure_mirror returns the existing local disc, no duplicate");
+}
+
+#[test]
 fn projects_update_nonexistent_returns_false() {
     let conn = test_db();
     let updated = crate::db::projects::update_project_default_skills(&conn, "nonexistent", &["s1".into()]).unwrap();

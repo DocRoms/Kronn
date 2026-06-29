@@ -537,6 +537,28 @@ pub struct CloneProjectResponse {
     pub discussion_id: Option<String>,
 }
 
+/// Body for `POST /api/projects/:id/clone-and-remap` — re-clone a project's
+/// `repo_url` locally and re-point the existing project at the clone. Used to
+/// recover projects whose path no longer resolves after a cross-machine DB
+/// import (e.g. WSL `/home/...` paths on macOS).
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct CloneAndRemapRequest {
+    /// Optional parent directory to clone into. When omitted the server picks
+    /// a sensible existing location (common parent of on-disk projects →
+    /// `KRONN_REPOS_DIR` → first existing scan path).
+    #[serde(default)]
+    pub parent_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct CloneAndRemapResponse {
+    pub project_id: String,
+    /// The local path the project now points at (where the repo was cloned).
+    pub new_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct RemoteRepo {

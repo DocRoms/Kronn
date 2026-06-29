@@ -185,7 +185,36 @@ pub async fn detect_all_ips() -> Vec<DetectedIp> {
         ips.push(DetectedIp { ip, kind, label });
     }
 
+    // Fallback: if the CLI interface scan surfaced no LAN IP (e.g. macOS native
+    // where `ifconfig` isn't on the backend's PATH), use the std UdpSocket
+    // route trick so a native instance still advertises a reachable address.
+    if !ips.iter().any(|d| d.kind == "lan") {
+        if let Some(ip) = primary_lan_ipv4() {
+            if !ips.iter().any(|d| d.ip == ip) {
+                ips.push(DetectedIp { ip, kind: "lan".into(), label: "LAN".into() });
+            }
+        }
+    }
+
     ips
+}
+
+/// Best-effort primary LAN IPv4 via the standard "UDP connect" trick: bind an
+/// ephemeral UDP socket and `connect()` it to an off-link target — **no packets
+/// are sent**, `connect()` just makes the OS resolve the default-route SOURCE
+/// address, which is this host's primary LAN IP. PATH-independent and
+/// cross-platform (macOS / Linux / WSL) — it works where the `ifconfig`/`ip`
+/// CLI scan fails (missing binary, unexpected format).
+pub fn primary_lan_ipv4() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // 8.8.8.8 is an arbitrary off-link address; nothing is transmitted.
+    sock.connect("8.8.8.8:80").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => {
+            Some(v4.to_string())
+        }
+        _ => None,
+    }
 }
 
 /// Parse `KRONN_HOST_IPS` env var: `iface:ip,iface:ip,...`
@@ -331,6 +360,18 @@ mod tests {
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    #[test]
+    fn primary_lan_ipv4_is_valid_non_loopback_or_none() {
+        // Network-dependent: on a host with a default route it returns a
+        // routable IPv4, offline it returns None. Assert only the invariants
+        // (never loopback / never 0.0.0.0 / always parseable) — never panics.
+        if let Some(ip) = primary_lan_ipv4() {
+            let parsed: std::net::Ipv4Addr = ip.parse().expect("valid IPv4 string");
+            assert!(!parsed.is_loopback(), "must not be loopback: {ip}");
+            assert!(!parsed.is_unspecified(), "must not be 0.0.0.0: {ip}");
+        }
     }
 
     #[test]

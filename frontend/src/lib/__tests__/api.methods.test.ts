@@ -242,6 +242,17 @@ describe('api.discussions (rest)', () => {
     const b = await exec(discussions.share('d-1', ['c1', 'c2']), 'POST', '/discussions/d-1/share');
     expect(b).toEqual({ contact_ids: ['c1', 'c2'] });
   });
+  it('peerJoin trims the token and supplies a web session identity', async () => {
+    const b = (await exec(discussions.peerJoin('  kr-join-abc  '), 'POST', '/discussions/peer-join')) as {
+      token: string;
+      agent_type: string;
+      session_id: string;
+    };
+    expect(b.token).toBe('kr-join-abc');
+    expect(b.agent_type).toBe('Custom');
+    expect(typeof b.session_id).toBe('string');
+    expect(b.session_id.length).toBeGreaterThan(0);
+  });
   it('getRunning', async () => { await exec(discussions.getRunning(), 'GET', '/discussions/running'); });
   it('participants', async () => { await exec(discussions.participants('d-1'), 'GET', '/discussions/d-1/participants'); });
   it('invitePeer', async () => { await exec(discussions.invitePeer('d-1'), 'POST', '/discussions/d-1/invite-peer'); });

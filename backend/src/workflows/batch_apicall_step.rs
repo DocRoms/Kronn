@@ -121,7 +121,19 @@ pub async fn execute_batch_apicall_step(
         Err(e) => return fail(&step, start, format!("Could not parse items_from: {e}")),
     };
     if items.is_empty() {
-        return fail(&step, start, "BatchApiCall: items_from resolved to an empty list.");
+        // A fan-out over ZERO items is a vacuous success — there's simply
+        // nothing to call (like iterating an empty list). Pre-0.9.x this
+        // returned `fail()` (a Failed status with NO `[SIGNAL]` line), which
+        // broke best-effort chains: e.g. the PR-review workflow posts
+        // reactions/replies to existing comments via two BatchApiCall steps;
+        // on a PR with no comments the list is empty, so the step "failed"
+        // and aborted the whole run — even though the review itself had
+        // already been posted, and the subsequent terminal step never ran.
+        // Emit the canonical 0-item envelope with `[SIGNAL: OK]` so the
+        // linear run continues and `on_result` can still branch. Genuine
+        // problems (missing config, template/parse errors) stay hard
+        // failures — they're caught above before we reach here.
+        return empty_success(&step, start);
     }
     if items.len() > max_items as usize {
         return fail(&step, start, format!(
@@ -420,6 +432,55 @@ fn inject_item_vars(ctx: &mut TemplateContext, item: &Value, idx: usize) {
     }
 }
 
+/// Vacuous-success outcome for a fan-out over an EMPTY item list (0 items).
+///
+/// Mirrors the normal aggregate envelope with `total/succeeded/failed = 0` and
+/// a canonical `[SIGNAL: OK]`, marks the step `Success`, and still evaluates
+/// `on_result` (so a Goto/Stop on `OK` fires as it would on a normal success).
+/// Used in place of `fail()` so an empty mechanical fan-out doesn't abort the
+/// run — see the call site for the rationale.
+fn empty_success(step: &WorkflowStep, start: Instant) -> StepOutcome {
+    let summary = "BatchApiCall: 0/0 succeeded (empty list — nothing to do)".to_string();
+    let output = super::step_output_format::format_step_output(
+        serde_json::json!({ "items": [], "total": 0, "succeeded": 0, "failed": 0 }),
+        "OK",
+        &summary,
+        None,
+        &["OK"],
+    );
+    let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
+    let condition_result = condition_action.as_ref().map(|a| match a {
+        ConditionAction::Stop => "Stop".to_string(),
+        ConditionAction::Skip => "Skip".to_string(),
+        ConditionAction::Goto { step_name, .. } => format!("Goto:{}", step_name),
+    });
+    tracing::info!(
+        target: "kronn::batch_apicall",
+        step = %step.name,
+        "items_from resolved to an empty list — vacuous success (nothing to call)"
+    );
+    StepOutcome {
+        result: StepResult {
+            step_name: step.name.clone(),
+            status: RunStatus::Success,
+            output,
+            tokens_used: 0,
+            duration_ms: start.elapsed().as_millis() as u64,
+            started_at: None,
+            condition_result,
+            envelope_detected: Some(true),
+            step_kind: None,
+            step_agent: None,
+            step_model: None,
+            step_api_plugin_slug: None,
+            step_api_endpoint_path: None,
+            is_rollback: false,
+            child_run_id: None,
+        },
+        condition_action,
+    }
+}
+
 fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutcome {
     let msg = msg.into();
     tracing::warn!(
@@ -480,11 +541,55 @@ mod tests {
 
     #[test]
     fn parse_items_empty_string_yields_empty_vec() {
-        // Empty render should yield empty list (executor will fail at the
-        // empty-list check, not on a parse error — keeps the error message
-        // user-actionable).
+        // Empty render should yield an empty list (NOT a parse error) — the
+        // executor then treats it as a vacuous success via `empty_success`
+        // (see `empty_list_is_vacuous_success`), so a best-effort fan-out
+        // over nothing doesn't abort the run.
         let items = parse_items_as_objects("").unwrap();
         assert!(items.is_empty());
+    }
+
+    #[test]
+    fn empty_list_is_vacuous_success() {
+        // 0.9.x — a fan-out over zero items is a no-op success, NOT a
+        // failure. It must mark the step Success, carry the canonical
+        // `[SIGNAL: OK]` (so `on_result` can branch + the linear run
+        // continues), and report 0/0 in the envelope. Regression guard for
+        // the PR-review bug: an empty react/reply step used to abort the
+        // whole child run even though the review had already posted.
+        let step = WorkflowStep {
+            name: "react".into(),
+            step_type: crate::models::StepType::BatchApiCall,
+            ..Default::default()
+        };
+        let outcome = empty_success(&step, std::time::Instant::now());
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert_eq!(outcome.result.step_name, "react");
+        assert!(
+            outcome.result.output.lines().any(|l| l.trim() == "[SIGNAL: OK]"),
+            "must emit a trailing [SIGNAL: OK] line, got:\n{}",
+            outcome.result.output
+        );
+        assert!(outcome.result.output.contains("\"total\":0"));
+        assert!(outcome.result.output.contains("\"failed\":0"));
+    }
+
+    #[test]
+    fn empty_list_honours_on_result_stop() {
+        // The vacuous-success path must still evaluate `on_result` — an
+        // `OK → Stop` rule fires exactly as it would on a normal success.
+        let step = WorkflowStep {
+            name: "react".into(),
+            step_type: crate::models::StepType::BatchApiCall,
+            on_result: vec![crate::models::StepConditionRule {
+                contains: "OK".into(),
+                action: ConditionAction::Stop,
+            }],
+            ..Default::default()
+        };
+        let outcome = empty_success(&step, std::time::Instant::now());
+        assert_eq!(outcome.result.status, RunStatus::Success);
+        assert!(matches!(outcome.condition_action, Some(ConditionAction::Stop)));
     }
 
     #[test]

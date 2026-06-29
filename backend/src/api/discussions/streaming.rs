@@ -1037,6 +1037,11 @@ pub(crate) async fn make_agent_stream(
                 }).await {
                     tracing::error!("Failed to save agent message: {e}");
                 }
+                // F1 — federate the native-runner reply to peers of a shared
+                // disc. Previously ONLY MCP `disc_append` + UI `send_message`
+                // federated, so a reply produced by Kronn's own runner was
+                // invisible to the other instance. No-op for a local disc.
+                crate::api::federation::federate_message(&state, &disc_id, &agent_msg).await;
 
                 // 0.8.8 PR-B — enforce-mode P3 fail-fast (non-destructive). The
                 // agent message above is kept (with its red pill); when it
@@ -1368,11 +1373,14 @@ pub(crate) async fn make_agent_stream(
                 };
 
                 let did = disc_id.clone();
+                let err_msg_fed = err_msg.clone();
                 if let Err(db_err) = state.db.with_conn(move |conn| {
                     crate::db::discussions::insert_message(conn, &did, &err_msg)
                 }).await {
                     tracing::error!("Failed to save agent error message: {db_err}");
                 }
+                // F1 — let the peer see the turn failed instead of silence.
+                crate::api::federation::federate_message(&state, &disc_id, &err_msg_fed).await;
 
                 let err = serde_json::json!({ "error": e });
                 let _ = tx.send(AgentStreamEvent::Error { data: err }).await;

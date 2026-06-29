@@ -225,9 +225,13 @@ mod summary_strategy_tests {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum MessageRole {
+    // `User` is the default so `#[serde(default)]` on federated frames from an
+    // older peer (no `role` field on the wire) decodes to the historical
+    // behaviour (every federated message used to land as User).
+    #[default]
     User,
     Agent,
     System,
@@ -263,6 +267,10 @@ pub struct CreateDiscussionRequest {
     /// `None` = not a QP launch (briefing / manual / etc.).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_qp_id: Option<String>,
+    /// F9 — create a "human-only" disc: the agent runner never spawns on
+    /// `send_message`. Used by the contact-click → 1:1 human↔human chat flow.
+    #[serde(default)]
+    pub no_agent: bool,
 }
 
 #[derive(Debug, Deserialize, TS)]

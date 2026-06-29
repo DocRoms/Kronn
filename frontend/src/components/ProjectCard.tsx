@@ -21,7 +21,7 @@ import {
   Loader2,
   MessageSquare, AlertTriangle,
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
-  FolderInput, Plug, X, FileText,
+  FolderInput, Plug, X, FileText, DownloadCloud,
 } from 'lucide-react';
 import { BriefingForm } from './BriefingForm';
 
@@ -262,6 +262,11 @@ export function ProjectCard({
   // two fast clicks would otherwise both read `remapping === false` and fire
   // twice. See feedback_race_guards.
   const remapGuard = useRef(false);
+  // Clone-and-remap state — alternative to manual remap when the project has a
+  // known repo_url: re-clone it locally (via linked Git credentials) and
+  // re-point the project at the clone in one click.
+  const [cloning, setCloning] = useState(false);
+  const cloneGuard = useRef(false);
 
   // 0.8.3 (#311) — resumable audit detection. Polled at mount + after
   // each audit completion/error so the "Lancer l'audit" button can
@@ -400,6 +405,28 @@ export function ProjectCard({
     } finally {
       setRemapping(false);
       remapGuard.current = false;
+    }
+  }, [remapValue, proj.id, proj.name, onRefetch, toast, t]);
+
+  // Clone the project's repo_url afresh and re-point the project at it. Uses
+  // the optional remap input as the target parent directory when the user
+  // typed one; otherwise the server picks an existing location. On success the
+  // backend also re-syncs the project's plugins (MCP) + skills to the new path.
+  const handleCloneRemap = useCallback(async () => {
+    if (cloneGuard.current) return;
+    cloneGuard.current = true;
+    setCloning(true);
+    setRemapError(null);
+    try {
+      const parentDir = remapValue.trim() || null;
+      const res = await projectsApi.cloneAndRemap(proj.id, { parent_dir: parentDir });
+      toast(t('projects.remap.cloneSuccessToast', proj.name, res.new_path), 'success');
+      onRefetch();
+    } catch (e) {
+      setRemapError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setCloning(false);
+      cloneGuard.current = false;
     }
   }, [remapValue, proj.id, proj.name, onRefetch, toast, t]);
 
@@ -1003,23 +1030,44 @@ export function ProjectCard({
                 className="dash-remap-input"
                 type="text"
                 value={remapValue}
-                placeholder={t('projects.remap.placeholder')}
+                placeholder={proj.repo_url ? t('projects.remap.placeholderWithClone') : t('projects.remap.placeholder')}
                 onChange={(e) => { setRemapValue(e.target.value); if (remapError) setRemapError(null); }}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleRemap(); }}
-                disabled={remapping}
+                disabled={remapping || cloning}
                 aria-label={t('projects.remap.title')}
               />
               <button
                 type="button"
                 className="dash-remap-btn"
                 onClick={handleRemap}
-                disabled={remapping || !remapValue.trim()}
+                disabled={remapping || cloning || !remapValue.trim()}
               >
                 {remapping
                   ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.remap.busy')}</>
                   : t('projects.remap.cta')}
               </button>
             </div>
+            {/* Clone-and-remap — only when the project has a known repo URL.
+                Re-clones the repo locally (using the linked Git credentials)
+                and re-points the project at the clone, then re-syncs its
+                plugins + skills. The remap input above doubles as an optional
+                target parent directory. */}
+            {proj.repo_url && (
+              <div className="dash-remap-clone">
+                <button
+                  type="button"
+                  className="dash-remap-clone-btn"
+                  onClick={handleCloneRemap}
+                  disabled={remapping || cloning}
+                  title={t('projects.remap.cloneHint', proj.repo_url)}
+                >
+                  {cloning
+                    ? <><Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} /> {t('projects.remap.cloneBusy')}</>
+                    : <><DownloadCloud size={12} /> {t('projects.remap.cloneCta')}</>}
+                </button>
+                <span className="dash-remap-clone-from">{proj.repo_url}</span>
+              </div>
+            )}
             {remapError && (
               <div className="dash-remap-error" role="alert">
                 <AlertTriangle size={11} /> {remapError}

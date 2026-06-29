@@ -137,13 +137,16 @@ export interface MessageBubbleProps {
    * Rendered as a strip under the content: image thumbnails (fetched as
    * auth'd blobs) and filename chips for non-images. Empty for most msgs. */
   attachments?: ContextFile[];
+  /** F15+ — a federated attachment is announced but its binary hasn't been
+   *  fetched/linked yet → show a "downloading…" placeholder until it lands. */
+  pendingAttachment?: boolean;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
 export const MessageBubble = memo(function MessageBubble(props: MessageBubbleProps) {
   const { msg, isLastUser, isLastAgent, isEditing, isCopied, isTtsActive, ttsState: tts, isExpandedSummary,
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
-    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, t } = props;
+    onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
 
@@ -261,22 +264,51 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           : 'error'
         ) : undefined}
       >
-        {isUser && (msg.author_pseudo || msg.author_avatar_email) && (
+        {isUser && (
+          // Always render a clear HUMAN attribution on user messages — even with
+          // no pseudo (federated from a peer whose pseudo is unset → "anonyme").
+          // The "· humain" marker is what tells a reader this is a PERSON typing
+          // in Kronn, not an agent reply (F11: cross-instance, both used to read
+          // as a bare "Anonymous" with no human/agent distinction).
           <div className="disc-msg-author">
             {msg.author_avatar_email ? (
               <img src={gravatarUrl(msg.author_avatar_email, 20)} alt="" className="disc-msg-author-avatar" />
-            ) : msg.author_pseudo ? (
+            ) : (
               <span className="disc-msg-author-initials">
-                {msg.author_pseudo.slice(0, 2).toUpperCase()}
+                {(msg.author_pseudo || 'anonyme').slice(0, 2).toUpperCase()}
               </span>
-            ) : null}
-            <span className="disc-msg-author-name">{msg.author_pseudo}</span>
+            )}
+            <span className="disc-msg-author-name">{msg.author_pseudo || 'anonyme'}</span>
+            <span
+              className="disc-msg-author-kind"
+              style={{ fontSize: 'var(--kr-fs-xs)', fontWeight: 400, opacity: 0.55 }}
+              title="Message humain — saisi dans Kronn"
+            >
+              · humain
+            </span>
           </div>
         )}
         {msg.role === 'Agent' && (
           <div className="disc-msg-agent-label" style={{ color: agentColor(agentType), justifyContent: 'space-between' }}>
             <span className="flex-row gap-2">
+              {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
+               *  glance. model_tier is present on local agent messages; a
+               *  federated agent reply also carries its owner's pseudo
+               *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
+               *  reads as "Romu's ClaudeCode on the other instance". */}
               <Cpu size={10} /> {agentType}
+              {msg.model_tier && (
+                <span style={{ opacity: 0.6, fontWeight: 400 }}>· {msg.model_tier}</span>
+              )}
+              {msg.author_pseudo && (
+                <span
+                  className="disc-msg-agent-peer"
+                  style={{ opacity: 0.6, fontWeight: 400 }}
+                  title={`Réponse fédérée du pair ${msg.author_pseudo}`}
+                >
+                  · {msg.author_pseudo}
+                </span>
+              )}
             </span>
             {copyBtn(9, false)}
           </div>
@@ -385,6 +417,14 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         )}
         {attachments && attachments.length > 0 && discussionId && (
           <MessageAttachments files={attachments} discussionId={discussionId} t={t} />
+        )}
+        {/* F15+ — federated file announced but not yet fetched/linked. Shows
+         *  while the peer downloads the binary, replaced by the real attachment
+         *  once the `file_attached{pending:false}` event lands + reload. */}
+        {pendingAttachment && (!attachments || attachments.length === 0) && (
+          <div className="disc-msg-attachment-pending" style={{ opacity: 0.7, fontSize: 'var(--kr-fs-xs)', marginTop: 4 }}>
+            📎 {t('disc.attachmentDownloading')}
+          </div>
         )}
         {msg.role === 'Agent' && (
           <button

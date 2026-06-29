@@ -135,4 +135,55 @@ describe('ProjectCard — remap banner', () => {
     );
     expect(onRefetch).not.toHaveBeenCalled();
   });
+
+  // ── Clone-and-remap (0.8.9) ──────────────────────────────────────────────
+  // When the project has a repo_url, the banner offers a one-click "Clone
+  // repository" action that re-clones via the linked Git credentials and
+  // re-points the project — an alternative to typing a local path.
+
+  it('does NOT show the clone button when the project has no repo_url', () => {
+    renderCard(project({ repo_url: null }));
+    expect(screen.queryByText('projects.remap.cloneCta')).not.toBeInTheDocument();
+  });
+
+  it('shows the clone button when the project has a repo_url', () => {
+    renderCard(project({ repo_url: 'https://github.com/me/GhostApp.git' }));
+    expect(screen.getByText('projects.remap.cloneCta')).toBeInTheDocument();
+  });
+
+  it('clones with no parent_dir when the input is empty, toasts, and refetches', async () => {
+    const { onRefetch } = renderCard(project({ repo_url: 'https://github.com/me/GhostApp.git' }));
+    fireEvent.click(screen.getByText('projects.remap.cloneCta'));
+    await waitFor(() =>
+      expect(projectsApi.cloneAndRemap).toHaveBeenCalledWith('p-ghost', { parent_dir: null })
+    );
+    await waitFor(() => expect(onRefetch).toHaveBeenCalled());
+    expect(toast).toHaveBeenCalledWith(
+      expect.stringContaining('projects.remap.cloneSuccessToast'),
+      'success',
+    );
+  });
+
+  it('passes the typed path as the target parent directory when cloning', async () => {
+    renderCard(project({ repo_url: 'https://github.com/me/GhostApp.git' }));
+    fireEvent.change(screen.getByLabelText('projects.remap.title'), {
+      target: { value: '  /Users/me/Repos  ' },
+    });
+    fireEvent.click(screen.getByText('projects.remap.cloneCta'));
+    await waitFor(() =>
+      expect(projectsApi.cloneAndRemap).toHaveBeenCalledWith('p-ghost', { parent_dir: '/Users/me/Repos' })
+    );
+  });
+
+  it('shows a clone failure inline and does NOT refetch', async () => {
+    (projectsApi.cloneAndRemap as unknown as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new Error('git clone failed: auth')
+    );
+    const { onRefetch } = renderCard(project({ repo_url: 'https://github.com/me/GhostApp.git' }));
+    fireEvent.click(screen.getByText('projects.remap.cloneCta'));
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(/git clone failed: auth/)
+    );
+    expect(onRefetch).not.toHaveBeenCalled();
+  });
 });

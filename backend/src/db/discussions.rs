@@ -372,6 +372,96 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     Ok(())
 }
 
+/// Ensure a local mirror of a shared discussion exists, returning its LOCAL
+/// disc id (existing or freshly created). Idempotent on `shared_id`. The title
+/// is stored as `"<title> (shared by <from_pseudo>)"` to match the WS-invite
+/// creation path (`api::ws::handle_discussion_invite`) so both routes converge
+/// on the same local representation.
+///
+/// Used by the cross-instance "join by code" flow: `claim-by-token` returns
+/// `shared_id` + `title` in its HTTP response, so the joiner creates the
+/// mirror directly here instead of waiting for the WS `DiscussionInvite` to
+/// arrive (fragile under NAT / WS lag). A late WS invite then finds the disc
+/// already present and is a no-op. Races with that invite are absorbed: if the
+/// insert trips the UNIQUE `shared_id` index, we re-resolve the existing row.
+pub fn ensure_mirror_by_shared_id(
+    conn: &Connection,
+    shared_id: &str,
+    title: &str,
+    from_pseudo: &str,
+) -> Result<String> {
+    if let Some(existing) = find_discussion_by_shared_id(conn, shared_id)? {
+        return Ok(existing);
+    }
+    let now = Utc::now();
+    let disc = Discussion {
+        id: uuid::Uuid::new_v4().to_string(),
+        project_id: None,
+        title: format!("{title} (shared by {from_pseudo})"),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![],
+        messages: vec![],
+        message_count: 0,
+        non_system_message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        pinned: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        summary_strategy: SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: Some(shared_id.to_string()),
+        shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
+        created_at: now,
+        updated_at: now,
+    };
+    match insert_discussion(conn, &disc) {
+        Ok(()) => Ok(disc.id),
+        Err(e) => {
+            // Lost a race with the WS invite (UNIQUE shared_id) — re-resolve.
+            if let Some(existing) = find_discussion_by_shared_id(conn, shared_id)? {
+                Ok(existing)
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// F9 — whether this disc is "human-only" (no agent runner ever spawns).
+/// Read directly off the column (like `diverged_at`) so we don't have to thread
+/// the flag through the big `Discussion` struct + all its query sites.
+pub fn disc_is_no_agent(conn: &Connection, disc_id: &str) -> Result<bool> {
+    let v: Option<i64> = conn
+        .query_row(
+            "SELECT no_agent FROM discussions WHERE id = ?1",
+            params![disc_id],
+            |row| row.get(0),
+        )
+        .ok();
+    Ok(v.unwrap_or(0) != 0)
+}
+
+/// Set/clear the F9 human-only flag on a disc. Returns true if the row existed.
+pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Result<bool> {
+    let affected = conn.execute(
+        "UPDATE discussions SET no_agent = ?2, updated_at = ?3 WHERE id = ?1",
+        params![disc_id, no_agent as i32, Utc::now().to_rfc3339()],
+    )?;
+    Ok(affected > 0)
+}
+
 pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     let affected = conn.execute("DELETE FROM discussions WHERE id = ?1", params![id])?;
     Ok(affected > 0)
@@ -585,6 +675,32 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
     })?.filter_map(|r| r.ok()).collect();
 
     Ok(messages)
+}
+
+/// For each SHARED discussion, the pair `(shared_id, latest_message_ts_millis)`.
+/// `latest_message_ts_millis` is 0 when the disc has no messages yet. Used on
+/// peer (re)connect to ask "send me everything newer than this" per shared disc
+/// (the F4 catch-up). Timestamps are stored as RFC3339 strings, lexically
+/// sortable, so `MAX(timestamp)` yields the newest; we parse it to millis.
+pub fn list_shared_sync_points(conn: &Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT d.shared_id, MAX(m.timestamp)
+           FROM discussions d
+           LEFT JOIN messages m ON m.discussion_id = d.id
+          WHERE d.shared_id IS NOT NULL
+          GROUP BY d.id, d.shared_id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let shared_id: String = row.get(0)?;
+        let max_ts: Option<String> = row.get(1)?;
+        Ok((shared_id, max_ts))
+    })?;
+    let mut out = Vec::new();
+    for r in rows.filter_map(|r| r.ok()) {
+        let since = r.1.map(parse_dt).map(|dt| dt.timestamp_millis()).unwrap_or(0);
+        out.push((r.0, since));
+    }
+    Ok(out)
 }
 
 pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMessage) -> Result<()> {
@@ -897,6 +1013,51 @@ pub fn insert_context_file(
         "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![id, discussion_id, filename, mime_type, original_size as i64, extracted_text, extracted_text.len() as i64, disk_path],
+    )?;
+    Ok(())
+}
+
+/// True if a context file with this id already exists locally. Idempotency
+/// guard for the F8 federated-file fetch (the host's file_id is reused on the
+/// peer, so a re-received FileAttached is a no-op).
+pub fn context_file_exists(conn: &Connection, file_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT COUNT(*) > 0 FROM context_files WHERE id = ?1",
+        rusqlite::params![file_id],
+        |row| row.get(0),
+    )
+}
+
+/// Fetch a single context file by id (incl. `disk_path`). Used by the F8
+/// `fetch-file` endpoint to stream a federated attachment's bytes to a peer.
+pub fn get_context_file(conn: &Connection, file_id: &str) -> rusqlite::Result<Option<crate::models::ContextFile>> {
+    conn.query_row(
+        "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
+         FROM context_files WHERE id = ?1",
+        rusqlite::params![file_id],
+        map_context_file_row,
+    ).optional()
+}
+
+/// Insert a context file received from a peer (F8), pinned to a specific
+/// message. Mirrors `insert_context_file` but sets `message_id` directly and
+/// reuses the host's `file_id` so it dedups across instances. `extracted_text`
+/// is empty — the binary lives on disk and the local agent reads it by path.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_federated_context_file(
+    conn: &Connection,
+    id: &str,
+    discussion_id: &str,
+    message_id: &str,
+    filename: &str,
+    mime_type: &str,
+    size: u64,
+    disk_path: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO context_files (id, discussion_id, filename, mime_type, original_size, extracted_text, extracted_size, disk_path, message_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, '', 0, ?6, ?7)",
+        rusqlite::params![id, discussion_id, filename, mime_type, size as i64, disk_path, message_id],
     )?;
     Ok(())
 }

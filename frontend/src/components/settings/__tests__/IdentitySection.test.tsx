@@ -25,6 +25,8 @@ const { config, contacts } = vi.hoisted(() => ({
     saveGlobalContext: vi.fn(),
     getGlobalContextMode: vi.fn(),
     saveGlobalContextMode: vi.fn(),
+    getNetworkExposure: vi.fn(),
+    setNetworkExposure: vi.fn(),
   },
   contacts: {
     networkInfo: vi.fn(),
@@ -49,6 +51,8 @@ beforeEach(() => {
   config.saveGlobalContext.mockResolvedValue(undefined);
   config.getGlobalContextMode.mockResolvedValue('always');
   config.saveGlobalContextMode.mockResolvedValue(undefined);
+  config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] });
+  config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
   contacts.networkInfo.mockResolvedValue({
     tailscale_ip: null, advertised_host: null, detected_ips: [],
   });
@@ -182,5 +186,32 @@ describe('IdentitySection — global context lifecycle', () => {
     const neverOption = await screen.findByText('settings.gcModeNever');
     fireEvent.click(neverOption);
     await waitFor(() => expect(config.saveGlobalContextMode).toHaveBeenCalledWith('never'));
+  });
+});
+
+describe('IdentitySection — network exposure toggle', () => {
+  it('reflects current exposure + toggling persists and surfaces the restart notice', async () => {
+    config.getNetworkExposure.mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] });
+    config.setNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
+    await mountIdentity();
+
+    const toggle = screen.getByTestId('expose-network-toggle') as HTMLInputElement;
+    expect(toggle.checked).toBe(false);
+
+    await act(async () => { fireEvent.click(toggle); });
+    await waitFor(() => expect(config.setNetworkExposure).toHaveBeenCalledWith(true));
+
+    // Exposing surfaces the security note + the restart-required notice.
+    expect(screen.getByText('settings.exposeSecurityNote')).toBeInTheDocument();
+    expect(screen.getByText('settings.exposeRestartRequired')).toBeInTheDocument();
+    expect(toggle.checked).toBe(true);
+  });
+
+  it('shows the CLI restart hint (not a Tauri button) in web mode', async () => {
+    config.getNetworkExposure.mockResolvedValue({ exposed: true, restart_required: true, port: 3140, reachable_ips: [] });
+    await mountIdentity();
+    // happy-dom has no `__TAURI__` → web mode → CLI hint, no restart button.
+    expect(screen.getByText('./kronn restart')).toBeInTheDocument();
+    expect(screen.queryByText('settings.exposeRestartBtn')).toBeNull();
   });
 });

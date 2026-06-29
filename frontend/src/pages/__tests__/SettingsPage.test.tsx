@@ -27,6 +27,8 @@ vi.mock('../../lib/api', () => ({
     getScanIgnore: vi.fn().mockResolvedValue(['node_modules', '.git']),
     getServerConfig: vi.fn().mockResolvedValue({ host: '127.0.0.1', port: 3140, domain: null, max_concurrent_agents: 5, auth_enabled: true }),
     setServerConfig: vi.fn().mockResolvedValue(undefined),
+    getNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
+    setNetworkExposure: vi.fn().mockResolvedValue({ exposed: false, restart_required: false, port: 3140, reachable_ips: [] }),
     regenerateAuthToken: vi.fn().mockResolvedValue('new-token-456'),
     saveApiKey: vi.fn(),
     deleteApiKey: vi.fn(),

@@ -3418,5 +3418,59 @@ class AgentLibraryCrudTests(unittest.TestCase):
             self.assertIn(n, self.mod.DISPATCH, f"{n} missing from DISPATCH")
 
 
+class DiscListTests(unittest.TestCase):
+    """F12 — disc_list browses available discussions, compact + newest-first,
+    shared-only by default."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _fake(self, discs):
+        return {"success": True, "data": discs, "error": None}
+
+    def test_registered_in_tools_and_dispatch(self):
+        names = [t["name"] for t in self.mod.TOOLS]
+        self.assertIn("disc_list", names)
+        self.assertIn("disc_list", self.mod.DISPATCH)
+
+    def test_shared_only_by_default_and_newest_first(self):
+        discs = [
+            {"id": "d1", "title": "Local", "shared_id": None, "message_count": 2,
+             "updated_at": "2026-06-29T10:00:00+00:00"},
+            {"id": "d2", "title": "Shared A", "shared_id": "s-a", "message_count": 5,
+             "updated_at": "2026-06-29T09:00:00+00:00"},
+            {"id": "d3", "title": "Shared B", "shared_id": "s-b", "message_count": 1,
+             "updated_at": "2026-06-29T11:00:00+00:00"},
+        ]
+        with mock.patch.object(self.mod, "_http", return_value=self._fake(discs)):
+            out = self.mod.call_disc_list({})
+        # Only shared discs, newest-first (d3 > d2); local d1 excluded.
+        self.assertEqual(out["disc_count"], 2)
+        self.assertEqual([d["disc_id"] for d in out["discussions"]], ["d3", "d2"])
+        self.assertEqual(out["discussions"][0]["shared_id"], "s-b")
+        self.assertEqual(out["discussions"][0]["message_count"], 1)
+
+    def test_shared_only_false_includes_local(self):
+        discs = [
+            {"id": "d1", "title": "Local", "shared_id": None, "message_count": 0,
+             "updated_at": "2026-06-29T10:00:00+00:00"},
+            {"id": "d2", "title": "Shared", "shared_id": "s", "message_count": 0,
+             "updated_at": "2026-06-29T09:00:00+00:00"},
+        ]
+        with mock.patch.object(self.mod, "_http", return_value=self._fake(discs)):
+            out = self.mod.call_disc_list({"shared_only": False})
+        self.assertEqual(out["disc_count"], 2)
+
+    def test_limit_caps_results(self):
+        discs = [
+            {"id": f"d{i}", "title": "x", "shared_id": f"s{i}", "message_count": 0,
+             "updated_at": f"2026-06-29T{i:02d}:00:00+00:00"}
+            for i in range(10)
+        ]
+        with mock.patch.object(self.mod, "_http", return_value=self._fake(discs)):
+            out = self.mod.call_disc_list({"limit": 3})
+        self.assertEqual(out["disc_count"], 3)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -12,13 +12,19 @@ export const UI_LOCALES: { code: UILocale; label: string; flag: string }[] = [
 const STORAGE_KEY = 'kronn:ui-locale';
 
 export function getUILocale(): UILocale {
-  const stored = localStorage.getItem(STORAGE_KEY);
-  if (stored && ['fr', 'en', 'es'].includes(stored)) return stored as UILocale;
+  // Tolerate an absent/throwing localStorage (test env without jsdom storage,
+  // SSR, sandboxed iframe) — i18n must never crash the whole app at render.
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored && ['fr', 'en', 'es'].includes(stored)) return stored as UILocale;
+  } catch { /* no localStorage available — fall back to default */ }
   return 'fr';
 }
 
 export function setUILocale(locale: UILocale) {
-  localStorage.setItem(STORAGE_KEY, locale);
+  try {
+    localStorage.setItem(STORAGE_KEY, locale);
+  } catch { /* no localStorage available — locale just won't persist */ }
 }
 
 // ─── Translation dictionary ─────────────────────────────────────────────────
@@ -86,6 +92,11 @@ const fr: TranslationDict = {
   'projects.remap.cta': 'Remapper le chemin',
   'projects.remap.busy': 'Remappage…',
   'projects.remap.successToast': 'Chemin de « {0} » mis à jour',
+  'projects.remap.placeholderWithClone': '/Users/vous/Repos (ou laissez vide pour cloner)',
+  'projects.remap.cloneCta': 'Cloner le dépôt',
+  'projects.remap.cloneBusy': 'Clonage…',
+  'projects.remap.cloneHint': 'Cloner {0} en local (via vos clés Git liées) et re-pointer le projet dessus',
+  'projects.remap.cloneSuccessToast': '« {0} » cloné et remappé vers {1}',
   'projects.missingBanner.one': '1 projet a un dossier introuvable — remappez-le vers son nouvel emplacement.',
   'projects.missingBanner.plural': '{0} projets ont un dossier introuvable — remappez-les vers leur nouvel emplacement.',
   'projects.missingBanner.showOnly': 'Afficher uniquement ceux-ci',
@@ -439,6 +450,7 @@ const fr: TranslationDict = {
   'disc.createEmpty': 'Créer la discussion',
   'disc.discFirstCreatedToast': "Discussion créée. Clique sur « + Inviter » dans le header pour ajouter un agent.",
   'disc.participantsEmpty': "Aucun agent attaché. Clique « + Inviter » pour ajouter un participant.",
+  'disc.attachmentDownloading': 'Téléchargement de la pièce jointe…',
   'disc.invitePeer': '+ Inviter',
   'disc.invitePeerTooltip': "Génère un token à coller dans un autre CLI (Claude, Codex, Gemini…) qui rejoindra cette discussion.",
   'disc.inviteFailed': "Échec de l'invitation : {0}",
@@ -639,6 +651,11 @@ const fr: TranslationDict = {
   'disc.modelTier': 'Mode IA',
   'settings.identity': 'Identité',
   'settings.identityHint': 'Votre pseudo et avatar, affichés dans les conversations.',
+  'settings.exposeNetwork': 'Autoriser les connexions depuis d\'autres appareils (LAN / Tailscale)',
+  'settings.exposeNetworkHint': 'Permet à un autre Kronn (autre PC, via le réseau local ou Tailscale) de te joindre, pour les discussions inter-machines.',
+  'settings.exposeSecurityNote': '⚠️ Expose l\'API sur ton réseau. L\'authentification est activée automatiquement : un pair devra fournir le token. Ton interface locale reste accessible sans token.',
+  'settings.exposeRestartRequired': 'Redémarrage requis pour appliquer le changement de liaison réseau.',
+  'settings.exposeRestartBtn': 'Redémarrer Kronn',
   'settings.pseudo': 'Pseudo',
   'settings.avatarEmail': 'Email (Gravatar)',
   'settings.avatarHint': 'Utilisé pour afficher votre avatar Gravatar. Optionnel.',
@@ -783,6 +800,14 @@ const fr: TranslationDict = {
   'contacts.inviteHint': "Partagez ce code pour que d'autres utilisateurs Kronn puissent vous ajouter.",
   'contacts.add': 'Ajouter un contact',
   'contacts.addPlaceholder': 'kronn:pseudo@host:port',
+  'contacts.joinByCode': 'Rejoindre par code',
+  'contacts.joinPlaceholder': 'Coller un code (kr-join-…)',
+  'contacts.joinResolving': 'Résolution en cours…',
+  'contacts.joinSuccess': 'Discussion rejointe : {0}',
+  'contacts.joinError': 'Code introuvable ou expiré',
+  'contacts.startChat': 'Discuter avec {0}',
+  'contacts.chatStarted': 'Discussion ouverte avec {0}',
+  'contacts.chatStartError': "Impossible d'ouvrir la discussion",
   'contacts.wsConnected': 'Connecté en temps réel',
   'contacts.wsDisconnected': 'Déconnecté',
   'contacts.added': 'Contact ajouté',
@@ -2628,6 +2653,11 @@ const en: TranslationDict = {
   'projects.remap.cta': 'Remap path',
   'projects.remap.busy': 'Remapping…',
   'projects.remap.successToast': 'Path for “{0}” updated',
+  'projects.remap.placeholderWithClone': '/Users/you/Repos (or leave empty to clone)',
+  'projects.remap.cloneCta': 'Clone repository',
+  'projects.remap.cloneBusy': 'Cloning…',
+  'projects.remap.cloneHint': 'Clone {0} locally (via your linked Git credentials) and re-point the project at it',
+  'projects.remap.cloneSuccessToast': '“{0}” cloned and remapped to {1}',
   'projects.missingBanner.one': '1 project has a missing folder — remap it to its new location.',
   'projects.missingBanner.plural': '{0} projects have missing folders — remap them to their new location.',
   'projects.missingBanner.showOnly': 'Show only these',
@@ -2971,6 +3001,7 @@ const en: TranslationDict = {
   'disc.createEmpty': 'Create discussion',
   'disc.discFirstCreatedToast': 'Discussion created. Click "+ Invite" in the header to add an agent.',
   'disc.participantsEmpty': 'No agent attached. Click "+ Invite" to add a participant.',
+  'disc.attachmentDownloading': 'Downloading attachment…',
   'disc.invitePeer': '+ Invite',
   'disc.invitePeerTooltip': 'Generate a token to paste into another MCP-capable CLI (Claude, Codex, Gemini…) so it joins this discussion.',
   'disc.inviteFailed': 'Invite failed: {0}',
@@ -3171,6 +3202,11 @@ const en: TranslationDict = {
   'disc.modelTier': 'AI mode',
   'settings.identity': 'Identity',
   'settings.identityHint': 'Your nickname and avatar, shown in conversations.',
+  'settings.exposeNetwork': 'Allow connections from other devices (LAN / Tailscale)',
+  'settings.exposeNetworkHint': 'Lets another Kronn (another PC, over the local network or Tailscale) reach you, for cross-machine discussions.',
+  'settings.exposeSecurityNote': '⚠️ Exposes the API on your network. Authentication is enabled automatically: a peer must provide the token. Your local UI stays accessible without one.',
+  'settings.exposeRestartRequired': 'Restart required to apply the network-binding change.',
+  'settings.exposeRestartBtn': 'Restart Kronn',
   'settings.pseudo': 'Nickname',
   'settings.avatarEmail': 'Email (Gravatar)',
   'settings.avatarHint': 'Used to display your Gravatar avatar. Optional.',
@@ -3315,6 +3351,14 @@ const en: TranslationDict = {
   'contacts.inviteHint': 'Share this code so other Kronn users can add you as a contact.',
   'contacts.add': 'Add contact',
   'contacts.addPlaceholder': 'kronn:pseudo@host:port',
+  'contacts.joinByCode': 'Join by code',
+  'contacts.joinPlaceholder': 'Paste a code (kr-join-…)',
+  'contacts.joinResolving': 'Resolving…',
+  'contacts.joinSuccess': 'Joined discussion: {0}',
+  'contacts.joinError': 'Code not found or expired',
+  'contacts.startChat': 'Chat with {0}',
+  'contacts.chatStarted': 'Chat opened with {0}',
+  'contacts.chatStartError': 'Could not open the chat',
   'contacts.wsConnected': 'Connected in real-time',
   'contacts.wsDisconnected': 'Disconnected',
   'contacts.added': 'Contact added',
@@ -5157,6 +5201,11 @@ const es: TranslationDict = {
   'projects.remap.cta': 'Reasignar ruta',
   'projects.remap.busy': 'Reasignando…',
   'projects.remap.successToast': 'Ruta de «{0}» actualizada',
+  'projects.remap.placeholderWithClone': '/Users/tu-usuario/Repos (o déjalo vacío para clonar)',
+  'projects.remap.cloneCta': 'Clonar el repositorio',
+  'projects.remap.cloneBusy': 'Clonando…',
+  'projects.remap.cloneHint': 'Clonar {0} en local (con tus credenciales Git vinculadas) y reapuntar el proyecto a él',
+  'projects.remap.cloneSuccessToast': '«{0}» clonado y reasignado a {1}',
   'projects.missingBanner.one': '1 proyecto tiene una carpeta no encontrada — reasígnalo a su nueva ubicación.',
   'projects.missingBanner.plural': '{0} proyectos tienen carpetas no encontradas — reasígnalos a su nueva ubicación.',
   'projects.missingBanner.showOnly': 'Mostrar solo estos',
@@ -5500,6 +5549,7 @@ const es: TranslationDict = {
   'disc.createEmpty': 'Crear discusión',
   'disc.discFirstCreatedToast': 'Discusión creada. Pulsa «+ Invitar» en el header para añadir un agente.',
   'disc.participantsEmpty': 'Ningún agente adjunto. Pulsa «+ Invitar» para añadir un participante.',
+  'disc.attachmentDownloading': 'Descargando el archivo adjunto…',
   'disc.invitePeer': '+ Invitar',
   'disc.invitePeerTooltip': 'Genera un token para pegar en otro CLI compatible MCP (Claude, Codex, Gemini…) que se unirá a esta discusión.',
   'disc.inviteFailed': 'Invitación fallida: {0}',
@@ -5700,6 +5750,11 @@ const es: TranslationDict = {
   'disc.modelTier': 'Modo IA',
   'settings.identity': 'Identidad',
   'settings.identityHint': 'Tu apodo y avatar, mostrados en las conversaciones.',
+  'settings.exposeNetwork': 'Permitir conexiones desde otros dispositivos (LAN / Tailscale)',
+  'settings.exposeNetworkHint': 'Permite que otro Kronn (otro PC, por red local o Tailscale) te alcance, para discusiones entre máquinas.',
+  'settings.exposeSecurityNote': '⚠️ Expone la API en tu red. La autenticación se activa automáticamente: un par deberá indicar el token. Tu interfaz local sigue accesible sin token.',
+  'settings.exposeRestartRequired': 'Reinicio necesario para aplicar el cambio de enlace de red.',
+  'settings.exposeRestartBtn': 'Reiniciar Kronn',
   'settings.pseudo': 'Apodo',
   'settings.avatarEmail': 'Email (Gravatar)',
   'settings.avatarHint': 'Utilizado para mostrar tu avatar Gravatar. Opcional.',
@@ -5844,6 +5899,14 @@ const es: TranslationDict = {
   'contacts.inviteHint': 'Comparte este código para que otros usuarios de Kronn puedan agregarte.',
   'contacts.add': 'Agregar contacto',
   'contacts.addPlaceholder': 'kronn:pseudo@host:port',
+  'contacts.joinByCode': 'Unirse por código',
+  'contacts.joinPlaceholder': 'Pega un código (kr-join-…)',
+  'contacts.joinResolving': 'Resolviendo…',
+  'contacts.joinSuccess': 'Discusión unida: {0}',
+  'contacts.joinError': 'Código no encontrado o expirado',
+  'contacts.startChat': 'Chatear con {0}',
+  'contacts.chatStarted': 'Discusión abierta con {0}',
+  'contacts.chatStartError': 'No se pudo abrir la discusión',
   'contacts.wsConnected': 'Conectado en tiempo real',
   'contacts.wsDisconnected': 'Desconectado',
   'contacts.added': 'Contacto agregado',

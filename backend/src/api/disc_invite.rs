@@ -21,6 +21,7 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
+use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;
@@ -120,26 +121,46 @@ pub async fn peer_join(
     let agent_type = req.agent_type.clone();
     let session_id = req.session_id.clone();
 
+    // Resolve (disc_id, session_pk): first try a LOCAL token join; on a local
+    // miss, fall back to asking our contacts who hosts the room (the unified
+    // "join by code"). The owning peer shares the disc back over the WS
+    // federation, we mirror it, and bind a session to the mirror.
+    let (disc_id, session_pk) = {
+        let (t, a, s) = (token.clone(), agent_type.clone(), session_id.clone());
+        let local = state
+            .db
+            .with_conn(move |conn| db::discussion_sessions::join_via_token(conn, &t, &a, &s))
+            .await;
+        match local {
+            Ok(j) => (j.disc_id, j.session_pk),
+            Err(local_err) => {
+                match try_remote_join(&state, &token, &agent_type, &session_id).await {
+                    Ok(Some(r)) => r,
+                    // No contact hosts it → surface the original local error.
+                    Ok(None) => return Json(ApiResponse::err(local_err.to_string())),
+                    Err(remote_err) => {
+                        return Json(ApiResponse::err(format!(
+                            "join failed locally ({local_err}) and via contacts ({remote_err})"
+                        )))
+                    }
+                }
+            }
+        }
+    };
+
+    // Build the response from the resolved disc (shared by local + mirror paths).
     let res = state
         .db
         .with_conn(move |conn| {
-            // Step 1 — atomic join.
-            let join = db::discussion_sessions::join_via_token(
-                conn,
-                &token,
-                &agent_type,
-                &session_id,
-            )?;
-
             // Step 2 — disc title + peer count for the response.
             let disc_title: String = conn.query_row(
                 "SELECT title FROM discussions WHERE id = ?1",
-                rusqlite::params![&join.disc_id],
+                rusqlite::params![&disc_id],
                 |r| r.get(0),
             )?;
             let peer_count = db::discussion_sessions::count_active_participants(
                 conn,
-                &join.disc_id,
+                &disc_id,
             )?;
 
             // Step 3 — recent messages (last 10, trimmed). Newest last
@@ -152,7 +173,7 @@ pub async fn peer_join(
                   LIMIT 10",
             )?;
             let mut rows: Vec<RecentMessagePreview> = stmt
-                .query_map(rusqlite::params![&join.disc_id], |r| {
+                .query_map(rusqlite::params![&disc_id], |r| {
                     let content: String = r.get(3)?;
                     let preview: String =
                         content.chars().take(400).collect();
@@ -204,12 +225,12 @@ pub async fn peer_join(
                  d. Go back to (a).\n\n\
                  To leave the room : `disc_leave()`. Don't leave until the task \
                  is done or the user explicitly tells you to stop.",
-                join.disc_id, disc_title, peer_count,
+                disc_id, disc_title, peer_count,
             );
 
             Ok::<_, anyhow::Error>(PeerJoinResponse {
-                disc_id: join.disc_id,
-                session_pk: join.session_pk,
+                disc_id,
+                session_pk,
                 peer_count,
                 disc_title,
                 recent_messages: rows,
@@ -222,6 +243,98 @@ pub async fn peer_join(
         Ok(r) => Json(ApiResponse::ok(r)),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
+}
+
+/// Cross-instance leg of `peer_join`: the token wasn't found locally, so ask
+/// each accepted contact "do you host the room behind this code?" via their
+/// `/api/disc/claim-by-token` endpoint. The owning peer shares the disc back
+/// (broadcasts a `DiscussionInvite` relayed to us over the WS federation); we
+/// poll for the mirror disc to land, then bind a session to it. Returns the
+/// mirror `(disc_id, session_pk)` on success, `None` if no contact hosts it.
+async fn try_remote_join(
+    state: &AppState,
+    token: &str,
+    agent_type: &str,
+    session_id: &str,
+) -> anyhow::Result<Option<(String, i64)>> {
+    // Our own invite code — the credential the peer validates against its contacts.
+    let our_code = {
+        let cfg = state.config.read().await;
+        crate::api::contacts::build_invite_code(&cfg.server).await
+    };
+
+    let contacts = state
+        .db
+        .with_conn(db::contacts::list_contacts)
+        .await
+        .unwrap_or_default();
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(6))
+        .build()?;
+
+    for contact in contacts.into_iter().filter(|c| c.status == "accepted") {
+        let url = format!(
+            "{}/api/disc/claim-by-token",
+            contact.kronn_url.trim_end_matches('/')
+        );
+        let body = serde_json::json!({ "token": token, "from_invite_code": our_code });
+        let resp = match client.post(&url).json(&body).send().await {
+            Ok(r) => r,
+            Err(_) => continue, // unreachable peer → try the next contact
+        };
+        let parsed: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let data = parsed.get("data");
+        let found = data
+            .and_then(|d| d.get("found"))
+            .and_then(|f| f.as_bool())
+            .unwrap_or(false);
+        if !found {
+            continue;
+        }
+        let Some(shared_id) = data
+            .and_then(|d| d.get("shared_id"))
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+        else {
+            continue;
+        };
+
+        // We already have shared_id + title from the HTTP claim response, so
+        // create the mirror DIRECTLY rather than waiting for the peer's WS
+        // `DiscussionInvite` to arrive — that race is fragile under NAT / WS
+        // lag and was a cause of "the shared disc never showed up". The WS
+        // invite, when/if it lands, is an idempotent no-op. Then bind our
+        // session to the mirror.
+        let title = data
+            .and_then(|d| d.get("title"))
+            .and_then(|t| t.as_str())
+            .unwrap_or("Discussion")
+            .to_string();
+        let (sid, ttl, from) = (shared_id.clone(), title, contact.pseudo.clone());
+        let mirror_disc_id = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::ensure_mirror_by_shared_id(conn, &sid, &ttl, &from)
+            })
+            .await?;
+        let (mdid, a, s) = (
+            mirror_disc_id.clone(),
+            agent_type.to_string(),
+            session_id.to_string(),
+        );
+        let pk = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::join_disc_session(conn, &mdid, &a, &s)
+            })
+            .await?;
+        return Ok(Some((mirror_disc_id, pk)));
+    }
+    Ok(None)
 }
 
 // ─── disc_leave (0.8.6 phase 3) ────────────────────────────────────
@@ -308,6 +421,11 @@ pub struct WaitForPeerMessage {
     pub agent_type: Option<String>,
     pub content: String,
     pub timestamp: String,
+    /// Author pseudo for messages that arrived from a PEER instance (federated)
+    /// or a human; `None` for our own local appends. Lets the wait correctly
+    /// treat a same-`agent_type` peer (e.g. another ClaudeCode instance) as a
+    /// real peer instead of filtering it out as "self".
+    pub author_pseudo: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -385,7 +503,7 @@ pub async fn wait_for_peer(
                 // exclude_agent_type in Rust to avoid threading an
                 // Option<String> through the SQL binder.
                 let mut stmt = conn.prepare(
-                    "SELECT sort_order, role, agent_type, content, timestamp
+                    "SELECT sort_order, role, agent_type, content, timestamp, author_pseudo
                        FROM messages
                       WHERE discussion_id = ?1 AND sort_order > ?2
                       ORDER BY sort_order ASC",
@@ -398,13 +516,19 @@ pub async fn wait_for_peer(
                             agent_type: r.get(2)?,
                             content: r.get(3)?,
                             timestamp: r.get(4)?,
+                            author_pseudo: r.get(5)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 let filtered = rows
                     .into_iter()
+                    // Exclude only OUR OWN local appends (same agent_type AND no
+                    // author_pseudo). A federated peer message carries an
+                    // author_pseudo, so a same-agent_type peer (another
+                    // ClaudeCode instance across the wire) is NOT filtered —
+                    // otherwise two ClaudeCode peers go deaf to each other.
                     .filter(|m| match (&exclude_clone, &m.agent_type) {
-                        (Some(ex), Some(ag)) => ex != ag,
+                        (Some(ex), Some(ag)) if ex == ag => m.author_pseudo.is_some(),
                         _ => true,
                     })
                     .collect();
@@ -510,6 +634,216 @@ pub async fn invite_peer(
         expires_at: issued.expires_at,
         ttl_seconds: db::discussion_sessions::INVITE_TTL_SECS,
         instruction_text,
+    }))
+}
+
+/// Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
+/// host the room behind this invite code?". Authenticated by `from_invite_code`
+/// matching one of our contacts — the same self-auth credential as the WS
+/// Presence handshake (so this endpoint is exempt from the bearer middleware).
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ClaimByTokenRequest {
+    pub token: String,
+    /// The CALLING peer's own invite code — must match a known contact here.
+    pub from_invite_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ClaimByTokenResponse {
+    /// True iff WE host the room behind `token`; then we've shared it back.
+    pub found: bool,
+    pub shared_id: Option<String>,
+    pub title: Option<String>,
+}
+
+/// `POST /api/disc/claim-by-token` — the cross-instance leg of the unified
+/// "join by code". When `disc_join(code)` misses locally, the caller asks each
+/// of its contacts here. If WE host the room, we share it back with the calling
+/// contact (broadcast a `DiscussionInvite` over the WS federation so the caller
+/// mirrors it). This collapses the two former mechanisms (local token-join vs
+/// contact-share) into a single paste-a-code action that works wherever the
+/// room actually lives.
+///
+/// Auth: the caller proves it's a known contact via `from_invite_code` (same
+/// credential as the WS Presence frame). Registered as auth-exempt in `lib.rs`
+/// (a remote peer has no bearer token), gated here instead.
+pub async fn claim_by_token(
+    State(state): State<AppState>,
+    Json(req): Json<ClaimByTokenRequest>,
+) -> Json<ApiResponse<ClaimByTokenResponse>> {
+    let from_code = req.from_invite_code.trim().to_string();
+    if from_code.is_empty() {
+        return Json(ApiResponse::err("from_invite_code required"));
+    }
+
+    // 1. Authenticate the caller: the invite code must match a known contact
+    //    (same trust model as the WS Presence handshake — no anonymous claims).
+    let code_lookup = from_code.clone();
+    let caller = match state
+        .db
+        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code_lookup))
+        .await
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => return Json(ApiResponse::err("unknown peer (invite code not in contacts)")),
+        Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
+    };
+
+    // 2. Resolve the token → a LOCAL disc we host (read-only, no consume).
+    let token = req.token.clone();
+    let disc_id = match state
+        .db
+        .with_conn(move |conn| crate::db::discussion_sessions::resolve_token_disc(conn, &token))
+        .await
+    {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            // We don't host this room — caller will try the next contact.
+            return Json(ApiResponse::ok(ClaimByTokenResponse {
+                found: false,
+                shared_id: None,
+                title: None,
+            }));
+        }
+        Err(e) => return Json(ApiResponse::err(format!("token resolve error: {e}"))),
+    };
+
+    // 3. Share that disc with the calling contact (idempotent), exactly like the
+    //    `share` handler — set/keep shared_id, append the contact, persist.
+    let cid = caller.id.clone();
+    let did = disc_id.clone();
+    let shared = state
+        .db
+        .with_conn(move |conn| {
+            let disc = crate::db::discussions::get_discussion(conn, &did)?
+                .ok_or_else(|| anyhow::anyhow!("discussion vanished"))?;
+            let shared_id = disc
+                .shared_id
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            let mut shared_with = disc.shared_with;
+            if !shared_with.contains(&cid) {
+                shared_with.push(cid.clone());
+            }
+            crate::db::discussions::update_discussion_sharing(conn, &did, &shared_id, &shared_with)?;
+            Ok::<_, anyhow::Error>((shared_id, disc.title))
+        })
+        .await;
+    let (shared_id, title) = match shared {
+        Ok(t) => t,
+        Err(e) => return Json(ApiResponse::err(format!("share error: {e}"))),
+    };
+
+    // 4. Broadcast the invite → ws_client relays it to the caller → mirrors there.
+    let config = state.config.read().await;
+    let from_pseudo = crate::api::contacts::invite_pseudo(&config.server);
+    let our_invite_code = crate::api::contacts::build_invite_code(&config.server).await;
+    drop(config);
+    let _ = state
+        .ws_broadcast
+        .send(crate::models::WsMessage::DiscussionInvite {
+            shared_discussion_id: shared_id.clone(),
+            title: title.clone(),
+            from_pseudo,
+            from_invite_code: our_invite_code,
+        });
+
+    tracing::info!(
+        "claim-by-token: shared disc {} (shared_id {}) back to contact {}",
+        disc_id,
+        shared_id,
+        caller.pseudo
+    );
+    Json(ApiResponse::ok(ClaimByTokenResponse {
+        found: true,
+        shared_id: Some(shared_id),
+        title: Some(title),
+    }))
+}
+
+/// Body of `POST /api/disc/fetch-file` (F8). A peer that received a
+/// `FileAttached` announcement calls this to pull the binary of a context file
+/// it doesn't have. Authenticated by `from_invite_code` matching a contact
+/// (same trust model as `claim-by-token`).
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct FetchFileRequest {
+    pub file_id: String,
+    pub from_invite_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct FetchFileResponse {
+    pub found: bool,
+    pub filename: Option<String>,
+    pub mime_type: Option<String>,
+    /// Base64-encoded file bytes (None when not found). Base64 keeps the
+    /// transport a simple JSON envelope; the peer decodes + writes to disk.
+    pub data_base64: Option<String>,
+}
+
+/// `POST /api/disc/fetch-file` — the binary-transfer leg of F8 (P2P file/doc
+/// recovery). Returns the bytes of a context file we host so a peer can mirror
+/// it locally. Auth-exempt in `lib.rs` (a remote peer has no bearer token),
+/// gated here on a known `from_invite_code` — same as `claim-by-token`.
+pub async fn fetch_file(
+    State(state): State<AppState>,
+    Json(req): Json<FetchFileRequest>,
+) -> Json<ApiResponse<FetchFileResponse>> {
+    let from_code = req.from_invite_code.trim().to_string();
+    if from_code.is_empty() {
+        return Json(ApiResponse::err("from_invite_code required"));
+    }
+    // Authenticate the caller (must be a known contact).
+    match state
+        .db
+        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &from_code))
+        .await
+    {
+        Ok(Some(_)) => {}
+        Ok(None) => return Json(ApiResponse::err("unknown peer (invite code not in contacts)")),
+        Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
+    }
+
+    let file_id = req.file_id.clone();
+    let cf = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_context_file(conn, &file_id).map_err(|e| anyhow::anyhow!(e)))
+        .await
+    {
+        Ok(Some(cf)) => cf,
+        Ok(None) => {
+            return Json(ApiResponse::ok(FetchFileResponse {
+                found: false,
+                filename: None,
+                mime_type: None,
+                data_base64: None,
+            }))
+        }
+        Err(e) => return Json(ApiResponse::err(format!("file lookup error: {e}"))),
+    };
+
+    let Some(disk_path) = cf.disk_path.clone() else {
+        // Text-only context file (no binary on disk) — nothing to transfer.
+        return Json(ApiResponse::ok(FetchFileResponse {
+            found: false,
+            filename: None,
+            mime_type: None,
+            data_base64: None,
+        }));
+    };
+    let bytes = match tokio::fs::read(&disk_path).await {
+        Ok(b) => b,
+        Err(e) => return Json(ApiResponse::err(format!("read error: {e}"))),
+    };
+    let data_base64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Json(ApiResponse::ok(FetchFileResponse {
+        found: true,
+        filename: Some(cf.filename),
+        mime_type: Some(cf.mime_type),
+        data_base64: Some(data_base64),
     }))
 }
 

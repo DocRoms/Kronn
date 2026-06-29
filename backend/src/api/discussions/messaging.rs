@@ -101,13 +101,6 @@ pub async fn send_message(
     let disc_id = id.clone();
     let msg = user_msg.clone();
     let target_clone = target.clone();
-    let shared_id_for_ws = {
-        let disc_id_check = id.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::discussions::get_discussion(conn, &disc_id_check)
-                .map(|d| d.and_then(|d| d.shared_id))
-        }).await.ok().flatten()
-    };
 
     if let Err(e) = state.db.with_conn(move |conn| {
         crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
@@ -133,25 +126,24 @@ pub async fn send_message(
         tracing::error!("Failed to save user message: {e}");
     }
 
-    // Broadcast to peers if this is a shared discussion
-    if let Some(shared_id) = shared_id_for_ws {
-        let config = state.config.read().await;
-        let pseudo = config.server.pseudo.clone().unwrap_or_default();
-        let avatar = config.server.avatar_email.clone();
-        let host = crate::api::contacts::advertised_host_async(&config.server).await;
-        let port = config.server.port;
-        drop(config);
-        let invite_code = format!("kronn:{}@{}:{}", pseudo, host, port);
+    // Federate to peers if this is a shared discussion (no-op otherwise).
+    crate::api::federation::federate_message(&state, &id, &user_msg).await;
 
-        let _ = state.ws_broadcast.send(WsMessage::ChatMessage {
-            shared_discussion_id: shared_id,
-            message_id: user_msg.id.clone(),
-            from_pseudo: pseudo,
-            from_avatar_email: avatar,
-            from_invite_code: invite_code,
-            content: req.content.clone(),
-            timestamp: user_msg.timestamp.timestamp_millis(),
-        });
+    // F9 — human-only disc: never spawn an agent. Persist + federate the human
+    // message (done above) and stop. Guarantees true human↔human chat even on
+    // an instance that has an agent installed.
+    let no_agent_id = id.clone();
+    let no_agent = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::disc_is_no_agent(conn, &no_agent_id))
+        .await
+        .unwrap_or(false);
+    if no_agent {
+        let payload = serde_json::json!({ "skipped": true, "reason": "no_agent" }).to_string();
+        let stream: SseStream = Box::pin(futures::stream::once(async move {
+            Ok::<_, Infallible>(Event::default().event("skipped_no_agent").data(payload))
+        }));
+        return Sse::new(stream);
     }
 
     // Double-responder guard (2026-06-04, flagged by Romuald; made

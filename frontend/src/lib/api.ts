@@ -25,6 +25,7 @@ import type {
   AgentType,
   Contact,
   NetworkInfo,
+  DetectedIp,
   TokenUsageSummary,
   DbInfo,
   SetAgentAccessRequest,
@@ -39,6 +40,8 @@ import type {
   BootstrapProjectResponse,
   CloneProjectRequest,
   CloneProjectResponse,
+  CloneAndRemapRequest,
+  CloneAndRemapResponse,
   DiscoverReposRequest,
   DiscoverReposResponse,
   Workflow,
@@ -395,6 +398,17 @@ export const health = {
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
+/** LAN/Tailscale exposure state (the "Allow connections from other devices"
+ *  toggle). Mirrors the backend `NetworkExposure` (api/setup.rs) — defined here
+ *  rather than generated because the struct carries a qualified-path field that
+ *  ts-rs skips. */
+export interface NetworkExposure {
+  exposed: boolean;
+  restart_required: boolean;
+  port: number;
+  reachable_ips: DetectedIp[];
+}
+
 export const config = {
   getTokens: () => api<ApiKeysResponse>('GET', '/config/tokens'),
   saveApiKey: (req: SaveApiKeyRequest) => api<ApiKeyDisplay>('POST', '/config/api-keys', req),
@@ -463,6 +477,8 @@ export const config = {
     if (json.error) throw new Error(json.error);
     return json.data;
   },
+  getNetworkExposure: () => api<NetworkExposure>('GET', '/config/network-exposure'),
+  setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
   setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),
@@ -691,6 +707,11 @@ export const projects = {
   prTemplate: (id: string) => api<{ template: string; source: string }>('GET', `/projects/${id}/pr-template`),
   exec: (id: string, command: string) => api<{ stdout: string; stderr: string; exit_code: number }>('POST', `/projects/${id}/exec`, { command }),
   remapPath: (id: string, path: string) => api<void>('POST', `/projects/${id}/remap-path`, { path }),
+  // Recover a project whose path no longer resolves: re-clone its repo_url
+  // locally (using the linked Git credentials) and re-point the project at
+  // the clone. `parent_dir` optional — the server picks an existing location.
+  cloneAndRemap: (id: string, req: CloneAndRemapRequest = { parent_dir: null }) =>
+    api<CloneAndRemapResponse>('POST', `/projects/${id}/clone-and-remap`, req),
 
   /** Stream the AI audit progress via SSE */
   auditStream: async (
@@ -972,6 +993,46 @@ export const mcps = {
 
 // ─── Discussions ────────────────────────────────────────────────────────────
 
+/** Result of the unified "join by code" (`POST /discussions/peer-join`). The
+ *  backend resolves the token LOCAL or cross-instance transparently. */
+/** Mirror of the backend `RecentMessagePreview` (disc_invite.rs). `preview` is
+ *  the body trimmed to ~400 chars; fetch full text via the disc itself. */
+export interface RecentMessagePreview {
+  sort_order: number;
+  role: string;
+  agent_type: string | null;
+  timestamp: string;
+  preview: string;
+}
+
+export interface PeerJoinResult {
+  disc_id: string;
+  session_pk: number;
+  peer_count: number;
+  disc_title: string;
+  recent_messages: RecentMessagePreview[];
+  next_steps: string;
+}
+
+/** Stable per-browser id used as the `session_id` when a human joins a disc by
+ *  code from the web UI (the join API is shared with CLI agents, which supply
+ *  their own session id). Persisted so re-joining the same disc is idempotent
+ *  server-side rather than spawning phantom participants. */
+function webSessionId(): string {
+  const KEY = 'kronn:webSessionId';
+  try {
+    let id = localStorage.getItem(KEY);
+    if (!id) {
+      id = (crypto?.randomUUID?.() ?? `web-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      localStorage.setItem(KEY, id);
+    }
+    return id;
+  } catch {
+    // No localStorage (SSR / tests): a per-call id is fine, just not idempotent.
+    return crypto?.randomUUID?.() ?? `web-${Date.now()}`;
+  }
+}
+
 export const discussions = {
   list: () => api<Discussion[]>('GET', '/discussions'),
   /** 2026-06-24 — disc ids with an in-flight agent run RIGHT NOW, server-side
@@ -983,11 +1044,23 @@ export const discussions = {
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
   update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('PATCH', `/discussions/${id}`, body),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
+  /** Unified "join by code": paste any `kr-join-…` token and the backend
+   *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
+   *  asks our accepted contacts (claim-by-token) and mirrors the disc back over
+   *  the WS federation (~0.5–8 s), then binds. The single await covers that
+   *  whole resolution — the caller just shows a "resolving…" state until it
+   *  returns the (mirrored) disc. */
+  peerJoin: (token: string) =>
+    api<PeerJoinResult>('POST', '/discussions/peer-join', {
+      token: token.trim(),
+      agent_type: 'Custom',
+      session_id: webSessionId(),
+    }),
   /** 0.8.6 phase 2 — list active+paused participants of a disc.
    *  Powers the header chips + `[+ Inviter]` button. `left` sessions
    *  are excluded server-side (audit history only). */
   participants: (id: string) =>
-    api<Array<{ id: number; disc_id: string; agent_type: string; session_id: string | null; role: string; status: string; joined_at: string; left_at: string | null }>>('GET', `/discussions/${id}/participants`),
+    api<Array<{ id: number; disc_id: string; agent_type: string; session_id: string | null; role: string; status: string; joined_at: string; left_at: string | null; last_seen: string | null }>>('GET', `/discussions/${id}/participants`),
   /** 0.8.6 phase 2 — mint a one-shot invite token bound to this disc.
    *  Returns the PLAIN token (only place it ever appears outside the
    *  agent's tool-call wire) + the human-readable instruction the
