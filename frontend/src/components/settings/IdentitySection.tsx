@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { config as configApi, contacts as contactsApi } from '../../lib/api';
+import { config as configApi, contacts as contactsApi, type NetworkExposure } from '../../lib/api';
 import { gravatarUrl } from '../../lib/gravatar';
 import type { NetworkInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
@@ -28,6 +28,8 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
   const [globalContextMode, setGlobalContextMode] = useState('always');
   const [serverDomain, setServerDomain] = useState('');
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [exposure, setExposure] = useState<NetworkExposure | null>(null);
+  const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
 
   // Load server config + global context once
   useEffect(() => {
@@ -51,6 +53,20 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
   useEffect(() => {
     contactsApi.networkInfo().then(setNetworkInfo).catch(() => {});
   }, [pseudo, serverDomain]);
+
+  // Network-exposure toggle state (bind 0.0.0.0 so peers can reach us).
+  useEffect(() => {
+    configApi.getNetworkExposure().then(setExposure).catch(() => {});
+  }, []);
+
+  const restartApp = async () => {
+    try {
+      // Same hidden-dynamic-import trick as main.tsx so the build doesn't
+      // hard-depend on @tauri-apps in web mode.
+      const mod = await new Function("return import('@tauri-apps/api/core')")();
+      await mod.invoke('restart_app');
+    } catch { /* not in Tauri / restart unavailable — the text notice covers it */ }
+  };
 
   return (
     <div id="settings-identity" className="set-card">
@@ -170,6 +186,42 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
               {pseudo || 'User'}
             </span>
           </div>
+        </div>
+
+        {/* Network exposure — gates whether other machines can reach this
+            instance at all (binds 0.0.0.0 vs localhost-only). */}
+        <div className="set-expose-box">
+          <label className="flex-row gap-3" style={{ cursor: 'pointer', alignItems: 'center' }}>
+            <input
+              type="checkbox"
+              data-testid="expose-network-toggle"
+              checked={!!exposure?.exposed}
+              onChange={async e => {
+                const next = e.target.checked;
+                try {
+                  const updated = await configApi.setNetworkExposure(next);
+                  setExposure(updated);
+                } catch { /* network blip — re-fetch on next mount */ }
+              }}
+            />
+            <span className="label mb-0">{t('settings.exposeNetwork')}</span>
+          </label>
+          <div className="set-hint-xs">{t('settings.exposeNetworkHint')}</div>
+          {exposure?.exposed && (
+            <div className="set-expose-warn" role="note">{t('settings.exposeSecurityNote')}</div>
+          )}
+          {exposure?.restart_required && (
+            <div className="set-expose-restart" role="alert">
+              <span>{t('settings.exposeRestartRequired')}</span>
+              {isTauri ? (
+                <button type="button" className="btn-ghost" onClick={restartApp}>
+                  {t('settings.exposeRestartBtn')}
+                </button>
+              ) : (
+                <code className="set-ollama-cmd">./kronn restart</code>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Invite code for multi-user */}

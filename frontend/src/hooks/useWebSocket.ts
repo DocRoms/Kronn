@@ -10,14 +10,24 @@ export type WsEventHandler = (msg: WsMessage) => void;
  * - Auto-reconnects with exponential backoff (1s → 60s).
  * - Sends a heartbeat ping every 30s to keep the connection alive.
  * - Calls `onMessage` for every parsed WsMessage received.
+ * - Calls `onConnect` on every (re)connect, so the caller can RE-SYNC state it
+ *   may have missed while the socket was down (a backend restart or dropped
+ *   connection means federated messages / presence events fired with no
+ *   listener — without a catch-up the UI silently stays stale until the next
+ *   live event, which is why a peer's messages "don't appear" after a rebuild).
  */
-export function useWebSocket(onMessage: WsEventHandler): { connected: boolean } {
+export function useWebSocket(
+  onMessage: WsEventHandler,
+  onConnect?: () => void,
+): { connected: boolean } {
   const [connected, setConnected] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeout = useRef<ReturnType<typeof setTimeout>>(undefined);
   const backoff = useRef(1000);
   const onMessageRef = useRef(onMessage);
   onMessageRef.current = onMessage;
+  const onConnectRef = useRef(onConnect);
+  onConnectRef.current = onConnect;
 
   const connect = useCallback(() => {
     // Build WS URL from current page location
@@ -48,6 +58,13 @@ export function useWebSocket(onMessage: WsEventHandler): { connected: boolean } 
         }));
       } catch {
         // ignore — onclose will retry
+      }
+      // Re-sync after every (re)connect so the UI catches up on anything that
+      // happened while the socket was down (missed federated messages, presence).
+      try {
+        onConnectRef.current?.();
+      } catch {
+        // a caller error must never tear the socket back down
       }
     };
 

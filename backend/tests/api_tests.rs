@@ -3486,6 +3486,8 @@ async fn ws_drops_pre_presence_garbage_silently() {
         from_invite_code: "kronn:Attacker@evil:1".into(),
         content: "hi".into(),
         timestamp: 0,
+        role: kronn::models::MessageRole::User,
+        agent_type: None,
     };
     sender
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -3637,6 +3639,8 @@ async fn ws_rejects_non_presence_first_message() {
         from_invite_code: "kronn:Attacker@evil.com:666".into(),
         content: "Injected message".into(),
         timestamp: 0,
+        role: kronn::models::MessageRole::User,
+        agent_type: None,
     };
     sender
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -3886,6 +3890,8 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         from_invite_code: "kronn:RemotePeer@10.0.0.50:3456".into(),
         content: "Hello from the other side!".into(),
         timestamp: now.timestamp_millis(),
+        role: kronn::models::MessageRole::Agent,
+        agent_type: Some(kronn::models::AgentType::ClaudeCode),
     };
     sender.send(tokio_tungstenite::tungstenite::Message::Text(
         serde_json::to_string(&chat_msg).unwrap().into(),
@@ -3903,6 +3909,236 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
     assert_eq!(updated_disc.messages[0].id, "remote-msg-001");
     assert_eq!(updated_disc.messages[0].content, "Hello from the other side!");
     assert_eq!(updated_disc.messages[0].author_pseudo.as_deref(), Some("RemotePeer"));
+    // F2 — role + agent_type survive the wire: an Agent reply must land as
+    // Agent (not the old hardcoded User), carrying its CLI identity.
+    assert_eq!(updated_disc.messages[0].role, kronn::models::MessageRole::Agent,
+        "federated Agent reply must keep role=Agent on the peer");
+    assert_eq!(updated_disc.messages[0].agent_type, Some(kronn::models::AgentType::ClaudeCode),
+        "federated reply must keep the originating agent identity");
+}
+
+/// F4 — a `DiscSyncRequest` makes the host re-broadcast every message newer
+/// than the requester's watermark, so a peer that was OFFLINE while messages
+/// were posted catches up on reconnect.
+#[tokio::test]
+async fn disc_sync_request_resends_missing_messages() {
+    let state = test_state();
+    // A shared disc we host, with one message already in it.
+    state.db.with_conn(|conn| {
+        kronn::db::discussions::ensure_mirror_by_shared_id(conn, "shared-sync-1", "Topic", "Host")?;
+        Ok(())
+    }).await.unwrap();
+    let disc_id = state.db.with_conn(|conn| {
+        kronn::db::discussions::find_discussion_by_shared_id(conn, "shared-sync-1")
+    }).await.unwrap().unwrap();
+    let msg = kronn::models::DiscussionMessage {
+        lint_report: None,
+        id: "sync-msg-1".into(),
+        role: kronn::models::MessageRole::Agent,
+        content: "missed while offline".into(),
+        agent_type: Some(kronn::models::AgentType::ClaudeCode),
+        timestamp: chrono::Utc::now(),
+        tokens_used: 0, auth_mode: None, model_tier: None, cost_usd: None,
+        author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+    };
+    let did = disc_id.clone();
+    state.db.with_conn(move |conn| kronn::db::discussions::insert_message(conn, &did, &msg)).await.unwrap();
+
+    let addr = start_test_server(state.clone()).await;
+    let url = format!("ws://{}/api/ws", addr);
+    let (ws_stream, _) = tokio_tungstenite::connect_async(&url).await.expect("WS connect failed");
+    let (mut sender, mut receiver) = StreamExt::split(ws_stream);
+    ws_send_presence(&mut sender).await;
+
+    // Ask for everything since the beginning (we have nothing locally).
+    let req = WsMessage::DiscSyncRequest {
+        shared_discussion_id: "shared-sync-1".into(),
+        since_timestamp: 0,
+    };
+    sender.send(tokio_tungstenite::tungstenite::Message::Text(
+        serde_json::to_string(&req).unwrap().into(),
+    )).await.unwrap();
+
+    // The host must re-broadcast the missing message as a ChatMessage, with its
+    // role/identity preserved.
+    let found = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        while let Some(Ok(frame)) = StreamExt::next(&mut receiver).await {
+            if let tokio_tungstenite::tungstenite::Message::Text(txt) = frame {
+                if let Ok(WsMessage::ChatMessage { message_id, content, role, .. }) =
+                    serde_json::from_str::<WsMessage>(txt.as_str())
+                {
+                    if message_id == "sync-msg-1" {
+                        assert_eq!(content, "missed while offline");
+                        assert_eq!(role, kronn::models::MessageRole::Agent,
+                            "role survives the catch-up re-send");
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }).await;
+    assert!(matches!(found, Ok(true)),
+        "DiscSyncRequest must trigger a re-broadcast of the missed message");
+}
+
+/// F8 — the fetch-file endpoint serves a context file's bytes to a KNOWN
+/// contact (base64) and rejects an unknown caller. This is the binary-transfer
+/// leg of P2P file/doc recovery.
+#[tokio::test]
+async fn fetch_file_serves_bytes_to_known_contact_and_rejects_unknown() {
+    let state = test_state();
+    // A trusted contact (the caller authenticates with this invite code).
+    let now = chrono::Utc::now();
+    let contact = kronn::models::Contact {
+        id: "c1".into(),
+        pseudo: "PeerAlpha".into(),
+        avatar_email: None,
+        kronn_url: "http://10.0.0.9:3140".into(),
+        invite_code: "kronn:PeerAlpha@10.0.0.9:3140".into(),
+        status: "accepted".into(),
+        created_at: now,
+        updated_at: now,
+    };
+    let c = contact.clone();
+    state.db.with_conn(move |conn| kronn::db::contacts::insert_contact(conn, &c)).await.unwrap();
+
+    // A disc + a context file backed by a real on-disk binary.
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode)
+             VALUES ('d1','T','ClaudeCode','fr','[]',datetime('now'),datetime('now'),0,'Direct')",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+    let tmp = std::env::temp_dir().join("kronn_f8_fetch_test.bin");
+    std::fs::write(&tmp, b"hello-doc-bytes").unwrap();
+    let path = tmp.to_string_lossy().to_string();
+    state.db.with_conn(move |conn| {
+        kronn::db::discussions::insert_context_file(
+            conn, "file1", "d1", "doc.pdf", "application/pdf", 15, "", Some(&path),
+        ).map_err(|e| anyhow::anyhow!(e))
+    }).await.unwrap();
+
+    // Known contact → bytes (base64 of "hello-doc-bytes").
+    let (st, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/disc/fetch-file",
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140" }),
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(json["data"]["found"], true);
+    assert_eq!(json["data"]["filename"], "doc.pdf");
+    assert_eq!(json["data"]["data_base64"], "aGVsbG8tZG9jLWJ5dGVz");
+
+    // Unknown caller → rejected (auth is the same trust model as claim-by-token).
+    let (st2, json2) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/disc/fetch-file",
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:Nobody@1.2.3.4:9" }),
+    ).await;
+    assert_eq!(st2, StatusCode::OK);
+    assert_eq!(json2["success"], false, "unknown peer must be rejected");
+
+    let _ = std::fs::remove_file(&tmp);
+}
+
+/// F13 — `wait_for_peer` must surface a PEER's message even when it shares our
+/// agent_type (two ClaudeCode instances across the wire), while still filtering
+/// our OWN local appends. The discriminator is author_pseudo: federated peer
+/// messages carry it, our local appends don't. (Regression introduced by F2:
+/// before it, federated messages arrived as role=User/agent_type=null and were
+/// never filtered.)
+#[tokio::test]
+async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode)
+             VALUES ('d1','T','ClaudeCode','fr','[]',datetime('now'),datetime('now'),0,'Direct')",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    let mk = |id: &str, content: &str, author: Option<&str>| kronn::models::DiscussionMessage {
+        lint_report: None,
+        id: id.into(),
+        role: kronn::models::MessageRole::Agent,
+        content: content.into(),
+        agent_type: Some(kronn::models::AgentType::ClaudeCode),
+        timestamp: chrono::Utc::now(),
+        tokens_used: 0, auth_mode: None, model_tier: None, cost_usd: None,
+        author_pseudo: author.map(|s| s.to_string()),
+        author_avatar_email: None, source_msg_id: None, duration_ms: None,
+    };
+    // Our own local append (no author_pseudo) + a federated peer ClaudeCode msg.
+    let own = mk("m-own", "my own local append", None);
+    let peer = mk("m-peer", "hello from peer ClaudeCode", Some("anonymous"));
+    state.db.with_conn(move |conn| {
+        kronn::db::discussions::insert_message(conn, "d1", &own)?;
+        kronn::db::discussions::insert_message(conn, "d1", &peer)?;
+        Ok(())
+    }).await.unwrap();
+
+    let (st, json) = get_json(
+        build_router_with_auth(state, false),
+        "/api/discussions/d1/wait?since_sort_order=0&timeout_secs=1&exclude_agent_type=ClaudeCode",
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    let msgs = json["data"]["messages"].as_array().expect("messages array");
+    let contents: Vec<&str> = msgs.iter().filter_map(|m| m["content"].as_str()).collect();
+    assert!(contents.contains(&"hello from peer ClaudeCode"),
+        "a same-agent_type PEER message must be surfaced, got {contents:?}");
+    assert!(!contents.contains(&"my own local append"),
+        "our own local append must still be filtered as self");
+}
+
+/// F9 — posting to a `no_agent` disc persists the human message but NEVER
+/// spawns the agent runner (true human↔human even on an agent-capable instance).
+/// The SSE stream signals `skipped_no_agent`.
+#[tokio::test]
+async fn send_message_to_no_agent_disc_skips_the_runner() {
+    let state = test_state();
+    state.db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO discussions (id, title, agent, language, participants_json,
+             created_at, updated_at, message_count, workspace_mode, no_agent)
+             VALUES ('d-human','People','ClaudeCode','fr','[]',
+             datetime('now'), datetime('now'), 0, 'Direct', 1)",
+            [],
+        )?;
+        Ok(())
+    }).await.unwrap();
+
+    let app = build_router_with_auth(state.clone(), false);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/discussions/d-human/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_vec(&serde_json::json!({
+            "content": "salut, ici humain",
+            "target_agent": null,
+        })).unwrap()))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = resp.into_body().collect().await.unwrap().to_bytes();
+    let body_str = String::from_utf8(body.to_vec()).unwrap();
+    assert!(body_str.contains("skipped_no_agent"),
+        "no_agent disc must skip the runner, got: {body_str}");
+
+    // The human message itself IS persisted (chat still works).
+    let count: i64 = state.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = 'd-human'",
+            [], |r| r.get::<_, i64>(0),
+        )?)
+    }).await.unwrap();
+    assert_eq!(count, 1, "the human message is stored even though no agent replies");
 }
 
 /// DiscussionInvite creates a new local discussion with the shared_id.
@@ -4003,6 +4239,8 @@ async fn ws_chat_message_idempotent() {
         from_invite_code: "kronn:PeerAlpha@10.0.0.1:3456".into(),
         content: "This message should appear once".into(),
         timestamp: now.timestamp_millis(),
+        role: kronn::models::MessageRole::User,
+        agent_type: None,
     };
 
     // Send twice
@@ -4271,6 +4509,92 @@ async fn import_zip_roundtrip() {
     let projects = json["data"].as_array().unwrap();
     assert_eq!(projects.len(), 1);
     assert_eq!(projects[0]["name"], "TestProject");
+}
+
+#[tokio::test]
+async fn import_accepts_payload_over_2mb_default_body_limit() {
+    // Regression (0.8.9): axum's default request body limit is ~2 MiB. A real
+    // whole-DB export (a few hundred discussions ≈ 2 MB ZIP) exceeds it, so
+    // without `DefaultBodyLimit` on `/api/config/import` the upload fails with
+    // "Failed to read upload: Error parsing multipart/form-data request"
+    // BEFORE the data is ever read — and the user just sees "import failed".
+    //
+    // We POST a >2 MiB multipart part and assert we get PAST the upload: the
+    // payload is garbage (non-ZIP, non-JSON) so the handler reaches its parse
+    // step and returns an "Invalid JSON" envelope — NOT the body-limit /
+    // multipart-read rejection the bug produced.
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state, false);
+
+    let big = vec![b'x'; 3 * 1024 * 1024]; // 3 MiB — comfortably over the 2 MiB default
+    let boundary = "----BigBodyBoundary";
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{}\r\n", boundary).as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"file\"; filename=\"big.json\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(&big);
+    body.extend_from_slice(format!("\r\n--{}--\r\n", boundary).as_bytes());
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/config/import")
+        .header("content-type", format!("multipart/form-data; boundary={}", boundary))
+        .body(Body::from(body))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    let status = resp.status();
+    let json: Value = serde_json::from_slice(
+        &resp.into_body().collect().await.unwrap().to_bytes(),
+    )
+    .unwrap();
+
+    // Handler returns 200 + a `{success:false}` envelope on a parse error.
+    assert_eq!(status, StatusCode::OK, "body over 2 MiB must not be rejected at the transport layer");
+    let err = json["error"].as_str().unwrap_or("");
+    assert!(
+        !err.contains("Failed to read upload") && !err.contains("multipart"),
+        "import must accept >2 MiB bodies (body-limit regression); got upload-level failure: {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn network_exposure_toggle_round_trips_and_secures() {
+    let state = test_state();
+
+    // Expose → host becomes 0.0.0.0 AND auth is forced on with a token
+    // (secure-by-default: a LAN/Tailscale peer isn't localhost).
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/config/network-exposure",
+        serde_json::json!({ "exposed": true })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["exposed"], true);
+    {
+        let cfg = state.config.read().await;
+        assert_eq!(cfg.server.host, "0.0.0.0", "exposing must bind all interfaces");
+        assert!(cfg.server.auth_enabled, "exposing must enforce auth");
+        assert!(
+            cfg.server.auth_token.as_deref().map(|t| !t.is_empty()).unwrap_or(false),
+            "exposing must ensure a token exists"
+        );
+    }
+
+    // Un-expose → back to loopback-only.
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = post_json(app, "/api/config/network-exposure",
+        serde_json::json!({ "exposed": false })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["exposed"], false);
+    {
+        let cfg = state.config.read().await;
+        assert_eq!(cfg.server.host, "127.0.0.1", "un-exposing returns to localhost");
+    }
+
+    // GET reflects the persisted state.
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, json) = get_json(app, "/api/config/network-exposure").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["data"]["exposed"], false);
+    assert!(json["data"]["reachable_ips"].is_array());
 }
 
 #[tokio::test]
@@ -8175,5 +8499,96 @@ mod cold_api_handlers_tests {
         ).await;
         assert_eq!(st, StatusCode::OK);
         assert!(json.get("success").is_some());
+    }
+
+    // ── disc_append cross-instance federation (regression 2026-06-29) ────────
+    // A message posted by an AGENT via `disc_append` (the MCP path every CLI
+    // peer uses) must broadcast a `ChatMessage` to peers when the disc is
+    // shared — otherwise cross-instance agent chat is silently one-sided
+    // (the message lands only in the local DB). The UI `send_message` path
+    // already broadcasts; this proves `disc_append` now matches it.
+    #[tokio::test]
+    async fn disc_append_federates_chatmessage_when_disc_is_shared() {
+        let state = test_state();
+        let mut ws_rx = state.ws_broadcast.subscribe();
+        state.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json,
+                 created_at, updated_at, message_count, workspace_mode, shared_id)
+                 VALUES ('disc-fed-shared', 'Shared', 'ClaudeCode', 'fr', '[]',
+                 datetime('now'), datetime('now'), 0, 'Direct', 'shared-xyz-123')",
+                [],
+            )?;
+            Ok(())
+        }).await.unwrap();
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            "/api/disc/append",
+            serde_json::json!({
+                "disc_id": "disc-fed-shared",
+                "messages": [{
+                    "source_msg_id": "src-1",
+                    "role": "Agent",
+                    "content": "hello peers from the agent path",
+                }],
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["appended"], 1);
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), ws_rx.recv())
+            .await
+            .expect("a ChatMessage must be broadcast for a shared disc")
+            .expect("broadcast channel error");
+        match received {
+            WsMessage::ChatMessage { shared_discussion_id, content, .. } => {
+                assert_eq!(shared_discussion_id, "shared-xyz-123",
+                    "broadcast must carry the disc's shared_id so the peer's mirror accepts it");
+                assert_eq!(content, "hello peers from the agent path");
+            }
+            other => panic!("expected ChatMessage, got {other:?}"),
+        }
+    }
+
+    // The mirror invariant: a PURELY LOCAL disc (shared_id NULL) must NOT
+    // emit a ChatMessage — federating a private disc would leak it to peers.
+    #[tokio::test]
+    async fn disc_append_does_not_federate_when_disc_is_not_shared() {
+        let state = test_state();
+        let mut ws_rx = state.ws_broadcast.subscribe();
+        state.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions (id, title, agent, language, participants_json,
+                 created_at, updated_at, message_count, workspace_mode)
+                 VALUES ('disc-fed-local', 'Local', 'ClaudeCode', 'fr', '[]',
+                 datetime('now'), datetime('now'), 0, 'Direct')",
+                [],
+            )?;
+            Ok(())
+        }).await.unwrap();
+
+        let app = build_router_with_auth(state.clone(), false);
+        let (st, json) = post_json(
+            app,
+            "/api/disc/append",
+            serde_json::json!({
+                "disc_id": "disc-fed-local",
+                "messages": [{
+                    "source_msg_id": "src-1",
+                    "role": "Agent",
+                    "content": "private, stays local",
+                }],
+            }),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["data"]["appended"], 1);
+
+        // No ChatMessage should arrive within a short window.
+        let res = tokio::time::timeout(std::time::Duration::from_millis(300), ws_rx.recv()).await;
+        if let Ok(Ok(WsMessage::ChatMessage { .. })) = res {
+            panic!("a non-shared disc must not federate its messages");
+        }
     }
 }

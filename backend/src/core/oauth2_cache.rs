@@ -33,9 +33,35 @@ use crate::models::{ApiAuthKind, TokenExchangeBodyFormat};
 pub struct CachedToken {
     pub access_token: String,
     pub refresh_at: Instant,
+    /// Fingerprint of the CREDENTIALS this token was minted from (client_id +
+    /// secret for OAuth2 ; the `creds_env_keys` values for TokenExchange). The
+    /// cache is keyed by `config_id`, which does NOT change when the operator
+    /// rotates the credentials in Settings — so without this, a token minted
+    /// from the OLD client_id kept being served (until its provider TTL, e.g.
+    /// Adobe's 24h) while the request's `x-api-key` header now carried the NEW
+    /// client_id → the provider rejected the mismatch (Adobe: `403003 "Api Key
+    /// is invalid"`). A cache hit now requires BOTH an unexpired `refresh_at`
+    /// AND a matching `cred_fp`; a credential change flips the fingerprint and
+    /// forces a re-mint on the next call.
+    pub cred_fp: u64,
 }
 
 const SAFETY_MARGIN: Duration = Duration::from_secs(30);
+
+/// Order-sensitive, length-prefixed hash of the given credential parts. Used
+/// only for change-detection (cache invalidation on credential rotation), not
+/// security — it stays in memory next to the token it guards. Length-prefixing
+/// avoids collisions like `("a","bc")` vs `("ab","c")`.
+fn cred_fingerprint(parts: &[&str]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    for p in parts {
+        p.len().hash(&mut h);
+        p.hash(&mut h);
+    }
+    h.finish()
+}
 
 /// Fetch a valid bearer token for an OAuth2 config, reusing the cache when
 /// possible. Blocks only on the exchange HTTP call when a refresh is needed.
@@ -62,20 +88,24 @@ pub async fn resolve_token(
         _ => return Err("resolve_token called on a non-OAuth2 auth kind".into()),
     };
 
-    // Cache hit (still valid): return without round-trip.
-    {
-        let guard = cache.lock().await;
-        if let Some(cached) = guard.get(config_id) {
-            if cached.refresh_at > Instant::now() {
-                return Ok(cached.access_token.clone());
-            }
-        }
-    }
-
+    // Read credentials up-front: needed both to mint AND to fingerprint the
+    // cache entry (so a rotated client_id/secret busts a still-unexpired token
+    // — see `CachedToken::cred_fp`).
     let client_id = env.get(client_id_env)
         .ok_or_else(|| format!("missing env var {}", client_id_env))?;
     let client_secret = env.get(client_secret_env)
         .ok_or_else(|| format!("missing env var {}", client_secret_env))?;
+    let cred_fp = cred_fingerprint(&[client_id, client_secret, scope, token_url]);
+
+    // Cache hit (still valid AND same credentials): return without round-trip.
+    {
+        let guard = cache.lock().await;
+        if let Some(cached) = guard.get(config_id) {
+            if cached.refresh_at > Instant::now() && cached.cred_fp == cred_fp {
+                return Ok(cached.access_token.clone());
+            }
+        }
+    }
 
     // Adobe IMS uses comma-separated scopes in `scope=` param; Google uses
     // space-separated. We forward the literal value provided by the
@@ -132,7 +162,7 @@ pub async fn resolve_token(
         let mut guard = cache.lock().await;
         guard.insert(
             config_id.to_string(),
-            CachedToken { access_token: access_token.clone(), refresh_at },
+            CachedToken { access_token: access_token.clone(), refresh_at, cred_fp },
         );
     }
 
@@ -165,7 +195,7 @@ pub async fn resolve_token_exchange(
     base_url: &str,
     env: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let (endpoint, method, body_template, body_format, token_jsonpath, ttl_seconds) = match auth {
+    let (endpoint, method, body_template, body_format, token_jsonpath, ttl_seconds, creds_env_keys) = match auth {
         ApiAuthKind::TokenExchange {
             endpoint,
             method,
@@ -173,16 +203,27 @@ pub async fn resolve_token_exchange(
             body_format,
             token_jsonpath,
             ttl_seconds,
+            creds_env_keys,
             ..
-        } => (endpoint, method, body_template, body_format, token_jsonpath, *ttl_seconds),
+        } => (endpoint, method, body_template, body_format, token_jsonpath, *ttl_seconds, creds_env_keys),
         _ => return Err("resolve_token_exchange called on a non-TokenExchange auth kind".into()),
     };
 
-    // Cache hit: short-circuit before any HTTP.
+    // Fingerprint the credentials (the `creds_env_keys` values) so a rotated
+    // secret busts a still-unexpired cached token — see `CachedToken::cred_fp`.
+    // Empty `creds_env_keys` (older specs) → fp 0 = no change-detection, same
+    // as the pre-fix behaviour for those.
+    let cred_values: Vec<&str> = creds_env_keys
+        .iter()
+        .map(|k| env.get(k).map(String::as_str).unwrap_or(""))
+        .collect();
+    let cred_fp = cred_fingerprint(&cred_values);
+
+    // Cache hit: short-circuit before any HTTP (still valid AND same creds).
     if ttl_seconds > 0 {
         let guard = cache.lock().await;
         if let Some(cached) = guard.get(config_id) {
-            if cached.refresh_at > Instant::now() {
+            if cached.refresh_at > Instant::now() && cached.cred_fp == cred_fp {
                 return Ok(cached.access_token.clone());
             }
         }
@@ -257,7 +298,7 @@ pub async fn resolve_token_exchange(
         let mut guard = cache.lock().await;
         guard.insert(
             config_id.to_string(),
-            CachedToken { access_token: access_token.clone(), refresh_at },
+            CachedToken { access_token: access_token.clone(), refresh_at, cred_fp },
         );
     }
 
@@ -418,6 +459,10 @@ mod tests {
                 CachedToken {
                     access_token: "cached-abc".into(),
                     refresh_at: Instant::now() + Duration::from_secs(300),
+                    // Must match the fingerprint resolve_token computes from
+                    // the env below + sample_auth's scope/token_url, else the
+                    // hit is (correctly) rejected as a credential mismatch.
+                    cred_fp: cred_fingerprint(&["x", "y", "read", "http://127.0.0.1:1/unused"]),
                 },
             );
         }
@@ -427,6 +472,38 @@ mod tests {
 
         let tok = resolve_token(&cache, "cfg-1", &sample_auth(), &env).await.unwrap();
         assert_eq!(tok, "cached-abc");
+    }
+
+    #[tokio::test]
+    async fn cred_change_busts_cache() {
+        // Regression (Adobe 403003 "Api Key is invalid"): a token cached under
+        // a config_id was served even after the operator rotated the
+        // client_id — so the request's x-api-key (NEW id) no longer matched
+        // the token (OLD id). With the cred fingerprint, a changed credential
+        // must invalidate the cache. sample_auth's token_url points at a
+        // closed port, so a forced re-mint fails fast → we assert we did NOT
+        // get the stale cached token back.
+        let cache = Arc::new(Mutex::new(HashMap::new()));
+        {
+            let mut g = cache.lock().await;
+            g.insert(
+                "cfg-rot".into(),
+                CachedToken {
+                    access_token: "stale-old-client".into(),
+                    refresh_at: Instant::now() + Duration::from_secs(300),
+                    // Fingerprint of the OLD credentials.
+                    cred_fp: cred_fingerprint(&["OLD_ID", "OLD_SECRET", "read", "http://127.0.0.1:1/unused"]),
+                },
+            );
+        }
+        let mut env = HashMap::new();
+        env.insert("CLIENT_ID".into(), "NEW_ID".into());
+        env.insert("CLIENT_SECRET".into(), "NEW_SECRET".into());
+
+        let res = resolve_token(&cache, "cfg-rot", &sample_auth(), &env).await;
+        // Fingerprint mismatch → no short-circuit → attempts a re-mint against
+        // the dead token_url → Err. Crucially NOT the stale token.
+        assert!(res.is_err(), "rotated creds must NOT return the stale cached token, got: {res:?}");
     }
 
     #[tokio::test]
@@ -451,8 +528,8 @@ mod tests {
         // Sanity: an Instant in the past means "must refresh"; in the
         // future means "still valid". We don't want the ordering semantics
         // to drift if Instant's contract ever changes.
-        let past = CachedToken { access_token: "old".into(), refresh_at: Instant::now() - Duration::from_secs(1) };
-        let future = CachedToken { access_token: "new".into(), refresh_at: Instant::now() + Duration::from_secs(60) };
+        let past = CachedToken { access_token: "old".into(), refresh_at: Instant::now() - Duration::from_secs(1), cred_fp: 0 };
+        let future = CachedToken { access_token: "new".into(), refresh_at: Instant::now() + Duration::from_secs(60), cred_fp: 0 };
         assert!(past.refresh_at <= Instant::now());
         assert!(future.refresh_at > Instant::now());
     }
@@ -621,6 +698,8 @@ mod tests {
                 CachedToken {
                     access_token: "cached-tx".into(),
                     refresh_at: Instant::now() + Duration::from_secs(300),
+                    // creds_env_keys is empty below → fp over no values.
+                    cred_fp: cred_fingerprint(&[]),
                 },
             );
         }

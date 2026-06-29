@@ -79,6 +79,24 @@ describe('useWebSocket', () => {
     expect(result.current.connected).toBe(true);
   });
 
+  it('calls onConnect on the first connect AND on every reconnect (re-sync hook)', () => {
+    const handler = vi.fn();
+    const onConnect = vi.fn();
+    renderHook(() => useWebSocket(handler, onConnect));
+
+    // First connect → re-sync once.
+    act(() => { MockWebSocket.instances[0].simulateOpen(); });
+    expect(onConnect).toHaveBeenCalledTimes(1);
+
+    // Drop the socket → backoff (1s) → a new socket → re-sync AGAIN (this is
+    // what catches messages/presence missed during a backend rebuild).
+    act(() => { MockWebSocket.instances[0].close(); });
+    act(() => { vi.advanceTimersByTime(1000); });
+    expect(MockWebSocket.instances).toHaveLength(2);
+    act(() => { MockWebSocket.instances[1].simulateOpen(); });
+    expect(onConnect).toHaveBeenCalledTimes(2);
+  });
+
   it('dispatches parsed WsMessage to handler', () => {
     const handler = vi.fn();
     renderHook(() => useWebSocket(handler));

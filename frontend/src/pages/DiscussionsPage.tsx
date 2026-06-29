@@ -230,6 +230,10 @@ export function DiscussionsPage({
   const [uploadingFiles, setUploadingFiles] = useState(false);
   const [contactsList, setContactsList] = useState<Contact[]>([]);
   const [contactsOnline, setContactsOnline] = useState<Record<string, boolean>>({});
+  // message_ids whose federated attachment is announced but not yet
+  // fetched/linked (F15+) → render a "downloading…" placeholder on the bubble
+  // until the file lands. Set by the `file_attached{pending}` WS events.
+  const [pendingFileMsgIds, setPendingFileMsgIds] = useState<Set<string>>(() => new Set());
   // Batch run summaries — feeds the sidebar pastille that links a batch group
   // back to the workflow run that spawned it. Refetched on batch WS events
   // (see handleWsMessage below) so newly-finished batches pick up their
@@ -460,6 +464,33 @@ export function DiscussionsPage({
         reloadDiscussion(activeDiscussionId);
       }
     }
+    // A federated file finished landing (announced, then fetched + linked to its
+    // message) → reload so the attachment renders WITHOUT waiting for the next
+    // message. The file federates slightly after its ChatMessage, so the reload
+    // on `chat_message` above fired before the file was ready (the "image
+    // n'apparaît qu'après un 2e message" glitch).
+    if (msg.type === 'file_attached') {
+      if (msg.pending) {
+        // Announced, binary not fetched yet → flag the message so its bubble
+        // shows "📎 téléchargement…" instead of nothing, then reload so the
+        // message itself is visible during the download.
+        setPendingFileMsgIds(prev => {
+          if (prev.has(msg.message_id)) return prev;
+          const next = new Set(prev); next.add(msg.message_id); return next;
+        });
+      } else {
+        // Binary fetched + linked → clear the placeholder; the reload below
+        // surfaces the real attachment.
+        setPendingFileMsgIds(prev => {
+          if (!prev.has(msg.message_id)) return prev;
+          const next = new Set(prev); next.delete(msg.message_id); return next;
+        });
+      }
+      refetchDiscussions();
+      if (activeDiscussionId) {
+        reloadDiscussion(activeDiscussionId);
+      }
+    }
     // Remote peer shared a discussion with us → refresh list
     if (msg.type === 'discussion_invite') {
       refetchDiscussions();
@@ -531,7 +562,42 @@ export function DiscussionsPage({
   // array — it would be in the temporal dead zone at this point in render
   // and throw a ReferenceError.
   }, [contactsList, activeDiscussionId, refetchDiscussions, setSendingMap, toast, t]);
-  const { connected: wsConnected } = useWebSocket(handleWsMessage);
+
+  // Reliable presence SNAPSHOT. The `presence` WS events above are edge-triggered
+  // (fired only when a peer connects/disconnects), so a frontend that subscribed
+  // AFTER a peer came online — or missed the event during a backend rebuild —
+  // shows the contact OFFLINE even though it's reachable (the "Romu apparaît hors
+  // ligne alors qu'il est connecté" bug). Ping each contact's /health to
+  // re-derive the dots; complements the instant edge events.
+  const refreshContactsPresence = useCallback(async () => {
+    if (contactsList.length === 0) return;
+    const entries = await Promise.all(contactsList.map(async (c) => {
+      try { return [c.id, await contactsApi.ping(c.id)] as const; }
+      catch { return [c.id, false] as const; }
+    }));
+    setContactsOnline(prev => ({ ...prev, ...Object.fromEntries(entries) }));
+  }, [contactsList]);
+
+  // On every WS (re)connect, re-sync so the UI catches up on anything missed
+  // while the socket was down (a backend rebuild / dropped connection drops
+  // federated chat + presence events with no listener). Inline closure (not a
+  // dep) — `reloadDiscussion` is declared further down; it's only *called* after
+  // mount, so the temporal-dead-zone caveat that applies to dep arrays here
+  // (see handleWsMessage above) doesn't apply to a deferred call.
+  const { connected: wsConnected } = useWebSocket(handleWsMessage, () => {
+    refetchDiscussions();
+    if (activeDiscussionId) reloadDiscussion(activeDiscussionId);
+    refreshContactsPresence();
+  });
+
+  // Baseline presence poll (every 30s) — edge events handle instant transitions
+  // in between; this guarantees the dots converge to the truth even if an event
+  // was missed. The initial fetch comes from the WS onConnect above (fires on
+  // first connect), so we don't also ping synchronously here.
+  useEffect(() => {
+    const id = setInterval(refreshContactsPresence, 30000);
+    return () => clearInterval(id);
+  }, [refreshContactsPresence]);
 
   // 0.8.3 (#280) — Poll the audit-status of the active discussion's
   // project so we can show a banner when an audit is running. The
@@ -1444,6 +1510,57 @@ export function DiscussionsPage({
     }
   }, [toast, t]);
 
+  // Unified "join by code": paste a kr-join token → the backend resolves it
+  // local OR cross-instance (asks our contacts, mirrors the disc back over WS),
+  // then we refresh the list and open the (possibly just-mirrored) disc. The
+  // single await covers the ~0.5–8 s remote resolution; the sidebar shows a
+  // "resolving…" state meanwhile. Throws on failure so the sidebar surfaces the
+  // backend message (expired / not found).
+  // Click a contact → open (or create) a 1:1 human↔human shared discussion with
+  // them. Reuses an existing shared disc with that contact if one exists, else
+  // creates one + shares it (mirrors on the peer). (The "no agent reply"
+  // guarantee for instances that DO have an agent installed is F9 backend —
+  // here, posting only triggers a local agent where one is installed.)
+  const handleStartChatWithContact = useCallback(async (contact: Contact) => {
+    const existing = allDiscussions.find(d => !d.archived && d.shared_with?.includes(contact.id));
+    if (existing) {
+      setActiveDiscussionId(existing.id);
+      if (isMobile) setSidebarOpen(false);
+      return;
+    }
+    try {
+      const disc = await discussionsApi.create({
+        project_id: null,
+        title: `Chat — ${contact.pseudo}`,
+        agent: 'ClaudeCode',
+        language: configLanguage ?? 'fr',
+        initial_prompt: '',
+        // F9 (WSL backend 6ddf25b): mark the disc human-only so send_message
+        // never spawns the local runner — a true human↔human chat even on an
+        // instance that has an agent installed.
+        no_agent: true,
+      });
+      await discussionsApi.share(disc.id, [contact.id]);
+      await refetchDiscussions();
+      setActiveDiscussionId(disc.id);
+      if (isMobile) setSidebarOpen(false);
+      toast(t('contacts.chatStarted', contact.pseudo), 'success');
+    } catch {
+      toast(t('contacts.chatStartError'), 'error');
+    }
+  }, [allDiscussions, refetchDiscussions, isMobile, configLanguage, toast, t]);
+
+  const handleJoinByCode = useCallback(async (code: string) => {
+    const res = await discussionsApi.peerJoin(code);
+    await refetchDiscussions();
+    setActiveDiscussionId(res.disc_id);
+    // Mobile: close the sidebar so the freshly-joined disc is actually shown
+    // (mirrors handleDiscSelect — without this the join "succeeds" but the user
+    // stays on the contact list and sees nothing happen).
+    if (isMobile) setSidebarOpen(false);
+    toast(t('contacts.joinSuccess', res.disc_title), 'success');
+  }, [refetchDiscussions, toast, t, isMobile]);
+
   const handleContactDelete = useCallback(async (id: string) => {
     // Pre-fix the X button on a contact pill in the sidebar fired
     // delete with no confirmation. Removing a contact tears down the
@@ -1609,6 +1726,8 @@ export function DiscussionsPage({
           onNewDiscussion={() => setShowNewDiscussion(true)}
           onClose={() => setSidebarOpen(false)}
           onContactAdd={handleContactAdd}
+          onJoinByCode={handleJoinByCode}
+          onStartChat={handleStartChatWithContact}
           onContactDelete={handleContactDelete}
           toast={toast}
           t={t}
@@ -2017,6 +2136,7 @@ export function DiscussionsPage({
                       msg={msg}
                       idx={idx}
                       attachments={attachmentsByMessageId[msg.id] ?? EMPTY_ATTACHMENTS}
+                      pendingAttachment={pendingFileMsgIds.has(msg.id)}
                       isLastUser={msg.role === 'User' && idx === lastUserIdx}
                       isLastAgent={msg.role === 'Agent' && idx === lastAgentIdx}
                       isEditing={editingMsgId === msg.id}

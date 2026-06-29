@@ -246,6 +246,8 @@ export interface BootstrapProjectResponse {
 
 export interface CloneProjectRequest { url: string; name: string | null; agent: AgentType; }
 export interface CloneProjectResponse { project_id: string; discussion_id: string | null; }
+export interface CloneAndRemapRequest { parent_dir: string | null; }
+export interface CloneAndRemapResponse { project_id: string; new_path: string; }
 
 export interface RemoteRepo {
   name: string;
@@ -1630,6 +1632,9 @@ export interface CreateDiscussionRequest {
    *  version_index from the snapshot table and stamps both columns on
    *  `discussions`. Drives the QP-metrics aggregator. */
   originating_qp_id?: string | null;
+  /** F9 — create a human-only disc (the agent runner never spawns on
+   *  send_message). Used by the contact-click → 1:1 human↔human chat. */
+  no_agent?: boolean;
 }
 
 export interface SendMessageRequest {
@@ -1665,8 +1670,10 @@ export type WsMessage =
   | { type: 'presence'; from_pseudo: string; from_invite_code: string; online: boolean }
   | { type: 'ping'; timestamp: number }
   | { type: 'pong'; timestamp: number }
-  | { type: 'chat_message'; shared_discussion_id: string; message_id: string; from_pseudo: string; from_avatar_email: string | null; from_invite_code: string; content: string; timestamp: number }
+  | { type: 'chat_message'; shared_discussion_id: string; message_id: string; from_pseudo: string; from_avatar_email: string | null; from_invite_code: string; content: string; timestamp: number; role: MessageRole; agent_type: AgentType | null }
   | { type: 'discussion_invite'; shared_discussion_id: string; title: string; from_pseudo: string; from_invite_code: string }
+  | { type: 'disc_sync_request'; shared_discussion_id: string; since_timestamp: number }
+  | { type: 'file_attached'; shared_discussion_id: string; message_id: string; file_id: string; filename: string; mime_type: string; size: number; from_invite_code: string; pending?: boolean }
   | { type: 'batch_run_finished'; run_id: string; discussion_id: string; batch_name: string | null; batch_total: number; batch_completed: number; batch_failed: number }
   | { type: 'batch_run_progress'; run_id: string; discussion_id: string; batch_total: number; batch_completed: number; batch_failed: number }
   | { type: 'batch_run_child_started'; run_id: string; discussion_id: string }

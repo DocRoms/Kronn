@@ -141,9 +141,15 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
     expect(initials?.textContent).toBe('PE');
   });
 
-  it('renders no author block when neither pseudo nor avatar is present', () => {
+  it('still renders a HUMAN attribution (anonyme) when neither pseudo nor avatar is present', () => {
+    // F11: a user message must ALWAYS read as a human (vs an agent), even with
+    // no pseudo (federated from a peer whose pseudo is unset) — it falls back to
+    // "anonyme · humain" rather than rendering no attribution at all.
     const { container } = renderBubble(makeMessage({ role: 'User', content: 'hello' }));
-    expect(container.querySelector('.disc-msg-author')).toBeNull();
+    const author = container.querySelector('.disc-msg-author');
+    expect(author).not.toBeNull();
+    expect(author?.textContent).toContain('anonyme');
+    expect(author?.textContent).toContain('humain');
   });
 });
 

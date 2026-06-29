@@ -211,6 +211,9 @@ pub async fn disc_append(
     }).await.ok().flatten().is_some();
     let mut appended = 0u32;
     let mut skipped = 0u32;
+    // Freshly-inserted messages, federated to peers after the loop IF this is a
+    // single-message (live-turn) append on a shared disc — see the F3 gate below.
+    let mut inserted_msgs: Vec<DiscussionMessage> = Vec::new();
 
     let did_for_loop = req.disc_id.clone();
     for incoming in req.messages.iter() {
@@ -252,7 +255,20 @@ pub async fn disc_append(
         if let Err(e) = insert_result {
             return Json(ApiResponse::err(format!("DB error appending message: {}", e)));
         }
+        inserted_msgs.push(msg);
         appended += 1;
+    }
+
+    // Federate to peers via the shared helper (carries role + agent_type so an
+    // agent reply lands as Agent, not User). F3: ONLY for a single-message
+    // append — the live agent-turn case. Bulk transcript imports
+    // (messages.len() > 1) are historical catch-up, not live chat: replaying N
+    // frames would re-announce old turns AND can overflow the broadcast bus,
+    // silently truncating the peer's copy.
+    if req.messages.len() == 1 {
+        if let Some(m) = inserted_msgs.first() {
+            crate::api::federation::federate_message(&state, &req.disc_id, m).await;
+        }
     }
 
     // Liveness heartbeat (migration 064). Posting is proof the agent is

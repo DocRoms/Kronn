@@ -87,6 +87,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("065_reap_abandoned_sessions", include_str!("sql/065_reap_abandoned_sessions.sql")),
         ("066_context_files_message_id", include_str!("sql/066_context_files_message_id.sql")),
         ("067_context_files_backfill_legacy", include_str!("sql/067_context_files_backfill_legacy.sql")),
+        ("068_shared_id_unique", include_str!("sql/068_shared_id_unique.sql")),
+        ("069_disc_no_agent", include_str!("sql/069_disc_no_agent.sql")),
     ];
 
     // Check if there are pending migrations before backing up

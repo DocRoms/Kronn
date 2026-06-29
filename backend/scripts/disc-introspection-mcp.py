@@ -247,6 +247,26 @@ TOOLS = [
             "required": ["q"],
         },
     },
+    {
+        "name": "disc_list",
+        "description": (
+            "List available discussions (compact: disc_id, title, shared_id, "
+            "message_count, updated_at), newest first. By default only SHARED "
+            "(cross-instance / P2P) discussions — pass shared_only=false for all. "
+            "Use this to BROWSE rooms (e.g. to pick one to disc_load_other or "
+            "disc_join) without needing a search keyword. To read a listed disc's "
+            "messages call disc_load_other({disc_id}); to reply once bound, "
+            "disc_append."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "shared_only": {"type": "boolean", "description": "Only shared/P2P discs (default true)."},
+                "limit": {"type": "integer", "description": "Max discs (1-100, default 30)."},
+            },
+            "required": [],
+        },
+    },
     # ─── 0.8.6 phase 2 — disc-first / cross-agent collab ──────────────
     # `disc_join` is the key that unlocks host-launched cross-agent
     # use cases : without it, only Kronn-launched agents (env-injected
@@ -2142,6 +2162,36 @@ def call_disc_search(args):
     return _unwrap(_http("GET", f"/api/disc/search?{qs}"))
 
 
+def call_disc_list(args):
+    """Browse available discussions, compact + newest-first. Shared/P2P only by
+    default (the rooms worth joining cross-instance); shared_only=false for all.
+    No search keyword needed — complements disc_search (keyword) and
+    disc_load_other (read one by id)."""
+    shared_only = args.get("shared_only", True)
+    try:
+        limit = int(args.get("limit") or 30)
+    except (TypeError, ValueError):
+        limit = 30
+    limit = max(1, min(limit, 100))
+
+    data = _unwrap(_http("GET", "/api/discussions"))
+    discs = data if isinstance(data, list) else (data.get("discussions") or [])
+    out = []
+    for d in discs:
+        if shared_only and not d.get("shared_id"):
+            continue
+        out.append({
+            "disc_id": d.get("id"),
+            "title": d.get("title"),
+            "shared_id": d.get("shared_id"),
+            "message_count": d.get("message_count"),
+            "updated_at": d.get("updated_at"),
+        })
+    out.sort(key=lambda x: x.get("updated_at") or "", reverse=True)
+    out = out[:limit]
+    return {"disc_count": len(out), "shared_only": shared_only, "discussions": out}
+
+
 def call_disc_join(args):
     """0.8.6 phase 2 — bind this bridge to a Kronn disc via invite token.
 
@@ -3866,6 +3916,7 @@ DISPATCH = {
     "disc_unlink": call_disc_unlink,
     "disc_find_by_session": call_disc_find_by_session,
     "disc_search": call_disc_search,
+    "disc_list": call_disc_list,
     "disc_load_other": call_disc_load_other,
     # 0.8.6 phase 2 — cross-agent collab via shared disc.
     "disc_join": call_disc_join,

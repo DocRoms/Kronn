@@ -40,6 +40,11 @@ pub struct DiscussionSession {
     pub status: String,
     pub joined_at: String,
     pub left_at: Option<String>,
+    /// Last activity heartbeat (migration 064): bumped on every `disc_append`.
+    /// Surfaced so the UI can show presence freshness — "active" vs "silent
+    /// (working)" vs "away" — instead of a binary present/absent that makes a
+    /// quietly-working peer look like a dead room. `None` for rows predating 064.
+    pub last_seen: Option<String>,
 }
 
 /// Metadata returned by `create_invite_token`. The plain `token` field
@@ -140,12 +145,12 @@ pub fn list_sessions(
     include_left: bool,
 ) -> Result<Vec<DiscussionSession>> {
     let sql = if include_left {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen
            FROM discussion_sessions
           WHERE disc_id = ?1
           ORDER BY joined_at ASC"
     } else {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen
            FROM discussion_sessions
           WHERE disc_id = ?1 AND status != 'left'
           ORDER BY joined_at ASC"
@@ -162,6 +167,7 @@ pub fn list_sessions(
                 status: r.get(5)?,
                 joined_at: r.get(6)?,
                 left_at: r.get(7)?,
+                last_seen: r.get(8)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -179,7 +185,7 @@ pub fn find_active_session(
 ) -> Result<Option<DiscussionSession>> {
     let row = conn
         .query_row(
-            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at
+            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen
                FROM discussion_sessions
               WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'
               LIMIT 1",
@@ -194,6 +200,7 @@ pub fn find_active_session(
                     status: r.get(5)?,
                     joined_at: r.get(6)?,
                     left_at: r.get(7)?,
+                    last_seen: r.get(8)?,
                 })
             },
         )
@@ -331,6 +338,30 @@ pub fn create_invite_token(conn: &Connection, disc_id: &str) -> Result<InviteTok
     })
 }
 
+/// Read-only resolution of an invite token → its `disc_id`, WITHOUT consuming it
+/// or creating a session. Returns `None` if the token is unknown or expired.
+///
+/// Used by the cross-instance **claim-by-token** flow: when `disc_join(code)`
+/// misses locally, each accepted contact is asked "do you host the room behind
+/// this code?" — the owner resolves it here and shares the disc back. This is
+/// what unifies the two former mechanisms (local token-join vs contact-share)
+/// into a single "paste a code, it just works wherever the room lives".
+pub fn resolve_token_disc(conn: &Connection, plain_token: &str) -> Result<Option<String>> {
+    let hash = sha256_hex(plain_token);
+    let now = Utc::now().to_rfc3339();
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT disc_id, expires_at FROM discussion_invite_tokens WHERE token_hash = ?1",
+            params![hash],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((disc_id, expires_at)) if expires_at.as_str() >= now.as_str() => Some(disc_id),
+        _ => None,
+    })
+}
+
 /// Consume an invite token : validate it exists + is not expired,
 /// then record the use (idempotent — same token CAN be reused by N
 /// agents within its TTL window, that's a usability fix shipped
@@ -465,7 +496,15 @@ pub fn join_via_token(
     let session_pk = if let Some(pk) = existing_pk {
         pk
     } else {
-        // Step 2b — first join for this (agent_type, session_id) → insert.
+        // Step 2b — first join for this (agent_type, session_id) on THIS disc.
+        // The partial unique index `idx_disc_sessions_session_active` is global
+        // across discs, so release any active binding this session holds on a
+        // DIFFERENT disc before inserting — a bridge is in one room at a time.
+        tx.execute(
+            "UPDATE discussion_sessions SET status = 'left', left_at = ?4
+              WHERE agent_type = ?1 AND session_id = ?2 AND disc_id != ?3 AND status != 'left'",
+            params![agent_type, session_id, &disc_id, now],
+        )?;
         tx.execute(
             "INSERT INTO discussion_sessions
                 (disc_id, agent_type, session_id, role, status, joined_at)
@@ -488,6 +527,49 @@ pub fn join_via_token(
 
     tx.commit()?;
     Ok(JoinViaTokenResult { disc_id, session_pk })
+}
+
+/// Bind a CLI session to a disc by id, WITHOUT an invite token. Used when the
+/// disc arrived as a cross-instance mirror (the `claim-by-token` flow shares a
+/// disc in — the mirror carries a `shared_id` but no local token). Idempotent
+/// on `(disc_id, agent_type, session_id)`: a re-join returns the existing pk
+/// instead of accumulating phantom participants. Returns the session pk.
+pub fn join_disc_session(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: &str,
+) -> Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let existing_pk: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM discussion_sessions
+              WHERE disc_id = ?1 AND agent_type = ?2 AND session_id = ?3 AND status != 'left'
+              LIMIT 1",
+            params![disc_id, agent_type, session_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(pk) = existing_pk {
+        return Ok(pk);
+    }
+    // The partial unique index `idx_disc_sessions_session_active` enforces ONE
+    // active binding per (agent_type, session_id) across ALL discs. A bridge
+    // session moving to a new room (e.g. joining a freshly mirrored disc while
+    // still bound to an earlier one) must release its previous binding first,
+    // else the INSERT below trips the unique constraint.
+    conn.execute(
+        "UPDATE discussion_sessions SET status = 'left', left_at = ?4
+          WHERE agent_type = ?1 AND session_id = ?2 AND disc_id != ?3 AND status != 'left'",
+        params![agent_type, session_id, disc_id, now],
+    )?;
+    conn.execute(
+        "INSERT INTO discussion_sessions
+            (disc_id, agent_type, session_id, role, status, joined_at)
+         VALUES (?1, ?2, ?3, 'peer', 'active', ?4)",
+        params![disc_id, agent_type, session_id, now],
+    )?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// SHA-256 hex digest helper. Pulled out so the token storage
@@ -528,6 +610,107 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn resolve_token_disc_returns_disc_for_valid_token() {
+        let conn = setup_db();
+        let issued = create_invite_token(&conn, "d1").unwrap();
+        // The read-only resolver maps a live token → its disc (no consume).
+        assert_eq!(
+            resolve_token_disc(&conn, &issued.token).unwrap().as_deref(),
+            Some("d1")
+        );
+        // Unknown token → None (the cross-instance "we don't host it" signal).
+        assert!(resolve_token_disc(&conn, "kr-join-deadbeef").unwrap().is_none());
+    }
+
+    #[test]
+    fn resolve_token_disc_rejects_expired_token() {
+        let conn = setup_db();
+        let plain = "kr-join-expired";
+        conn.execute(
+            "INSERT INTO discussion_invite_tokens (token_hash, disc_id, created_at, expires_at)
+             VALUES (?1, 'd1', ?2, ?2)",
+            params![sha256_hex(plain), "2000-01-01T00:00:00+00:00"],
+        )
+        .unwrap();
+        assert!(resolve_token_disc(&conn, plain).unwrap().is_none());
+    }
+
+    #[test]
+    fn join_disc_session_is_idempotent_and_distinct_per_session() {
+        let conn = setup_db();
+        // Token-free bind (used for cross-instance mirror discs).
+        let pk1 = join_disc_session(&conn, "d1", "ClaudeCode", "sess-1").unwrap();
+        let pk2 = join_disc_session(&conn, "d1", "ClaudeCode", "sess-1").unwrap();
+        assert_eq!(pk1, pk2, "re-join of same session returns the same pk");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM discussion_sessions WHERE disc_id='d1' AND session_id='sess-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "no phantom duplicate session rows");
+        let pk3 = join_disc_session(&conn, "d1", "ClaudeCode", "sess-2").unwrap();
+        assert_ne!(pk1, pk3, "a different session id is a distinct participant");
+    }
+
+    #[test]
+    fn list_sessions_surfaces_last_seen_for_presence_freshness() {
+        let conn = setup_db();
+        // A bound session starts with no heartbeat…
+        join_disc_session(&conn, "d1", "ClaudeCode", "sess-1").unwrap();
+        let before = list_sessions(&conn, "d1", false).unwrap();
+        let s = before.iter().find(|s| s.session_id.as_deref() == Some("sess-1")).unwrap();
+        assert!(s.last_seen.is_none(), "no activity yet → last_seen None");
+        // …and after a heartbeat (every disc_append calls this), it's surfaced
+        // so the UI can show "active" vs "silent" instead of a dead-looking room.
+        touch_session_by_agent(&conn, "d1", "ClaudeCode").unwrap();
+        let after = list_sessions(&conn, "d1", false).unwrap();
+        let s = after.iter().find(|s| s.session_id.as_deref() == Some("sess-1")).unwrap();
+        assert!(s.last_seen.is_some(), "heartbeat must surface in list_sessions");
+    }
+
+    #[test]
+    fn join_disc_session_rebinds_session_across_discs() {
+        // Regression: the partial unique index idx_disc_sessions_session_active
+        // is GLOBAL across discs, so a bridge session already active on one disc
+        // that joins a second one (e.g. a freshly mirrored cross-instance disc)
+        // must release the first binding rather than trip the unique constraint.
+        let conn = setup_db();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO discussions (id, project_id, title, created_at, updated_at)
+             VALUES ('d2', 'p1', 'Mirror disc', ?1, ?1)",
+            params![now],
+        )
+        .unwrap();
+
+        let pk_d1 = join_disc_session(&conn, "d1", "ClaudeCode", "sess-1").unwrap();
+        // Previously panicked here with UNIQUE constraint failed.
+        let pk_d2 = join_disc_session(&conn, "d2", "ClaudeCode", "sess-1").unwrap();
+        assert_ne!(pk_d1, pk_d2, "the new disc gets its own active row");
+
+        // The old binding is released, exactly one active binding remains.
+        let active: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM discussion_sessions
+                  WHERE agent_type='ClaudeCode' AND session_id='sess-1' AND status != 'left'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active, 1, "a bridge session is active in exactly one room");
+        let d1_status: String = conn
+            .query_row(
+                "SELECT status FROM discussion_sessions WHERE id = ?1",
+                params![pk_d1],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(d1_status, "left", "the previous binding is marked left");
     }
 
     #[test]

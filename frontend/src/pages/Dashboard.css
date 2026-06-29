@@ -1631,6 +1631,52 @@ html[data-density="large"] .dash-main {
   border-radius: var(--kr-r-sm);
 }
 
+/* Clone-and-remap row — the alternative to manual remap when the project
+   has a known repo_url. Neutral (accent) styling, distinct from the
+   error-toned manual remap button above it. */
+.dash-remap-clone {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  flex-wrap: wrap;
+  margin-top: var(--kr-sp-3);
+}
+
+.dash-remap-clone-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-6);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.4);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-accent-ink);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.dash-remap-clone-btn:hover:not(:disabled) {
+  background: rgba(var(--kr-accent-rgb), 0.2);
+}
+
+.dash-remap-clone-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dash-remap-clone-from {
+  font-size: var(--kr-fs-xs);
+  font-family: var(--kr-font-mono, monospace);
+  color: var(--kr-text-faint);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 /* Page-level missing-path summary banner (0.8.9). One row, error-tinted,
    with a filter toggle. Sits above the search bar after a cross-OS import. */
 .dash-missing-banner {

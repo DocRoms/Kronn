@@ -36,7 +36,30 @@ interface ParticipantRow {
   session_id: string | null;
   role: string;
   status: string;
+  last_seen?: string | null;
 }
+
+// Presence freshness from `last_seen` (the row's last activity heartbeat):
+// active <2 min (green) / quiet-but-working <10 min (amber) / away beyond (grey).
+// An agent that idles between turns is NOT "gone" — this distinguishes
+// working-and-quiet from actually-absent without a noisy online/offline flip.
+type Freshness = 'fresh' | 'idle' | 'away';
+function freshnessOf(lastSeen?: string | null): Freshness {
+  if (!lastSeen) return 'away';
+  const ageMs = Date.now() - new Date(lastSeen).getTime();
+  if (Number.isNaN(ageMs) || ageMs >= 10 * 60_000) return 'away';
+  return ageMs < 2 * 60_000 ? 'fresh' : 'idle';
+}
+const FRESH_COLOR: Record<Freshness, string> = {
+  fresh: 'var(--kr-success)',
+  idle: 'var(--kr-warning)',
+  away: 'var(--kr-text-tertiary, #888)',
+};
+const FRESH_LABEL: Record<Freshness, string> = {
+  fresh: 'actif',
+  idle: 'silencieux',
+  away: 'absent',
+};
 
 // Agent-type → emoji icon. Distinct glyphs per CLI but none of them
 // should LOOK like a status indicator (green circle = "online" etc.) —
@@ -121,18 +144,26 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
           {t('disc.participantsEmpty')}
         </span>
       )}
-      {participants.map(p => (
-        <span
-          key={p.id}
-          className="disc-participant-chip"
-          data-status={p.status}
-          data-role={p.role}
-          title={`${p.agent_type} (${p.role}, ${p.status})`}
-        >
-          <span aria-hidden>{iconFor(p.agent_type)}</span>
-          <span>{p.agent_type}</span>
-        </span>
-      ))}
+      {participants.map(p => {
+        const f = freshnessOf(p.last_seen);
+        return (
+          <span
+            key={p.id}
+            className="disc-participant-chip"
+            data-status={p.status}
+            data-role={p.role}
+            data-freshness={f}
+            title={`${p.agent_type} (${p.role}) — ${FRESH_LABEL[f]}`}
+          >
+            <span
+              aria-hidden
+              style={{ width: 6, height: 6, borderRadius: '50%', background: FRESH_COLOR[f], display: 'inline-block', flexShrink: 0 }}
+            />
+            <span aria-hidden>{iconFor(p.agent_type)}</span>
+            <span>{p.agent_type}</span>
+          </span>
+        );
+      })}
       <button
         type="button"
         className="disc-participants-invite-btn"

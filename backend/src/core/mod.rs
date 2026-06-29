@@ -35,6 +35,7 @@ pub mod user_context;
 pub mod sse_limits;
 pub mod worktree;
 pub mod tailscale;
+pub mod net_expose;
 pub mod ws_client;
 pub mod log_buffer;
 pub mod rtk_detect;

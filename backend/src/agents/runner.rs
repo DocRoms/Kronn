@@ -510,14 +510,23 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // Use compact format for agents with small context windows (eco-design)
     let compact = matches!(config.agent_type, AgentType::Codex | AgentType::Kiro | AgentType::Vibe);
 
-    // Ensure this discussion's skills/profiles exist as native files on disk.
-    // Skills are installed at the PROJECT level (shared by all discussions).
-    // This is additive: it only creates missing files, never removes others.
-    // Full cleanup only happens at startup / project config change.
-    let native_sync_ok = if !config.project_path.is_empty() && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty()) {
+    // Ensure this run's skills/profiles exist as native files in the
+    // directory the agent ACTUALLY runs in.
+    //
+    // This must target `work_dir`, not `project_path`. For a workflow Agent
+    // step the agent runs in an isolated git WORKTREE (`work_dir`), which is a
+    // fresh checkout that does NOT contain the untracked `.claude/skills/`
+    // dir synced to the project root — so a custom skill named in `skill_ids`
+    // was invisible to the agent's Skill tool ("the skill isn't registered").
+    // Syncing to the effective cwd lands `SKILL.md` where the agent discovers
+    // it. For a normal discussion `work_dir` is None → falls back to
+    // `project_path` (unchanged behaviour). Additive: only creates missing
+    // files, never removes others.
+    let agent_cwd = config.work_dir.unwrap_or(config.project_path);
+    let native_sync_ok = if !agent_cwd.is_empty() && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty()) {
         let profile_ids_vec: Vec<String> = config.profile_ids.to_vec();
         crate::core::native_files::sync_project_native_files(
-            config.project_path, config.skill_ids, &profile_ids_vec,
+            agent_cwd, config.skill_ids, &profile_ids_vec,
         ).is_ok()
     } else {
         false
@@ -525,13 +534,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
     // If native files exist AND the agent discovers them (not all do — Vibe/Kiro don't),
     // send a lightweight hint (~15 tokens) instead of full content (~500-800 tokens).
+    // Probe the SAME dir we synced to (`agent_cwd`) — probing project_path
+    // while the agent runs in a worktree would mis-detect and send a hint for
+    // a file the agent can't actually see.
     let native_skills = native_sync_ok
         && crate::core::native_files::supports_native_skills(config.agent_type)
-        && crate::core::native_files::has_native_skills(config.project_path, config.agent_type);
+        && crate::core::native_files::has_native_skills(agent_cwd, config.agent_type);
     let native_profiles = native_sync_ok
         && config.profile_ids.len() == 1 // Multi-profile always needs prompt injection
         && crate::core::native_files::supports_native_profiles(config.agent_type)
-        && crate::core::native_files::has_native_profiles(config.project_path, config.agent_type);
+        && crate::core::native_files::has_native_profiles(agent_cwd, config.agent_type);
 
     // Build skills prompt — native hint (~15 tokens) or full injection (~500-800 tokens)
     let skills_prompt = if native_skills {

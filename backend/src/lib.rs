@@ -277,6 +277,16 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
+    // Skip the bearer check for the cross-instance "claim by token" endpoint —
+    // a remote peer has no bearer token. It self-authenticates via its invite
+    // code in the body, validated against our contacts in the handler (same
+    // trust model as the WS Presence handshake).
+    if request.uri().path() == "/api/disc/claim-by-token"
+        || request.uri().path() == "/api/disc/fetch-file"
+    {
+        return Ok(next.run(request).await);
+    }
+
     let config = state.config.read().await;
     let auth_enabled = config.server.auth_enabled;
     let expected_token = config.server.auth_token.clone();
@@ -473,11 +483,21 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/agent-access", get(api::setup::get_agent_access).post(api::setup::set_agent_access))
         .route("/api/config/model-tiers", get(api::setup::get_model_tiers).post(api::setup::set_model_tiers))
         .route("/api/config/server", get(api::setup::get_server_config).post(api::setup::set_server_config))
+        .route("/api/config/network-exposure", get(api::setup::get_network_exposure).post(api::setup::set_network_exposure))
         .route("/api/config/auth-token/regenerate", post(api::setup::regenerate_auth_token))
         .route("/api/config/db-info", get(api::setup::db_info))
         .route("/api/db/backup", post(api::setup::db_backup))
         .route("/api/config/export", get(api::setup::export_data))
-        .route("/api/config/import", post(api::setup::import_data))
+        // Whole-DB restore: exports routinely exceed axum's ~2 MB default body
+        // limit (a few hundred discussions ≈ 2 MB ZIP). Without this, any
+        // non-trivial export fails the upload with "Error parsing
+        // multipart/form-data request" before the data is ever read. 512 MB
+        // headroom — this is a trusted localhost admin op.
+        .route(
+            "/api/config/import",
+            post(api::setup::import_data)
+                .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
         // ── Projects ──
         .route("/api/projects", get(api::projects::list))
         .route("/api/projects", post(api::projects::create))
@@ -519,6 +539,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // is the manual escape hatch for operators.
         .route("/api/audit-runs/cleanup", post(api::audit::audit_runs_cleanup))
         .route("/api/projects/{id}/remap-path", post(api::projects::remap_path))
+        // Recover a project whose path no longer resolves (cross-machine
+        // import): re-clone its repo_url locally + re-point the existing
+        // project at the clone. Re-syncs plugins/skills to the new path.
+        .route("/api/projects/{id}/clone-and-remap", post(api::projects::clone_and_remap))
         // 0.7.1 — `ai/` → `docs/` convention migration. Idempotent, safe
         // to call on already-migrated or never-bootstrapped projects.
         .route("/api/projects/{id}/migrate-docs", post(api::projects::migrate_docs))
@@ -733,6 +757,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // to validate the token and bind itself to the resolved disc.
         // Not scoped by id — the disc identity is what the token resolves to.
         .route("/api/discussions/peer-join", post(api::disc_invite::peer_join))
+        // Cross-instance leg of the unified "join by code": a peer asks whether
+        // we host the room behind a token; if so we share it back. Auth-exempt
+        // (self-auth via invite code in body — see auth_middleware).
+        .route("/api/disc/claim-by-token", post(api::disc_invite::claim_by_token))
+        .route("/api/disc/fetch-file", post(api::disc_invite::fetch_file))
         // 0.8.6 phase 3 — `disc_leave` MCP tool's companion route.
         // Marks the caller's active session as `left` (idempotent).
         .route("/api/discussions/peer-leave", post(api::disc_invite::peer_leave))

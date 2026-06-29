@@ -166,6 +166,7 @@ pub async fn create(
     // (the client only knows the QP id; treating the server as the
     // source of truth avoids races against concurrent QP updates).
     let originating_qp_id = req.originating_qp_id.clone();
+    let want_no_agent = req.no_agent;
     match state.db.with_conn(move |conn| {
         crate::db::discussions::insert_discussion(conn, &disc)?;
         crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
@@ -173,6 +174,10 @@ pub async fn create(
             if let Ok(Some(v)) = crate::db::quick_prompts::current_version_index(conn, qp_id) {
                 crate::db::discussions::set_originating_qp(conn, &disc.id, qp_id, v)?;
             }
+        }
+        // F9 — mark the disc human-only so the runner never spawns.
+        if want_no_agent {
+            crate::db::discussions::set_disc_no_agent(conn, &disc.id, true)?;
         }
         Ok(())
     }).await {
@@ -392,13 +397,14 @@ pub async fn share(
 
     match result {
         Ok((shared_id, title)) => {
-            // Send DiscussionInvite to peers via WS broadcast
+            // Send DiscussionInvite to peers via WS broadcast. Use the canonical
+            // invite-code builder (anonymous-pseudo fallback) so the "shared by"
+            // label + from_invite_code are well-formed — the old inline
+            // unwrap_or_default() leaked an empty pseudo (`kronn:@host`).
             let config = state.config.read().await;
-            let pseudo = config.server.pseudo.clone().unwrap_or_default();
-            let host = crate::api::contacts::advertised_host_async(&config.server).await;
-            let port = config.server.port;
+            let pseudo = crate::api::contacts::invite_pseudo(&config.server);
+            let invite_code = crate::api::contacts::build_invite_code(&config.server).await;
             drop(config);
-            let invite_code = format!("kronn:{}@{}:{}", pseudo, host, port);
 
             let _ = state.ws_broadcast.send(WsMessage::DiscussionInvite {
                 shared_discussion_id: shared_id.clone(),

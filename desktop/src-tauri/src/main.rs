@@ -449,9 +449,16 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
         None => config::default_config(),
     };
 
-    // Override server config for embedded mode
-    app_config.server.host = "127.0.0.1".to_string();
+    // Embedded mode: bind loopback by default, but HONOR the network-exposure
+    // toggle (`config.server.host = 0.0.0.0`) so the desktop app can join the
+    // contacts / P2P mesh. The webview always talks to 127.0.0.1:port (which
+    // 0.0.0.0 includes), so the local UI is unaffected either way. We never bind
+    // an arbitrary configured host in embedded mode — only loopback or bind-all.
+    if !kronn::core::net_expose::is_exposed_host(&app_config.server.host) {
+        app_config.server.host = "127.0.0.1".to_string();
+    }
     app_config.server.port = port;
+    let bind_host = app_config.server.host.clone();
 
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
@@ -582,8 +589,9 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
             ),
         );
 
-    let addr = format!("127.0.0.1:{}", port);
+    let addr = format!("{}:{}", bind_host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
+    kronn::core::net_expose::record_bound_host(&bind_host);
     tracing::info!("Kronn ready on http://{}", addr);
 
     axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
@@ -606,6 +614,13 @@ fn open_url(url: String) -> Result<(), String> {
     } else {
         Err("Only http/https URLs are allowed".into())
     }
+}
+
+/// Relaunch the desktop app — used by the "Allow connections from other
+/// devices" toggle, whose host change only takes effect on a re-bind.
+#[tauri::command]
+fn restart_app(app: tauri::AppHandle) {
+    app.restart();
 }
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -655,7 +670,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(BackendInfo { port })
-        .invoke_handler(tauri::generate_handler![get_backend_url, open_url])
+        .invoke_handler(tauri::generate_handler![get_backend_url, open_url, restart_app])
         .setup(move |app| {
             use tauri::Manager;
 

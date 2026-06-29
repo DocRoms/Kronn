@@ -932,6 +932,23 @@
   font-size: var(--kr-fs-sm);
 }
 
+.disc-contact-add-submit:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* "Résolution en cours…" state while a join-by-code resolves (local or the
+   async cross-instance mirror, ~0.5–8 s). */
+.disc-join-resolving {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.disc-join-spin {
+  animation: spin 0.8s linear infinite;
+}
+
 .disc-contact-row {
   display: flex;
   align-items: center;

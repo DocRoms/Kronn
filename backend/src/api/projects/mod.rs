@@ -378,6 +378,51 @@ pub(super) async fn determine_parent_dir(state: &AppState) -> Result<String, Str
     }
 }
 
+/// Re-sync a project's on-disk agent assets to its CURRENT (DB) path.
+///
+/// Writes the MCP plugins the project is configured for (`.mcp.json`,
+/// `.gemini/settings.json`, …) plus its native skill/profile files
+/// (`SKILL.md`, agent files). Call this after the project's path changes —
+/// a remap or a clone-into-existing — so the new directory gets the same
+/// plugins/skills the project had before the move. Without it, a freshly
+/// remapped project shows its configured plugins in the UI but the agent
+/// running in that directory never sees them on disk.
+///
+/// Best-effort: every step logs on failure and never fails the caller.
+/// MCP sync is skipped when no encryption secret is configured (the env
+/// secrets can't be decrypted to write them out).
+pub(crate) async fn resync_project_assets(state: &AppState, project_id: &str) {
+    let secret = state.config.read().await.encryption_secret.clone();
+    let pid = project_id.to_string();
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            // Plugins (MCP configs) → per-agent config files in the project root.
+            // `sync_project_mcps_to_disk` reads the project's path from the DB,
+            // so it picks up the path we just updated.
+            if let Some(ref s) = secret {
+                if let Err(e) = crate::core::mcp_scanner::sync_project_mcps_to_disk(conn, &pid, s) {
+                    tracing::warn!("Plugin (MCP) re-sync failed for project {pid} after path change: {e}");
+                }
+            } else {
+                tracing::debug!("Skipping MCP re-sync for project {pid}: no encryption secret configured");
+            }
+            // Native skills + profiles → SKILL.md / agent files.
+            if let Ok(Some(project)) = crate::db::projects::get_project(conn, &pid) {
+                let profile_ids: Vec<String> = project.default_profile_id.iter().cloned().collect();
+                if let Err(e) = crate::core::native_files::sync_project_native_files_full(
+                    &project.path,
+                    &project.default_skill_ids,
+                    &profile_ids,
+                ) {
+                    tracing::warn!("Native skill/profile re-sync failed for project {pid} after path change: {e}");
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        })
+        .await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

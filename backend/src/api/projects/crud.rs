@@ -901,7 +901,15 @@ pub async fn remap_path(
     let pid = id.clone();
     let np = new_path.clone();
     match state.db.with_conn(move |conn| crate::db::projects::update_project_path(conn, &pid, &np)).await {
-        Ok(true) => Json(ApiResponse::ok(())),
+        Ok(true) => {
+            // Re-sync the project's plugins (MCP configs) + native skill/profile
+            // files to the new directory. Pre-fix, a remap only moved the DB
+            // pointer — the freshly mapped folder never received the `.mcp.json`
+            // / SKILL.md files the project is configured for, so an agent running
+            // there saw none of its plugins. Best-effort (logs on failure).
+            super::resync_project_assets(&state, &id).await;
+            Json(ApiResponse::ok(()))
+        }
         Ok(false) => Json(ApiResponse::err("Project not found".to_string())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }

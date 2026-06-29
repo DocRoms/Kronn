@@ -459,7 +459,15 @@ async fn execute_foreach(
 
         // Expose the item to the child via the shared worktree.
         if let Err(e) = std::fs::write(&task_file, serde_json::to_string_pretty(item).unwrap_or_default()) {
-            return fail(step, start, format!("Cannot write .kronn/current_task.json: {e}"));
+            // A per-item infra hiccup (transient FS error on ONE item) must NOT
+            // abort the whole sweep — record it as a failed item and move on so
+            // the remaining items still get processed. Only a pre-loop
+            // catastrophic error (bad child workflow, unreadable foreach file)
+            // aborts; inside the loop the sole early-out is parent cancellation.
+            tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: cannot write current_task.json ({e}) — skipping this item");
+            failed += 1;
+            results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedWriteError", "error": e.to_string() }));
+            continue;
         }
 
         // Build the child's trigger_context: the fan-out bookkeeping keys PLUS
@@ -496,7 +504,12 @@ async fn execute_foreach(
         };
         let to_insert = child_run.clone();
         if let Err(e) = state.db.with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert)).await {
-            return fail(step, start, format!("Failed to create child run row (item {idx}): {e}"));
+            // Same rationale as the task-file write above: a per-item DB hiccup
+            // skips THIS item, it doesn't kill the sweep.
+            tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: cannot create child run row ({e}) — skipping this item");
+            failed += 1;
+            results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedDbError", "error": e.to_string() }));
+            continue;
         }
         tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, child_run=%child_run.id, item=%idx, item_id=%item_id, "foreach: entering child");
 

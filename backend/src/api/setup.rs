@@ -759,6 +759,75 @@ pub async fn set_server_config(
     }
 }
 
+// ── Network exposure ("Allow connections from other devices") ───────────────
+
+/// State of the LAN/Tailscale exposure toggle.
+#[derive(Debug, Clone, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct NetworkExposure {
+    /// Configured to bind a network-reachable address (`0.0.0.0`/`::`), not just localhost.
+    pub exposed: bool,
+    /// The configured exposure differs from what the process bound at boot →
+    /// a restart is needed for it to take effect.
+    pub restart_required: bool,
+    pub port: u16,
+    /// Reachable addresses (LAN + Tailscale) a peer could use to reach us.
+    pub reachable_ips: Vec<crate::core::tailscale::DetectedIp>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SetNetworkExposureRequest {
+    pub exposed: bool,
+}
+
+/// GET /api/config/network-exposure
+pub async fn get_network_exposure(
+    State(state): State<AppState>,
+) -> Json<ApiResponse<NetworkExposure>> {
+    let (host, port) = {
+        let config = state.config.read().await;
+        (config.server.host.clone(), config.server.port)
+    };
+    let reachable_ips = crate::core::tailscale::detect_all_ips().await;
+    Json(ApiResponse::ok(NetworkExposure {
+        exposed: crate::core::net_expose::is_exposed_host(&host),
+        restart_required: crate::core::net_expose::restart_required(&host),
+        port,
+        reachable_ips,
+    }))
+}
+
+/// POST /api/config/network-exposure — flip LAN/Tailscale exposure.
+///
+/// Exposing binds `0.0.0.0` (vs `127.0.0.1`) and, secure-by-default, forces auth
+/// on + ensures a token exists: a LAN/Tailscale peer isn't localhost, so the
+/// loopback auth-bypass won't apply to it — but the owner's local UI keeps
+/// working through that same bypass, so this never locks them out. Takes effect
+/// on the next restart (the host is only bound at boot).
+pub async fn set_network_exposure(
+    State(state): State<AppState>,
+    Json(req): Json<SetNetworkExposureRequest>,
+) -> Json<ApiResponse<NetworkExposure>> {
+    {
+        let mut config = state.config.write().await;
+        config.server.host = if req.exposed {
+            "0.0.0.0".to_string()
+        } else {
+            "127.0.0.1".to_string()
+        };
+        if req.exposed {
+            config.server.auth_enabled = true;
+            if config.server.auth_token.as_deref().unwrap_or("").is_empty() {
+                config.server.auth_token = Some(uuid::Uuid::new_v4().to_string());
+            }
+        }
+        if let Err(e) = config::save(&config).await {
+            return Json(ApiResponse::err(format!("Failed to save: {}", e)));
+        }
+    }
+    get_network_exposure(State(state)).await
+}
+
 /// POST /api/config/auth-token/regenerate
 pub async fn regenerate_auth_token(
     State(state): State<AppState>,
