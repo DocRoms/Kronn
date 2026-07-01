@@ -254,6 +254,7 @@ pub async fn bootstrap(
         } else {
             crate::models::ModelTier::Default
         },
+        model: None,
         pin_first_message: true,
         worktree_branch: None,
         summary_cache: None,

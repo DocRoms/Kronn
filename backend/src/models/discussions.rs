@@ -50,6 +50,11 @@ pub struct Discussion {
     /// Model capability tier for this discussion.
     #[serde(default)]
     pub tier: ModelTier,
+    /// 0.8.10 — explicit model override for this discussion (e.g. inherited
+    /// from the Quick Prompt that launched it). Wins over `tier` at run time
+    /// (threaded to the agent as `model_override`). `None` = resolve from tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Pin the first message (protocol prompt) — always include it in agent prompts, never summarize it.
     /// Used for validation, bootstrap, and briefing discussions.
     #[serde(default)]

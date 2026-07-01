@@ -89,6 +89,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("067_context_files_backfill_legacy", include_str!("sql/067_context_files_backfill_legacy.sql")),
         ("068_shared_id_unique", include_str!("sql/068_shared_id_unique.sql")),
         ("069_disc_no_agent", include_str!("sql/069_disc_no_agent.sql")),
+        ("070_agent_model_override", include_str!("sql/070_agent_model_override.sql")),
     ];
 
     // Check if there are pending migrations before backing up

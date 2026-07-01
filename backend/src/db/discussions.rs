@@ -158,6 +158,7 @@ const DISC_SELECT_COLS: &str = "d.id, d.project_id, d.title, d.agent, d.language
                 d.test_mode_restore_branch, d.test_mode_stash_ref,
                 d.summary_strategy, d.introspection_call_count,
                 d.source_agent, d.source_session_id, d.imported_at, d.diverged_at,
+                d.model,
                 (SELECT COUNT(*) FROM messages m
                    WHERE m.discussion_id = d.id AND m.role != 'System') AS non_system_count";
 
@@ -179,10 +180,10 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         participants: serde_json::from_str(&participants_str).unwrap_or_default(),
         messages: vec![],
         message_count: row.get::<_, u32>(10).unwrap_or(0),
-        // Index 32 — trailing computed col from DISC_SELECT_COLS (subquery
-        // counting non-System messages). Used by the unread badge so tool
-        // breadcrumbs don't inflate the "messages à lire" counter.
-        non_system_message_count: row.get::<_, u32>(32).unwrap_or(0),
+        // Index 33 — trailing computed col from DISC_SELECT_COLS (subquery
+        // counting non-System messages), now after d.model at 32. Used by the
+        // unread badge so tool breadcrumbs don't inflate the "à lire" counter.
+        non_system_message_count: row.get::<_, u32>(33).unwrap_or(0),
         skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
         profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
         directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
@@ -192,6 +193,7 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
         worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
         tier: parse_model_tier(&row.get::<_, String>(18).unwrap_or_else(|_| "default".into())),
+        model: row.get::<_, Option<String>>(32).unwrap_or(None),
         pin_first_message: row.get::<_, i32>(19).unwrap_or(0) != 0,
         summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
         summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
@@ -281,7 +283,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 shared_id, shared_with_json, workflow_run_id, pinned,
                 test_mode_restore_branch, test_mode_stash_ref,
                 summary_strategy, introspection_call_count,
-                source_agent, source_session_id, imported_at, diverged_at
+                source_agent, source_session_id, imported_at, diverged_at,
+                model
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -310,6 +313,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
             worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
             tier: parse_model_tier(&row.get::<_, String>(17).unwrap_or_else(|_| "default".into())),
+            model: row.get::<_, Option<String>>(31).unwrap_or(None),
             pin_first_message: row.get::<_, i32>(18).unwrap_or(0) != 0,
             summary_cache: row.get::<_, Option<String>>(15).unwrap_or(None),
             summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
@@ -341,8 +345,8 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
 
 pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
     conn.execute(
-        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, pinned, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id, test_mode_restore_branch, test_mode_stash_ref)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+        "INSERT INTO discussions (id, project_id, title, agent, language, participants_json, created_at, updated_at, archived, pinned, skill_ids_json, profile_ids_json, directive_ids_json, workspace_mode, workspace_path, worktree_branch, model_tier, pin_first_message, shared_id, shared_with_json, workflow_run_id, test_mode_restore_branch, test_mode_stash_ref, model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
         params![
             disc.id,
             disc.project_id,
@@ -367,6 +371,7 @@ pub fn insert_discussion(conn: &Connection, disc: &Discussion) -> Result<()> {
             disc.workflow_run_id,
             disc.test_mode_restore_branch,
             disc.test_mode_stash_ref,
+            disc.model,
         ],
     )?;
     Ok(())
@@ -413,6 +418,7 @@ pub fn ensure_mirror_by_shared_id(
         workspace_path: None,
         worktree_branch: None,
         tier: ModelTier::Default,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,

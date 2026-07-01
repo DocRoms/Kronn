@@ -33,6 +33,7 @@ mod tests {
             workspace_path: None,
             worktree_branch: None,
             tier: ModelTier::Default,
+            model: None,
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,

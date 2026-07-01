@@ -139,6 +139,7 @@ pub async fn create(
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
         tier: req.tier,
+        model: None,
         pin_first_message: false,
         archived: false,
             pinned: false,

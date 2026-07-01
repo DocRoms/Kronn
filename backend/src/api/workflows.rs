@@ -3547,6 +3547,7 @@ mod tests {
             profile_ids: vec![],
             directive_ids: vec![],
             tier: ModelTier::Default,
+            agent_settings: None,
             description: "Audit a repo".into(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

@@ -1201,6 +1201,7 @@ pub async fn full_audit(
             ],
             directive_ids: vec![],
             tier: crate::models::ModelTier::Default,
+            model: None,
             pin_first_message: true,
             archived: false,
             pinned: false,

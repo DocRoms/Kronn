@@ -447,6 +447,10 @@ pub fn create_batch_run(
             workspace_path: None,
             worktree_branch: None,
             tier: qp.tier,
+            // 0.8.10 — a QP-launched batch discussion inherits the QP's explicit
+            // model (consumed via disc.model → model_override once the batch
+            // agent-run path reads it in 2b-2).
+            model: qp.agent_settings.as_ref().and_then(|s| s.model.clone()),
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,

@@ -123,6 +123,7 @@ pub async fn start_briefing(
         workspace_mode: "Direct".into(),
         workspace_path: None,
         tier: crate::models::ModelTier::Default,
+        model: None,
         pin_first_message: true,
         worktree_branch: None,
         summary_cache: None,
