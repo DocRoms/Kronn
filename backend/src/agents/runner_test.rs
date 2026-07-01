@@ -119,6 +119,38 @@ mod tests {
         assert_eq!(ollama_num_ctx(&huge, &huge), 8192, "huge prompt → cap");
     }
 
+    #[tokio::test]
+    async fn forward_ollama_line_forwards_content_and_captures_tokens() {
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        // A streamed content chunk...
+        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr).await;
+        // ...then the terminal `done` object (identical shape to a non-stream
+        // single-object response), carrying the token counts.
+        forward_ollama_line(
+            r#"{"message":{"content":""},"done":true,"prompt_eval_count":12,"eval_count":3}"#,
+            &tx, &stderr,
+        ).await;
+        drop(tx);
+        let mut got = String::new();
+        while let Some(s) = rx.recv().await { got.push_str(&s); }
+        assert_eq!(got, "391");
+        assert_eq!(stderr.lock().unwrap().as_slice(), &["ollama_tokens:12:3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn forward_ollama_line_ignores_blank_and_malformed() {
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        forward_ollama_line("   ", &tx, &stderr).await;      // blank tail buffer
+        forward_ollama_line("{not json", &tx, &stderr).await; // partial/garbage
+        drop(tx);
+        assert!(rx.recv().await.is_none(), "no content forwarded");
+        assert!(stderr.lock().unwrap().is_empty(), "no token line captured");
+    }
+
     #[test]
     fn parse_stream_text_delta_with_thinking_leak_is_skipped() {
         // End-to-end: a text_delta whose entire content is the leak should

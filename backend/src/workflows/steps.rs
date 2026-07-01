@@ -483,6 +483,29 @@ fn format_tool_input_suffix(raw_input: &str) -> String {
     }
 }
 
+/// Wrap a `TypedSchema` step's author schema in the canonical envelope shape
+/// ({data, status, summary}) so Ollama's grammar-constrained `format` emits a
+/// bare envelope object that `extract_step_envelope` (strategy-2) recovers —
+/// the post-extract schema validation on `data` then runs unchanged. Returns
+/// `None` for non-TypedSchema steps (free text / vanilla Structured), which
+/// keep the streaming, prompt-injection path. Ollama-only: consumed solely by
+/// `AgentStartConfig.ollama_format`; other agents get their schema via the
+/// prompt (see the output_format addendum near the top of this module).
+fn ollama_envelope_format(output_format: &crate::models::StepOutputFormat) -> Option<serde_json::Value> {
+    match output_format {
+        crate::models::StepOutputFormat::TypedSchema { schema, .. } => Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": schema,
+                "status": { "type": "string" },
+                "summary": { "type": "string" }
+            },
+            "required": ["data", "status"]
+        })),
+        _ => None,
+    }
+}
+
 /// Run an agent with optional stall timeout.
 /// Returns the agent output text and token usage.
 ///
@@ -510,6 +533,10 @@ async fn run_agent_with_timeout(
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(1800));
 
+    // TypedSchema → constrain Ollama decoding to the envelope-wrapped schema
+    // (owned here so it outlives the borrow in AgentStartConfig below).
+    let ollama_format = ollama_envelope_format(&step.output_format);
+
     let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
         work_dir: Some(work_dir),
         full_access,
@@ -520,6 +547,7 @@ async fn run_agent_with_timeout(
             .and_then(|s| s.tier)
             .unwrap_or_default(),
         model_tiers,
+        ollama_format: ollama_format.as_ref(),
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
@@ -908,6 +936,36 @@ mod tests {
 
     fn rule(contains: &str, action: ConditionAction) -> StepConditionRule {
         StepConditionRule { contains: contains.to_string(), action }
+    }
+
+    #[test]
+    fn ollama_envelope_format_wraps_typed_schema_data() {
+        use crate::models::{StepOutputFormat, OnInvalid};
+        let data_schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer" } },
+            "required": ["score"]
+        });
+        let of = StepOutputFormat::TypedSchema {
+            schema: data_schema.clone(),
+            on_invalid: OnInvalid::Continue,
+        };
+        let wrapped = ollama_envelope_format(&of).expect("TypedSchema → envelope schema");
+        // The author schema becomes `data`; status/summary are added; data +
+        // status are required so extract_step_envelope strategy-2 recovers it.
+        assert_eq!(wrapped["properties"]["data"], data_schema);
+        assert_eq!(wrapped["properties"]["status"]["type"], "string");
+        assert_eq!(wrapped["properties"]["summary"]["type"], "string");
+        let required: Vec<&str> = wrapped["required"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required.contains(&"data") && required.contains(&"status"));
+    }
+
+    #[test]
+    fn ollama_envelope_format_none_for_freetext_and_structured() {
+        use crate::models::StepOutputFormat;
+        assert!(ollama_envelope_format(&StepOutputFormat::FreeText).is_none());
+        assert!(ollama_envelope_format(&StepOutputFormat::Structured).is_none());
     }
 
     #[test]

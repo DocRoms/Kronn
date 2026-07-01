@@ -395,6 +395,12 @@ pub struct AgentStartConfig<'a> {
     /// belong to a persistent discussion thread, or the auto-summary
     /// path itself).
     pub discussion_id: Option<&'a str>,
+    /// Ollama-only: a JSON Schema (a `TypedSchema` step's schema, already
+    /// wrapped in the canonical envelope shape by the caller) forwarded as
+    /// the `/api/chat` `format` param — grammar-constrained decoding +
+    /// non-streaming. `None` for every other agent and for free-text steps;
+    /// other agents get their schema via prompt injection, not here.
+    pub ollama_format: Option<&'a serde_json::Value>,
 }
 
 impl<'a> AgentStartConfig<'a> {
@@ -438,6 +444,7 @@ impl<'a> AgentStartConfig<'a> {
             model_tiers: None,
             context_files_prompt: "",
             discussion_id: None,
+            ollama_format: None,
         }
     }
 }
@@ -735,6 +742,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             config.prompt,
             &extra_context,
             model_flag.as_deref().unwrap_or("qwen3:30b-a3b"),
+            config.ollama_format,
         ).await;
     }
 
@@ -1133,23 +1141,56 @@ pub(crate) fn build_ollama_chat_body(
     body
 }
 
-/// Start Ollama via HTTP API streaming (/api/chat) instead of CLI.
+/// Handle one Ollama `/api/chat` response object (a streamed NDJSON line, or
+/// the single object of a non-streaming `format` response): forward its text
+/// delta to the channel and, on the terminal `done` chunk, stash token counts
+/// for `parse_token_usage`. Shared by the streaming loop and the tail flush so
+/// both response shapes go through identical handling. The stderr lock is only
+/// held across synchronous work — never across the `tx.send().await`.
+/// Returns `false` once the consumer has dropped the receiver (user cancelled /
+/// stream aborted) so the caller can stop draining Ollama into the void.
+pub(crate) async fn forward_ollama_line(
+    line: &str,
+    tx: &tokio::sync::mpsc::Sender<String>,
+    stderr: &Arc<Mutex<Vec<String>>>,
+) -> bool {
+    if line.trim().is_empty() { return true; }
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Some(text) = json["message"]["content"].as_str() {
+            if !text.is_empty() && tx.send(text.to_string()).await.is_err() {
+                return false;
+            }
+        }
+        if json["done"].as_bool() == Some(true) {
+            let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
+            let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
+            if let Ok(mut stderr) = stderr.lock() {
+                stderr.push(format!("ollama_tokens:{}:{}", prompt_tokens, eval_tokens));
+            }
+        }
+    }
+    true
+}
+
+/// Start Ollama via HTTP API (/api/chat) instead of a CLI process.
 /// Returns an AgentProcess with a dummy child process and an rx fed by
-/// the HTTP response stream. System context and user prompt are sent as
-/// separate messages (role: system, role: user) so the model doesn't
-/// confuse MCP instructions with the user's question.
+/// the HTTP response. System context and user prompt are sent as separate
+/// messages (role: system, role: user) so the model doesn't confuse MCP
+/// instructions with the user's question.
+///
+/// `format` = an optional JSON Schema (a `TypedSchema` step's schema, already
+/// wrapped in the canonical envelope shape by the caller). When set, decoding
+/// is grammar-constrained and the request is non-streaming (one JSON object).
 async fn start_ollama_http(
     user_prompt: &str,
     system_context: &str,
     model: &str,
+    format: Option<&serde_json::Value>,
 ) -> Result<AgentProcess, String> {
     let base = crate::api::ollama::ollama_base_url_pub();
     let url = format!("{}/api/chat", base);
 
-    // format=None here: the TypedSchema→format wiring (and the non-streaming
-    // read path it requires) lands in the follow-up commit. Streaming stays
-    // the default for free-text steps.
-    let body = build_ollama_chat_body(model, system_context, user_prompt, None);
+    let body = build_ollama_chat_body(model, system_context, user_prompt, format);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 min max for slow models
@@ -1212,33 +1253,21 @@ async fn start_ollama_http(
 
             buffer.push_str(&String::from_utf8_lossy(&bytes));
 
-            // Process complete JSON lines (newline-delimited)
+            // Process complete JSON lines (newline-delimited stream chunks).
             while let Some(newline_pos) = buffer.find('\n') {
                 let line = buffer[..newline_pos].to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
-
-                if line.trim().is_empty() { continue; }
-
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                    // Extract text content. A failed send means the consumer
-                    // dropped the receiver (user cancelled / stream aborted) —
-                    // stop downloading instead of draining Ollama into the void.
-                    if let Some(text) = json["message"]["content"].as_str() {
-                        if !text.is_empty() && tx.send(text.to_string()).await.is_err() {
-                            return;
-                        }
-                    }
-                    // Last chunk: extract token counts into stderr for parse_token_usage
-                    if json["done"].as_bool() == Some(true) {
-                        let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
-                        let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
-                        if let Ok(mut stderr) = stderr_clone.lock() {
-                            stderr.push(format!("ollama_tokens:{}:{}", prompt_tokens, eval_tokens));
-                        }
-                    }
+                // Consumer gone (cancel) → stop reading the HTTP body.
+                if !forward_ollama_line(&line, &tx, &stderr_clone).await {
+                    return;
                 }
             }
         }
+
+        // Non-streaming responses (format-constrained / TypedSchema steps set
+        // stream:false) arrive as a single JSON object with no trailing
+        // newline, so the line loop above never fires — flush the remainder.
+        let _ = forward_ollama_line(buffer.trim(), &tx, &stderr_clone).await;
     });
 
     Ok(AgentProcess {
