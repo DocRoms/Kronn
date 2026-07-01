@@ -106,8 +106,9 @@ describe('OllamaCard — 4-state rendering', () => {
       ],
     });
     await mountCard();
-    expect(screen.getByText(/llama3\.2:latest/)).toBeTruthy();
-    expect(screen.getByText(/qwen2\.5-coder:14b/)).toBeTruthy();
+    // Model names appear as <option>s across the 3 tier selects → match-all.
+    expect(screen.getAllByText(/llama3\.2:latest/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/qwen2\.5-coder:14b/).length).toBeGreaterThan(0);
     // Status line carries the count via the i18n template.
     expect(document.body.textContent).toMatch(/2 ollama\.models/);
   });
@@ -132,8 +133,8 @@ describe('OllamaCard — canirun.ai hint always visible', () => {
   });
 });
 
-describe('OllamaCard — default-model picker', () => {
-  it('clicking a model fires setModelTiers with the optimistic update', async () => {
+describe('OllamaCard — per-tier model picker', () => {
+  it('choosing a model in the default AND economy selects fires setModelTiers per tier', async () => {
     ollama.health.mockResolvedValue({
       status: 'online', version: '0.3.12', endpoint: 'http://localhost:11434',
       models_count: 1, hint: null,
@@ -143,42 +144,41 @@ describe('OllamaCard — default-model picker', () => {
     });
     await mountCard();
 
-    // Click the model entry — the row's primary action sets default.
-    const modelRow = screen.getByText(/llama3\.2/).closest('button, [role="button"], [data-default-picker]');
-    if (modelRow) fireEvent.click(modelRow);
-    else {
-      // Fallback : the model name itself is a clickable affordance.
-      fireEvent.click(screen.getByText(/llama3\.2/));
-    }
+    // Default tier → writes ollama.default (aria-label is the i18n key here).
+    const defSelect = screen.getByLabelText('disc.tier.default') as HTMLSelectElement;
+    await act(async () => { fireEvent.change(defSelect, { target: { value: 'llama3.2' } }); });
     await waitFor(() => expect(config.setModelTiers).toHaveBeenCalled());
-    const sent = config.setModelTiers.mock.calls[0][0];
-    expect(sent.ollama.default).toBe('llama3.2');
+    expect(config.setModelTiers.mock.calls[0][0].ollama.default).toBe('llama3.2');
+
+    // Economy tier → the NEW capability: writes ollama.economy independently.
+    const ecoSelect = screen.getByLabelText('disc.tier.economy') as HTMLSelectElement;
+    await act(async () => { fireEvent.change(ecoSelect, { target: { value: 'llama3.2' } }); });
+    await waitFor(() => expect(config.setModelTiers.mock.calls.length).toBeGreaterThan(1));
+    const last = config.setModelTiers.mock.calls.at(-1)![0];
+    expect(last.ollama.economy).toBe('llama3.2');
   });
 
-  it('rolls back optimistic flip when setModelTiers fails', async () => {
+  it('rolls back the select to its prior value when setModelTiers fails', async () => {
     ollama.health.mockResolvedValue({
       status: 'online', version: '0.3.12', endpoint: 'http://localhost:11434',
-      models_count: 1, hint: null,
+      models_count: 2, hint: null,
     });
     ollama.models.mockResolvedValue({
-      models: [{ name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' }],
+      models: [
+        { name: 'llama3.2', size: 2_500_000_000, digest: 'sha:abc', modified_at: '2026-01-01' },
+        { name: 'qwen2.5-coder:14b', size: 9_000_000_000, digest: 'sha:def', modified_at: '2026-01-02' },
+      ],
     });
-    config.getModelTiers.mockResolvedValue({ ...baseTiers, ollama: { economy: null, reasoning: null, default: 'gemma3:27b' } });
+    config.getModelTiers.mockResolvedValue({ ...baseTiers, ollama: { economy: null, reasoning: null, default: 'llama3.2' } });
     config.setModelTiers.mockRejectedValue(new Error('500'));
     await mountCard();
 
-    const modelRow = screen.getByText(/llama3\.2/).closest('button, [role="button"], [data-default-picker]');
-    if (modelRow) {
-      await act(async () => { fireEvent.click(modelRow); });
-    } else {
-      await act(async () => { fireEvent.click(screen.getByText(/llama3\.2/)); });
-    }
+    const defSelect = screen.getByLabelText('disc.tier.default') as HTMLSelectElement;
+    expect(defSelect.value).toBe('llama3.2');
+    await act(async () => { fireEvent.change(defSelect, { target: { value: 'qwen2.5-coder:14b' } }); });
     await waitFor(() => expect(config.setModelTiers).toHaveBeenCalled());
-    // The component logs a warn — assert by behaviour : default did NOT
-    // change in the saved-tiers state (the test is structural ; the
-    // user-visible rollback is the radio flipping back, which the row
-    // structure may not expose declaratively in this DOM).
-    // We at least confirm the failing POST didn't crash the card.
+    // Optimistic flip reverted on failure → select shows the original model again.
+    await waitFor(() => expect(defSelect.value).toBe('llama3.2'));
     expect(document.querySelector('.set-ollama-card')).not.toBeNull();
   });
 });

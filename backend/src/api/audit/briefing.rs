@@ -89,6 +89,7 @@ pub async fn start_briefing(
     let agent_type = req.agent;
 
     let initial_message = DiscussionMessage {
+        model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
@@ -123,6 +124,7 @@ pub async fn start_briefing(
         workspace_mode: "Direct".into(),
         workspace_path: None,
         tier: crate::models::ModelTier::Default,
+        model: None,
         pin_first_message: true,
         worktree_branch: None,
         summary_cache: None,

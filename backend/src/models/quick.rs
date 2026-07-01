@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use super::{AgentType, ExtractSpec, ModelTier, PaginationSpec};
+use super::{AgentSettings, AgentType, ExtractSpec, ModelTier, PaginationSpec};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Quick Prompts (reusable prompt templates with variables)
@@ -65,6 +65,13 @@ pub struct QuickPrompt {
     pub directive_ids: Vec<String>,
     #[serde(default)]
     pub tier: ModelTier,
+    /// 0.8.10 — optional explicit model (+ effort / max_tokens), mirroring
+    /// `WorkflowStep.agent_settings`. `agent_settings.model` wins over `tier`
+    /// (see `runner::effective_model_flag`). Copied onto a workflow step by
+    /// `quick_prompt_hydrate`, and onto the launched discussion by the QP
+    /// launch path. `None` = resolve the model from `tier` as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_settings: Option<AgentSettings>,
     /// Optional human description of what this Quick Prompt does. Shown
     /// in the batch-workflow picker so the user knows which QP fits their
     /// use case. Empty string = legacy QP created before 2026-04-10.
@@ -92,6 +99,8 @@ pub struct CreateQuickPromptRequest {
     pub directive_ids: Vec<String>,
     #[serde(default)]
     pub tier: ModelTier,
+    #[serde(default)]
+    pub agent_settings: Option<AgentSettings>,
     #[serde(default)]
     pub description: String,
 }

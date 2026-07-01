@@ -127,6 +127,9 @@ pub async fn execute_sub_workflow_step(
         parent_run_id: Some(parent_run_id.to_string()),
         state: Default::default(),
         produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     };
     let to_insert = child_run.clone();
     if let Err(e) = state
@@ -501,6 +504,9 @@ async fn execute_foreach(
             parent_run_id: Some(parent_run_id.to_string()),
             state: Default::default(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         };
         let to_insert = child_run.clone();
         if let Err(e) = state.db.with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert)).await {

@@ -1070,6 +1070,7 @@ mod tests {
             profile_ids: vec![],
             directive_ids: vec![],
             tier: ModelTier::Default,
+            agent_settings: None,
             description: "E2E test QP".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -1129,6 +1130,9 @@ mod tests {
             parent_run_id: None,
             state: std::collections::HashMap::new(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         };
         state.db.with_conn(move |conn| -> anyhow::Result<()> {
             crate::db::workflows::insert_workflow(conn, &workflow)?;
@@ -1151,6 +1155,7 @@ mod tests {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,

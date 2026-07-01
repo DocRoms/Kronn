@@ -9,8 +9,12 @@ import {
   Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
-  Download, Square, Hand, Terminal, Braces, Sparkles, Zap,
+  Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
 } from 'lucide-react';
+import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
+import { formatDurationCompact } from '../../lib/kronnToolParser';
+import { hasBranches } from '../../lib/stepGraph';
+import { StepBranchMap } from './StepBranchMap';
 import { RunDetail } from './RunDetail';
 import '../../pages/WorkflowsPage.css';
 
@@ -156,6 +160,11 @@ export interface WorkflowDetailProps {
   /** 2026-06-13 — open another workflow's detail (e.g. jump from a fan-out
    *  per-task row to the child sub-workflow that ran it). */
   onNavigateToWorkflow?: (workflowId: string) => void;
+  /** #11 — jump to a SPECIFIC child run (workflow + run id): opens that
+   *  workflow's detail and focuses the exact run. */
+  onNavigateToRun?: (workflowId: string, runId: string) => void;
+  /** #11 — a run id to auto-expand + scroll into view once loaded. */
+  focusRunId?: string | null;
   /** 0.7.0 UX pass — export the workflow as a JSON file. The handler
    *  is wired in the parent page (it has the api binding + toast). */
   onExport?: () => void;
@@ -1124,9 +1133,58 @@ function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug;
   }
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onExport, onGateDecided }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
+  // Run-list control bar (#2): status filter + free-text search + fold past N.
+  // Pure in-memory over `runs` already fetched — no backend round-trip.
+  const [runFilter, setRunFilter] = useState<RunStatusFilter>('all');
+  const [runSearch, setRunSearch] = useState('');
+  const [showAllRuns, setShowAllRuns] = useState(false);
+  // #6 — runs render as dense compact rows, expandable to the full RunDetail.
+  // Terminal runs collapse (the 151-sub-run case); non-terminal ones stay open
+  // by default because they need attention.
+  const [expandedRunIds, setExpandedRunIds] = useState<Set<string>>(new Set());
+  const isRunExpanded = (run: WorkflowRun): boolean =>
+    expandedRunIds.has(run.id) ||
+    run.status === 'Running' || run.status === 'Pending' || run.status === 'WaitingApproval';
+  const toggleRunExpanded = (id: string) => setExpandedRunIds(prev => {
+    const next = new Set(prev);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    return next;
+  });
+  // #14 — sub-runs of one parent tick collapse under a group accordion.
+  // Default open when the group holds a run still needing attention; a user
+  // click records an explicit override that wins over the default.
+  const [groupOverride, setGroupOverride] = useState<Record<string, boolean>>({});
+  const isGroupExpanded = (key: string, groupRuns: WorkflowRun[]): boolean => {
+    if (key in groupOverride) return groupOverride[key];
+    return groupRuns.some(r => r.status === 'Running' || r.status === 'Pending' || r.status === 'WaitingApproval');
+  };
+  const toggleGroup = (key: string, groupRuns: WorkflowRun[]) =>
+    setGroupOverride(prev => ({ ...prev, [key]: !isGroupExpanded(key, groupRuns) }));
+
+  // #11 — when arriving with a focus run id (drill from a parent's sub-run
+  // link), make sure it's visible: clear filters, unfold the list, expand the
+  // run + its group, then scroll it into view.
+  useEffect(() => {
+    if (!focusRunId) return;
+    const target = runs.find(r => r.id === focusRunId);
+    if (!target) return;
+    setRunFilter('all');
+    setRunSearch('');
+    setShowAllRuns(true);
+    setExpandedRunIds(prev => new Set(prev).add(focusRunId));
+    setGroupOverride(prev => ({ ...prev, [target.parent_run_id ?? focusRunId]: true }));
+    const raf = requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-run-id="${focusRunId}"]`);
+      // jsdom doesn't implement scrollIntoView; guard so tests don't throw.
+      if (el && typeof (el as HTMLElement).scrollIntoView === 'function') {
+        try { (el as HTMLElement).scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch { /* no-op */ }
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [focusRunId, runs]);
   // Steps panel collapses to a compact pipeline by default — the full
   // per-step cards (with prompts + Test buttons) are heavy and rarely what
   // you want at a glance, especially while a run is in flight. "Voir en
@@ -1390,6 +1448,8 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
 
             {stepsExpanded && (
               <div className="wf-steps-detail" data-testid="wf-steps-detail">
+                {/* #15 — branch map, only for workflows that actually branch. */}
+                {hasBranches(workflow.steps) && <StepBranchMap steps={workflow.steps} t={t} />}
                 {workflow.steps.map((step, i) => (
                   <StepCard key={i} step={step} index={i} agentAccess={agentAccess} projectId={workflow.project_id} t={t} quickPromptsById={quickPromptsById} workflowId={workflow.id} allSteps={workflow.steps} />
                 ))}
@@ -1643,16 +1703,76 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         <p className="text-sm text-faint mt-4">{t('wf.noRuns')}</p>
       )}
 
-      {showRuns && runs.map(run => {
+      {/* #2 — control bar: only when the list is long enough to warrant it. */}
+      {showRuns && runs.length > RUN_PAGE_SIZE && (
+        <div className="wf-runs-controls">
+          <div className="wf-runs-filter" role="group" aria-label={t('wf.runs.filterLabel')}>
+            {(['all', 'failed', 'waiting', 'stopped'] as const).map(f => (
+              <button
+                key={f}
+                type="button"
+                className="wf-runs-filter-btn"
+                data-active={runFilter === f}
+                onClick={() => { setRunFilter(f); setShowAllRuns(false); }}
+              >{t(`wf.runs.filter.${f}`)}</button>
+            ))}
+          </div>
+          <div className="wf-runs-search">
+            <Search size={12} />
+            <input
+              type="search"
+              className="wf-runs-search-input"
+              placeholder={t('wf.runs.searchPlaceholder')}
+              value={runSearch}
+              onChange={e => { setRunSearch(e.target.value); setShowAllRuns(false); }}
+              aria-label={t('wf.runs.searchPlaceholder')}
+            />
+          </div>
+        </div>
+      )}
+
+      {(() => {
+        if (!showRuns) return null;
+        const visible = filterRuns(runs, runFilter, runSearch);
+        const shown = showAllRuns ? visible : visible.slice(0, RUN_PAGE_SIZE);
+        const hidden = visible.length - shown.length;
+        const groups = groupRunsByParent(shown);
+        const renderRunItem = (run: WorkflowRun) => {
         // If this linear run spawned a batch (BatchQuickPrompt step), show a
         // "📋 N conversations" chip pointing to the discussions tab.
         const childBatch = batchByParentRunId.get(run.id);
+        const expanded = isRunExpanded(run);
+        const durMs = run.finished_at
+          ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
+          : null;
         return (
-          <div key={run.id}>
+          <div key={run.id} className="wf-run-item" data-testid="wf-run-item" data-run-id={run.id}>
+            {/* #6 — compact row = the always-visible accordion header. */}
+            <button
+              type="button"
+              className="wf-run-compact"
+              data-status={run.status}
+              aria-expanded={expanded}
+              onClick={() => toggleRunExpanded(run.id)}
+            >
+              <span className="wf-step-dot wf-run-compact-dot" style={{ width: 8, height: 8 }} />
+              <span className="wf-run-compact-status">{run.status}</span>
+              {run.parent_workflow_name && (
+                <span className="wf-run-compact-parent" title={run.parent_workflow_name}>↳ {run.parent_workflow_name}</span>
+              )}
+              <span className="wf-run-compact-time">{new Date(run.started_at).toLocaleString()}</span>
+              <span className="wf-run-compact-meta">
+                {durMs != null && formatDurationCompact(durMs)}
+                {run.tokens_used > 0 && ` · ${run.tokens_used} tk`}
+              </span>
+              <ChevronRight size={12} className={expanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
+            </button>
+            {expanded && (<>
             <RunDetail
               run={run}
               workflowSteps={workflow.steps}
               onNavigateToWorkflow={onNavigateToWorkflow}
+              onNavigateToRun={onNavigateToRun}
               onDelete={() => onDeleteRun(run.id)}
               onCancel={async () => {
                 try {
@@ -1693,9 +1813,54 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                 <ChevronRight size={10} />
               </button>
             )}
+            </>)}
           </div>
         );
-      })}
+        };
+        return (
+          <>
+            {runs.length > RUN_PAGE_SIZE && visible.length === 0 && (
+              <p className="text-sm text-faint mt-4">{t('wf.runs.noMatch')}</p>
+            )}
+            {groups.map(g => {
+              // A real multi-child parent tick → group accordion. Standalone or
+              // single runs render as plain compact rows (no group header).
+              if (g.parentRunId && g.runs.length > 1) {
+                const gExpanded = isGroupExpanded(g.key, g.runs);
+                const failed = g.runs.filter(r => r.status === 'Failed').length;
+                return (
+                  <div key={g.key} className="wf-run-group">
+                    <button
+                      type="button"
+                      className="wf-run-group-header"
+                      aria-expanded={gExpanded}
+                      onClick={() => toggleGroup(g.key, g.runs)}
+                    >
+                      <ChevronRight size={12} className={gExpanded ? 'wf-chevron-rotated' : 'wf-chevron'} />
+                      <span className="wf-run-group-title">
+                        {g.tickAt ? new Date(g.tickAt).toLocaleString() : (g.parentName ?? t('wf.runs.groupFallback'))}
+                      </span>
+                      <span className="wf-run-group-meta">
+                        {t('wf.runs.groupSummary', g.runs.length)}
+                        {failed > 0 && <span className="wf-run-group-failed"> · {t('wf.runs.groupFailed', failed)}</span>}
+                      </span>
+                    </button>
+                    {gExpanded && <div className="wf-run-group-body">{g.runs.map(renderRunItem)}</div>}
+                  </div>
+                );
+              }
+              return <Fragment key={g.key}>{g.runs.map(renderRunItem)}</Fragment>;
+            })}
+            {hidden > 0 && (
+              <button
+                type="button"
+                className="wf-runs-show-more"
+                onClick={() => setShowAllRuns(true)}
+              >{t('wf.runs.showMore', hidden)}</button>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }

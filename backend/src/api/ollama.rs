@@ -67,7 +67,7 @@ pub async fn health(
             let models_count = body["models"].as_array().map(|a| a.len() as u32).unwrap_or(0);
 
             let hint = if models_count == 0 {
-                Some("Ollama est en ligne mais aucun modèle n'est installé. Exécutez : ollama pull llama3.2".into())
+                Some("Ollama est en ligne mais aucun modèle n'est installé. Exécutez : ollama pull qwen3:8b".into())
             } else {
                 None
             };

@@ -207,8 +207,13 @@ test.describe('Run detail — produced branches panel', () => {
     // Open the workflow card → loads detail + runs.
     await page.locator('.wf-card').filter({ hasText: 'E2E Produced Branches' }).click();
 
-    // The run row collapses by default — expand it to render RunDetail.
-    // Click the run header (timestamp area) to toggle the panel open.
+    // #6 compact rows — a terminal (Success) run renders as a collapsed
+    // one-line row; the full RunDetail (.wf-run-card) only mounts after
+    // expanding it. Click the compact row first.
+    const compactRow = page.locator('.wf-run-compact').first();
+    await expect(compactRow).toBeVisible({ timeout: 5_000 });
+    await compactRow.click();
+
     const runRow = page.locator('.wf-run-card').first();
     await expect(runRow).toBeVisible({ timeout: 5_000 });
 

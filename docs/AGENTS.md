@@ -72,6 +72,7 @@ Full spec: [`docs/conventions/agents-md-format-v1.md`](conventions/agents-md-for
 | Docker / deployment | `docs/operations/debug-operations.md` |
 | Secret themes / unlock-gated features | `docs/operations/secret-themes.md` |
 | **Désagentification / `ApiCall` step** (workflow engine calls APIs directly, zero tokens) — incl. AI helper bubble | `docs/operations/deagent-apicall.md` |
+| **Ollama local models** (deterministic offload: model resolution, num_ctx / `/no_think` gotchas, TypedSchema `format`, quality escalation) | `docs/operations/ollama-local-models.md` |
 | Fix known issue | `docs/inconsistencies-tech-debt.md` |
 
 #### Tier 2 — For needs not covered above (max 3 files)

@@ -230,6 +230,43 @@
   gap: var(--kr-sp-2);
 }
 
+/* Per-tier model pickers (economy/default/reasoning) — ISO with other agents. */
+.set-ollama-tier-grid {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+}
+
+.set-ollama-tier-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.set-ollama-tier-label {
+  flex: 0 0 5.5rem;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.set-ollama-tier-select {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  font-size: var(--kr-fs-xs);
+  background: var(--kr-bg-input, var(--kr-bg-elev));
+  color: var(--kr-text-primary);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+}
+
+.set-ollama-tier-guidance {
+  margin-top: var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs, 11px);
+  line-height: 1.45;
+  color: var(--kr-text-muted);
+}
+
 .set-ollama-model-row {
   display: flex;
   align-items: center;

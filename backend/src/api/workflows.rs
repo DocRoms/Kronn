@@ -1036,6 +1036,17 @@ const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 /// QP referenced by a `BatchQuickPrompt` step so the importer doesn't
 /// need to find them separately. The frontend triggers a file download
 /// from this response (filename suggested via `Content-Disposition`).
+/// #10 — the non-empty `sub_workflow_id`s referenced by a step list's
+/// SubWorkflow steps. Used to bundle (export) and remap (import) the child
+/// workflow graph. Pure + unit-tested.
+pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
+    steps.iter()
+        .filter(|s| matches!(s.step_type, StepType::SubWorkflow))
+        .filter_map(|s| s.sub_workflow_id.clone())
+        .filter(|id| !id.trim().is_empty())
+        .collect()
+}
+
 pub async fn export_workflow(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1050,32 +1061,54 @@ pub async fn export_workflow(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
     };
 
-    // Bundle every QP referenced by a BatchQuickPrompt step. Dedup by
-    // QP id so we don't ship the same QP twice when multiple steps
-    // reuse it.
-    let qp_ids: Vec<String> = wf.steps.iter()
-        .chain(wf.on_failure.iter())
-        .filter_map(|s| s.batch_quick_prompt_id.clone())
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect();
+    // #10 — bundle the transitive SubWorkflow children + every QP referenced
+    // by a BatchQuickPrompt step across the whole graph, in ONE DB round-trip.
+    // Load all workflows once and BFS in memory (cheap; N_workflows is small).
+    let root = wf.clone();
+    let (referenced_workflows, referenced_quick_prompts) = match state.db.with_conn(move |conn| {
+        let all = crate::db::workflows::list_workflows(conn)?;
+        let by_id: std::collections::HashMap<String, Workflow> =
+            all.into_iter().map(|w| (w.id.clone(), w)).collect();
 
-    let referenced_quick_prompts = if qp_ids.is_empty() {
-        Vec::new()
-    } else {
-        let ids = qp_ids.clone();
-        match state.db.with_conn(move |conn| {
-            let mut found = Vec::with_capacity(ids.len());
-            for id in &ids {
-                if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, id)? {
-                    found.push(qp);
+        // BFS over sub_workflow_id refs, excluding the root (and dedup / cycle-safe).
+        let mut bundled: Vec<Workflow> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        seen.insert(root.id.clone());
+        let mut queue: std::collections::VecDeque<String> =
+            sub_workflow_child_ids(&root.steps).into_iter().collect();
+        while let Some(cid) = queue.pop_front() {
+            if !seen.insert(cid.clone()) {
+                continue;
+            }
+            if let Some(child) = by_id.get(&cid) {
+                for gc in sub_workflow_child_ids(&child.steps) {
+                    if !seen.contains(&gc) {
+                        queue.push_back(gc);
+                    }
+                }
+                bundled.push(child.clone());
+            }
+        }
+
+        // QPs referenced anywhere in the bundle (root + children).
+        let mut qp_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for w in std::iter::once(&root).chain(bundled.iter()) {
+            for s in w.steps.iter().chain(w.on_failure.iter()) {
+                if let Some(q) = &s.batch_quick_prompt_id {
+                    qp_ids.insert(q.clone());
                 }
             }
-            Ok(found)
-        }).await {
-            Ok(qps) => qps,
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
         }
+        let mut qps = Vec::with_capacity(qp_ids.len());
+        for q in &qp_ids {
+            if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, q)? {
+                qps.push(qp);
+            }
+        }
+        Ok((bundled, qps))
+    }).await {
+        Ok(t) => t,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
     };
 
     let envelope = WorkflowExportEnvelope {
@@ -1084,6 +1117,7 @@ pub async fn export_workflow(
         exported_at: Utc::now(),
         workflow: wf.clone(),
         referenced_quick_prompts,
+        referenced_workflows,
     };
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
@@ -1107,21 +1141,80 @@ pub async fn export_workflow(
     ).into_response()
 }
 
+/// Validate one workflow from an import bundle exactly like a fresh create
+/// (POST /api/workflows). Applied to the root AND every bundled child so a
+/// malformed child can't slip in. Returns a user-facing error string.
+fn validate_workflow_for_import(wf: &Workflow) -> Result<(), String> {
+    if wf.steps.is_empty() {
+        return Err("Workflow must have at least one step".into());
+    }
+    if wf.steps.len() > 20 {
+        return Err(format!("Too many steps ({}, max 20)", wf.steps.len()));
+    }
+    crate::workflows::template::validate_step_references(&wf.steps)
+        .map_err(|errors| format!("Références d'étapes invalides :\n- {}", errors.join("\n- ")))?;
+    if let Some(ref guards) = wf.guards {
+        validate_guards(guards)?;
+    }
+    validate_artifact_specs(&wf.artifacts)?;
+    validate_on_failure_steps(&wf.on_failure)?;
+    validate_exec_allowlist(&wf.exec_allowlist)?;
+    validate_exec_steps(&wf.steps, &wf.exec_allowlist)?;
+    validate_exec_steps(&wf.on_failure, &wf.exec_allowlist)?;
+    validate_required_fields_per_type(&wf.steps)?;
+    validate_required_fields_per_type(&wf.on_failure)?;
+    Ok(())
+}
+
+/// #9 — rebind each ApiCall step's `api_config_id` to a config that exists on
+/// THIS instance for the same plugin (`api_plugin_slug` = server id, stable
+/// across instances; config ids are not). Keeps a still-valid id (same-instance
+/// clone); rebinds a dangling/foreign one to a matching local config; leaves it
+/// untouched when no local config exists (the user then picks in the UI).
+/// Best-effort: a DB hiccup on one step never aborts the import.
+fn rebind_api_configs(
+    conn: &rusqlite::Connection,
+    steps: &mut [WorkflowStep],
+    project_id: Option<&str>,
+) {
+    for s in steps.iter_mut() {
+        let Some(slug) = s.api_plugin_slug.clone() else { continue };
+        // Current id still valid for this server on this instance → keep it.
+        let keep = match s.api_config_id.as_deref() {
+            Some(id) => crate::db::mcps::get_config(conn, id)
+                .ok()
+                .flatten()
+                .map(|c| c.server_id == slug)
+                .unwrap_or(false),
+            None => false,
+        };
+        if keep {
+            continue;
+        }
+        if let Ok(Some(new_id)) = crate::db::mcps::find_config_for_server(conn, &slug, project_id) {
+            s.api_config_id = Some(new_id);
+        }
+        // else: no local config for this plugin — leave the id as-is; the
+        // ApiCall step will surface it and the user rebinds it in the UI.
+    }
+}
+
 /// POST /api/workflows/import
 ///
-/// Body: `ImportWorkflowRequest { content, project_id }`. `content` is
-/// the raw JSON string of a `WorkflowExportEnvelope`. Validates the
-/// envelope, mints fresh ids/timestamps, attaches to `project_id` (or
-/// leaves null), strips `gate_notify_url` (URLs are per-user — not
-/// portable), and inserts both the workflow and any bundled QPs.
+/// Body: `ImportWorkflowRequest { content, project_id }`. `content` is the raw
+/// JSON string of a `WorkflowExportEnvelope`. Validates the envelope, mints
+/// fresh ids/timestamps, attaches to `project_id` (or leaves null), strips
+/// `gate_notify_url` (URLs are per-user — not portable), and inserts the
+/// workflow, any bundled QPs, and any bundled sub-workflows (#10).
 ///
-/// Behaviour with referenced QPs:
-///   - Each bundled QP gets a fresh id (no collision with importer's
-///     existing QPs)
-///   - `BatchQuickPrompt` steps' `batch_quick_prompt_id` is rewritten
-///     to point at the new ids
-///   - If the workflow references a QP that wasn't bundled, the import
-///     fails loudly (no silent half-import)
+/// Behaviour with referenced QPs / sub-workflows:
+/// - Each bundled QP + sub-workflow gets a fresh id (no collision with the
+///   importer's existing rows).
+/// - `BatchQuickPrompt` steps' `batch_quick_prompt_id` and `SubWorkflow` steps'
+///   `sub_workflow_id` are remapped to the new ids.
+/// - If a step references a QP that wasn't bundled, or a sub-workflow that is
+///   neither bundled nor present on this instance, the import fails loudly
+///   (no silent half-import).
 pub async fn import_workflow(
     State(state): State<AppState>,
     Json(req): Json<ImportWorkflowRequest>,
@@ -1144,58 +1237,26 @@ pub async fn import_workflow(
         )));
     }
 
-    let mut wf = envelope.workflow;
+    // #10 — the import BUNDLE = the root workflow + its (transitive) sub-workflow
+    // children (`referenced_workflows`, empty on legacy single-workflow exports).
+    // The whole set is recreated atomically with fresh ids; `sub_workflow_id`
+    // refs are remapped to the new child ids so the parent→child graph survives.
+    let mut all_wfs: Vec<Workflow> = Vec::with_capacity(1 + envelope.referenced_workflows.len());
+    all_wfs.push(envelope.workflow);
+    all_wfs.extend(envelope.referenced_workflows);
 
-    // Validate the workflow as if it were created from scratch — same
-    // rules as POST /api/workflows. Fail loudly if the source machine
-    // had something the destination doesn't accept.
-    if wf.steps.is_empty() {
-        return Json(ApiResponse::err("Workflow must have at least one step"));
-    }
-    if wf.steps.len() > 20 {
-        return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", wf.steps.len())));
-    }
-    if let Err(errors) = crate::workflows::template::validate_step_references(&wf.steps) {
-        return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
-    }
-    if let Some(ref guards) = wf.guards {
-        if let Err(e) = validate_guards(guards) {
+    // Validate every workflow in the bundle like a fresh create.
+    for w in &all_wfs {
+        if let Err(e) = validate_workflow_for_import(w) {
             return Json(ApiResponse::err(e));
         }
     }
-    if let Err(e) = validate_artifact_specs(&wf.artifacts) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = validate_on_failure_steps(&wf.on_failure) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = validate_exec_allowlist(&wf.exec_allowlist) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = validate_exec_steps(&wf.steps, &wf.exec_allowlist) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = validate_exec_steps(&wf.on_failure, &wf.exec_allowlist) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = validate_required_fields_per_type(&wf.steps) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = validate_required_fields_per_type(&wf.on_failure) {
-        return Json(ApiResponse::err(e));
-    }
-    // 2026-06-11 Phase 1 — SubWorkflow graph. An import that references a
-    // sub-workflow absent on this instance fails loudly here (the export
-    // bundle doesn't yet embed referenced workflows — Phase 2 follow-up).
-    if let Err(e) = validate_sub_workflow_graph_db(&state, "__import__", &wf.steps).await {
-        return Json(ApiResponse::err(e));
-    }
 
-    // Build a remap table for QP ids (source → fresh) and insert the
-    // bundled QPs first. If a step references a QP that's NOT bundled,
-    // refuse the whole import to keep the workflow consistent.
-    let mut qp_id_remap: std::collections::HashMap<String, String> = Default::default();
     let now = Utc::now();
+
+    // QP remap (source → fresh). The export bundles QPs referenced anywhere in
+    // the graph (root + children), so a step pointing to an unbundled QP fails.
+    let mut qp_id_remap: std::collections::HashMap<String, String> = Default::default();
     let mut qps_to_insert: Vec<QuickPrompt> = Vec::with_capacity(envelope.referenced_quick_prompts.len());
     for mut qp in envelope.referenced_quick_prompts {
         let old_id = qp.id.clone();
@@ -1208,49 +1269,92 @@ pub async fn import_workflow(
         qps_to_insert.push(qp);
     }
 
-    // Rewrite batch_quick_prompt_id refs in steps + on_failure. Refuse
-    // if a step points to an unbundled QP.
-    let rewrite = |steps: &mut Vec<WorkflowStep>| -> Result<(), String> {
-        for s in steps {
-            if let Some(ref qp_id) = s.batch_quick_prompt_id {
-                match qp_id_remap.get(qp_id) {
-                    Some(new) => s.batch_quick_prompt_id = Some(new.clone()),
-                    None => return Err(format!(
-                        "Step `{}` référence le Quick Prompt `{}` qui n'est pas inclus dans le fichier d'import. Ré-exporte le workflow source pour qu'il bundle ses QPs.",
-                        s.name, qp_id
-                    )),
+    // Workflow id remap: a fresh id for every workflow in the bundle.
+    let mut wf_id_remap: std::collections::HashMap<String, String> = Default::default();
+    for w in &all_wfs {
+        wf_id_remap.insert(w.id.clone(), Uuid::new_v4().to_string());
+    }
+    let root_new_id = wf_id_remap[&all_wfs[0].id].clone();
+
+    // Rewrite each workflow: fresh identity + remap sub_workflow_id (bundle) +
+    // batch_quick_prompt_id (bundle), strip per-user notify URLs.
+    let mut prepared: Vec<Workflow> = Vec::with_capacity(all_wfs.len());
+    for mut w in all_wfs {
+        let new_id = wf_id_remap[&w.id].clone();
+        for steps in [&mut w.steps, &mut w.on_failure] {
+            for s in steps.iter_mut() {
+                // sub_workflow_id → the remapped child (leave untouched when it
+                // points at a pre-existing workflow on this instance).
+                if let Some(sid) = s.sub_workflow_id.as_ref() {
+                    if let Some(nid) = wf_id_remap.get(sid) {
+                        s.sub_workflow_id = Some(nid.clone());
+                    }
                 }
+                if let Some(qp_id) = s.batch_quick_prompt_id.as_ref() {
+                    match qp_id_remap.get(qp_id) {
+                        Some(new) => s.batch_quick_prompt_id = Some(new.clone()),
+                        None => return Json(ApiResponse::err(format!(
+                            "Step `{}` référence le Quick Prompt `{}` qui n'est pas inclus dans le fichier d'import. Ré-exporte le workflow source pour qu'il bundle ses QPs.",
+                            s.name, qp_id
+                        ))),
+                    }
+                }
+                s.gate_notify_url = None;
             }
-            // Strip per-user webhook URL — Slack/Teams URLs are NOT portable.
-            // The importer will see the field empty and re-fill if needed.
-            s.gate_notify_url = None;
         }
-        Ok(())
+        w.id = new_id;
+        w.project_id = req.project_id.clone();
+        w.created_at = now;
+        w.updated_at = now;
+        w.enabled = true;
+        prepared.push(w);
+    }
+
+    // Every SubWorkflow ref must resolve within the bundle (fresh ids) OR to a
+    // workflow already on this instance — else the graph would dangle.
+    let new_ids: std::collections::HashSet<String> = wf_id_remap.values().cloned().collect();
+    let db_ids: std::collections::HashSet<String> = match state
+        .db
+        .with_conn(|conn| Ok(crate::db::workflows::list_workflows(conn)?
+            .into_iter().map(|w| w.id).collect::<std::collections::HashSet<String>>()))
+        .await
+    {
+        Ok(s) => s,
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
-    if let Err(e) = rewrite(&mut wf.steps) {
-        return Json(ApiResponse::err(e));
-    }
-    if let Err(e) = rewrite(&mut wf.on_failure) {
-        return Json(ApiResponse::err(e));
+    for w in &prepared {
+        for cid in sub_workflow_child_ids(&w.steps) {
+            if !new_ids.contains(&cid) && !db_ids.contains(&cid) {
+                return Json(ApiResponse::err(format!(
+                    "Le workflow « {} » référence un sous-workflow introuvable (ni bundlé, ni présent sur cette instance). Ré-exporte le workflow source pour bundler ses enfants.",
+                    w.name
+                )));
+            }
+        }
     }
 
-    // Mint fresh identity for the workflow itself.
-    wf.id = Uuid::new_v4().to_string();
-    wf.project_id = req.project_id.clone();
-    wf.created_at = now;
-    wf.updated_at = now;
-    wf.enabled = true;
-
-    let imported_wf = wf.clone();
-    let qps = qps_to_insert.clone();
+    // Atomic insert: QPs, then every workflow in the bundle. Return the root.
+    let qps = qps_to_insert;
+    let rebind_project = req.project_id.clone();
+    let root_id_for_return = root_new_id;
     match state.db.with_conn(move |conn| {
         for qp in &qps {
             crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
         }
-        crate::db::workflows::insert_workflow(conn, &imported_wf)?;
-        Ok(())
+        let mut root_out: Option<Workflow> = None;
+        for mut w in prepared {
+            // #9 — retarget ApiCall configs to this instance before insert.
+            rebind_api_configs(conn, &mut w.steps, rebind_project.as_deref());
+            rebind_api_configs(conn, &mut w.on_failure, rebind_project.as_deref());
+            crate::db::workflows::insert_workflow(conn, &w)?;
+            if w.id == root_id_for_return {
+                root_out = Some(w);
+            }
+        }
+        Ok(root_out)
     }).await {
-        Ok(()) => Json(ApiResponse::ok(wf)),
+        Ok(Some(w)) => Json(ApiResponse::ok(w)),
+        Ok(None) => Json(ApiResponse::err("Import interne : workflow racine introuvable après insertion")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -1314,6 +1418,9 @@ pub async fn trigger(
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     };
 
     let r = run.clone();
@@ -2651,6 +2758,7 @@ pub async fn suggestions(
                 mode: StepMode::Normal,
                 output_format: if *structured { StepOutputFormat::Structured } else { StepOutputFormat::FreeText },
                 on_result: vec![],
+                on_timeout: None,
                 agent_settings: None,
                 stall_timeout_secs: None,
                 retry: None,
@@ -3121,6 +3229,7 @@ mod tests {
             mode: StepMode::Normal,
             output_format: StepOutputFormat::FreeText,
             on_result: vec![],
+            on_timeout: None,
             agent_settings: None,
             stall_timeout_secs: None,
             retry: None,
@@ -3461,6 +3570,53 @@ mod tests {
     }
 
     #[test]
+    fn sub_workflow_child_ids_collects_only_subworkflow_step_ids() {
+        let mut sw1 = mk_step("child_a", StepType::SubWorkflow);
+        sw1.sub_workflow_id = Some("wf-child-a".into());
+        let mut sw2 = mk_step("child_b", StepType::SubWorkflow);
+        sw2.sub_workflow_id = Some("wf-child-b".into());
+        let mut sw_empty = mk_step("child_blank", StepType::SubWorkflow);
+        sw_empty.sub_workflow_id = Some("  ".into()); // blank → ignored
+        let mut agent_with_id = mk_step("not_subwf", StepType::Agent);
+        agent_with_id.sub_workflow_id = Some("wf-ignored".into()); // non-SubWorkflow → ignored
+        let ids = sub_workflow_child_ids(&[sw1, sw2, sw_empty, agent_with_id, mk_step("plain", StepType::Exec)]);
+        assert_eq!(ids, vec!["wf-child-a".to_string(), "wf-child-b".to_string()]);
+    }
+
+    #[test]
+    fn export_envelope_roundtrips_referenced_workflows() {
+        let mut child = mk_workflow_for_export("child");
+        child.id = "child-id".into();
+        let env = WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: mk_workflow_for_export("parent"),
+            referenced_quick_prompts: vec![],
+            referenced_workflows: vec![child],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.referenced_workflows.len(), 1);
+        assert_eq!(parsed.referenced_workflows[0].name, "child");
+    }
+
+    #[test]
+    fn export_envelope_omits_empty_referenced_workflows_from_wire() {
+        // Legacy single-workflow exports stay byte-compatible (field skipped).
+        let env = WorkflowExportEnvelope {
+            kind: WORKFLOW_EXPORT_KIND.into(),
+            version: EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            workflow: mk_workflow_for_export("solo"),
+            referenced_quick_prompts: vec![],
+            referenced_workflows: vec![],
+        };
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(!json.contains("referenced_workflows"), "empty list must be omitted: {json}");
+    }
+
+    #[test]
     fn export_envelope_serializes_with_kind_and_version() {
         let env = WorkflowExportEnvelope {
             kind: WORKFLOW_EXPORT_KIND.into(),
@@ -3468,6 +3624,7 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("audit"),
             referenced_quick_prompts: vec![],
+            referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains("\"kind\":\"kronn.workflow\""));
@@ -3489,6 +3646,7 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("no-qps"),
             referenced_quick_prompts: vec![],
+            referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         assert!(!json.contains("referenced_quick_prompts"),
@@ -3518,6 +3676,7 @@ mod tests {
             exported_at: chrono::Utc::now(),
             workflow: mk_workflow_for_export("future"),
             referenced_quick_prompts: vec![],
+            referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
@@ -3547,6 +3706,7 @@ mod tests {
             profile_ids: vec![],
             directive_ids: vec![],
             tier: ModelTier::Default,
+            agent_settings: None,
             description: "Audit a repo".into(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

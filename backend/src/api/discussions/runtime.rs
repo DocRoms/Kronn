@@ -172,6 +172,7 @@ pub async fn spawn_agent_run_with_chain(
 
         // Insert the QP prompt as a User message
         let msg = crate::models::DiscussionMessage {
+            model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: crate::models::MessageRole::User,

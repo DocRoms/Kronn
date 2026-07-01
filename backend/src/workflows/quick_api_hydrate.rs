@@ -120,6 +120,7 @@ mod tests {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,

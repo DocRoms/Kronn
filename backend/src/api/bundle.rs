@@ -193,6 +193,7 @@ pub async fn create_bundle(
             profile_ids: qp.request.profile_ids.clone(),
             directive_ids: qp.request.directive_ids.clone(),
             tier: qp.request.tier,
+            agent_settings: qp.request.agent_settings.clone(),
             description: qp.request.description.clone(),
             created_at: now,
             updated_at: now,

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
@@ -18,6 +18,7 @@ import type {
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
+import { promptNeedsFileAccess } from '../../lib/ollamaHints';
 import {
   Plus, Loader2, Check, X, ChevronRight, ChevronDown, ChevronUp,
   Clock, GitBranch, Zap, HelpCircle, Settings, Shield,
@@ -152,6 +153,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [wizardStep, setWizardStep] = useState(0);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
+  // Pulled Ollama models → suggestions for the per-step model picker.
+  // Best-effort: stays empty when Ollama is offline, so the model field
+  // simply remains a free-text input (any tag / remote host still typable).
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  useEffect(() => {
+    ollamaApi.models()
+      .then(r => setOllamaModels((r.models ?? []).map(m => m.name)))
+      .catch(() => {});
+  }, []);
   const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
@@ -676,6 +686,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
         name: s.name,
         description: s.description,
         on_result: s.on_result,
+        on_timeout: s.on_timeout,
         retry: s.retry,
         stall_timeout_secs: s.stall_timeout_secs,
         delay_after_secs: s.delay_after_secs,
@@ -2869,6 +2880,25 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         Gate/Exec/BatchQuickPrompt. */}
                     {(!step.step_type || step.step_type.type === 'Agent') && (
                       <div className="mb-5">
+                        {/* Ollama = local, tool-less HTTP model: no file/repo/MCP
+                            access. It only ever sees the prompt text, so a WF that
+                            relies on the agent reading the worktree won't work with
+                            Ollama unless the content is injected into the prompt. */}
+                        {step.agent === 'Ollama' && (
+                          <div className="wf-ollama-note" role="note">
+                            <Info size={12} />
+                            <span>{t('wiz.ollamaNoFilesNote')}</span>
+                          </div>
+                        )}
+                        {/* Active lint: the prompt looks like it asks the agent to
+                            READ files/worktree — impossible for a tool-less Ollama.
+                            Escalate to a warning so the user injects the content. */}
+                        {step.agent === 'Ollama' && promptNeedsFileAccess(step.prompt_template) && (
+                          <div className="wf-ollama-note wf-ollama-note--warn" role="alert">
+                            <AlertTriangle size={12} />
+                            <span>{t('wiz.ollamaContextLint')}</span>
+                          </div>
+                        )}
                         <label className="wf-label">{t('wiz.agentSettings')}</label>
                         <div className="flex-row gap-3">
                           <div className="flex-1">
@@ -2879,8 +2909,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               onChange={e => updateStep(i, {
                                 agent_settings: { ...step.agent_settings, model: e.target.value || null }
                               })}
-                              placeholder="ex: o3"
+                              placeholder={step.agent === 'Ollama' ? 'ex: qwen3:8b' : 'ex: o3'}
+                              list={step.agent === 'Ollama' ? `ollama-models-${i}` : undefined}
                             />
+                            {step.agent === 'Ollama' && ollamaModels.length > 0 && (
+                              <datalist id={`ollama-models-${i}`}>
+                                {ollamaModels.map(m => <option key={m} value={m} />)}
+                              </datalist>
+                            )}
                           </div>
                           <div className="flex-1">
                             <label className="wf-label text-2xs">Reasoning effort</label>

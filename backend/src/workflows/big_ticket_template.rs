@@ -283,6 +283,7 @@ fn blank_step(name: &str, kind: StepType, agent: AgentType) -> WorkflowStep {
         mcp_config_ids: vec![],
         agent_settings: None,
         on_result: vec![],
+        on_timeout: None,
         stall_timeout_secs: None,
         retry: None,
         delay_after_secs: None,

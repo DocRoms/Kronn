@@ -2228,6 +2228,7 @@ mod tests {
             mode: crate::models::StepMode::Normal,
             output_format: crate::models::StepOutputFormat::FreeText,
             on_result: vec![],
+            on_timeout: None,
             agent_settings: None,
             stall_timeout_secs: None,
             retry: None,
@@ -2521,6 +2522,7 @@ mod tests {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,
@@ -3022,6 +3024,9 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         }
     }
 

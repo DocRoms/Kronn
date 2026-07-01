@@ -1,0 +1,20 @@
+# cargo-audit configuration — see https://github.com/rustsec/rustsec/tree/main/cargo-audit
+#
+# quick-xml RUSTSEC-2026-0194 / -0195 (DoS: quadratic attr-dup check + unbounded
+# namespace allocation). Fix requires quick-xml >=0.41, but our only path to it
+# is `calamine` (xlsx reader), whose LATEST release (0.35.0) still pins
+# quick-xml ^0.39. No upstream fix is available yet.
+#
+# Exposure is bounded: quick-xml is reached ONLY via `extract_xlsx`
+# (core/context_files.rs) parsing a spreadsheet a user attaches as a context
+# file in this self-hosted app — not an internet-facing parser. A hard input
+# size cap on office docs (see MAX_OFFICE_DOC_SIZE) bounds both the quadratic
+# runtime and the memory-exhaustion vectors.
+#
+# TODO: drop these ignores once calamine releases a build on quick-xml >=0.41
+# (track: https://github.com/tafia/calamine/issues).
+[advisories]
+ignore = [
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

@@ -111,6 +111,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const { data: profilesCatalog } = useApi(() => profilesApi.list(), []);
   const { data: directivesCatalog } = useApi(() => directivesApi.list(), []);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  // #11 — when a parent run's sub-run link is clicked, remember the target
+  // child run so the opened WorkflowDetail auto-expands + scrolls to it.
+  const [focusRunId, setFocusRunId] = useState<string | null>(null);
   const [showCreateQP, setShowCreateQP] = useState(false);
   const [editingQP, setEditingQP] = useState<QuickPrompt | null>(null);
   const [launchingQP, setLaunchingQP] = useState<QuickPrompt | null>(null);
@@ -320,8 +323,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const openDetail = async (id: string) => {
+  const openDetail = async (id: string, runId?: string) => {
     setSelectedId(id);
+    setFocusRunId(runId ?? null);
     setLoadingDetail(true);
     try {
       const [wf, runs] = await Promise.all([
@@ -1377,6 +1381,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 agentAccess={agentAccess}
                 onNavigateToBatch={onNavigateToBatch}
                 onNavigateToWorkflow={(wfId) => openDetail(wfId)}
+                onNavigateToRun={(wfId, runId) => openDetail(wfId, runId)}
+                focusRunId={focusRunId}
                 onGateDecided={() => setLiveRun(null)}
                 onExport={async () => {
                   try {

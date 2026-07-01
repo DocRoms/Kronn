@@ -87,6 +87,7 @@ pub async fn send_message(
 
     // Add user message to DB
     let user_msg = DiscussionMessage {
+        model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,

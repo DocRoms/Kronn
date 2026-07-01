@@ -559,6 +559,7 @@ mod tests {
             mode: StepMode::Normal,
             output_format: StepOutputFormat::Structured,
             on_result: vec![],
+            on_timeout: None,
             agent_settings: None,
             stall_timeout_secs: None,
             retry: None,

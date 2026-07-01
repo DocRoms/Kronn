@@ -111,6 +111,7 @@ pub async fn create(
 
     let now = Utc::now();
     let initial_message = DiscussionMessage {
+        model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
@@ -139,6 +140,7 @@ pub async fn create(
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
         tier: req.tier,
+        model: None,
         pin_first_message: false,
         archived: false,
             pinned: false,
@@ -158,7 +160,7 @@ pub async fn create(
         updated_at: now,
     };
 
-    let disc = discussion.clone();
+    let mut disc = discussion.clone();
     let msg = initial_message;
     // 0.8.5 — when this create is part of a QP launch, capture the QP
     // id so we can stamp the lineage in the same transaction. The
@@ -168,6 +170,16 @@ pub async fn create(
     let originating_qp_id = req.originating_qp_id.clone();
     let want_no_agent = req.no_agent;
     match state.db.with_conn(move |conn| {
+        // 0.8.10 — a QP-launched discussion inherits the QP's explicit model
+        // (agent_settings.model), so a standalone launch runs on the same
+        // model the QP is pinned to. Set it before insert; None → tier resolve.
+        if let Some(ref qp_id) = originating_qp_id {
+            if let Ok(Some(qp)) = crate::db::quick_prompts::get_quick_prompt(conn, qp_id) {
+                if let Some(m) = qp.agent_settings.and_then(|s| s.model) {
+                    disc.model = Some(m);
+                }
+            }
+        }
         crate::db::discussions::insert_discussion(conn, &disc)?;
         crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
         if let Some(ref qp_id) = originating_qp_id {
@@ -306,6 +318,7 @@ pub async fn update(
             // (System messages are filtered from the agent prompt)
             let old_name = old_agent_name.as_deref().unwrap_or("?");
             let switch_msg = crate::models::DiscussionMessage {
+                model: None,
                 lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: crate::models::MessageRole::User,

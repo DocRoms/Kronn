@@ -575,6 +575,7 @@ mod tests {
                 workspace_path: None,
                 worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
+                model: None,
                 pin_first_message: false,
                 summary_cache: None,
                 summary_up_to_msg_idx: None,
@@ -708,6 +709,7 @@ mod tests {
                 archived: false, pinned: false, workspace_mode: "Direct".into(),
                 workspace_path: None, worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
+                model: None,
                 pin_first_message: false,
                 summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
@@ -937,6 +939,7 @@ mod tests {
                     archived: false, pinned: false, workspace_mode: "Direct".into(),
                     workspace_path: None, worktree_branch: None,
                     tier: crate::models::ModelTier::Default,
+                    model: None,
                     pin_first_message: false,
                     summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
@@ -960,6 +963,7 @@ mod tests {
             let content = content.to_string();
             move |conn| {
                 let msg = crate::models::DiscussionMessage {
+                    model: None,
                     lint_report: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     role: match role.as_str() {
@@ -1689,6 +1693,7 @@ mod tests {
                 archived: false, pinned: false, workspace_mode: "Direct".into(),
                 workspace_path: None, worktree_branch: None,
                 tier: crate::models::ModelTier::Default,
+                model: None,
                 pin_first_message: true,
                 summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
             shared_id: None,
