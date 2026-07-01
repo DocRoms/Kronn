@@ -497,12 +497,14 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         (AgentType::CopilotCli, ModelTier::Default)    => None, // Copilot default is fine
         (AgentType::CopilotCli, ModelTier::Reasoning)  => Some("o4-mini".into()),
         // Ollama: the user normally picks a model via the OllamaCard (override
-        // above). These are the pulled-tag fallbacks when none is set — bench-
-        // backed defaults (see docs). Economy uses qwen3:4b (fastest, needs
-        // /no_think, injected in build_ollama_chat_body); Default/Reasoning use
-        // the qwen3:30b-a3b MoE (fast + capable). Never bare tags like `qwen3`
-        // (not a pullable name) or `llama3.2` (not pulled) → opaque Ollama 404.
-        (AgentType::Ollama, ModelTier::Default)        => Some("qwen3:30b-a3b".into()),
+        // above). These are the pulled-tag fallbacks when none is set. They are
+        // deliberately portability-first, NOT tuned for a beefy machine: the
+        // no-config Default is qwen3:8b (~5 GB — fits almost any box, fast, good
+        // multilingual). Economy is qwen3:4b (lightest). Reasoning is the only
+        // heavy fallback (qwen3:30b-a3b MoE) — an explicit opt-in tier; small
+        // machines should override it via the OllamaCard. Never bare tags like
+        // `qwen3` (not pullable) or `llama3.2` (not pulled) → opaque Ollama 404.
+        (AgentType::Ollama, ModelTier::Default)        => Some("qwen3:8b".into()),
         (AgentType::Ollama, ModelTier::Economy)        => Some("qwen3:4b".into()),
         (AgentType::Ollama, ModelTier::Reasoning)      => Some("qwen3:30b-a3b".into()),
         // Kiro, Vibe: no --model flag support
@@ -741,7 +743,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         return start_ollama_http(
             config.prompt,
             &extra_context,
-            model_flag.as_deref().unwrap_or("qwen3:30b-a3b"),
+            model_flag.as_deref().unwrap_or("qwen3:8b"),
             config.ollama_format,
         ).await;
     }
@@ -1467,7 +1469,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
         },
         AgentType::Ollama => {
             // Ollama: local LLM inference via `ollama run <model> <prompt>`
-            let model = model_flag.unwrap_or("qwen3:30b-a3b");
+            let model = model_flag.unwrap_or("qwen3:8b");
             let full_prompt = if mcp_context.is_empty() {
                 prompt.into()
             } else {

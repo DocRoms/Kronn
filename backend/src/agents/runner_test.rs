@@ -898,8 +898,8 @@ Suite de la réponse.";
         let no_override = ModelTiersConfig::default();
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&no_override)),
-            Some("qwen3:30b-a3b".into()),
-            "No override → built-in default is a pulled tag, never a bare/absent name",
+            Some("qwen3:8b".into()),
+            "No override → portable built-in default (small, fits most machines), never a bare/absent name",
         );
     }
 
@@ -909,8 +909,10 @@ Suite de la réponse.";
         use crate::models::ModelTier;
         // Regression: the old fallbacks were `llama3.2` (not pulled) and the
         // bare `qwen3` (not a pullable tag) → opaque Ollama 404 at run time.
+        // Portability-first: Default is a small, universal model (qwen3:8b);
+        // Reasoning is the only heavy opt-in fallback.
         assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None), Some("qwen3:4b".into()));
-        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None), Some("qwen3:30b-a3b".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None), Some("qwen3:8b".into()));
         assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None), Some("qwen3:30b-a3b".into()));
     }
 
