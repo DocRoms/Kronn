@@ -162,9 +162,16 @@ test.describe('Workflow linear runner — 3 steps end-to-end', () => {
     // runner plumbing is what's under test, not httpbin's uptime. A 4xx, a
     // missing run, or a non-Notify failure is a REAL regression → still asserted.
     if (final!.status !== 'Success') {
-      const blob = JSON.stringify(final!.step_results);
-      const externalFivexx = /"http_status":\s*5\d\d/.test(blob);
-      test.skip(externalFivexx, `httpbin returned a 5xx to a Notify step mid-run (external flake): ${blob}`);
+      // Test each step's RAW output string, NOT `JSON.stringify(step_results)`:
+      // `output` is itself a JSON string, so re-stringifying the array escapes
+      // its quotes (`\"http_status\":502`) and the naive `"http_status":5xx`
+      // regex never matched — the guard silently never fired and httpbin 5xx
+      // flakes surfaced as hard failures (observed in CI 2026-07-02).
+      const externalFivexx = final!.step_results.some(sr => {
+        const out = typeof sr.output === 'string' ? sr.output : JSON.stringify(sr.output ?? '');
+        return sr.status === 'Failed' && /"http_status":\s*5\d\d/.test(out);
+      });
+      test.skip(externalFivexx, `httpbin returned a 5xx to a Notify step mid-run (external flake): ${JSON.stringify(final!.step_results)}`);
     }
     expect(
       final!.status,

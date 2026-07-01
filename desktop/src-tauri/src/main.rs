@@ -466,8 +466,25 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
         DEFAULT_MAX_CONCURRENT_AGENTS
     };
 
+    // Exactly ONE backend per data dir (same guard as the headless main): refuse
+    // to start if another Kronn already holds the lock, so two processes can't
+    // race on config.toml / the key / the DB. Held for the process lifetime.
+    let _data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
+        tracing::error!("{e}");
+        e
+    })?;
+
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
+
+    // Resolve/repair the encryption key now the DB is open (see core::keystore):
+    // adopt the legacy key, restore it from keychain/sidecar, or mint on an empty
+    // install — NEVER regenerate over existing encrypted data (2026-06-30 fix).
+    // Fail-soft: an unresolvable key locks only the token subsystem, not boot.
+    match kronn::core::keystore::reconcile(&mut app_config, &database).await {
+        Ok(outcome) => tracing::info!("Encryption key reconciled: {outcome:?}"),
+        Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
+    }
 
     // Build state via the shared factory — any new AppState field gets
     // picked up here automatically (see kronn::AppState::new_defaults).

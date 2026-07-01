@@ -1,10 +1,21 @@
-.PHONY: start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump desktop desktop-dev desktop-target
+
+# Doc-skippers type `make` bare (or `make install`) before reading anything.
+# Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
+# helper — a baffling near-no-op. Default to help instead; it points at the
+# guided entry (`./kronn start`).
+.DEFAULT_GOAL := help
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 APP_NAME    := kronn
 VERSION     := $(shell cat VERSION 2>/dev/null || echo "0.0.0")
 PORT        := 3140
 DOCKER_COMP := docker compose
+
+# In-place sed differs between GNU (`sed -i`) and BSD/macOS (`sed -i ''`).
+# Detected once so `make bump` works on both — the GNU-only syntax used to
+# abort mid-bump on macOS (observed on the 0.8.10 bump).
+SEDI := $(shell sed --version >/dev/null 2>&1 && echo "-i" || echo "-i ''")
 
 # ─── Colors ──────────────────────────────────────────────────────────────────
 RED    := \033[0;31m
@@ -148,7 +159,20 @@ _apply-debug-flag:
 ## Start everything (Docker, fast build — no LTO, ~4x faster than prod)
 ## Pass DEBUG=1 to force verbose logs (kronn=debug,tower_http=debug) for this run.
 ## Without DEBUG=1, the backend picks the level from config.server.debug_mode.
+# The universal "I didn't read the docs" entry point. Delegates to the guided
+# CLI (`./kronn start`), which handles the macOS Docker warning, prerequisites,
+# and points at `./kronn start-dev` (native) where appropriate. NOTE: `start`
+# below must NOT delegate to the CLI — kronn's cmd_web calls `make start`
+# internally, so that would recurse.
+install:
+	@echo "$(CYAN)Launching the guided Kronn setup (./kronn start)...$(RESET)"
+	@./kronn start
+
 start: .env _gen-override _apply-debug-flag
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+		echo "$(YELLOW)  macOS note: Docker can't run your host agents (Claude, Codex, …) or read the Keychain.$(RESET)"; \
+		echo "$(YELLOW)  For native agent execution prefer: ./kronn start-dev$(RESET)"; \
+	fi
 	@echo "$(GREEN)▸ Building $(APP_NAME) (fast profile)...$(RESET)"
 	@CARGO_PROFILE=fast $(DOCKER_COMP) up -d --build
 	@echo ""
@@ -216,7 +240,9 @@ dev-frontend:
 
 ## Run both in dev mode (requires tmux or two terminals)
 dev:
-	@echo "$(YELLOW)Run in two terminals:$(RESET)"
+	@echo "$(CYAN)One command runs both (backend hot-reload + Vite):$(RESET)"
+	@echo "  ./kronn start-dev"
+	@echo "$(YELLOW)Or manually, in two terminals:$(RESET)"
 	@echo "  make dev-backend"
 	@echo "  make dev-frontend"
 
@@ -343,8 +369,13 @@ help:
 	@echo ""
 	@echo "$(CYAN)$(APP_NAME) — Enter the grid. Command your agents.$(RESET)"
 	@echo ""
+	@echo "$(GREEN)New here? One command:$(RESET)"
+	@echo "  ./kronn start       Guided setup & launch (recommended)"
+	@echo "  ./kronn start-dev   Native mode — REQUIRED on macOS for host agents"
+	@echo ""
 	@echo "$(GREEN)Usage:$(RESET)"
-	@echo "  make start          Build & launch (Docker, fast — default)"
+	@echo "  make install        Same as ./kronn start (guided)"
+	@echo "  make start          Build & launch (Docker, fast)"
 	@echo "  make start-prod     Build & launch (Docker, release + LTO)"
 	@echo "  make stop           Stop services"
 	@echo "  make logs           Tail logs"
@@ -370,18 +401,18 @@ ifndef V
 endif
 	@echo "$(YELLOW)▸ Bumping version to $(V)...$(RESET)"
 	@echo "$(V)" > VERSION
-	@sed -i 's/^version = ".*"/version = "$(V)"/' backend/Cargo.toml
-	@sed -i 's/^version = ".*"/version = "$(V)"/' desktop/src-tauri/Cargo.toml
-	@sed -i 's/"version": ".*"/"version": "$(V)"/' frontend/package.json
-	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
-	@sed -i 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
-	@sed -i 's/Kronn v[0-9]\+\.[0-9]\+\.[0-9]\+/Kronn v$(V)/' README.md
+	@sed $(SEDI) 's/^version = ".*"/version = "$(V)"/' backend/Cargo.toml
+	@sed $(SEDI) 's/^version = ".*"/version = "$(V)"/' desktop/src-tauri/Cargo.toml
+	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' frontend/package.json
+	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
+	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
+	@sed $(SEDI) 's/Kronn v[0-9]\+\.[0-9]\+\.[0-9]\+/Kronn v$(V)/' README.md
 	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
 	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
 	@# still claiming v0.8.5 on the early-access disclaimer + credits line.
 	@# Pattern: any "v<semver>" occurrence in site/*.html is the Kronn version
 	@# (no other tokens use that prefix today).
-	@sed -i 's/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$(V)/g' site/index.html site/en.html site/es.html
+	@sed $(SEDI) 's/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$(V)/g' site/index.html site/en.html site/es.html
 	@# Sync Cargo.lock workspace entries so `cargo check --locked` stays green in CI.
 	@# `cargo update --workspace --offline` only touches local package versions in the
 	@# lock file — no network, no dep bumps. Required after editing a workspace

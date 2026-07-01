@@ -479,6 +479,15 @@ export const config = {
   },
   getNetworkExposure: () => api<NetworkExposure>('GET', '/config/network-exposure'),
   setNetworkExposure: (exposed: boolean) => api<NetworkExposure>('POST', '/config/network-exposure', { exposed }),
+  /** P2 recovery passphrase — the encryption key wrapped under an Argon2id
+   *  passphrase, so MCP secrets survive total machine/keychain loss. */
+  getRecoveryStatus: () => api<{ configured: boolean }>('GET', '/config/recovery/status'),
+  /** Returns the recovery code the user MUST save off-machine. */
+  setRecovery: (passphrase: string) => api<{ recovery_code: string }>('POST', '/config/recovery/set', { passphrase }),
+  /** Restores the encryption key when the token subsystem is locked. `recoveryCode`
+   *  optional — omitted, the local recovery sidecar is used. */
+  restoreRecovery: (passphrase: string, recoveryCode?: string) =>
+    api<void>('POST', '/config/recovery/restore', { passphrase, recovery_code: recoveryCode || null }),
   getServerConfig: () => api<ServerConfigPublic>('GET', '/config/server'),
   setServerConfig: (req: { domain?: string; max_concurrent_agents?: number; agent_stall_timeout_min?: number; pseudo?: string; avatar_email?: string; bio?: string; debug_mode?: boolean; default_model_tier?: 'economy' | 'default' | 'reasoning'; default_summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('POST', '/config/server', req),
   regenerateAuthToken: () => api<string>('POST', '/config/auth-token/regenerate'),

@@ -190,6 +190,18 @@ jobs:
           SCCACHE_GHA_ENABLED: "true"
           RUSTC_WRAPPER: "sccache"
 
+      # Scoped, stricter floor on the encryption-key / config-persistence modules
+      # (2026-06-30 secret-loss hardening). Reuses the instrumented build from the
+      # step above (cargo llvm-cov report, no rebuild). Separate from the repo-wide
+      # floor — a regression that could silently lose the key fails CI here first.
+      - name: cargo llvm-cov — key-management scoped floor
+        # The job's default working-directory is `backend/` — the script lives at
+        # the repo root and handles its own `cd`, so reference it relatively.
+        run: ../scripts/check-keymgmt-coverage.sh
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+
       # ── Desktop compilation check ───────────────────────────────────
       # The Tauri desktop app (desktop/src-tauri/) imports the backend as
       # a lib. Signature changes in the backend break the desktop build

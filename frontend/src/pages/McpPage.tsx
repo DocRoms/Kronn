@@ -8,6 +8,7 @@ import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, Mc
 import { pluginKind, type PluginKind } from '../lib/pluginKind';
 import { linkify } from '../lib/linkify';
 import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
+import { RecoveryRestorePanel } from '../components/RecoveryRestorePanel';
 import { Dropdown } from '../components/Dropdown';
 import { SecretField } from '../components/SecretField';
 import {
@@ -1540,6 +1541,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               </li>
             ))}
           </ul>
+          {/* P2 — when the cause is a changed encryption key (secrets
+              unreadable), the recovery passphrase can restore the original
+              key in one step instead of re-entering every token. */}
+          <RecoveryRestorePanel toast={toast} t={t} onRestored={refetchMcps} />
         </div>
       )}
 

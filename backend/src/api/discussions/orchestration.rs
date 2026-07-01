@@ -710,13 +710,16 @@ pub(super) async fn maybe_generate_summary(
     }).await {
         Ok(mut process) => {
             let mut summary = String::new();
+            // Ollama streams raw token fragments (no '\n' re-join); CLI text
+            // agents stream lines.
+            let raw_stream = process.raw_token_stream();
             while let Some(line) = process.next_line().await {
                 if process.output_mode == runner::OutputMode::StreamJson {
                     if let runner::StreamJsonEvent::Text(text) = runner::parse_claude_stream_line(&line) {
                         summary.push_str(&text);
                     }
                 } else {
-                    if !summary.is_empty() { summary.push('\n'); }
+                    if !raw_stream && !summary.is_empty() { summary.push('\n'); }
                     summary.push_str(&line);
                 }
             }
@@ -882,6 +885,9 @@ pub async fn generate_summary_on_demand(
     // not zero like Phase A's placeholder.
     let mut stream_json_tokens: u64 = 0;
     let is_stream_json = process.output_mode == runner::OutputMode::StreamJson;
+    // Ollama streams raw token fragments (no '\n' re-join); CLI text agents
+    // stream lines.
+    let raw_stream = process.raw_token_stream();
     while let Some(line) = process.next_line().await {
         if is_stream_json {
             match runner::parse_claude_stream_line(&line) {
@@ -893,7 +899,7 @@ pub async fn generate_summary_on_demand(
                 _ => {}
             }
         } else {
-            if !out.is_empty() { out.push('\n'); }
+            if !raw_stream && !out.is_empty() { out.push('\n'); }
             out.push_str(&line);
         }
     }

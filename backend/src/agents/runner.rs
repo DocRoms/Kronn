@@ -96,6 +96,15 @@ pub struct AgentProcess {
 }
 
 impl AgentProcess {
+    /// True when `next_line()` yields RAW token fragments to concatenate as-is
+    /// (Ollama HTTP streams model tokens), not whole lines. Line-based
+    /// consumers must skip their '\n' separator for these — joining tokens
+    /// with newlines shreds the message into one word per line (the
+    /// 2026-07-01 Ollama formatting bug).
+    pub fn raw_token_stream(&self) -> bool {
+        self.agent_type == AgentType::Ollama
+    }
+
     /// Get next output line. For Kiro, strips ANSI codes and filters noise.
     pub async fn next_line(&mut self) -> Option<String> {
         loop {
@@ -172,6 +181,11 @@ pub trait AgentIo: Send {
     async fn next_line(&mut self) -> Option<String>;
     /// How to interpret stdout (StreamJson → parse events ; otherwise raw).
     fn output_mode(&self) -> OutputMode;
+    /// True when `next_line()` yields raw token fragments (concatenate as-is)
+    /// instead of whole lines. Only Ollama's HTTP stream does this.
+    fn raw_token_stream(&self) -> bool {
+        false
+    }
     /// Best-effort kill of the underlying process.
     async fn kill(&mut self);
     /// Await process exit. `None` when nothing real backs it (scripted).
@@ -195,6 +209,9 @@ impl AgentIo for AgentProcess {
     }
     fn output_mode(&self) -> OutputMode {
         self.output_mode
+    }
+    fn raw_token_stream(&self) -> bool {
+        AgentProcess::raw_token_stream(self)
     }
     async fn kill(&mut self) {
         let _ = self.child.kill().await;
@@ -631,9 +648,56 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }
     if !doc_author_prompt.is_empty() { parts.push(format!("=== DOC AUTHORING DISCIPLINE (enforce) ===\n\n{}", doc_author_prompt)); }
     if !config.context_files_prompt.is_empty() { parts.push(format!("=== CONTEXT FILES ===\n\n{}", config.context_files_prompt)); }
-    if !mcp_context.is_empty() { parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context)); }
+    // Ollama runs over bare HTTP chat: no filesystem, no tool-execution loop.
+    // Two consequences the other agents don't have:
+    //  1. CLI agents read `docs/AGENTS.md` themselves from the project CWD —
+    //     an HTTP model can't, so inject the doc inline (capped) or Ollama
+    //     answers with zero project grounding.
+    //  2. Describing MCP tools would only teach the model to HALLUCINATE
+    //     calling them (observed 2026-07-01: it presented `fastly_execute` as
+    //     its own capability). Tell it the truth instead.
+    if *config.agent_type == AgentType::Ollama {
+        if project_has_agents_md {
+            if let Ok(mut doc) = std::fs::read_to_string(
+                std::path::Path::new(config.project_path).join("docs/AGENTS.md"),
+            ) {
+                const MAX_INLINE_DOC: usize = 24_000;
+                if doc.len() > MAX_INLINE_DOC {
+                    let mut cut = MAX_INLINE_DOC;
+                    while !doc.is_char_boundary(cut) { cut -= 1; }
+                    doc.truncate(cut);
+                    doc.push_str("\n\n[… truncated — full doc exceeds the inline context budget …]");
+                }
+                // The doc INDEXES other files (docs/examples/*.md, …) the model
+                // cannot open — without this note it claims "all of docs/ is
+                // accessible" and cites files it never saw (observed 2026-07-01).
+                parts.push(format!(
+                    "=== PROJECT DOCUMENTATION ===\n\nThe following is the ONLY project file \
+                     you have. Other files it mentions (docs/*, source code) are NOT available: \
+                     you can NOT read or open them, and if asked you must say so. You may cite \
+                     their paths as pointers for the USER to open, but never present their \
+                     content as known to you.\n\n{}",
+                    doc
+                ));
+            }
+        }
+        parts.push(
+            "=== TOOLS ===\n\nYou have NO executable tools and NO file access in this mode. \
+             You cannot read, write or modify ANY file (including docs/). Answer strictly \
+             from the context provided above; never claim to run a tool, call an API, or \
+             read a file."
+                .to_string(),
+        );
+    } else if !mcp_context.is_empty() {
+        parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
+    }
     if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
-    parts.push(format!("=== PROJECT MEMORY (write back what you learn) ===\n\n{}", memory_prelude));
+    // The memory prelude tells agents to WRITE learnings back into docs/ —
+    // meaningless for Ollama (no file access) and actively harmful: it made the
+    // model claim "I can modify docs/ files" (observed 2026-07-01).
+    if *config.agent_type != AgentType::Ollama {
+        parts.push(format!("=== PROJECT MEMORY (write back what you learn) ===\n\n{}", memory_prelude));
+    }
     let extra_context = parts.join("\n\n");
 
     // 0.6.0 — observability log : trace ce qui est INJECTÉ à chaque
@@ -1045,8 +1109,29 @@ async fn start_ollama_http(
     let stderr_capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     let stderr_clone = stderr_capture.clone();
 
+    // AgentProcess requires a child, but Ollama's execution is HTTP-based. The
+    // child must mirror the STREAM's lifetime exactly: consumers `child.wait()`
+    // after the stream to finalize (a `sleep 3600` placeholder blocked there
+    // for an hour — the UI spinner never stopped, 2026-07-01 bug), and the
+    // audit zombie-probe `try_wait()`s after 60s idle (an already-exited child
+    // would be a false zombie during a slow model cold-load). Solution: `cat`
+    // with a piped stdin whose write end is HELD BY the streaming task below —
+    // when the stream ends (or errors, or the task dies), the pipe closes,
+    // `cat` sees EOF and exits 0 → wait() returns success immediately, and
+    // while the stream lives the child is genuinely alive for the probe.
+    let mut dummy_child = crate::core::cmd::async_cmd("cat")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn stream-lifetime process: {}", e))?;
+    let stdin_guard = dummy_child.stdin.take();
+
     // Spawn a background task to read the HTTP stream and forward text to the channel.
     tokio::spawn(async move {
+        // Holds `cat`'s stdin open for the duration of the stream — dropped on
+        // every exit path of this task, which lets the child exit.
+        let _stream_lifetime = stdin_guard;
         use futures::StreamExt;
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
@@ -1070,10 +1155,12 @@ async fn start_ollama_http(
                 if line.trim().is_empty() { continue; }
 
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line) {
-                    // Extract text content
+                    // Extract text content. A failed send means the consumer
+                    // dropped the receiver (user cancelled / stream aborted) —
+                    // stop downloading instead of draining Ollama into the void.
                     if let Some(text) = json["message"]["content"].as_str() {
-                        if !text.is_empty() {
-                            let _ = tx.send(text.to_string()).await;
+                        if !text.is_empty() && tx.send(text.to_string()).await.is_err() {
+                            return;
                         }
                     }
                     // Last chunk: extract token counts into stderr for parse_token_usage
@@ -1088,16 +1175,6 @@ async fn start_ollama_http(
             }
         }
     });
-
-    // Create a dummy child process (sleep infinity) — AgentProcess requires it
-    // but Ollama's execution is HTTP-based, not process-based. The child is
-    // never read from; it's just a handle that we kill on cancellation.
-    let dummy_child = crate::core::cmd::async_cmd("sleep")
-        .arg("3600")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map_err(|e| format!("Failed to spawn dummy process: {}", e))?;
 
     Ok(AgentProcess {
         child: dummy_child,

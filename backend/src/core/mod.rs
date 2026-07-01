@@ -14,6 +14,9 @@ pub mod context_files;
 pub mod env;
 pub mod config;
 pub mod crypto;
+pub mod keyvault;
+pub mod keystore;
+pub mod recovery;
 pub mod directives;
 pub mod key_discovery;
 pub mod mcp_scanner;
@@ -43,9 +46,10 @@ pub mod versions;
 pub mod run_eta;
 pub mod audit_detectors;
 
-#[cfg(test)]
-#[path = "crypto_test.rs"]
-mod crypto_test;
+// crypto_test.rs removed 2026-07-01 — it was a strict subset of crypto.rs's
+// richer inline `tests` module (roundtrip / wrong-key / base64 / parse / mask),
+// adding duplicate tests with zero new coverage. The inline suite + proptest
+// module in crypto.rs is the single source of truth.
 
 #[cfg(test)]
 #[path = "registry_test.rs"]

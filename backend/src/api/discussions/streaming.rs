@@ -660,6 +660,9 @@ pub(crate) async fn make_agent_stream(
                 // sleep future, effectively resetting the stall timer. If the agent produces
                 // no output for `stall_timeout`, the sleep wins the select! and we break.
                 // The global_deadline sleep_until is NOT reset (absolute deadline).
+                // Ollama streams raw token fragments — concatenate as-is; every
+                // other text-mode agent streams LINES that need the '\n' put back.
+                let raw_stream = process.raw_token_stream();
                 while let Some(line) = tokio::select! {
                     line = process.next_line() => line,
                     _ = cancel_token.cancelled() => {
@@ -776,7 +779,7 @@ pub(crate) async fn make_agent_stream(
                             runner::StreamJsonEvent::Skip => {}
                         }
                     } else {
-                        if !full_response.is_empty() {
+                        if !raw_stream && !full_response.is_empty() {
                             full_response.push('\n');
                         }
                         full_response.push_str(&line);
@@ -790,7 +793,7 @@ pub(crate) async fn make_agent_stream(
                         }
 
                         if !client_gone {
-                            let text_with_nl = if full_response.len() > line.len() {
+                            let text_with_nl = if !raw_stream && full_response.len() > line.len() {
                                 format!("\n{}", line)
                             } else {
                                 line.clone()
@@ -1453,6 +1456,7 @@ pub(super) async fn run_agent_streaming(
     let mut current_tool: Option<String> = None;
     let mut tool_input = String::new();
     let is_stream_json = process.output_mode() == runner::OutputMode::StreamJson;
+    let raw_stream = process.raw_token_stream();
     let deadline = tokio::time::Instant::now() + AGENT_GLOBAL_TIMEOUT;
 
     let mut signal_stop = false;
@@ -1513,7 +1517,7 @@ pub(super) async fn run_agent_streaming(
                                 runner::StreamJsonEvent::Skip => {}
                             }
                         } else {
-                            let nl = if full_response.is_empty() { "" } else { "\n" };
+                            let nl = if raw_stream || full_response.is_empty() { "" } else { "\n" };
                             full_response.push_str(&format!("{}{}", nl, line));
                             if !tx.is_closed() {
                                 let chunk = serde_json::json!({

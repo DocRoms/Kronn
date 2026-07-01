@@ -44,12 +44,13 @@ pub async fn load() -> Result<Option<AppConfig>> {
 
     let mut needs_save = false;
 
-    // Ensure encryption secret exists (migrate older configs)
-    if config.encryption_secret.is_none() {
-        config.encryption_secret = Some(super::crypto::generate_secret());
-        needs_save = true;
-        tracing::info!("Generated encryption secret for existing config");
-    }
+    // The encryption key is intentionally NOT (re)generated here. `load()` runs
+    // BEFORE the DB is open, so it cannot tell whether encrypted rows already
+    // exist — minting a key at this point is exactly what orphaned every secret
+    // in the 2026-06-30 incident. The key is resolved AFTER DB open by the
+    // DB-aware reconciler (env → keychain → sidecar → this legacy field), which
+    // only mints on a genuinely empty install. `encryption_secret` is left as
+    // read from disk (possibly None) and preserved verbatim on any re-save.
 
     // Auto-generate auth token on first launch. Auth defaults ON on native
     // (Tauri/CLI), where the localhost bypass keeps it transparent; OFF under
@@ -120,13 +121,100 @@ pub async fn save(config: &AppConfig) -> Result<()> {
 
     let content = toml::to_string_pretty(config)
         .context("Failed to serialize config")?;
-
     let path = config_path()?;
-    fs::write(&path, content).await?;
-    restrict_permissions(&path, false).await;
+
+    // Atomic write on a blocking thread: fully-written temp (0600) → fsync →
+    // rename over the target (atomic on one filesystem) → fsync the dir. A crash
+    // or a concurrent reader never sees a half-written config, so the key/token
+    // fields can't be lost to a torn write. Replaces the old `fs::write`, which
+    // could truncate-then-fail and leave a corrupt config.
+    let dir_c = dir.clone();
+    let path_c = path.clone();
+    tokio::task::spawn_blocking(move || write_config_atomic(&dir_c, &path_c, content.as_bytes()))
+        .await
+        .context("config write task panicked")?
+        .context("atomic config write failed")?;
 
     tracing::info!("Config saved to {}", path.display());
     Ok(())
+}
+
+/// Sequence counter so concurrent `save()` calls in one process use distinct
+/// temp filenames (a shared temp name would let one writer's rename yank the
+/// other's temp out from under it).
+static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Atomically persist `content` to `path` inside the already-existing `dir`:
+/// write a sibling temp file, tighten it to `0600`, fsync it, then rename over
+/// the target and fsync the directory so the rename itself is durable. On any
+/// failure the pre-existing `path` is left untouched and the temp is removed.
+fn write_config_atomic(
+    dir: &std::path::Path,
+    path: &std::path::Path,
+    content: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = dir.join(format!(".{}.{}.{}.tmp", CONFIG_FILE, std::process::id(), seq));
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
+        f.sync_all()?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    {
+        // Best-effort: fsync the dir so the rename itself survives a crash.
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
+/// Acquire an exclusive advisory lock on the data dir so exactly ONE backend
+/// runs against a given `config_dir()`. Prevents two instances (a stale
+/// process, or P2P peers sharing a synced dir) from racing on config.toml / the
+/// key / the DB. Hold the returned handle for the process lifetime; dropping it
+/// releases the lock.
+pub fn acquire_data_dir_lock() -> Result<std::fs::File> {
+    let dir = config_dir()?;
+    acquire_lock_in(&dir)
+}
+
+fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
+    use fs2::FileExt;
+    std::fs::create_dir_all(dir)?;
+    let lock_path = dir.join(".kronn.lock");
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        // Pure lock file — its (empty) content is irrelevant, only the flock
+        // matters. Explicit no-truncate keeps clippy's suspicious-open-options
+        // happy without implying we ever write to it.
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .with_context(|| format!("open data-dir lock {}", lock_path.display()))?;
+    f.try_lock_exclusive().map_err(|e| {
+        anyhow::anyhow!(
+            "another Kronn instance is already running against this data directory \
+             ({}). Only one backend may use it at a time.\n\
+             \u{2192} Stop the other one first:\n\
+             \u{2022}  Docker:  kronn stop\n\
+             \u{2022}  native:  pkill -f 'target/debug/kronn' ; pkill -f 'cargo watch -x run'\n\
+             then start Kronn again. (lock: {e})",
+            dir.display()
+        )
+    })?;
+    Ok(f)
 }
 
 /// Restrict a path to owner-only access on Unix; no-op on Windows.
@@ -281,6 +369,203 @@ mod tests {
             "config path should end in config.toml, got: {}",
             p.display()
         );
+    }
+
+    /// A unique scratch dir per test (no `KRONN_DATA_DIR` needed — these test the
+    /// filesystem helpers directly).
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "kronn-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+        ));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn write_config_atomic_writes_and_leaves_no_temp() {
+        let dir = scratch_dir("atomic");
+        let path = dir.join(CONFIG_FILE);
+        write_config_atomic(&dir, &path, b"port = 3140\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "port = 3140\n");
+        let has_tmp = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(!has_tmp, "atomic write must leave no .tmp behind");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn write_config_atomic_sets_file_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch_dir("atomic0600");
+        let path = dir.join(CONFIG_FILE);
+        write_config_atomic(&dir, &path, b"x = 1").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "config file must be 0600");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_config_atomic_errors_when_dir_missing() {
+        // Covers the File::create error path (root-independent).
+        let dir = scratch_dir("atomicmissing");
+        let path = dir.join(CONFIG_FILE);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(
+            write_config_atomic(&dir, &path, b"x = 1\n").is_err(),
+            "writing into a missing dir must error, not panic"
+        );
+    }
+
+    #[test]
+    fn write_config_atomic_leaves_original_when_rename_fails() {
+        // Make `path` a NON-EMPTY dir so rename(temp, path) fails — proves the
+        // pre-existing target is untouched on failure and the temp is cleaned up.
+        let dir = scratch_dir("atomicrename");
+        let path = dir.join(CONFIG_FILE);
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("marker"), b"keep").unwrap();
+        assert!(
+            write_config_atomic(&dir, &path, b"new = 1\n").is_err(),
+            "rename over a non-empty dir must fail"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path.join("marker")).unwrap(),
+            "keep",
+            "the pre-existing target must be untouched on failure"
+        );
+        let has_tmp = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp"));
+        assert!(!has_tmp, "temp must be removed when the rename fails");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn data_dir_lock_is_exclusive() {
+        let dir = scratch_dir("lock");
+        let g1 = acquire_lock_in(&dir).expect("first exclusive lock must succeed");
+        assert!(
+            acquire_lock_in(&dir).is_err(),
+            "a second exclusive lock on the same data dir must be refused"
+        );
+        drop(g1); // releasing lets a later acquire succeed
+        assert!(acquire_lock_in(&dir).is_ok(), "lock must be re-acquirable after release");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// I1 — `load()` must NEVER mint a key when the field is missing. That silent
+    /// regeneration is exactly what orphaned every secret in the 2026-06-30
+    /// incident. The DB-aware reconciler owns key resolution now.
+    #[tokio::test]
+    async fn load_does_not_regenerate_a_missing_encryption_secret() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("noregen");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let mut cfg = default_config();
+        cfg.server.auth_token = Some("tok".into()); // avoid the auth-gen re-save path
+        cfg.encryption_secret = None; // simulate a config that lost its key
+        save(&cfg).await.expect("save must succeed");
+
+        let loaded = load().await.expect("load Ok").expect("Some after save");
+        assert!(
+            loaded.encryption_secret.is_none(),
+            "load() MUST NOT generate a key when the field is missing (I1)"
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn load_keeps_an_existing_encryption_secret() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("keepsecret");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let mut cfg = default_config();
+        let secret = cfg.encryption_secret.clone().expect("default has a secret");
+        cfg.server.auth_token = Some("tok".into());
+        save(&cfg).await.expect("save must succeed");
+
+        let loaded = load().await.expect("load Ok").expect("Some after save");
+        assert_eq!(
+            loaded.encryption_secret.as_deref(),
+            Some(secret.as_str()),
+            "an existing secret must be preserved verbatim across load"
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Legacy single-key fields (`tokens.anthropic/openai/google`) must migrate
+    /// into the multi-key `keys[]` on load, and the legacy fields get cleared.
+    #[tokio::test]
+    async fn load_migrates_legacy_single_keys_to_multikey() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("legacymig");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        // The legacy fields are `skip_serializing`, so we can't round-trip them
+        // through save(); write a raw config.toml with the legacy line injected
+        // under [tokens] — exactly the shape an OLD Kronn wrote.
+        let mut cfg = default_config();
+        cfg.server.auth_token = Some("tok".into());
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        let injected = toml_str.replacen("[tokens]\n", "[tokens]\nanthropic = \"sk-ant-legacy\"\n", 1);
+        assert!(injected.contains("anthropic = \"sk-ant-legacy\""), "injection sanity");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(config_path().unwrap(), injected).unwrap();
+
+        let loaded = load().await.expect("load Ok").expect("Some after save");
+        assert_eq!(loaded.tokens.keys.len(), 1, "one legacy key must migrate");
+        assert_eq!(loaded.tokens.keys[0].provider, "anthropic");
+        assert_eq!(loaded.tokens.keys[0].value, "sk-ant-legacy");
+        assert!(loaded.tokens.anthropic.is_none(), "legacy field must be cleared");
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Atomic rename guarantees a concurrent flurry of `save()` never yields a
+    /// torn, unparseable config — `load()` always parses cleanly.
+    #[tokio::test]
+    async fn concurrent_saves_never_produce_a_torn_config() {
+        let _lock = ENV_LOCK.lock().await;
+        let tmp = scratch_dir("concurrent");
+        std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
+
+        let base = default_config();
+        let mut handles = Vec::new();
+        for i in 0..8u16 {
+            let mut c = base.clone();
+            c.server.port = 3000 + i;
+            handles.push(tokio::spawn(async move { save(&c).await }));
+        }
+        for h in handles {
+            h.await.expect("task join").expect("save must succeed");
+        }
+
+        // The payoff: the final file is always fully parseable (never torn).
+        let loaded = load().await.expect("load Ok").expect("Some after concurrent saves");
+        assert!(
+            loaded.encryption_secret.is_some(),
+            "a complete config (with its secret) must be readable after concurrent saves"
+        );
+
+        std::env::remove_var("KRONN_DATA_DIR");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// A Batman unlock writes "batman" into config.unlocked_profiles AND

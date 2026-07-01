@@ -57,6 +57,7 @@ function AttributedDescription({ text, className }: { text: string; className?: 
 }
 
 import { IdentitySection } from '../components/settings/IdentitySection';
+import { RecoverySection } from '../components/settings/RecoverySection';
 import { AntiHallucSection } from '../components/settings/AntiHallucSection';
 import { ContinualLearningSection } from '../components/settings/ContinualLearningSection';
 import { ProfilesSection } from '../components/settings/ProfilesSection';
@@ -296,6 +297,7 @@ export function SettingsPage({
           { id: 'settings-scan', label: 'Scan' },
           { id: 'settings-agent-config', label: 'Agents & Skills' },
           { id: 'settings-identity', label: t('settings.identity') },
+          { id: 'settings-recovery', label: t('settings.recovery.title') },
           { id: 'settings-user-context', label: t('userContext.title') },
           { id: 'settings-usage', label: t('config.usage') },
           { id: 'settings-server', label: t('config.server') },
@@ -1282,6 +1284,9 @@ export function SettingsPage({
 
       {/* Identity */}
       <IdentitySection toast={toast} t={t} />
+
+      {/* P2 — recovery passphrase for the MCP-secrets encryption key. */}
+      <RecoverySection toast={toast} t={t} />
 
       {/* User context — cross-project markdown notes injected into every agent.
           Lives in ~/.kronn/user-context/ on disk; this editor is the

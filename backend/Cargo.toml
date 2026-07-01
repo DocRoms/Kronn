@@ -1,6 +1,6 @@
 [package]
 name = "kronn"
-version = "0.8.9"
+version = "0.8.10"
 edition = "2021"
 description = "Self-hosted AI dev workflow control plane"
 license = "AGPL-3.0-only"
@@ -47,6 +47,21 @@ async-stream = "0.3"
 aes-gcm = "0.10"
 sha2 = "0.11"
 base64 = "0.22"
+# OS keychain (macOS Keychain / Windows Credential Manager) — a backup tier for
+# the encryption key. DELIBERATELY no Linux Secret Service feature: it pulls
+# `libdbus-sys`, a C system dependency (libdbus-1-dev) that broke CI/Docker
+# builds — for a tier that can't work there anyway (no D-Bus daemon in
+# containers/WSL, debug builds skip the keychain). On Linux, `Entry::new`
+# errors → the keyvault probe degrades to the 0600 sidecar, which was already
+# the primary Linux tier in the design matrix.
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+# Recovery passphrase → KEK (Argon2id) that wraps the encryption key, so it's
+# recoverable even after total loss of the machine + keychain + sidecar.
+argon2 = "0.5"
+zeroize = "1"           # Wipe derived KEKs / key material from memory after use
+# Advisory exclusive lock on the data dir — exactly one backend per config_dir()
+# (prevents two instances racing on config.toml / the key / the DB).
+fs2 = "0.4"
 
 # HTTP client (for tracker APIs)
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream", "form"] }
@@ -103,6 +118,7 @@ wiremock = "0.6"          # HTTP mock server for ApiCall step tests
 syn = { version = "2", features = ["full", "visit", "extra-traits"] }
 proc-macro2 = { version = "1", features = ["span-locations"] }
 walkdir = "2"
+proptest = "1"          # Property tests for crypto (roundtrip + universal tamper rejection)
 
 # ── Build profiles ───────────────────────────────────────────────────────────
 

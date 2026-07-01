@@ -1132,7 +1132,7 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         .into_iter().filter(|p| !p.is_builtin).collect();
 
     Ok(DbExport {
-        version: 4,
+        version: crate::models::db::CURRENT_EXPORT_VERSION,
         exported_at: Utc::now(),
         projects,
         discussions,
@@ -1185,33 +1185,21 @@ pub async fn export_data(
     };
     drop(config);
 
-    // Build ZIP in memory
-    let mut buf = std::io::Cursor::new(Vec::new());
-    {
-        let mut zip = zip::ZipWriter::new(&mut buf);
-        let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+    // P2 — bundle the recovery blob (the encryption key wrapped under the user's
+    // Argon2id passphrase) when one is configured. With it, THIS export + the
+    // passphrase restore the plugin SECRETS too, not just the data — the export
+    // used to carry undecryptable ciphertext only (the 2026-06-30 re-enter-
+    // everything pain). Safe to ship: the blob is useless without the passphrase;
+    // the raw key itself is still never exported.
+    let recovery_code = config::config_dir()
+        .ok()
+        .and_then(|d| crate::core::recovery::load_blob(&d))
+        .map(|b| crate::core::recovery::to_code(&b));
 
-        if let Err(e) = zip.start_file("data.json", options) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP error: {}", e)).into_response();
-        }
-        if let Err(e) = std::io::Write::write_all(&mut zip, data_json.as_bytes()) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP write error: {}", e)).into_response();
-        }
-
-        if let Err(e) = zip.start_file("config.toml", options) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP error: {}", e)).into_response();
-        }
-        if let Err(e) = std::io::Write::write_all(&mut zip, config_toml.as_bytes()) {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP write error: {}", e)).into_response();
-        }
-
-        if let Err(e) = zip.finish() {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("ZIP finish error: {}", e)).into_response();
-        }
-    }
-
-    let bytes = buf.into_inner();
+    let bytes = match build_export_zip(&data_json, &config_toml, recovery_code.as_deref()) {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    };
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
@@ -1220,25 +1208,132 @@ pub async fn export_data(
         .unwrap()
 }
 
+/// Assemble the export ZIP: data.json + config.toml (+ recovery.key when the
+/// user configured a recovery passphrase). Factored out of the handler so the
+/// archive layout is unit-testable.
+fn build_export_zip(
+    data_json: &str,
+    config_toml: &str,
+    recovery_code: Option<&str>,
+) -> Result<Vec<u8>, String> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+
+        zip.start_file("data.json", options).map_err(|e| format!("ZIP error: {}", e))?;
+        std::io::Write::write_all(&mut zip, data_json.as_bytes())
+            .map_err(|e| format!("ZIP write error: {}", e))?;
+
+        zip.start_file("config.toml", options).map_err(|e| format!("ZIP error: {}", e))?;
+        std::io::Write::write_all(&mut zip, config_toml.as_bytes())
+            .map_err(|e| format!("ZIP write error: {}", e))?;
+
+        if let Some(code) = recovery_code {
+            zip.start_file("recovery.key", options).map_err(|e| format!("ZIP error: {}", e))?;
+            std::io::Write::write_all(&mut zip, code.as_bytes())
+                .map_err(|e| format!("ZIP write error: {}", e))?;
+        }
+
+        zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
+    }
+    Ok(buf.into_inner())
+}
+
+/// Install a recovery blob carried by an imported backup — without EVER
+/// destroying existing recovery material: a differing local blob (it protects
+/// the LOCAL key) is copied to `recovery.key.backup` first. Once installed, the
+/// Plugins restore panel works with the source machine's passphrase alone.
+/// Returns user-facing warnings for the ImportResult.
+fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let Ok(blob) = crate::core::recovery::from_code(code) else {
+        warnings.push("The backup carries a recovery blob but it is malformed — ignored.".to_string());
+        return warnings;
+    };
+    match crate::core::recovery::load_blob(dir) {
+        Some(existing) if existing == blob => {} // already in place — nothing to do
+        Some(_) => {
+            let _ = std::fs::copy(
+                dir.join(crate::core::recovery::RECOVERY_FILENAME),
+                dir.join("recovery.key.backup"),
+            );
+            if crate::core::recovery::save_blob(dir, &blob).is_ok() {
+                warnings.push(
+                    "The backup's recovery blob was installed (this machine's previous one was \
+                     kept as recovery.key.backup). If imported plugin secrets are unreadable, \
+                     use Plugins → 'Restore from recovery passphrase' with the passphrase set \
+                     on the SOURCE machine.".to_string(),
+                );
+            }
+        }
+        None => {
+            if crate::core::recovery::save_blob(dir, &blob).is_ok() {
+                warnings.push(
+                    "The backup's recovery blob was installed. If imported plugin secrets are \
+                     unreadable, use Plugins → 'Restore from recovery passphrase' with the \
+                     passphrase set on the SOURCE machine.".to_string(),
+                );
+            }
+        }
+    }
+    warnings
+}
+
+/// Which table-clear statements a selective import runs for this payload. Only
+/// clears a table group when the export carries rows for it, so an older or
+/// partial export can NEVER wipe a table it doesn't contain (the 2026-06-29
+/// quick_apis/learnings silent-wipe). Child rows precede parents to respect FKs.
+fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
+    let mut stmts: Vec<&'static str> = Vec::new();
+    if !data.discussions.is_empty() {
+        stmts.push("DELETE FROM messages");
+        stmts.push("DELETE FROM discussions");
+    }
+    if !data.mcp_servers.is_empty() || !data.mcp_configs.is_empty() {
+        stmts.push("DELETE FROM mcp_config_projects");
+        stmts.push("DELETE FROM mcp_configs");
+        stmts.push("DELETE FROM mcp_servers");
+    }
+    if !data.workflows.is_empty() {
+        stmts.push("DELETE FROM workflow_runs");
+        stmts.push("DELETE FROM workflows");
+    }
+    if !data.contacts.is_empty() { stmts.push("DELETE FROM contacts"); }
+    if !data.quick_prompts.is_empty() { stmts.push("DELETE FROM quick_prompts"); }
+    if !data.quick_apis.is_empty() { stmts.push("DELETE FROM quick_apis"); }
+    if !data.learnings.is_empty() { stmts.push("DELETE FROM learnings"); }
+    if !data.projects.is_empty() { stmts.push("DELETE FROM projects"); }
+    stmts
+}
+
 /// Import DB data from a DbExport struct. Returns warnings and invalid paths.
 async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult, String> {
     let mut warnings = Vec::new();
     let mut invalid_paths = Vec::new();
 
-    // Clear existing data
-    state.db.with_conn(|conn| {
-        conn.execute_batch(
-            "DELETE FROM messages; DELETE FROM discussions; \
-             DELETE FROM mcp_config_projects; DELETE FROM mcp_configs; DELETE FROM mcp_servers; \
-             DELETE FROM workflow_runs; DELETE FROM workflows; \
-             DELETE FROM contacts; \
-             DELETE FROM quick_prompts; \
-             DELETE FROM quick_apis; \
-             DELETE FROM learnings; \
-             DELETE FROM projects;"
-        )?;
-        Ok(())
-    }).await.map_err(|e| format!("Failed to clear DB: {}", e))?;
+    // Downgrade guard: an export OLDER than this build can't carry tables added
+    // since (they deserialize to empty), so restoring it must NOT be read as
+    // "the user has none of X". Warn loudly, and clear SELECTIVELY below.
+    if data.version < crate::models::db::CURRENT_EXPORT_VERSION {
+        warnings.push(format!(
+            "This backup is an older format (v{} < v{}). Tables it doesn't carry are left \
+             untouched instead of wiped — your current data for any newer feature is preserved.",
+            data.version, crate::models::db::CURRENT_EXPORT_VERSION
+        ));
+    }
+
+    // Selective clear (replaces the old unconditional wipe): only clear the
+    // tables the payload actually carries — see `import_clear_statements`.
+    let stmts = import_clear_statements(data);
+    if !stmts.is_empty() {
+        let batch = format!("{};", stmts.join("; "));
+        state.db.with_conn(move |conn| {
+            conn.execute_batch(&batch)?;
+            Ok(())
+        }).await.map_err(|e| format!("Failed to clear DB: {}", e))?;
+    }
 
     // Import projects (check path validity)
     for project in &data.projects {
@@ -1409,8 +1504,9 @@ async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<Stri
     warnings
 }
 
-/// Extract data.json and config.toml from a ZIP file (synchronous, no await)
-fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>), String> {
+/// Extract data.json, config.toml and the optional recovery blob from a ZIP
+/// file (synchronous, no await).
+fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option<String>), String> {
     let cursor = std::io::Cursor::new(file_bytes);
     let mut archive = zip::ZipArchive::new(cursor)
         .map_err(|e| format!("Invalid ZIP: {}", e))?;
@@ -1438,7 +1534,21 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>), Strin
         None
     };
 
-    Ok((data, imported_config))
+    // Read recovery.key (optional, P2) — kept only if it parses as a valid
+    // recovery code; a corrupt entry is dropped, never an import error.
+    let recovery_code = if let Ok(mut f) = archive.by_name("recovery.key") {
+        let mut contents = String::new();
+        if std::io::Read::read_to_string(&mut f, &mut contents).is_ok() {
+            let trimmed = contents.trim().to_string();
+            crate::core::recovery::from_code(&trimmed).ok().map(|_| trimmed)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok((data, imported_config, recovery_code))
 }
 
 /// POST /api/config/import — accepts ZIP (multipart) or JSON (legacy)
@@ -1464,7 +1574,7 @@ pub async fn import_data(
 
     if is_zip {
         // Extract ZIP (sync — no await needed, avoids Send issues with zip reader)
-        let (data, imported_config) = match extract_zip(&file_bytes) {
+        let (data, imported_config, recovery_code) = match extract_zip(&file_bytes) {
             Ok(r) => r,
             Err(e) => return Json(ApiResponse::err(e)),
         };
@@ -1479,6 +1589,14 @@ pub async fn import_data(
         if let Some(cfg) = imported_config {
             let config_warnings = merge_import_config(&state, &cfg).await;
             result.warnings.extend(config_warnings);
+        }
+
+        // P2 — install the backup's recovery blob so the source passphrase can
+        // unlock the imported secrets (never destroys local recovery material).
+        if let Some(code) = recovery_code {
+            if let Ok(dir) = config::config_dir() {
+                result.warnings.extend(persist_imported_recovery(&dir, &code));
+            }
         }
 
         Json(ApiResponse::ok(result))
@@ -1526,6 +1644,85 @@ pub async fn reset(
     Json(ApiResponse::ok(()))
 }
 
+// ── Recovery passphrase (P2) ────────────────────────────────────────────────
+
+#[derive(serde::Deserialize)]
+pub struct SetRecoveryRequest {
+    pub passphrase: String,
+}
+
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct SetRecoveryResponse {
+    /// The off-machine copy the user must save. With it + the passphrase, the
+    /// encryption key survives total loss of the machine / keychain / data dir.
+    pub recovery_code: String,
+}
+
+#[derive(serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct RecoveryStatus {
+    pub configured: bool,
+}
+
+#[derive(serde::Deserialize)]
+pub struct RestoreRecoveryRequest {
+    pub passphrase: String,
+    /// Optional: the saved recovery code. When omitted, the local `recovery.key`
+    /// sidecar is used (works unless the whole data dir was lost).
+    #[serde(default)]
+    pub recovery_code: Option<String>,
+}
+
+/// GET /api/config/recovery/status — is a recovery passphrase configured?
+pub async fn recovery_status() -> Json<ApiResponse<RecoveryStatus>> {
+    let configured = config::config_dir()
+        .map(|d| crate::core::recovery::is_configured(&d))
+        .unwrap_or(false);
+    Json(ApiResponse::ok(RecoveryStatus { configured }))
+}
+
+/// POST /api/config/recovery/set — wrap the active key under a passphrase and
+/// return the recovery code to save. Strongly-offered, non-blocking (no wizard
+/// gate). Auth-gated like the destructive endpoints (see `auth_allows`).
+pub async fn set_recovery(
+    State(state): State<AppState>,
+    Json(req): Json<SetRecoveryRequest>,
+) -> Json<ApiResponse<SetRecoveryResponse>> {
+    let config = state.config.read().await;
+    match crate::core::keystore::set_recovery_passphrase(&config, &req.passphrase) {
+        Ok(recovery_code) => Json(ApiResponse::ok(SetRecoveryResponse { recovery_code })),
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
+/// POST /api/config/recovery/restore — restore the encryption key from a
+/// passphrase (+ optional saved recovery code) when the token subsystem is
+/// locked. Verifies the recovered key actually decrypts this instance's data,
+/// then mirrors it back into the keychain/sidecar. Auth-gated.
+pub async fn restore_recovery(
+    State(state): State<AppState>,
+    Json(req): Json<RestoreRecoveryRequest>,
+) -> Json<ApiResponse<()>> {
+    let dir = match config::config_dir() {
+        Ok(d) => d,
+        Err(e) => return Json(ApiResponse::err(e.to_string())),
+    };
+    let store = crate::core::keyvault::KeyStore::standard(&dir);
+    let mut config = state.config.write().await;
+    match crate::core::keystore::recover_with_passphrase(
+        &mut config,
+        &state.db,
+        &store,
+        &req.passphrase,
+        req.recovery_code.as_deref(),
+        &dir,
+    ).await {
+        Ok(_) => Json(ApiResponse::ok(())),
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
 // ── Open URL in system browser ─────────────────────────────────────────────
 
 #[derive(serde::Deserialize)]
@@ -1553,6 +1750,62 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
 mod tests {
     use super::*;
     use crate::core::config;
+
+    // ─── import_clear_statements (I10: selective clear, no downgrade wipe) ────
+
+    fn empty_export() -> crate::models::db::DbExport {
+        crate::models::db::DbExport {
+            version: crate::models::db::CURRENT_EXPORT_VERSION,
+            exported_at: chrono::Utc::now(),
+            projects: vec![], discussions: vec![], workflows: vec![],
+            mcp_servers: vec![], mcp_configs: vec![], custom_skills: vec![],
+            custom_directives: vec![], custom_profiles: vec![], contacts: vec![],
+            quick_prompts: vec![], quick_apis: vec![], learnings: vec![],
+        }
+    }
+
+    fn a_contact() -> crate::models::Contact {
+        crate::models::Contact {
+            id: "c1".into(), pseudo: "p".into(), avatar_email: None,
+            kronn_url: "u".into(), invite_code: "x".into(), status: "accepted".into(),
+            created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn empty_or_old_export_clears_nothing() {
+        // THE fix: an export that carries no rows (incl. an older-format export
+        // whose newer tables deserialize empty) must wipe NOTHING on the target.
+        assert!(import_clear_statements(&empty_export()).is_empty());
+    }
+
+    #[test]
+    fn selective_clear_only_touches_tables_the_payload_carries() {
+        let mut exp = empty_export();
+        exp.contacts.push(a_contact());
+        let stmts = import_clear_statements(&exp);
+        assert_eq!(stmts, vec!["DELETE FROM contacts"]);
+        // Crucially, tables ABSENT from the payload are NOT cleared (the
+        // 2026-06-29 quick_apis/learnings silent wipe).
+        assert!(!stmts.iter().any(|s| s.contains("quick_apis")));
+        assert!(!stmts.iter().any(|s| s.contains("learnings")));
+        assert!(!stmts.iter().any(|s| s.contains("projects")));
+    }
+
+    #[test]
+    fn selective_clear_orders_children_before_parents() {
+        let mut exp = empty_export();
+        exp.mcp_servers.push(crate::models::McpServer {
+            id: "s".into(), name: "n".into(), description: String::new(),
+            transport: crate::models::McpTransport::Stdio { command: "echo".into(), args: vec![] },
+            source: crate::models::McpSource::Registry, api_spec: None,
+        });
+        let stmts = import_clear_statements(&exp);
+        // FK-safe order: link table + configs cleared before the parent servers.
+        let pos = |needle: &str| stmts.iter().position(|s| s.contains(needle)).unwrap();
+        assert!(pos("mcp_config_projects") < pos("mcp_configs"));
+        assert!(pos("mcp_configs") < pos("mcp_servers"));
+    }
 
     // ─── clamp_stall_timeout_min (0.7.0 — 60 min cap was too aggressive
     //    for heavy implements; bumped to 120). ─────────────────────────
@@ -1660,9 +1913,10 @@ mod tests {
         let bytes = buf.into_inner();
 
         // Extract
-        let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
+        let (extracted_data, extracted_config, recovery_code) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_some());
+        assert!(recovery_code.is_none(), "no recovery.key in this zip");
     }
 
     /// A pre-0.8.9 (v3) export has no `quick_apis` / `learnings` keys at all.
@@ -1855,9 +2109,77 @@ mod tests {
         }
         let bytes = buf.into_inner();
 
-        let (extracted_data, extracted_config) = extract_zip(&bytes).unwrap();
+        let (extracted_data, extracted_config, _) = extract_zip(&bytes).unwrap();
         assert_eq!(extracted_data.version, 4);
         assert!(extracted_config.is_none(), "config.toml should be optional");
+    }
+
+    // ─── P2 — recovery blob bundled in export/import ───────────────────
+
+    #[test]
+    fn export_zip_bundles_and_roundtrips_the_recovery_code() {
+        let key = crate::core::crypto::generate_secret();
+        let blob = crate::core::recovery::wrap_key(&key, "passphrase-123").unwrap();
+        let code = crate::core::recovery::to_code(&blob);
+
+        let data_json = serde_json::to_string(&empty_export()).unwrap();
+        let bytes = build_export_zip(&data_json, "", Some(&code)).unwrap();
+
+        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        assert_eq!(extracted.as_deref(), Some(code.as_str()), "recovery code must roundtrip");
+        // …and the roundtripped code still unwraps the key with the passphrase.
+        let parsed = crate::core::recovery::from_code(extracted.as_deref().unwrap()).unwrap();
+        assert_eq!(crate::core::recovery::unwrap_key(&parsed, "passphrase-123").unwrap(), key);
+    }
+
+    #[test]
+    fn export_zip_without_recovery_carries_no_blob() {
+        let data_json = serde_json::to_string(&empty_export()).unwrap();
+        let bytes = build_export_zip(&data_json, "", None).unwrap();
+        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        assert!(extracted.is_none());
+    }
+
+    #[test]
+    fn extract_zip_drops_a_corrupt_recovery_entry_without_failing_import() {
+        let data_json = serde_json::to_string(&empty_export()).unwrap();
+        let bytes = build_export_zip(&data_json, "", Some("not-a-valid-recovery-code")).unwrap();
+        let (_, _, extracted) = extract_zip(&bytes).unwrap();
+        assert!(extracted.is_none(), "garbage recovery.key must be dropped, not error");
+    }
+
+    /// Import must NEVER destroy local recovery material: a differing local blob
+    /// is kept as recovery.key.backup before the imported one is installed.
+    #[test]
+    fn persist_imported_recovery_backs_up_a_differing_local_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Local machine has its own blob (protects the LOCAL key).
+        let local = crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "local-pass").unwrap();
+        crate::core::recovery::save_blob(tmp.path(), &local).unwrap();
+
+        // Imported backup carries a different blob (the SOURCE machine's).
+        let imported = crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "source-pass").unwrap();
+        let warnings = persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
+
+        assert!(!warnings.is_empty(), "replacing a local blob must be surfaced");
+        // The imported blob is now the active one…
+        assert_eq!(crate::core::recovery::load_blob(tmp.path()).unwrap(), imported);
+        // …and the local one survives as a backup.
+        let backup = std::fs::read_to_string(tmp.path().join("recovery.key.backup")).unwrap();
+        assert_eq!(crate::core::recovery::from_code(backup.trim()).unwrap(), local);
+    }
+
+    #[test]
+    fn persist_imported_recovery_installs_when_no_local_blob() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        let imported = crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pp").unwrap();
+        let warnings = persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
+
+        assert!(!warnings.is_empty(), "the user must be told how to use the installed blob");
+        assert_eq!(crate::core::recovery::load_blob(tmp.path()).unwrap(), imported);
+        assert!(!tmp.path().join("recovery.key.backup").exists(), "no backup when nothing replaced");
     }
 
     // ─── 0.8.6 phase 4 — default_model_tier ───────────────────────────
