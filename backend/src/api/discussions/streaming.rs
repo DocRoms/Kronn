@@ -193,6 +193,9 @@ pub(crate) async fn make_agent_stream(
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
     let disc_tier = disc.tier;
+    // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
+    // Quick Prompt) wins over the tier; None → resolve from tier as before.
+    let disc_model = disc.model.clone();
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
@@ -537,6 +540,7 @@ pub(crate) async fn make_agent_stream(
             skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),
             tier: disc_tier, model_tiers: Some(&model_tiers_config),
+            model_override: disc_model.as_deref(),
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
