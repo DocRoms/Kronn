@@ -1217,6 +1217,22 @@ async fn start_ollama_http(
 
     let body = build_ollama_chat_body(model, system_context, user_prompt, format);
 
+    // Observability: the effective num_ctx is the #1 confound for local perf —
+    // an oversized window balloons the KV cache and spills onto the CPU (0.2
+    // vs 12.5 tok/s). Surface it (+ the derived reasoning-cut / schema flags)
+    // at INFO on a dedicated target so `kronn logs | grep ollama` shows what
+    // each run actually requested. tok/s is recovered downstream from the
+    // `ollama_tokens:` line (eval_count / eval_duration).
+    tracing::info!(
+        target: "kronn::ollama",
+        model = %model,
+        num_ctx = body["options"]["num_ctx"].as_u64().unwrap_or(0),
+        no_think = ollama_disables_thinking(model),
+        constrained_format = format.is_some(),
+        stream = body["stream"].as_bool().unwrap_or(true),
+        "ollama run starting"
+    );
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 min max for slow models
         .build()
