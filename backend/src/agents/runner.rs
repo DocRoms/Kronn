@@ -401,6 +401,11 @@ pub struct AgentStartConfig<'a> {
     /// non-streaming. `None` for every other agent and for free-text steps;
     /// other agents get their schema via prompt injection, not here.
     pub ollama_format: Option<&'a serde_json::Value>,
+    /// Explicit model, from a step's / QP's `AgentSettings.model`. When set it
+    /// wins over `tier` (see `effective_model_flag`) for every agent that
+    /// supports a `--model` flag (incl. both Ollama paths). `None` = resolve
+    /// the model from `tier` as before.
+    pub model_override: Option<&'a str>,
 }
 
 impl<'a> AgentStartConfig<'a> {
@@ -445,6 +450,7 @@ impl<'a> AgentStartConfig<'a> {
             context_files_prompt: "",
             discussion_id: None,
             ollama_format: None,
+            model_override: None,
         }
     }
 }
@@ -509,6 +515,23 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         (AgentType::Ollama, ModelTier::Reasoning)      => Some("qwen3:30b-a3b".into()),
         // Kiro, Vibe: no --model flag support
         _ => None,
+    }
+}
+
+/// Resolve the effective `--model` value for a run: an explicit per-step /
+/// per-QP `model_override` wins outright (blank is treated as unset); otherwise
+/// fall back to the tier → model mapping (`resolve_model_flag`, which itself
+/// honors the global OllamaCard overrides). Kept pure + `pub(crate)` so the
+/// precedence is unit-tested without spawning a process.
+pub(crate) fn effective_model_flag(
+    model_override: Option<&str>,
+    agent_type: &AgentType,
+    tier: ModelTier,
+    model_tiers: Option<&ModelTiersConfig>,
+) -> Option<String> {
+    match model_override {
+        Some(m) if !m.trim().is_empty() => Some(m.to_string()),
+        _ => resolve_model_flag(agent_type, tier, model_tiers),
     }
 }
 
@@ -739,7 +762,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // doesn't confuse MCP context with the user's question, (2) token
     // counts in the response, (3) works without the ollama binary (Docker).
     if *config.agent_type == AgentType::Ollama {
-        let model_flag = resolve_model_flag(config.agent_type, config.tier, config.model_tiers);
+        let model_flag = effective_model_flag(config.model_override, config.agent_type, config.tier, config.model_tiers);
         return start_ollama_http(
             config.prompt,
             &extra_context,
@@ -748,8 +771,8 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         ).await;
     }
 
-    // Resolve model tier to a --model flag
-    let model_flag = resolve_model_flag(config.agent_type, config.tier, config.model_tiers);
+    // Resolve model: explicit per-step/per-QP override wins, else tier → model.
+    let model_flag = effective_model_flag(config.model_override, config.agent_type, config.tier, config.model_tiers);
 
     let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
         agent_command(config.agent_type, config.prompt, config.full_access, &extra_context, model_flag.as_deref());

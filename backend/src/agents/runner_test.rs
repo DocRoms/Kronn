@@ -916,6 +916,33 @@ Suite de la réponse.";
         assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None), Some("qwen3:30b-a3b".into()));
     }
 
+    // ─── effective_model_flag: explicit model override beats tier ─────────────
+    #[test]
+    fn effective_model_flag_override_wins_over_tier() {
+        use crate::models::ModelTier;
+        // Explicit model beats the tier fallback — including the Economy tier
+        // that would otherwise resolve to qwen3:4b.
+        assert_eq!(
+            effective_model_flag(Some("qwen3:30b-a3b"), &AgentType::Ollama, ModelTier::Economy, None),
+            Some("qwen3:30b-a3b".into()),
+        );
+    }
+
+    #[test]
+    fn effective_model_flag_blank_or_none_falls_back_to_tier() {
+        use crate::models::ModelTier;
+        // Blank override is treated as unset → tier resolution.
+        assert_eq!(
+            effective_model_flag(Some("   "), &AgentType::Ollama, ModelTier::Default, None),
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
+        );
+        // None → identical to resolve_model_flag (here: Claude reasoning → opus).
+        assert_eq!(
+            effective_model_flag(None, &AgentType::ClaudeCode, ModelTier::Reasoning, None),
+            Some("opus".into()),
+        );
+    }
+
     // ─── Claude Code: prompt is always last arg (required for --mcp-config injection)
 
     #[test]

@@ -548,6 +548,9 @@ async fn run_agent_with_timeout(
             .unwrap_or_default(),
         model_tiers,
         ollama_format: ollama_format.as_ref(),
+        // Explicit per-step model (from the wizard's model picker) — now
+        // actually consumed at run time, not just stamped for display.
+        model_override: step.agent_settings.as_ref().and_then(|s| s.model.as_deref()),
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
