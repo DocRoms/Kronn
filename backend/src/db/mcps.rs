@@ -594,6 +594,93 @@ mod tests {
         assert!(!delete_config(&conn, "nope").unwrap());
     }
 
+    /// Helper: seed a server + one config whose env is encrypted under `secret`.
+    fn seed_encrypted_config(conn: &Connection, secret: &str, id: &str) {
+        upsert_server(conn, &mk_server("srv")).ok();
+        let mut env = HashMap::new();
+        env.insert("TOKEN".to_string(), "s3cr3t".to_string());
+        let enc = encrypt_env(&env, secret).unwrap();
+        let cfg = crate::models::McpConfig {
+            id: id.into(),
+            server_id: "srv".into(),
+            label: "L".into(),
+            env_keys: vec!["TOKEN".into()],
+            env_encrypted: enc,
+            args_override: None,
+            is_global: false,
+            config_hash: id.into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
+        };
+        insert_config(conn, &cfg).unwrap();
+    }
+
+    #[test]
+    fn encrypt_env_empty_map_returns_empty_string() {
+        // Empty env → "" so the reconciler/locked-state treat it as "no secret".
+        let secret = crypto::generate_secret();
+        assert_eq!(encrypt_env(&HashMap::new(), &secret).unwrap(), "");
+    }
+
+    #[test]
+    fn encrypt_then_decrypt_env_roundtrips() {
+        let secret = crypto::generate_secret();
+        let mut env = HashMap::new();
+        env.insert("A".to_string(), "1".to_string());
+        env.insert("B".to_string(), "two".to_string());
+        let enc = encrypt_env(&env, &secret).unwrap();
+        assert_eq!(decrypt_env(&enc, &secret).unwrap(), env);
+    }
+
+    /// The locked-state AUTHORITY: `secrets_broken` must be TRUE exactly when the
+    /// active key cannot decrypt a config that has secrets — this is what the UI
+    /// renders as "🔒 needs re-key" and what proves nothing was silently lost.
+    #[test]
+    fn list_display_flags_broken_only_for_undecryptable_rows() {
+        let conn = test_conn();
+        let good = crypto::generate_secret();
+        let wrong = crypto::generate_secret();
+        seed_encrypted_config(&conn, &good, "cfg-good");
+
+        // Right key → not broken.
+        let disp = list_configs_display(&conn, Some(&good)).unwrap();
+        assert_eq!(disp.len(), 1);
+        assert!(!disp[0].secrets_broken, "correct key must NOT flag broken");
+
+        // Wrong key → broken (locked): the row is present, ciphertext intact,
+        // just not decryptable — exactly the recoverable-by-re-key state.
+        let disp_wrong = list_configs_display(&conn, Some(&wrong)).unwrap();
+        assert!(disp_wrong[0].secrets_broken, "wrong key MUST flag broken/locked");
+    }
+
+    #[test]
+    fn list_display_not_broken_when_no_secrets_present() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("srv")).unwrap();
+        // A config with NO env_keys / empty ciphertext is never "broken".
+        let cfg = crate::models::McpConfig {
+            id: "cfg-empty".into(), server_id: "srv".into(), label: "L".into(),
+            env_keys: vec![], env_encrypted: String::new(), args_override: None,
+            is_global: false, config_hash: "h".into(), project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly, include_general: true,
+        };
+        insert_config(&conn, &cfg).unwrap();
+        let disp = list_configs_display(&conn, Some(&crypto::generate_secret())).unwrap();
+        assert!(!disp[0].secrets_broken, "a keyless config is never broken");
+    }
+
+    #[test]
+    fn list_display_no_active_key_does_not_false_flag_broken() {
+        // When no key is available (None), we can't prove a row is broken, so we
+        // must NOT mark it broken (avoids a scary false "locked" with no key).
+        let conn = test_conn();
+        let good = crypto::generate_secret();
+        seed_encrypted_config(&conn, &good, "cfg-x");
+        let disp = list_configs_display(&conn, None).unwrap();
+        assert!(!disp[0].secrets_broken, "no active key → do not false-flag broken");
+    }
+
     #[test]
     fn decrypt_env_empty_returns_empty_hashmap() {
         let secret = crypto::generate_secret();

@@ -293,64 +293,90 @@ async fn auth_middleware(
     let strict_localhost = config.server.auth_strict_localhost;
     drop(config);
 
-    // Master switch. When the user has explicitly disabled auth, skip it
-    // entirely — even if a token is still present in the config (config.rs
-    // only re-generates a token when none exists, so leaving the token in
-    // place is harmless and keeps `auth_enabled = false` sticky across boots).
-    // This is the supported escape hatch for environments where the localhost
-    // bypass below can't work: Docker Desktop on macOS NATs every published-
-    // port request to the Docker network gateway IP, so the backend can't tell
-    // the real client is local. Mirrors `setup_status`, which already reports
-    // auth as `auth_enabled && token.is_some()`.
-    if !auth_enabled {
-        return Ok(next.run(request).await);
-    }
-
-    // If no token is configured, skip auth (backward compat / first run)
-    let Some(expected) = expected_token else {
-        return Ok(next.run(request).await);
+    // Trust primitives, computed once. `local_trusted` is the self-hosted bypass
+    // (a request from a local IP, unless the user opted into strict-localhost);
+    // `has_valid_token` is a correct Bearer token. See `is_local_ip` for what
+    // counts as local (loopback + Docker bridge gateway, NOT LAN/Tailscale).
+    let local_trusted = !strict_localhost && request_is_local_ip(&headers, &request);
+    let has_valid_token = match &expected_token {
+        Some(expected) => headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|t| t == expected)
+            .unwrap_or(false),
+        None => false,
     };
 
-    // Skip auth for localhost requests UNLESS strict-localhost is on.
-    //
-    // The bypass is the pragmatic self-hosted default: a user running
-    // Kronn on their own machine doesn't want to copy-paste a Bearer
-    // token on every API call. Risk: any process on the same host
-    // (a malicious local app, a sibling container) gets full API
-    // access. Mitigation = `auth_strict_localhost = true` in
-    // `~/.config/kronn/config.toml` for users who run shared/multi-
-    // tenant boxes. Future direction: deprecate the bypass entirely
-    // once TLS is generalised (TD-20260314-no-tls).
-    //
-    // 1. Nginx proxy: check X-Real-IP header (Docker setup — nginx sets this to the real client IP)
-    // 2. Direct connection: check the actual peer address (Tauri desktop — no nginx, no proxy headers)
-    if !strict_localhost {
-        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-            if is_local_ip(real_ip) {
-                return Ok(next.run(request).await);
-            }
-        }
-        // Fallback: check the direct connection IP (covers Tauri desktop and direct access without proxy)
-        if let Some(connect_info) = request.extensions().get::<axum::extract::ConnectInfo<std::net::SocketAddr>>() {
-            if is_local_ip(&connect_info.0.ip().to_string()) {
-                return Ok(next.run(request).await);
-            }
-        }
-    }
-
-    // Check Authorization: Bearer <token>
-    let authorized = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(|token| token == expected)
-        .unwrap_or(false);
-
-    if authorized {
+    if auth_allows(
+        request.uri().path(),
+        auth_enabled,
+        expected_token.is_some(),
+        local_trusted,
+        has_valid_token,
+    ) {
         return Ok(next.run(request).await);
     }
-
     Err(StatusCode::UNAUTHORIZED)
+}
+
+/// Endpoints that irreversibly destroy user data (wipe the DB, clobber config)
+/// or change the encryption-key material. Gated even when app-wide auth is
+/// disabled — see `auth_allows`. `recovery/set` reads the active key and writes
+/// a recovery blob; `recovery/restore` swaps the live key — both must never be
+/// callable by an unauthenticated LAN peer.
+const DESTRUCTIVE_PATHS: &[&str] = &[
+    "/api/setup/reset",
+    "/api/config/import",
+    "/api/config/recovery/set",
+    "/api/config/recovery/restore",
+];
+
+/// Pure auth decision for a request that already cleared the always-open
+/// exceptions (health, ws, claim-by-token). `true` = allow.
+///
+/// The one non-obvious rule (I9): DESTRUCTIVE endpoints require local trust or a
+/// valid token EVEN when `auth_enabled` is false. The Docker default is auth-off
+/// on 0.0.0.0, so a bare `!auth_enabled` pass would let any LAN/Tailscale peer
+/// wipe the instance. Everything else keeps the historical behaviour: auth off →
+/// open; no token configured → open; otherwise local-bypass-or-token.
+fn auth_allows(
+    path: &str,
+    auth_enabled: bool,
+    token_configured: bool,
+    local_trusted: bool,
+    has_valid_token: bool,
+) -> bool {
+    if DESTRUCTIVE_PATHS.contains(&path) {
+        return local_trusted || has_valid_token;
+    }
+    if !auth_enabled {
+        return true;
+    }
+    if !token_configured {
+        return true;
+    }
+    local_trusted || has_valid_token
+}
+
+/// True when the request originates from a local IP — either the `X-Real-IP`
+/// nginx sets (Docker), or the direct peer address (Tauri desktop / no proxy).
+/// Does NOT apply the strict-localhost policy; callers combine it as needed.
+fn request_is_local_ip(headers: &HeaderMap, request: &axum::extract::Request) -> bool {
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if is_local_ip(real_ip) {
+            return true;
+        }
+    }
+    if let Some(ci) = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+    {
+        if is_local_ip(&ci.0.ip().to_string()) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Check if an IP address is local (localhost or Docker internal network).
@@ -477,6 +503,11 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/config/continual-learning-enabled", get(api::setup::get_continual_learning_enabled).post(api::setup::save_continual_learning_enabled))
         // 0.8.7 — spec doc served from include_str! (linked from Settings → Sourcing).
         .route("/api/conventions/agents-md-format-v1", get(api::setup::get_agents_md_spec_v1))
+        // P2 recovery passphrase (Argon2id-wrapped key). set/restore are
+        // auth-gated as destructive-adjacent — see DESTRUCTIVE_PATHS.
+        .route("/api/config/recovery/status", get(api::setup::recovery_status))
+        .route("/api/config/recovery/set", post(api::setup::set_recovery))
+        .route("/api/config/recovery/restore", post(api::setup::restore_recovery))
         .route("/api/config/scan-paths", get(api::setup::get_scan_paths).post(api::setup::set_scan_paths))
         .route("/api/config/scan-ignore", get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore))
         .route("/api/config/scan-depth", get(api::setup::get_scan_depth).post(api::setup::set_scan_depth))
@@ -977,7 +1008,54 @@ mod audit_tracker_tests {
 
 #[cfg(test)]
 mod auth_tests {
-    use super::is_local_ip;
+    use super::{auth_allows, is_local_ip};
+
+    // ── auth_allows decision matrix (I9: destructive-op gating) ──────────────
+    const RESET: &str = "/api/setup/reset";
+    const IMPORT: &str = "/api/config/import";
+    const NORMAL: &str = "/api/projects";
+
+    #[test]
+    fn destructive_from_remote_is_denied_even_when_auth_off() {
+        // THE fix: Docker default (auth off, 0.0.0.0). A LAN peer — not local,
+        // no token — must NOT be able to wipe/overwrite the instance.
+        assert!(!auth_allows(RESET, false, true, false, false));
+        assert!(!auth_allows(IMPORT, false, true, false, false));
+        // …and still denied even if no token is configured at all.
+        assert!(!auth_allows(RESET, false, false, false, false));
+    }
+
+    #[test]
+    fn destructive_allowed_for_local_or_valid_token() {
+        assert!(auth_allows(RESET, false, true, true, false), "local host may reset");
+        assert!(auth_allows(RESET, false, true, false, true), "valid token may reset");
+        assert!(auth_allows(IMPORT, true, true, true, false), "local host may import (auth on)");
+    }
+
+    #[test]
+    fn recovery_endpoints_are_gated_like_destructive() {
+        // recovery/set reads the active key, recovery/restore swaps it — both
+        // must be denied to an unauthenticated remote peer even with auth off.
+        for p in ["/api/config/recovery/set", "/api/config/recovery/restore"] {
+            assert!(!auth_allows(p, false, true, false, false), "{p} must deny remote+no-token");
+            assert!(auth_allows(p, false, true, true, false), "{p} allows local");
+            assert!(auth_allows(p, false, true, false, true), "{p} allows valid token");
+        }
+    }
+
+    #[test]
+    fn non_destructive_keeps_historical_behaviour() {
+        // auth off → open.
+        assert!(auth_allows(NORMAL, false, true, false, false));
+        // auth on, no token configured → open (first-run/back-compat).
+        assert!(auth_allows(NORMAL, true, false, false, false));
+        // auth on, token configured, remote & no token → denied.
+        assert!(!auth_allows(NORMAL, true, true, false, false));
+        // auth on, local trusted → open.
+        assert!(auth_allows(NORMAL, true, true, true, false));
+        // auth on, valid token → open.
+        assert!(auth_allows(NORMAL, true, true, false, true));
+    }
 
     // Localhost auth-bypass relies entirely on `is_local_ip`. A
     // regression here = either (a) auth incorrectly fires for the

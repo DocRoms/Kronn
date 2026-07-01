@@ -103,11 +103,30 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
                 !applied
             });
             if has_pending {
+                // Fold the WAL back into the main db file FIRST, so a plain
+                // file copy is a consistent snapshot. Without this, recent
+                // writes live only in `<db>-wal` and the backup is stale/torn
+                // (it would omit everything since the last checkpoint).
+                if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
+                    tracing::warn!("WAL checkpoint before backup failed (backup may be stale): {}", e);
+                }
                 let backup_path = path.with_extension("db.backup");
                 if let Err(e) = std::fs::copy(path, &backup_path) {
                     tracing::warn!("Failed to backup database before migration: {}", e);
                 } else {
                     tracing::info!("Database backed up to {}", backup_path.display());
+                }
+                // Also snapshot config.toml (co-located in the data dir) — it
+                // holds auth_token + other config a bad migration/crash could
+                // strand. Best-effort; absence is fine (Docker/env configs).
+                if let Some(dir) = path.parent() {
+                    let cfg = dir.join("config.toml");
+                    if cfg.exists() {
+                        let cfg_backup = dir.join("config.toml.backup");
+                        if let Err(e) = std::fs::copy(&cfg, &cfg_backup) {
+                            tracing::warn!("Failed to backup config.toml before migration: {}", e);
+                        }
+                    }
                 }
             }
         }
@@ -122,11 +141,20 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
 
         if !already_applied {
             tracing::info!("Running migration: {}", name);
-            conn.execute_batch(sql)?;
-            conn.execute(
-                "INSERT INTO _migrations (name) VALUES (?1)",
-                [name],
-            )?;
+            // Apply the migration SQL and its bookkeeping row ATOMICALLY. A crash
+            // (or an error) mid-migration must not leave the schema changed
+            // without the `_migrations` row — that would re-run non-idempotent
+            // SQL on the next boot and brick startup. `unchecked_transaction`
+            // works on `&Connection`; on any error the tx drops → rollback, so
+            // the DB is left exactly as before this migration (restore from
+            // `<db>.db.backup` if the failure is a corrupt file, not just SQL).
+            let tx = conn.unchecked_transaction()
+                .map_err(|e| anyhow::anyhow!("begin tx for migration {name}: {e}"))?;
+            tx.execute_batch(sql)
+                .map_err(|e| anyhow::anyhow!("migration {name} failed and was rolled back: {e}"))?;
+            tx.execute("INSERT INTO _migrations (name) VALUES (?1)", [name])?;
+            tx.commit()
+                .map_err(|e| anyhow::anyhow!("commit migration {name}: {e}"))?;
         }
     }
 
@@ -183,5 +211,55 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_with_backup(&conn, None).expect("run_with_backup with None path should succeed");
         // No assertion on files — just ensure it doesn't panic
+    }
+
+    /// A migration that fails mid-way must be ATOMIC: neither its schema change
+    /// nor its `_migrations` bookkeeping row may persist. Proves the per-migration
+    /// transaction rolls back on error (was: partial schema → boot brick).
+    #[test]
+    fn failing_migration_rolls_back_atomically() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, \
+             applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
+        ).unwrap();
+
+        // A batch that creates a table THEN runs invalid SQL — the CREATE must be
+        // rolled back with the failure, and no _migrations row written.
+        let bad = "CREATE TABLE half_applied(x INTEGER); THIS IS NOT SQL;";
+        let tx = conn.unchecked_transaction().unwrap();
+        let res = tx.execute_batch(bad);
+        assert!(res.is_err(), "the invalid batch must error");
+        drop(tx); // rollback
+
+        let table_exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='half_applied'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert!(!table_exists, "the CREATE must have been rolled back, not left half-applied");
+    }
+
+    #[test]
+    fn run_with_backup_snapshots_config_toml_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("kronn.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch("CREATE TABLE t(id INTEGER);").unwrap();
+        }
+        // Co-located config.toml holding a secret-ish value.
+        let cfg = dir.path().join("config.toml");
+        std::fs::write(&cfg, "auth_token = \"tok-123\"\n").unwrap();
+
+        let conn = Connection::open(&db_path).unwrap();
+        run_with_backup(&conn, Some(&db_path)).expect("migrations should succeed");
+
+        let cfg_backup = dir.path().join("config.toml.backup");
+        assert!(cfg_backup.exists(), "config.toml must be snapshotted before migrations");
+        assert_eq!(
+            std::fs::read_to_string(&cfg_backup).unwrap(),
+            "auth_token = \"tok-123\"\n",
+            "config backup must be a faithful copy"
+        );
     }
 }

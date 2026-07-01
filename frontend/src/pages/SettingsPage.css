@@ -1486,6 +1486,31 @@
   color: var(--kr-warning, #b45309);
 }
 
+/* P2 — the what3words example link in the mnemonic tip. Theme-aware via
+   --kr-accent (redefined per theme: dark/light/matrix/gotham/sakura) — a raw
+   browser-blue anchor is unreadable on the dark backgrounds. :visited pinned
+   too, or the browser's purple bleeds through the class. */
+.set-recovery-tip-link,
+.set-recovery-tip-link:visited {
+  color: var(--kr-accent);
+  text-decoration: underline;
+}
+
+/* P2 — one-time recovery-code reveal (RecoverySection). Monospace, wraps the
+   long "KRECOV1.…" string, selectable in one triple-click. */
+.set-recovery-code {
+  display: block;
+  margin-top: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  font-family: var(--kr-font-mono, monospace);
+  font-size: var(--kr-fs-xs);
+  word-break: break-all;
+  user-select: all;
+  background: var(--kr-bg-subtle, rgba(127, 127, 127, 0.08));
+  border: 1px solid var(--kr-border, rgba(127, 127, 127, 0.25));
+  border-radius: 6px;
+}
+
 .set-expose-restart {
   display: flex;
   align-items: center;

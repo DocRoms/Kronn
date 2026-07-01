@@ -27,6 +27,16 @@
   color: var(--kr-text-secondary);
   margin: 0 0 var(--kr-sp-3) 0;
 }
+/* P2 — inline recovery-restore form inside the warning banner. */
+.mcp-recovery-restore {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-4);
+  padding-top: var(--kr-sp-4);
+  border-top: 1px dashed rgba(var(--kr-warning-rgb, 251, 191, 36), 0.35);
+  max-width: 480px;
+}
 .mcp-warning-banner-list {
   list-style: none;
   margin: 0;

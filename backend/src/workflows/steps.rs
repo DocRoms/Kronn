@@ -581,6 +581,9 @@ async fn drive_agent_to_output(
     // surface a `🔧 Edit · src/foo.rs` one-liner on ToolEnd.
     let mut current_tool: Option<String> = None;
     let mut current_tool_input = String::new();
+    // Ollama streams raw token fragments (no '\n' re-join); CLI text agents
+    // stream lines.
+    let raw_stream = process.raw_token_stream();
 
     loop {
         match timeout(stall_timeout, process.next_line()).await {
@@ -624,7 +627,7 @@ async fn drive_agent_to_output(
                         StreamJsonEvent::Skip => {}
                     }
                 } else {
-                    let chunk = if output.is_empty() {
+                    let chunk = if raw_stream || output.is_empty() {
                         line.clone()
                     } else {
                         output.push('\n');

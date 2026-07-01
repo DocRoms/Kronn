@@ -26,6 +26,11 @@ pub struct DbInfo {
     pub custom_directive_count: u32,
 }
 
+/// Current export schema version. Bump when a new table/field is added to
+/// `DbExport` so import can WARN when restoring an older backup (whose missing
+/// tables must NOT wipe newer data — see `do_import_db`'s selective clear).
+pub const CURRENT_EXPORT_VERSION: u32 = 4;
+
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DbExport {

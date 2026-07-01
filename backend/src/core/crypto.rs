@@ -70,6 +70,31 @@ pub fn mask_value(value: &str) -> String {
     format!("{}...{}", &value[..2], &value[value.len() - 2..])
 }
 
+/// Domain-separated fingerprint ("KID") of a 32-byte encryption key.
+///
+/// Lets us record *which* key encrypted a row and later check a candidate key
+/// against it WITHOUT storing or exposing the key itself. Returns 16 lowercase
+/// hex chars (first 8 bytes of SHA-256 over a fixed domain tag + the key).
+/// One-way and collision-resistant for our purpose — telling two 256-bit keys
+/// apart — and the truncation keeps it compact for a DB column.
+pub fn key_fingerprint(key: &[u8; 32]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"kronn-kid-v1");
+    hasher.update(key);
+    let result = hasher.finalize();
+    // sha2 0.11 returns `hybrid_array::Array` (no `LowerHex`) — manual hex, as
+    // in `core::checksums`. First 8 bytes are ample to distinguish keys.
+    result.iter().take(8).map(|b| format!("{:02x}", b)).collect()
+}
+
+/// KID from a hex-encoded secret string — convenience for the config / keystore
+/// call sites that hold the hex form. Errors if the hex isn't a valid 32-byte key.
+pub fn key_fingerprint_hex(hex_secret: &str) -> Result<String, String> {
+    let key = parse_secret(hex_secret)?;
+    Ok(key_fingerprint(&key))
+}
+
 // hex encode/decode (tiny, no extra dep needed)
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
@@ -255,5 +280,90 @@ mod tests {
     fn mask_value_longer_strings_show_first_two_and_last_two() {
         assert_eq!(mask_value("abcdefg"), "ab...fg");
         assert_eq!(mask_value("ghp_abcdefghijklmnop"), "gh...op");
+    }
+
+    #[test]
+    fn key_fingerprint_is_stable_and_16_hex() {
+        let key = parse_secret(&generate_secret()).unwrap();
+        let kid = key_fingerprint(&key);
+        assert_eq!(kid.len(), 16, "KID is 16 hex chars");
+        assert!(kid.chars().all(|c| c.is_ascii_hexdigit()));
+        // Deterministic: the same key must yield the same KID across calls.
+        assert_eq!(kid, key_fingerprint(&key));
+    }
+
+    #[test]
+    fn key_fingerprint_differs_for_different_keys() {
+        let a = parse_secret(&generate_secret()).unwrap();
+        let b = parse_secret(&generate_secret()).unwrap();
+        assert_ne!(key_fingerprint(&a), key_fingerprint(&b));
+    }
+
+    #[test]
+    fn key_fingerprint_is_not_the_key_itself() {
+        // A leaked KID must not be the key: different length (16 vs 64 hex).
+        let hex = generate_secret();
+        let key = parse_secret(&hex).unwrap();
+        let kid = key_fingerprint(&key);
+        assert_ne!(kid, hex);
+        assert_ne!(kid.len(), hex.len());
+    }
+
+    #[test]
+    fn key_fingerprint_hex_matches_byte_form_and_rejects_bad_hex() {
+        let hex = generate_secret();
+        let key = parse_secret(&hex).unwrap();
+        assert_eq!(key_fingerprint_hex(&hex).unwrap(), key_fingerprint(&key));
+        assert!(key_fingerprint_hex("nothex").is_err());
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        // No matter the plaintext, encrypt→decrypt is lossless under the same key.
+        #[test]
+        fn roundtrip_any_plaintext(pt in ".{0,4096}", seed in any::<[u8; 32]>()) {
+            let key = seed; // any 32 bytes is a valid AES-256 key
+            let ct = encrypt(&pt, &key).unwrap();
+            prop_assert_eq!(decrypt(&ct, &key).unwrap(), pt);
+        }
+
+        // AEAD integrity: flipping ANY single byte of the base64-decoded
+        // (nonce||ct||tag) blob must make decryption FAIL — never yield a
+        // different-but-valid plaintext. Generalises the two hand-written tamper
+        // tests into "no bit-flip anywhere ever decrypts".
+        #[test]
+        fn any_single_byte_tamper_is_rejected(
+            pt in ".{1,256}", seed in any::<[u8; 32]>(), idx in any::<usize>(), xor in 1u8..=255,
+        ) {
+            let key = seed;
+            let ct_b64 = encrypt(&pt, &key).unwrap();
+            let mut raw = B64.decode(&ct_b64).unwrap();
+            let i = idx % raw.len();
+            raw[i] ^= xor; // guaranteed-different byte
+            let tampered = B64.encode(&raw);
+            prop_assert!(decrypt(&tampered, &key).is_err());
+        }
+
+        // parse_secret accepts exactly well-formed 64-hex strings and the parsed
+        // key roundtrips; any other length is rejected, never panics.
+        #[test]
+        fn parse_secret_accepts_only_valid_64_hex(bytes in any::<[u8; 32]>()) {
+            let hex: String = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            let key = parse_secret(&hex).unwrap();
+            prop_assert_eq!(&key, &bytes);
+            let ct = encrypt("x", &key).unwrap();
+            prop_assert_eq!(decrypt(&ct, &key).unwrap(), "x".to_string());
+        }
+
+        #[test]
+        fn parse_secret_rejects_wrong_length_hex(len in (0usize..128).prop_filter("not 64", |n| *n != 64)) {
+            let hex = "a".repeat(len);
+            prop_assert!(parse_secret(&hex).is_err());
+        }
     }
 }

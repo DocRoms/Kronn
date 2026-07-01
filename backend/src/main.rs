@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
     // the tracing filter's default level. This is a tiny re-order vs. the
     // historical flow — `config::load()` doesn't emit logs itself, so we
     // can afford to run it silently.
-    let app_config = match config::load().await? {
+    let mut app_config = match config::load().await? {
         Some(cfg) => cfg,
         None => config::default_config(),
     };
@@ -110,9 +110,29 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("API authentication disabled — API is open to anyone on the network");
     }
 
+    // Exactly ONE backend per data dir. Refuse to start if another instance
+    // already holds the lock — prevents two processes (a stale one, or P2P peers
+    // sharing a synced dir) racing on config.toml / the key / the DB. Held for
+    // the whole process lifetime; released when `_data_dir_lock` drops at exit.
+    let _data_dir_lock = config::acquire_data_dir_lock().map_err(|e| {
+        tracing::error!("{e}");
+        e
+    })?;
+
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
     tracing::info!("Database opened at {}/kronn.db", config::config_dir().unwrap().display());
+
+    // Resolve/repair the encryption key now that the DB is open — `config::load`
+    // deliberately never mints one. This adopts the legacy config.toml key,
+    // restores it from the keychain/sidecar, or mints on a genuinely empty
+    // install, and NEVER regenerates a key over existing encrypted data (the
+    // silent regen that orphaned every secret on 2026-06-30). Fail-soft: an
+    // unresolvable key locks only the token subsystem, it never blocks boot.
+    match kronn::core::keystore::reconcile(&mut app_config, &database).await {
+        Ok(outcome) => tracing::info!("Encryption key reconciled: {outcome:?}"),
+        Err(e) => tracing::error!("Key reconcile failed (booting locked): {e}"),
+    }
 
     // Build state via the shared factory — keep both mains in sync when
     // new runtime fields are added to AppState (see lib.rs doc).

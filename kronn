@@ -31,6 +31,7 @@ KRONN_CONFIG_DIR="${HOME}/.config/kronn"
 
 # ─── Source libraries ────────────────────────────────────────────────────────
 source "$KRONN_DIR/lib/ui.sh"
+source "$KRONN_DIR/lib/config.sh"
 source "$KRONN_DIR/lib/agents.sh"
 source "$KRONN_DIR/lib/mcps.sh"
 source "$KRONN_DIR/lib/tron.sh"
@@ -39,31 +40,8 @@ source "$KRONN_DIR/lib/repos.sh"
 source "$KRONN_DIR/lib/api-client.sh"
 
 # ─── Config ──────────────────────────────────────────────────────────────────
-
-load_config() {
-    local config_file="$KRONN_CONFIG_DIR/config.toml"
-    mkdir -p "$KRONN_CONFIG_DIR"
-
-    SCAN_PATH=""
-
-    if [[ -f "$config_file" ]]; then
-        SCAN_PATH=$(awk -F'"' '/^scan_path/ {print $2}' "$config_file" 2>/dev/null || true)
-    fi
-
-    # Default: parent directory of kronn repo
-    if [[ -z "$SCAN_PATH" ]]; then
-        SCAN_PATH="$(dirname "$KRONN_DIR")"
-    fi
-}
-
-save_config() {
-    mkdir -p "$KRONN_CONFIG_DIR"
-    cat > "$KRONN_CONFIG_DIR/config.toml" <<TOML
-# Kronn configuration
-scan_path = "$SCAN_PATH"
-agent = "${SELECTED_AGENT:-}"
-TOML
-}
+# load_config / save_config live in lib/config.sh (sourced above) so they're
+# unit-testable and, crucially, the CLI never clobbers the backend's config.toml.
 
 kiro_container_available() {
     (cd "$KRONN_DIR" && docker compose exec -T backend /bin/sh -lc \
@@ -144,13 +122,21 @@ cmd_web() {
     if is_macos_host && [[ "${KRONN_SKIP_MACOS_WARN:-0}" != "1" ]]; then
         warn "macOS detected — Docker can't run your host CLIs (Claude, Codex, …) or read the Keychain."
         printf "  ${DIM}Agents that execute on the host won't work via Docker on macOS.${RESET}\n"
-        printf "  ${DIM}For native host-agent execution use either:${RESET}\n"
-        printf "  ${DIM}  • the desktop app — recommended for solo use, or${RESET}\n"
-        printf "  ${DIM}  • make dev-backend + make dev-frontend  (native, hot-reload)${RESET}\n"
         printf "  ${DIM}Docker still serves the web UI + API (config, plugins, API-only workflows).${RESET}\n"
-        printf "  ${DIM}(set KRONN_SKIP_MACOS_WARN=1 to silence this)${RESET}\n"
-        if ! ask_yn "Continue with Docker anyway?"; then
-            info "Aborted. On macOS, run ${BOLD}make dev-backend${RESET} + ${BOLD}make dev-frontend${RESET} for native execution."
+        printf "  ${DIM}(set KRONN_SKIP_MACOS_WARN=1 to skip this menu and use Docker)${RESET}\n"
+        echo ""
+        # Enter-hammerers land on the FIRST option — make it the correct one on
+        # macOS (native run), and DO it for them instead of printing a command
+        # to retype. Docker stays available as the explicit second choice.
+        menu_choice "How do you want to run Kronn on this Mac?" \
+            "Native — backend + UI in one command (recommended: host agents work)" \
+            "Docker anyway — web UI + API only (host agents won't run)"
+        if [[ "$REPLY" == "1" ]]; then
+            cmd_start_dev
+            return
+        elif [[ "$REPLY" != "2" ]]; then
+            # Escape/EOF (REPLY=0): cancelling must NOT fall through to Docker.
+            info "Aborted."
             return 0
         fi
     fi
@@ -258,13 +244,23 @@ cmd_start_dev() {
         return 1
     fi
 
-    # Something already on :3140 is almost always a Docker Kronn — the native
-    # backend then can't bind the port. Surface it before the cryptic bind error.
+    # Clean start: reap any orphaned NATIVE backend from a previous start-dev
+    # (cargo-watch's kronn grandchild survives a bare Ctrl+C) BEFORE we launch —
+    # otherwise it still owns :3140 + the data-dir lock and this run dies with a
+    # cryptic bind/lock error. `cargo watch -x run` then rebuilds fresh anyway.
+    if pgrep -f "target/debug/kronn" >/dev/null 2>&1 || pgrep -f "cargo[- ]watch" >/dev/null 2>&1; then
+        info "A previous native Kronn backend is still running — stopping it first."
+        reap_native_backend
+        success "Previous native backend stopped."
+    fi
+
+    # If something STILL answers on :3140 after the native reap, it's a Docker
+    # Kronn (a different lifecycle) — the native backend can't bind the port.
     if curl -fsS -o /dev/null "http://localhost:3140/api/health" 2>/dev/null; then
-        warn "Something is already listening on :3140 (a Docker Kronn?)."
+        warn "Something is still listening on :3140 — a Docker Kronn is running."
         printf "  ${DIM}Run ${BOLD}kronn stop${RESET}${DIM} first, or the native backend can't bind the port.${RESET}\n"
         if ! ask_yn "Continue anyway?"; then
-            info "Aborted — stop the other instance (${BOLD}kronn stop${RESET}), then re-run ${BOLD}kronn start-dev${RESET}."
+            info "Aborted — run ${BOLD}kronn stop${RESET} (stops Docker + native), then re-run ${BOLD}kronn start-dev${RESET}."
             return 0
         fi
     fi
@@ -294,7 +290,11 @@ cmd_start_dev() {
     # replaces). A script-global + ${:-} guard makes teardown robust whether the
     # trap fires on Ctrl+C (INT, still in-function) or at script EXIT.
     KRONN_DEV_BACKEND_PID=$!
-    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" 2>/dev/null || true' EXIT INT TERM
+    # Teardown must kill the whole native stack, not just the `make` pid: the
+    # actual backend is a cargo-watch grandchild that survives a single-pid kill
+    # (the leak that stranded orphaned backends holding the data-dir lock). Kill
+    # the direct child, then reap the grandchildren by pattern. Quiet on Ctrl+C.
+    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" 2>/dev/null || true; reap_native_backend >/dev/null 2>&1 || true' EXIT INT TERM
 
     # Open the browser once Vite is actually serving (cross-platform via
     # open_url: open/wslview/xdg-open). OSC 8 links aren't clickable in every
@@ -644,9 +644,48 @@ cmd_init() {
     init_repo "$target"
 }
 
+# Stop any orphaned NATIVE (start-dev) backend + its cargo-watch/make wrappers.
+# `make stop` only tears down Docker; start-dev's real backend runs as a
+# cargo-watch GRANDCHILD (`make dev-backend` → sh → cargo watch → cargo → kronn)
+# that survives a plain Ctrl+C, so without this it leaks — still bound to :3140
+# and (since 0.9.x) still holding the data-dir lock, which blocks the next
+# start. Pattern-matched (not process-group / setsid, which macOS lacks) and a
+# no-op when nothing native is running. Never matches this script itself: its
+# cmdline is `bash …/kronn`, which contains none of these patterns.
+# NOTE on patterns: the watcher runs as `cargo-watch watch -x run` (the binary
+# is `cargo-watch`, hyphen) — NOT `cargo watch …` — so `cargo[- ]watch` is used
+# to catch both invocation forms. Killing the backend alone is not enough: a
+# surviving cargo-watch RESPAWNS it on the next file change and re-grabs the
+# data-dir lock, so the watcher MUST be reaped too.
+#
+# Frontend: `make dev-frontend` spawns `vite` as a node grandchild that
+# survives/wedges the same way (process alive but no longer bound to :5173 → the
+# UI "boots from cache" while every dynamic import + the /api proxy 000s). So
+# `vite/bin/vite` is reaped directly too — the specific path avoids matching
+# unrelated "vite" processes.
+reap_native_backend() {
+    local pats=("target/debug/kronn" "target/release/kronn" "cargo[- ]watch" "make dev-backend" "make dev-frontend" "vite/bin/vite")
+    local found=0 p
+    for p in "${pats[@]}"; do
+        pgrep -f "$p" >/dev/null 2>&1 && found=1
+    done
+    [[ "$found" == "0" ]] && return 0
+
+    # Kill the watcher(s) FIRST so nothing respawns the backend under us.
+    pkill -f "cargo[- ]watch" 2>/dev/null || true
+    for p in "${pats[@]}"; do pkill -f "$p" 2>/dev/null || true; done
+    sleep 1  # let them release :3140 / :5173 + the data-dir lock
+    # Escalate on any survivor so the next start can't hit the lock/port.
+    for p in "cargo[- ]watch" "target/debug/kronn" "target/release/kronn" "vite/bin/vite"; do
+        pkill -9 -f "$p" 2>/dev/null || true
+    done
+    return 0
+}
+
 cmd_stop() {
     step "Stopping Kronn"
-    (cd "$KRONN_DIR" && make stop)
+    reap_native_backend                 # native start-dev stack (cargo-watch + kronn)
+    (cd "$KRONN_DIR" && make stop)      # Docker stack
     success "Kronn stopped."
 }
 

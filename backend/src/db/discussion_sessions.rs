@@ -20,7 +20,7 @@
 //! See `project_cross_agent_collab_demo.md` in memory for the wider
 //! design (form simplification, `[+ Inviter]` header button, etc.).
 use anyhow::{anyhow, Result};
-use chrono::{Duration, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -231,6 +231,15 @@ pub fn count_active_participants(conn: &Connection, disc_id: &str) -> Result<i64
 /// pinning presence-sticky `count_live_participants`.
 pub const SESSION_ABANDON_SECS: i64 = 86_400;
 
+/// Reaping keys off wall-clock deltas, so a badly wrong system clock could
+/// mass-retire LIVE sessions. If `now` is more than this far AHEAD of the newest
+/// recorded session activity, we treat it as garbage/skew and skip the pass.
+/// Set to 10 years — beyond Kronn's own existence, so any *genuine* absence still
+/// reaps on a sane clock, and only a nonsensical future timestamp trips it. (The
+/// common real skews — dead RTC / VM restore — move the clock BACKWARD instead,
+/// caught by the separate `now < newest` check.)
+pub const SESSION_SKEW_SANITY_DAYS: i64 = 3650;
+
 /// Bump `last_seen = now` for the live session of (disc_id, agent_type)
 /// (migration 064 heartbeat). Called whenever an agent proves it's alive
 /// — every `disc_wait_for_peer` long-poll (idle loop) and `disc_append`
@@ -286,8 +295,45 @@ pub fn count_live_participants(conn: &Connection, disc_id: &str) -> Result<i64> 
 /// [`count_live_participants`] is never pinned by a long-dead ghost — an
 /// agent that exited without `disc_leave`. Returns the rows retired.
 pub fn reap_abandoned_sessions(conn: &Connection) -> Result<u64> {
-    let cutoff = (Utc::now() - Duration::seconds(SESSION_ABANDON_SECS)).to_rfc3339();
-    let now = Utc::now().to_rfc3339();
+    let now_dt = Utc::now();
+
+    // Clock-skew guard (I8). A wrong system clock (VM restored from snapshot,
+    // dead RTC, WSL drift) shifts `now`, and since reaping compares `now - 24h`
+    // against each session's `last_seen`, a clock that jumped far AHEAD would
+    // mark every live session abandoned at once — collapsing the double-responder
+    // gate so Kronn replies over live peers. Compare `now` to the newest recorded
+    // activity: if the clock sits behind it (impossible under a sane clock → it
+    // moved backward) or absurdly ahead of it, skip this pass and warn. A stale
+    // session lingering one more boot is harmless; wrongly reaping a live one is
+    // not — and genuinely-live sessions re-heartbeat within ~90s, so a skipped
+    // reap self-corrects on the next sane-clock pass. (Sub-threshold forward skew
+    // is tolerated for the same self-healing reason.)
+    let newest: Option<String> = conn.query_row(
+        "SELECT MAX(COALESCE(last_seen, joined_at)) FROM discussion_sessions WHERE status = 'active'",
+        [],
+        |r| r.get(0),
+    ).optional()?.flatten();
+    if let Some(newest) = newest {
+        if let Ok(newest_dt) = DateTime::parse_from_rfc3339(&newest) {
+            let newest_utc = newest_dt.with_timezone(&Utc);
+            if now_dt < newest_utc {
+                tracing::warn!(
+                    "reap: system clock ({}) is behind the newest session activity ({}) — \
+                     skipping reap (suspected clock skew)", now_dt, newest_utc);
+                return Ok(0);
+            }
+            if now_dt - newest_utc > Duration::days(SESSION_SKEW_SANITY_DAYS) {
+                tracing::warn!(
+                    "reap: system clock is implausibly far ahead (>{} days) of the newest \
+                     session activity ({}) — skipping reap (suspected clock skew / garbage \
+                     timestamp)", SESSION_SKEW_SANITY_DAYS, newest_utc);
+                return Ok(0);
+            }
+        }
+    }
+
+    let cutoff = (now_dt - Duration::seconds(SESSION_ABANDON_SECS)).to_rfc3339();
+    let now = now_dt.to_rfc3339();
     let n = conn.execute(
         "UPDATE discussion_sessions
             SET status = 'left', left_at = COALESCE(left_at, ?2)
@@ -901,6 +947,38 @@ mod tests {
         assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "recent peer still live, ghost gone");
         // Idempotent: a second pass reaps nothing.
         assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "idempotent");
+    }
+
+    /// I8: if the system clock is BEHIND the newest recorded activity (a session
+    /// heartbeated "in the future" = the clock rolled back), reaping must skip —
+    /// a transient wrong clock must never retire live sessions.
+    #[test]
+    fn reap_skips_when_clock_is_behind_recorded_activity() {
+        let conn = setup_db();
+        let id_future = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
+        let id_ghost = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
+        // Newest activity is in the FUTURE → now < newest → suspected skew.
+        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_future, (Utc::now() + Duration::hours(1)).to_rfc3339()]).unwrap();
+        // A normally-reapable 3-day-old ghost — must be spared while skew suspected.
+        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_ghost, (Utc::now() - Duration::days(3)).to_rfc3339()]).unwrap();
+
+        assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "clock behind activity → skip reap");
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 2, "no session reaped under suspected skew");
+    }
+
+    /// I8: if `now` is absurdly far AHEAD of all recorded activity (>10 years — a
+    /// garbage/far-future clock), skip rather than mass-reap every session.
+    #[test]
+    fn reap_skips_when_clock_is_absurdly_ahead_of_activity() {
+        let conn = setup_db();
+        let id = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
+        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id, (Utc::now() - Duration::days(SESSION_SKEW_SANITY_DAYS + 30)).to_rfc3339()]).unwrap();
+
+        assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "clock absurdly ahead → skip reap");
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "session spared under suspected skew");
     }
 
     #[test]

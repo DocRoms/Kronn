@@ -87,6 +87,18 @@ This is what makes Kronn different from Cursor (one prompt, one agent) and from 
 
 Download the installer for your OS from [Releases](https://github.com/DocRoms/Kronn/releases/latest). No Docker, no extra runtime. Per-OS steps in [docs/install.md](docs/install.md).
 
+### From source: one command
+
+```bash
+git clone https://github.com/DocRoms/Kronn.git
+cd Kronn
+./kronn start        # guided setup & launch (Docker)
+```
+
+> **macOS:** use `./kronn start-dev` instead (native). Docker on macOS cannot run your
+> host agents (Claude, Codex, …) or read the Keychain — `start-dev` runs backend + UI
+> natively in one command. (`make install` also lands on the guided setup.)
+
 <details>
 <summary><strong>Self-hosted (team-shared, always-on, headless server)</strong></summary>
 
