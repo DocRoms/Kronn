@@ -60,6 +60,66 @@ mod tests {
     }
 
     #[test]
+    fn strip_thinking_leaks_catches_qwen3_short_think_tag() {
+        // Regression: the regex only matched `<thinking>`, never qwen3's
+        // shorter `<think>` / `</think>`. Now both are stripped.
+        assert_eq!(strip_thinking_leaks("<think>reasoning</think>391"), "reasoning391");
+        assert_eq!(strip_thinking_leaks("</think>"), "");
+        assert_eq!(strip_thinking_leaks("<THINK>x</THINK>"), "x");
+        // The longer form still works.
+        assert_eq!(strip_thinking_leaks("<thinking>y</thinking>"), "y");
+        // Still no false positives on the plain word.
+        assert_eq!(strip_thinking_leaks("I think so."), "I think so.");
+    }
+
+    // ─── Ollama /api/chat request body (asserts on the REQUEST, never on the
+    //     generated text — greedy-stable ≠ bit-exact on Metal, would be flaky) ─
+    #[test]
+    fn ollama_body_has_deterministic_options() {
+        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None);
+        let opts = &body["options"];
+        assert_eq!(opts["temperature"], 0);
+        assert_eq!(opts["top_k"], 1);
+        assert_eq!(opts["seed"], 42);
+        assert!(opts["num_ctx"].as_u64().unwrap() <= 8192, "num_ctx must be capped at 8192");
+        assert!(opts["num_ctx"].as_u64().unwrap() >= 2048, "num_ctx must respect the floor");
+    }
+
+    #[test]
+    fn ollama_body_injects_no_think_for_qwen3_only() {
+        // qwen3 → a dedicated `/no_think` system message is prepended.
+        let q = build_ollama_chat_body("qwen3:30b-a3b", "", "hi", None);
+        let msgs = q["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "/no_think");
+        // Non-qwen3 (e.g. llama3.3) → no /no_think message at all.
+        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None);
+        let lmsgs = l["messages"].as_array().unwrap();
+        assert!(!lmsgs.iter().any(|m| m["content"] == "/no_think"),
+            "no_think must be qwen3-only");
+    }
+
+    #[test]
+    fn ollama_body_format_switches_to_non_stream() {
+        // No format → stream text.
+        let free = build_ollama_chat_body("qwen3:8b", "", "hi", None);
+        assert_eq!(free["stream"], true);
+        assert!(free.get("format").is_none());
+        // TypedSchema format → non-stream (one validated JSON blob) + schema passed through.
+        let schema = serde_json::json!({"type":"object","properties":{"x":{"type":"integer"}}});
+        let typed = build_ollama_chat_body("qwen3:8b", "", "hi", Some(&schema));
+        assert_eq!(typed["stream"], false);
+        assert_eq!(typed["format"], schema);
+    }
+
+    #[test]
+    fn ollama_num_ctx_is_clamped_both_ends() {
+        assert_eq!(ollama_num_ctx("", ""), 2048, "tiny prompt → floor");
+        let huge = "x".repeat(100_000);
+        assert_eq!(ollama_num_ctx(&huge, &huge), 8192, "huge prompt → cap");
+    }
+
+    #[test]
     fn parse_stream_text_delta_with_thinking_leak_is_skipped() {
         // End-to-end: a text_delta whose entire content is the leak should
         // NOT reach `full_response` as an empty chunk (which would still
@@ -787,7 +847,7 @@ Suite de la réponse.";
         // New 2026-05-11: the Default tier now reads `agent_cfg.default`
         // before falling through to the built-in match. Primary use case
         // = Ollama user picks `gemma3:27b` from the OllamaCard, that
-        // value overrides the hardcoded `llama3.2` fallback.
+        // value overrides the built-in qwen3:30b-a3b fallback.
         use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
         let overrides = ModelTiersConfig {
             ollama: ModelTierConfig {
@@ -800,15 +860,26 @@ Suite de la réponse.";
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&overrides)),
             Some("gemma3:27b".into()),
-            "Default-tier user override must win over built-in `llama3.2`",
+            "Default-tier user override must win over the built-in qwen3 fallback",
         );
         // Without an override, the legacy built-in is still served.
         let no_override = ModelTiersConfig::default();
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&no_override)),
-            Some("llama3.2".into()),
-            "No override → legacy built-in default applies",
+            Some("qwen3:30b-a3b".into()),
+            "No override → built-in default is a pulled tag, never a bare/absent name",
         );
+    }
+
+    // ─── Ollama tier fallbacks are real, pullable tags (no opaque 404) ────────
+    #[test]
+    fn resolve_model_flag_ollama_tiers_are_pullable_tags() {
+        use crate::models::ModelTier;
+        // Regression: the old fallbacks were `llama3.2` (not pulled) and the
+        // bare `qwen3` (not a pullable tag) → opaque Ollama 404 at run time.
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None), Some("qwen3:4b".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None), Some("qwen3:30b-a3b".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None), Some("qwen3:30b-a3b".into()));
     }
 
     // ─── Claude Code: prompt is always last arg (required for --mcp-config injection)

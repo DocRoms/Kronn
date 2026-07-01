@@ -462,9 +462,9 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
             ModelTier::Reasoning => &agent_cfg.reasoning,
             // `Default` tier now honors a user override too — primarily
             // for Ollama, where the OllamaCard picker writes here so the
-            // user's preferred model wins over the built-in `llama3.2`
-            // fallback below. Backward compatible: `None` (the common
-            // case) falls through to the built-in match.
+            // user's preferred model wins over the built-in qwen3 fallback
+            // below. Backward compatible: `None` (the common case) falls
+            // through to the built-in match.
             ModelTier::Default => &agent_cfg.default,
         };
         if let Some(ref val) = override_val {
@@ -489,10 +489,15 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         (AgentType::CopilotCli, ModelTier::Economy)   => Some("gpt-4o-mini".into()),
         (AgentType::CopilotCli, ModelTier::Default)    => None, // Copilot default is fine
         (AgentType::CopilotCli, ModelTier::Reasoning)  => Some("o4-mini".into()),
-        // Ollama: user picks model explicitly via model_flag; return as-is
-        (AgentType::Ollama, ModelTier::Default)        => Some("llama3.2".into()),
-        (AgentType::Ollama, ModelTier::Economy)        => Some("llama3.2".into()),
-        (AgentType::Ollama, ModelTier::Reasoning)      => Some("qwen3".into()),
+        // Ollama: the user normally picks a model via the OllamaCard (override
+        // above). These are the pulled-tag fallbacks when none is set — bench-
+        // backed defaults (see docs). Economy uses qwen3:4b (fastest, needs
+        // /no_think, injected in build_ollama_chat_body); Default/Reasoning use
+        // the qwen3:30b-a3b MoE (fast + capable). Never bare tags like `qwen3`
+        // (not a pullable name) or `llama3.2` (not pulled) → opaque Ollama 404.
+        (AgentType::Ollama, ModelTier::Default)        => Some("qwen3:30b-a3b".into()),
+        (AgentType::Ollama, ModelTier::Economy)        => Some("qwen3:4b".into()),
+        (AgentType::Ollama, ModelTier::Reasoning)      => Some("qwen3:30b-a3b".into()),
         // Kiro, Vibe: no --model flag support
         _ => None,
     }
@@ -729,7 +734,7 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         return start_ollama_http(
             config.prompt,
             &extra_context,
-            model_flag.as_deref().unwrap_or("llama3.2"),
+            model_flag.as_deref().unwrap_or("qwen3:30b-a3b"),
         ).await;
     }
 
@@ -1055,6 +1060,79 @@ pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> 
     None
 }
 
+/// Bounds for the local Ollama context window. The Ollama default is huge
+/// (up to 256K tokens for some qwen3 tags); an oversized KV cache balloons
+/// memory — e.g. llama3.3:70b at 128K ctx needs ~66 GB and spills onto the
+/// CPU (measured 0.2 tok/s vs 12.5 at 8K, 100% GPU). We therefore cap the
+/// window and never let a local step silently request a giant one.
+const OLLAMA_NUM_CTX_CAP: u64 = 8192;
+const OLLAMA_NUM_CTX_FLOOR: u64 = 2048;
+
+/// Size the context window to the prompt, bounded by [FLOOR, CAP]. Coarse on
+/// purpose (~3 chars/token + output headroom): this is a memory guard, not
+/// fine-grained sizing.
+pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str) -> u64 {
+    let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
+    est.clamp(OLLAMA_NUM_CTX_FLOOR, OLLAMA_NUM_CTX_CAP)
+}
+
+/// qwen3 models are hybrid-reasoning. Ollama's `think:false` API flag is NOT
+/// honored on `/api/chat` (verified empirically 2026-06: `message.content`
+/// still carries the reasoning, and untagged so `strip_thinking_leaks` can't
+/// catch it either). The only reliable switch is the qwen `/no_think` control
+/// token in a dedicated system message, which routes reasoning into a separate
+/// `thinking` field and keeps `content` clean.
+pub(crate) fn ollama_disables_thinking(model: &str) -> bool {
+    model.starts_with("qwen3")
+}
+
+/// Build the Ollama `/api/chat` request body. Pure + side-effect-free so it
+/// can be unit-tested on the constructed request — we deliberately never
+/// assert on generated text: on Metal, `temperature=0` + `seed` yields
+/// *greedy-stable* output, NOT bit-exact reproducibility (float reduction
+/// order isn't guaranteed; two logits within epsilon can flip the argmax,
+/// more so under Q4 quant). Never build logic (output hash-caching, strict
+/// text-equality) that presumes exact reproducibility. Ordered pillars:
+/// fixed num_ctx > temp=0/top_k=1 > same model+quant > seed (near-inert
+/// under greedy, kept only for a possible future temp>0).
+///
+/// `format` = an optional JSON Schema (from a workflow step's `TypedSchema`).
+/// When present, Ollama constrains decoding to the schema (structurally-valid
+/// JSON guaranteed) and we switch to a non-streaming request: a schema step
+/// wants one validated blob, not progressive chunks.
+pub(crate) fn build_ollama_chat_body(
+    model: &str,
+    system_context: &str,
+    user_prompt: &str,
+    format: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut messages = Vec::new();
+    if ollama_disables_thinking(model) {
+        messages.push(serde_json::json!({ "role": "system", "content": "/no_think" }));
+    }
+    if !system_context.is_empty() {
+        messages.push(serde_json::json!({ "role": "system", "content": system_context }));
+    }
+    messages.push(serde_json::json!({ "role": "user", "content": user_prompt }));
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": messages,
+        // format present ⇒ one validated JSON blob (non-stream); else stream text.
+        "stream": format.is_none(),
+        "options": {
+            "temperature": 0,
+            "top_k": 1,
+            "seed": 42,
+            "num_ctx": ollama_num_ctx(system_context, user_prompt),
+        },
+    });
+    if let Some(fmt) = format {
+        body["format"] = fmt.clone();
+    }
+    body
+}
+
 /// Start Ollama via HTTP API streaming (/api/chat) instead of CLI.
 /// Returns an AgentProcess with a dummy child process and an rx fed by
 /// the HTTP response stream. System context and user prompt are sent as
@@ -1068,23 +1146,10 @@ async fn start_ollama_http(
     let base = crate::api::ollama::ollama_base_url_pub();
     let url = format!("{}/api/chat", base);
 
-    let mut messages = Vec::new();
-    if !system_context.is_empty() {
-        messages.push(serde_json::json!({
-            "role": "system",
-            "content": system_context,
-        }));
-    }
-    messages.push(serde_json::json!({
-        "role": "user",
-        "content": user_prompt,
-    }));
-
-    let body = serde_json::json!({
-        "model": model,
-        "messages": messages,
-        "stream": true,
-    });
+    // format=None here: the TypedSchema→format wiring (and the non-streaming
+    // read path it requires) lands in the follow-up commit. Streaming stays
+    // the default for free-text steps.
+    let body = build_ollama_chat_body(model, system_context, user_prompt, None);
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 min max for slow models
@@ -1373,7 +1438,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
         },
         AgentType::Ollama => {
             // Ollama: local LLM inference via `ollama run <model> <prompt>`
-            let model = model_flag.unwrap_or("llama3.2");
+            let model = model_flag.unwrap_or("qwen3:30b-a3b");
             let full_prompt = if mcp_context.is_empty() {
                 prompt.into()
             } else {
@@ -1841,12 +1906,16 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 /// this helper just prevents the visible pollution from reaching the UI.
 ///
 /// Case-insensitive on the tag name so a model quirk like `<Thinking>` is
-/// also caught. We do NOT strip more generic HTML-ish tags — legitimate
-/// user-facing content may contain other `<...>` patterns (code samples,
-/// XML docs, etc.), and over-stripping would be worse than the leak.
+/// also caught. Also matches the shorter `<think>` / `</think>` form emitted
+/// by qwen3 (hybrid-reasoning) — the primary guard against qwen3 reasoning
+/// leaks is `/no_think` (see `ollama_disables_thinking`), which keeps
+/// `message.content` clean; this is only a secondary net for the tagged case.
+/// We do NOT strip more generic HTML-ish tags — legitimate user-facing content
+/// may contain other `<...>` patterns (code samples, XML docs, etc.), and
+/// over-stripping would be worse than the leak.
 pub fn strip_thinking_leaks(s: &str) -> String {
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?i)</?thinking>").unwrap()
+        regex_lite::Regex::new(r"(?i)</?think(ing)?>").unwrap()
     });
     RE.replace_all(s, "").to_string()
 }
