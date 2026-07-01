@@ -283,6 +283,43 @@ pub async fn execute_step(
                             }
                         }
 
+                        // 0.8.10 — quality escalation local→Claude. If a LOCAL
+                        // (Ollama) step still fails validation after repair,
+                        // retry ONCE on the paid reasoning tier before giving
+                        // up. The escalation RATE (logged on target
+                        // kronn::ollama::escalation) is the health metric that
+                        // reveals which steps are too hard for the chosen local
+                        // model. Fires only for TypedSchema (needs a schema to
+                        // validate against) that ran on Ollama.
+                        if !repair_valid
+                            && step.agent == crate::models::AgentType::Ollama
+                            && matches!(step.output_format, crate::models::StepOutputFormat::TypedSchema { .. })
+                        {
+                            tracing::warn!(
+                                target: "kronn::ollama::escalation",
+                                step = %step.name,
+                                "local schema validation failed after repair — escalating to Claude"
+                            );
+                            let escalated = escalation_step(step);
+                            if let Ok(esc) = run_agent_with_timeout(&escalated, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, None).await {
+                                total_tokens += esc.tokens_used;
+                                let esc_env = crate::workflows::template::extract_step_envelope(&esc.text);
+                                let esc_error = match (&step.output_format, &esc_env) {
+                                    (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
+                                        crate::workflows::template::validate_envelope_against_schema(&env.data_json, schema).err()
+                                    }
+                                    _ => None,
+                                };
+                                if matches!((&esc_env, &esc_error), (Some(_), None)) {
+                                    final_output = esc.text;
+                                    repair_valid = true; // valid now → don't fail below
+                                    tracing::info!(target: "kronn::ollama::escalation", step = %step.name, "escalation to Claude succeeded");
+                                } else {
+                                    tracing::warn!(target: "kronn::ollama::escalation", step = %step.name, "escalation to Claude also failed");
+                                }
+                            }
+                        }
+
                         // 0.8.3 — `on_invalid: Fail` short-circuits the
                         // step when repair didn't fix the output. Used by
                         // Feasibility-Gated triage so the implement step
@@ -504,6 +541,24 @@ fn ollama_envelope_format(output_format: &crate::models::StepOutputFormat) -> Op
         })),
         _ => None,
     }
+}
+
+/// Build the escalation variant of a step: the same task, but forced onto the
+/// paid reasoning tier (Claude) instead of the local model. Used as a quality
+/// safety-net when a LOCAL (Ollama) `TypedSchema` step still fails schema
+/// validation after one repair attempt — rare, but a garbage manifest would
+/// poison downstream steps. Clears any pinned local model so tier resolution
+/// applies. Pure so the transform is unit-tested.
+fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
+    let mut escalated = step.clone();
+    escalated.agent = crate::models::AgentType::ClaudeCode;
+    escalated.agent_settings = Some(crate::models::AgentSettings {
+        model: None,
+        tier: Some(crate::models::ModelTier::Reasoning),
+        reasoning_effort: None,
+        max_tokens: None,
+    });
+    escalated
 }
 
 /// Run an agent with optional stall timeout.
@@ -969,6 +1024,24 @@ mod tests {
         use crate::models::StepOutputFormat;
         assert!(ollama_envelope_format(&StepOutputFormat::FreeText).is_none());
         assert!(ollama_envelope_format(&StepOutputFormat::Structured).is_none());
+    }
+
+    #[test]
+    fn escalation_step_forces_claude_reasoning_and_clears_local_model() {
+        let mut local = make_step("summarize {{x}}");
+        local.agent = crate::models::AgentType::Ollama;
+        local.agent_settings = Some(crate::models::AgentSettings {
+            model: Some("qwen3:8b".into()),
+            tier: Some(crate::models::ModelTier::Default),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+        let esc = escalation_step(&local);
+        assert_eq!(esc.agent, crate::models::AgentType::ClaudeCode, "escalate to Claude");
+        let s = esc.agent_settings.expect("settings present");
+        assert_eq!(s.model, None, "pinned local model cleared → tier resolution");
+        assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
+        assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
     }
 
     #[test]
