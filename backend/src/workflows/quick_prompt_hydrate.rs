@@ -78,15 +78,22 @@ pub async fn hydrate_step_from_quick_prompt(
     // `agent_settings` : si le step n'en a pas, on injecte un settings
     // minimal avec le `tier` du QP. Si le step en a un mais pas de tier,
     // on remplit. Sinon on respecte.
+    // 0.8.10 — the QP may pin an explicit model (agent_settings.model). Copy it
+    // onto the step when the step doesn't already set one, so a QP-driven step
+    // runs on the QP's model (consumed via runner::effective_model_flag).
+    let qp_model = qp.agent_settings.as_ref().and_then(|s| s.model.clone());
     match step.agent_settings.as_mut() {
         Some(settings) => {
             if settings.tier.is_none() {
                 settings.tier = Some(qp.tier);
             }
+            if settings.model.is_none() {
+                settings.model = qp_model;
+            }
         }
         None => {
             step.agent_settings = Some(crate::models::AgentSettings {
-                model: None,
+                model: qp_model,
                 tier: Some(qp.tier),
                 reasoning_effort: None,
                 max_tokens: None,
@@ -146,6 +153,7 @@ mod tests {
             profile_ids: vec!["coder".to_string()],
             directive_ids: vec!["concise".to_string()],
             tier: ModelTier::Reasoning,
+            agent_settings: None,
             description: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -164,6 +172,7 @@ mod tests {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,
@@ -245,6 +254,48 @@ mod tests {
         assert_eq!(
             step.agent_settings.as_ref().unwrap().tier,
             Some(ModelTier::Reasoning)
+        );
+    }
+
+    #[tokio::test]
+    async fn hydrates_qp_model_into_step() {
+        // Also exercises the QP DB round-trip: seed_qp inserts with
+        // agent_settings, hydrate reads it back via get_quick_prompt.
+        let db = Database::open_in_memory().unwrap();
+        let mut qp = make_qp("qp-model", "Résume {{host}}");
+        qp.agent_settings = Some(crate::models::AgentSettings {
+            model: Some("qwen3:8b".to_string()),
+            tier: None, reasoning_effort: None, max_tokens: None,
+        });
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        assert_eq!(
+            step.agent_settings.as_ref().and_then(|s| s.model.clone()),
+            Some("qwen3:8b".to_string()),
+            "QP's explicit model must reach the step (and survive the DB round-trip)"
+        );
+    }
+
+    #[tokio::test]
+    async fn step_model_wins_over_qp_model() {
+        let db = Database::open_in_memory().unwrap();
+        let mut qp = make_qp("qp-model2", "x");
+        qp.agent_settings = Some(crate::models::AgentSettings {
+            model: Some("qwen3:8b".to_string()),
+            tier: None, reasoning_effort: None, max_tokens: None,
+        });
+        let qp_id = seed_qp(&db, qp).await;
+        let mut step = blank_step(Some(qp_id));
+        step.agent_settings = Some(crate::models::AgentSettings {
+            model: Some("llama3.3:70b".to_string()),
+            tier: None, reasoning_effort: None, max_tokens: None,
+        });
+        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        assert_eq!(
+            step.agent_settings.as_ref().and_then(|s| s.model.clone()),
+            Some("llama3.3:70b".to_string()),
+            "an explicit step model must win over the QP's"
         );
     }
 

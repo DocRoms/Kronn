@@ -75,6 +75,12 @@ vi.mock('../../lib/api', () => ({
     overview: vi.fn().mockResolvedValue({ servers: [], configs: [], customized_contexts: [], incompatibilities: [] }),
     registry: vi.fn().mockResolvedValue([]),
   },
+  // 0.8.10 — WorkflowWizard fetches installed Ollama models at mount for the
+  // per-step model picker (datalist on Ollama steps).
+  ollama: {
+    models: vi.fn().mockResolvedValue({ models: [] }),
+    health: vi.fn().mockResolvedValue({ reachable: false, models: [] }),
+  },
 }));
 
 const defaultModelTiers = {

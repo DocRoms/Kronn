@@ -287,6 +287,14 @@ pub struct WorkflowStep {
     pub agent_settings: Option<AgentSettings>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub on_result: Vec<StepConditionRule>,
+    /// #8 — first-class handling of a step STALL/timeout. When the step exhausts
+    /// its attempts on a stall (no output for `stall_timeout_secs`), the runner
+    /// applies this action (Goto a recovery/notify step, or Stop gracefully)
+    /// instead of failing the whole run. `None` = legacy behaviour (the stall
+    /// fails the step and tips into the rollback chain). Stored in `steps_json`
+    /// alongside `on_result` — no migration; absent on older workflows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_timeout: Option<ConditionAction>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_timeout_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1016,6 +1024,18 @@ pub struct WorkflowRun {
     /// blocked, no auth, network down, …).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub produced_branches: Vec<ProducedBranch>,
+    /// Provenance enrichment (DERIVED, not persisted). When this run is a
+    /// sub-workflow child (`parent_run_id` set), these resolve the parent run's
+    /// workflow id + name + tick time so the UI can render
+    /// "↳ depuis <parent> · <date>" (clickable) without an extra round-trip.
+    /// Populated ONLY by `list_runs` / `get_run` via a single batch JOIN;
+    /// `None` on insert, on top-level runs, and when the parent was deleted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_workflow_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_workflow_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_started_at: Option<DateTime<Utc>>,
 }
 
 /// One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
@@ -1334,6 +1354,12 @@ pub struct WorkflowExportEnvelope {
     /// step references a QP.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub referenced_quick_prompts: Vec<super::QuickPrompt>,
+    /// #10 — sub-workflows referenced (transitively) by `SubWorkflow` steps,
+    /// bundled so a clone/import recreates the whole parent+child graph in one
+    /// atomic operation and remaps `sub_workflow_id` to the fresh child ids.
+    /// Empty when the workflow has no SubWorkflow steps. Excludes the root.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub referenced_workflows: Vec<Workflow>,
 }
 
 #[derive(Debug, Deserialize, TS)]

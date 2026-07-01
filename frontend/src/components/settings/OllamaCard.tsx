@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { ollama as ollamaApi, config as configApi } from '../../lib/api';
 import type { OllamaHealthResponse, OllamaModel, ModelTiersConfig } from '../../types/generated';
-import { RefreshCw, ExternalLink, Download, Check, AlertTriangle, Loader2 } from 'lucide-react';
+import { RefreshCw, ExternalLink, Download, AlertTriangle, Loader2 } from 'lucide-react';
 import '../../pages/SettingsPage.css';
 
 interface OllamaCardProps {
@@ -67,14 +67,11 @@ export function OllamaCard({ t }: OllamaCardProps) {
   const [health, setHealth] = useState<OllamaHealthResponse | null>(null);
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [loading, setLoading] = useState(true);
-  // User's preferred default Ollama model — surfaces as the selected
-  // radio in the picker. Persisted via the existing model-tier config
-  // endpoint (`ModelTierConfig.default` for the Ollama agent). When
-  // unset (`null`), the backend falls back to the hardcoded
-  // `llama3.2` in `runner.rs:resolve_model_flag`.
-  const [defaultModel, setDefaultModel] = useState<string | null>(null);
+  // Source of truth for the per-tier model choice is `tiers.ollama.{economy,
+  // default,reasoning}`; the selects read it directly.
   const [tiers, setTiers] = useState<ModelTiersConfig | null>(null);
-  const [savingDefault, setSavingDefault] = useState(false);
+  // Which tier row is mid-save (disables just that <select>).
+  const [savingTier, setSavingTier] = useState<'economy' | 'default' | 'reasoning' | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -86,7 +83,6 @@ export function OllamaCard({ t }: OllamaCardProps) {
       setHealth(h);
       if (t) {
         setTiers(t);
-        setDefaultModel(t.ollama?.default ?? null);
       }
       if (h.status === 'online') {
         const m = await ollamaApi.models();
@@ -103,25 +99,32 @@ export function OllamaCard({ t }: OllamaCardProps) {
 
   useEffect(() => { refresh(); }, [refresh]);
 
-  const pickDefaultModel = useCallback(async (name: string) => {
+  // Assign an installed model to a tier (economy/default/reasoning) — ISO with
+  // the per-tier picking every other agent gets in AgentsSection. `null` clears
+  // the slot back to the backend built-in. Empty economy/reasoning slots fall
+  // back to the `default` slot for Ollama (runner::resolve_model_flag), so
+  // setting only `default` still applies everywhere — these two just let you
+  // pick a lighter model for cheap steps and a stronger one for reasoning.
+  const pickTierModel = useCallback(async (
+    tier: 'economy' | 'default' | 'reasoning',
+    name: string | null,
+  ) => {
     if (!tiers) return;
-    setSavingDefault(true);
-    // Optimistic — flip the radio immediately so the click feels responsive.
-    // If the POST fails the next refresh corrects it.
-    setDefaultModel(name);
+    setSavingTier(tier);
+    const prev = tiers;
+    const next: ModelTiersConfig = {
+      ...tiers,
+      ollama: { ...tiers.ollama, [tier]: name },
+    };
+    // Optimistic — reflect immediately; rollback on failure.
+    setTiers(next);
     try {
-      const next: ModelTiersConfig = {
-        ...tiers,
-        ollama: { ...tiers.ollama, default: name },
-      };
       await configApi.setModelTiers(next);
-      setTiers(next);
     } catch (err) {
-      console.warn('Failed to save default Ollama model:', err);
-      // Roll back optimistic flip on failure.
-      setDefaultModel(tiers.ollama?.default ?? null);
+      console.warn('Failed to save Ollama tier model:', err);
+      setTiers(prev);
     } finally {
-      setSavingDefault(false);
+      setSavingTier(null);
     }
   }, [tiers]);
 
@@ -231,48 +234,47 @@ export function OllamaCard({ t }: OllamaCardProps) {
             </div>
           )}
 
-          {/* ── Online + models → picker ──
-           *  Each installed model is a radio. The selected one becomes
-           *  the Default-tier override (`ModelTierConfig.default`) that
-           *  `runner.rs:resolve_model_flag` reads before falling back
-           *  to the hardcoded `llama3.2`. Effective immediately — no
-           *  Save button. */}
+          {/* ── Online + models → per-tier pickers ──
+           *  One selector per model tier (economy/default/reasoning), ISO with
+           *  the per-tier model choice every other agent gets in AgentsSection.
+           *  Writes `ModelTierConfig.{economy,default,reasoning}` for Ollama,
+           *  read by `runner.rs:resolve_model_flag`. Empty economy/reasoning
+           *  fall back to `default` (Ollama has no built-in tiers). Effective
+           *  immediately — no Save button. */}
           {health.status === 'online' && models.length > 0 && (
             <div className="set-ollama-models">
-              <div className="text-xs text-muted mb-2">{t('ollama.installedModels')}</div>
-              <div className="set-ollama-model-list" role="radiogroup" aria-label={t('ollama.installedModels')}>
-                {models.map(m => {
-                  const isDefault = defaultModel === m.name;
-                  return (
-                    <button
-                      key={m.name}
-                      type="button"
-                      role="radio"
-                      aria-checked={isDefault}
-                      className="set-ollama-model-row set-ollama-model-row-pickable"
-                      data-selected={isDefault}
-                      onClick={() => pickDefaultModel(m.name)}
-                      disabled={savingDefault}
-                    >
-                      <span
-                        className="set-ollama-radio"
-                        aria-hidden="true"
-                        data-checked={isDefault}
-                      >
-                        {isDefault && <Check size={8} style={{ color: 'var(--kr-success)' }} />}
+              <div className="text-xs text-muted mb-2">{t('ollama.tierPickerTitle')}</div>
+              <div className="set-ollama-tier-grid">
+                {(['economy', 'default', 'reasoning'] as const).map(tier => (
+                  <label key={tier} className="set-ollama-tier-row">
+                    {/* Same tier emotes as every other agent (AgentsSection). */}
+                    <span className="set-ollama-tier-label">
+                      <span aria-hidden="true" style={{ marginRight: 4 }}>
+                        {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '🧠' : '🎯'}
                       </span>
-                      <code className="set-ollama-model-name">{m.name}</code>
-                      <span className="text-ghost text-2xs">{m.size}</span>
-                      {isDefault && (
-                        <span className="set-ollama-default-tag">{t('ollama.defaultTag')}</span>
-                      )}
-                    </button>
-                  );
-                })}
+                      {t(`disc.tier.${tier}`)}
+                    </span>
+                    <select
+                      className="set-ollama-tier-select"
+                      value={tiers?.ollama?.[tier] ?? ''}
+                      disabled={savingTier === tier}
+                      onChange={e => pickTierModel(tier, e.target.value || null)}
+                      aria-label={t(`disc.tier.${tier}`)}
+                    >
+                      <option value="">{t('ollama.tierAuto')}</option>
+                      {models.map(m => (
+                        <option key={m.name} value={m.name}>{m.name} · {m.size}</option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
               </div>
+              {/* Bench-based guidance (2026-07) — which local model fits which
+                  job, so users don't put a weak model on a demanding step. */}
+              <div className="set-ollama-tier-guidance">💡 {t('ollama.tierGuidance')}</div>
               <div className="set-ollama-pull-hint">
                 <span className="text-2xs text-muted">
-                  {defaultModel ? t('ollama.pickedDefaultHint', defaultModel) : t('ollama.pickDefaultHint')}
+                  {t('ollama.tierPickerHint')}
                   {' · '}
                   {t('ollama.pullMoreHint')}
                 </span>

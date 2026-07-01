@@ -193,6 +193,9 @@ pub(crate) async fn make_agent_stream(
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
     let disc_tier = disc.tier;
+    // 0.8.10 — explicit per-discussion model (e.g. inherited from a launching
+    // Quick Prompt) wins over the tier; None → resolve from tier as before.
+    let disc_model = disc.model.clone();
     let skill_ids = disc.skill_ids.clone();
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
@@ -537,6 +540,7 @@ pub(crate) async fn make_agent_stream(
             skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),
             tier: disc_tier, model_tiers: Some(&model_tiers_config),
+            model_override: disc_model.as_deref(),
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
@@ -1011,6 +1015,17 @@ pub(crate) async fn make_agent_stream(
                 // clean-exit child isn't mis-counted as a batch success.
                 let child_run_was_success = child_run_counts_as_success(success, &full_response);
 
+                // Concrete model this reply ran on — resolved with the SAME
+                // precedence the runner used (per-disc/QP override → tier →
+                // OllamaCard default → built-in). Stored per-message so the UI
+                // can show "Ollama · qwen3:32b" even when the model changes
+                // mid-thread. `None` for provider-default runs with no flag.
+                let effective_model = runner::effective_model_flag(
+                    disc_model.as_deref(),
+                    &agent_type,
+                    disc_tier,
+                    Some(&model_tiers_config),
+                );
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -1020,6 +1035,7 @@ pub(crate) async fn make_agent_stream(
                     tokens_used,
                     auth_mode: Some(auth_mode_str.clone()),
                     model_tier: tier_label,
+                    model: effective_model,
                     cost_usd,
                     author_pseudo: None,
                     author_avatar_email: None,
@@ -1061,6 +1077,7 @@ pub(crate) async fn make_agent_stream(
                     fabricated_count,
                 ) {
                     let refusal = DiscussionMessage {
+                        model: None,
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
                         role: MessageRole::System,
@@ -1109,6 +1126,7 @@ pub(crate) async fn make_agent_stream(
                     let resolutions = super::slash_markers::resolve_markers(&state, &disc_id, &markers).await;
                     for body in resolutions {
                         let sys_msg = DiscussionMessage {
+                            model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::System,
@@ -1149,6 +1167,7 @@ pub(crate) async fn make_agent_stream(
                 if !kronn_tool_calls.is_empty() {
                     for body in kronn_tool_calls.iter() {
                         let sys_msg = DiscussionMessage {
+                            model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::System,
@@ -1186,6 +1205,7 @@ pub(crate) async fn make_agent_stream(
                 if !native_tool_calls.is_empty() {
                     for body in native_tool_calls.iter() {
                         let sys_msg = DiscussionMessage {
+                            model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::System,
@@ -1364,6 +1384,7 @@ pub(crate) async fn make_agent_stream(
                 tracing::error!("Agent start failed: {}", e);
 
                 let err_msg = DiscussionMessage {
+                    model: None,
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::System,

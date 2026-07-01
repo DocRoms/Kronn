@@ -347,6 +347,32 @@ pub fn configs_for_project(conn: &Connection, project_id: &str) -> Result<Vec<Mc
     }).collect())
 }
 
+/// Pick THIS instance's config id for a given plugin/server, used when a
+/// workflow is imported/cloned and its ApiCall steps carry the source
+/// instance's `api_config_id` (a UUID meaningless here). Preference order:
+/// a config scoped to `project_id`, then a global one, then any config for
+/// that server. `None` when this instance has no config for the plugin (the
+/// caller leaves the step's id as-is so the user picks one). Server ids
+/// (`api_plugin_slug`) are stable across instances; config ids are not.
+pub fn find_config_for_server(
+    conn: &Connection,
+    server_id: &str,
+    project_id: Option<&str>,
+) -> Result<Option<String>> {
+    let all = list_configs(conn)?;
+    if let Some(pid) = project_id {
+        if let Some(c) = all.iter().find(|c|
+            c.server_id == server_id && c.project_ids.iter().any(|p| p == pid))
+        {
+            return Ok(Some(c.id.clone()));
+        }
+    }
+    if let Some(c) = all.iter().find(|c| c.server_id == server_id && c.is_global) {
+        return Ok(Some(c.id.clone()));
+    }
+    Ok(all.into_iter().find(|c| c.server_id == server_id).map(|c| c.id))
+}
+
 // ─── Display helpers ─────────────────────────────────────────────────────────
 
 /// Build McpConfigDisplay list with masked secrets and server names.
@@ -578,6 +604,35 @@ mod tests {
         let found = find_config_by_hash(&conn, "abcdef").unwrap();
         assert!(found.is_some());
         assert_eq!(found.unwrap().label, "Prod");
+    }
+
+    #[test]
+    fn find_config_for_server_prefers_project_then_global_then_any() {
+        let conn = test_conn();
+        upsert_server(&conn, &mk_server("gh")).unwrap();
+        upsert_server(&conn, &mk_server("jira")).unwrap();
+        let mk = |id: &str, server: &str, global: bool| crate::models::McpConfig {
+            id: id.into(), server_id: server.into(), label: "L".into(),
+            env_keys: vec![], env_encrypted: "x".into(), args_override: None,
+            is_global: global, config_hash: id.into(), project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly, include_general: true,
+        };
+        conn.execute("INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('proj-1','Test','/tmp/proj1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", []).unwrap();
+        insert_config(&conn, &mk("gh-global", "gh", true)).unwrap();
+        insert_config(&conn, &mk("gh-proj", "gh", false)).unwrap();
+        link_config_project(&conn, "gh-proj", "proj-1").unwrap();
+        insert_config(&conn, &mk("jira-1", "jira", true)).unwrap();
+
+        // Project-scoped config wins for that project.
+        assert_eq!(find_config_for_server(&conn, "gh", Some("proj-1")).unwrap().as_deref(), Some("gh-proj"));
+        // No project → prefer the global config for the server.
+        assert_eq!(find_config_for_server(&conn, "gh", None).unwrap().as_deref(), Some("gh-global"));
+        // Unknown project → falls back to the global config.
+        assert_eq!(find_config_for_server(&conn, "gh", Some("other")).unwrap().as_deref(), Some("gh-global"));
+        // A different server resolves to its own config.
+        assert_eq!(find_config_for_server(&conn, "jira", None).unwrap().as_deref(), Some("jira-1"));
+        // No config for the plugin → None (caller leaves the step id untouched).
+        assert!(find_config_for_server(&conn, "slack", None).unwrap().is_none());
     }
 
     #[test]

@@ -240,6 +240,9 @@ impl WorkflowEngine {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         };
 
         // Persist the run
@@ -303,6 +306,7 @@ mod tests {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             skill_ids: vec![],
@@ -454,6 +458,9 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         };
 
         assert_eq!(run.status, RunStatus::Pending);
@@ -496,6 +503,9 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         };
         let tc = run.trigger_context.unwrap();
         assert_eq!(tc["type"], "tracker");

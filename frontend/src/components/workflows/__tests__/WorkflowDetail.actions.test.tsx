@@ -256,6 +256,9 @@ describe('WorkflowDetail — runs list', () => {
 describe('WorkflowDetail — per-run actions', () => {
   it('fires onDeleteRun with the run id from a run card delete button', () => {
     const { props } = renderDetail({ runs: [mkRun({ id: 'run-42', status: 'Success' })] });
+    // #6 — terminal runs render as a collapsed compact row; expand to reach
+    // the full RunDetail (and its delete button).
+    fireEvent.click(screen.getByRole('button', { name: /Success/ }));
     fireEvent.click(screen.getByTitle('wf.deleteRun'));
     expect(props.onDeleteRun).toHaveBeenCalledWith('run-42');
   });
@@ -457,11 +460,63 @@ describe('WorkflowDetail — batch conversations chip', () => {
       runs: [mkRun({ id: 'run-parent', status: 'Success' })],
       onNavigateToBatch,
     });
+    // #6 — the (terminal) parent run is a collapsed compact row; expand it so
+    // the batch chip (rendered alongside the full RunDetail) is present.
+    fireEvent.click(await screen.findByRole('button', { name: /Success/ }));
     // No I18nProvider in the test tree → useT() falls back to the default
     // context whose t() returns the raw key (args dropped), so the chip
     // label is the bare key.
     const chip = await screen.findByText('wf.runBatchChip');
     fireEvent.click(chip);
     expect(onNavigateToBatch).toHaveBeenCalledWith('batch-99');
+  });
+});
+
+// ---- #6 compact rows -------------------------------------------------
+describe('WorkflowDetail — compact run rows', () => {
+  it('collapses a terminal run and expands its detail on click', () => {
+    renderDetail({ runs: [mkRun({ id: 'r1', status: 'Success' })] });
+    // Collapsed: the full RunDetail (its delete button) is not mounted.
+    expect(screen.queryByTitle('wf.deleteRun')).toBeNull();
+    fireEvent.click(screen.getByRole('button', { name: /Success/ }));
+    expect(screen.getByTitle('wf.deleteRun')).toBeInTheDocument();
+  });
+
+  it('expands a non-terminal run by default (needs attention)', () => {
+    renderDetail({ runs: [mkRun({ id: 'r1', status: 'WaitingApproval', finished_at: null })] });
+    const row = screen.getByRole('button', { name: /WaitingApproval/ });
+    expect(row).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('#11 — focusRunId auto-expands the targeted (otherwise-collapsed) run', () => {
+    renderDetail({
+      runs: [
+        mkRun({ id: 'other', status: 'Success' }),
+        mkRun({ id: 'target-run', status: 'Success' }),
+      ],
+      focusRunId: 'target-run',
+    });
+    // The focused terminal run is force-expanded → its RunDetail (delete
+    // button) is mounted even though terminal runs collapse by default.
+    expect(screen.getByTitle('wf.deleteRun')).toBeInTheDocument();
+  });
+
+  it('groups sub-runs of the same parent tick under a collapsible accordion', () => {
+    const { container } = renderDetail({
+      runs: [
+        mkRun({ id: 's1', status: 'Success', parent_run_id: 'tick-1', parent_workflow_name: 'Cron Parent' }),
+        mkRun({ id: 's2', status: 'Failed', parent_run_id: 'tick-1', parent_workflow_name: 'Cron Parent' }),
+      ],
+    });
+    // Group header present; both terminal → collapsed by default → no per-run
+    // compact rows rendered yet (queried by their distinctive class).
+    const header = screen.getByRole('button', { name: /Cron Parent/ });
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(container.querySelectorAll('.wf-run-compact')).toHaveLength(0);
+    // Expand the group → both sub-run compact rows appear.
+    fireEvent.click(header);
+    const rows = container.querySelectorAll('.wf-run-compact');
+    expect(rows).toHaveLength(2);
+    expect([...rows].map(r => r.getAttribute('data-status')).sort()).toEqual(['Failed', 'Success']);
   });
 });

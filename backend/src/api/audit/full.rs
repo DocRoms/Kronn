@@ -1162,6 +1162,7 @@ pub async fn full_audit(
         let now = Utc::now();
         let discussion_id = Uuid::new_v4().to_string();
         let initial_message = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
@@ -1201,6 +1202,7 @@ pub async fn full_audit(
             ],
             directive_ids: vec![],
             tier: crate::models::ModelTier::Default,
+            model: None,
             pin_first_message: true,
             archived: false,
             pinned: false,

@@ -189,6 +189,9 @@ pub async fn workflow_trigger(
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     };
 
     let r = run.clone();
@@ -1051,6 +1054,9 @@ mod tests {
             parent_run_id: None,
             state: ::std::collections::HashMap::new(),
             produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
         }
     }
 

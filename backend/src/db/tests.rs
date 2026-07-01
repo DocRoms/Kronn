@@ -54,6 +54,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         workspace_path: None,
         worktree_branch: None,
         tier: ModelTier::Default,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -70,6 +71,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
 
 fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
     DiscussionMessage {
+        model: None,
         lint_report: None,
         id: id.into(),
         role,
@@ -362,6 +364,22 @@ fn disc_no_agent_flag_round_trips() {
     assert!(crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "flag set");
     crate::db::discussions::set_disc_no_agent(&conn, "d1", false).unwrap();
     assert!(!crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "flag cleared");
+}
+
+#[test]
+fn discussion_model_override_round_trips() {
+    // 070/2c — the explicit per-discussion model column persists through
+    // insert → get and via the list mapping. Default (None) stays None.
+    let conn = test_db();
+    let mut d = sample_discussion("d-model", None);
+    d.model = Some("qwen3:8b".into());
+    crate::db::discussions::insert_discussion(&conn, &d).unwrap();
+    let got = crate::db::discussions::get_discussion(&conn, "d-model").unwrap().unwrap();
+    assert_eq!(got.model, Some("qwen3:8b".into()));
+
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("d-none", None)).unwrap();
+    let none = crate::db::discussions::get_discussion(&conn, "d-none").unwrap().unwrap();
+    assert_eq!(none.model, None, "no override → None, resolve from tier");
 }
 
 #[test]
@@ -1206,6 +1224,7 @@ fn sample_workflow(id: &str) -> Workflow {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,
@@ -1339,6 +1358,9 @@ fn sample_run(id: &str, workflow_id: &str) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     }
 }
 
@@ -1351,6 +1373,74 @@ fn workflow_runs_insert_and_list() {
     let runs = crate::db::workflows::list_runs(&conn, "w1").unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, RunStatus::Running);
+}
+
+#[test]
+fn list_runs_enriches_subworkflow_parent_provenance() {
+    let conn = test_db();
+    // A parent workflow with a run, and a child workflow whose run points at it.
+    let mut parent_wf = sample_workflow("parent-wf");
+    parent_wf.name = "Cron Parent".into();
+    crate::db::workflows::insert_workflow(&conn, &parent_wf).unwrap();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("child-wf")).unwrap();
+
+    let parent_run = sample_run("parent-run-1", "parent-wf");
+    crate::db::workflows::insert_run(&conn, &parent_run).unwrap();
+
+    let mut child = sample_run("child-run-1", "child-wf");
+    child.run_type = "subworkflow".into();
+    child.parent_run_id = Some("parent-run-1".into());
+    crate::db::workflows::insert_run(&conn, &child).unwrap();
+
+    let runs = crate::db::workflows::list_runs(&conn, "child-wf").unwrap();
+    assert_eq!(runs.len(), 1);
+    let r = &runs[0];
+    assert_eq!(r.parent_workflow_id.as_deref(), Some("parent-wf"), "parent workflow id resolved");
+    assert_eq!(r.parent_workflow_name.as_deref(), Some("Cron Parent"), "parent workflow name resolved via JOIN");
+    assert_eq!(
+        r.parent_run_started_at.map(|d| d.timestamp()),
+        Some(parent_run.started_at.timestamp()),
+        "parent run tick time carried"
+    );
+
+    // get_run enriches too.
+    let one = crate::db::workflows::get_run(&conn, "child-run-1").unwrap().unwrap();
+    assert_eq!(one.parent_workflow_name.as_deref(), Some("Cron Parent"));
+}
+
+#[test]
+fn list_runs_provenance_none_for_toplevel_run() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    // Top-level run: no parent_run_id → provenance stays None (the common case).
+    crate::db::workflows::insert_run(&conn, &sample_run("top", "w1")).unwrap();
+
+    let runs = crate::db::workflows::list_runs(&conn, "w1").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].parent_workflow_name.is_none());
+    assert!(runs[0].parent_workflow_id.is_none());
+    assert!(runs[0].parent_run_started_at.is_none());
+}
+
+#[test]
+fn list_runs_provenance_cleared_when_parent_deleted() {
+    // FK `parent_run_id REFERENCES workflow_runs(id) ON DELETE SET NULL`:
+    // deleting the parent run NULLs the child's link (no dangling pointer),
+    // so provenance resolves to None rather than a stale name.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("parent-wf")).unwrap();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("child-wf")).unwrap();
+    crate::db::workflows::insert_run(&conn, &sample_run("p1", "parent-wf")).unwrap();
+    let mut child = sample_run("c1", "child-wf");
+    child.run_type = "subworkflow".into();
+    child.parent_run_id = Some("p1".into());
+    crate::db::workflows::insert_run(&conn, &child).unwrap();
+
+    crate::db::workflows::delete_run(&conn, "p1").unwrap();
+
+    let runs = crate::db::workflows::list_runs(&conn, "child-wf").unwrap();
+    assert_eq!(runs.len(), 1);
+    assert!(runs[0].parent_workflow_name.is_none(), "parent gone → no stale provenance");
 }
 
 #[test]
@@ -1643,6 +1733,9 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
         parent_run_id: None,
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     }
 }
 
@@ -1885,6 +1978,7 @@ fn sample_qp_for_batch(id: &str) -> QuickPrompt {
         profile_ids: vec![],
         directive_ids: vec![],
         tier: crate::models::ModelTier::Default,
+        agent_settings: None,
         description: "Test QP for batch chaining".into(),
         created_at: now,
         updated_at: now,
@@ -2049,6 +2143,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         workspace_path: None,
         worktree_branch: None,
         tier: ModelTier::Default,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -2124,6 +2219,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        model: None,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
         test_mode_restore_branch: None, test_mode_stash_ref: None,
@@ -2173,6 +2269,7 @@ fn has_pending_partial_returns_true_when_set() {
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        model: None,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
         test_mode_restore_branch: None, test_mode_stash_ref: None,
@@ -2198,6 +2295,7 @@ fn partial_response_clear_with_none_wipes_column() {
         archived: false,
         pinned: false, workspace_mode: "Direct".into(),
         workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        model: None,
         pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
         shared_id: None, shared_with: vec![], workflow_run_id: None,
         test_mode_restore_branch: None, test_mode_stash_ref: None,
@@ -2468,6 +2566,7 @@ fn workflow_multi_step_roundtrip() {
                 mcp_config_ids: vec![],
                 agent_settings: None,
                 on_result: vec![],
+                on_timeout: None,
                 stall_timeout_secs: None,
                 retry: None,
                 delay_after_secs: None,
@@ -2527,6 +2626,7 @@ fn workflow_multi_step_roundtrip() {
                     contains: "NO_RESULTS".into(),
                     action: ConditionAction::Stop,
                 }],
+                on_timeout: None,
                 stall_timeout_secs: Some(300),
                 retry: None,
                 delay_after_secs: None,
@@ -2583,6 +2683,7 @@ fn workflow_multi_step_roundtrip() {
                 mcp_config_ids: vec![],
                 agent_settings: None,
                 on_result: vec![],
+                on_timeout: None,
                 stall_timeout_secs: None,
                 retry: None,
                 delay_after_secs: Some(5),
@@ -2681,6 +2782,7 @@ fn workflow_update_steps_count() {
         mcp_config_ids: vec![],
         agent_settings: None,
         on_result: vec![],
+        on_timeout: None,
         stall_timeout_secs: None,
         retry: None,
         delay_after_secs: None,
@@ -3013,6 +3115,7 @@ fn quick_prompt_crud() {
         profile_ids: vec!["coder".into()],
         directive_ids: vec!["concise".into()],
         tier: crate::models::ModelTier::Default,
+        agent_settings: None,
         description: "Analyse technique d'un ticket Jira pour cadrage".into(),
         created_at: now,
         updated_at: now,
@@ -3074,6 +3177,7 @@ fn quick_prompt_insert_seeds_version_v1() {
         profile_ids: vec![],
         directive_ids: vec![],
         tier: crate::models::ModelTier::Default,
+        agent_settings: None,
         description: "v1".into(),
         created_at: now,
         updated_at: now,
@@ -3104,6 +3208,7 @@ fn quick_prompt_update_snapshots_v2_v3() {
         profile_ids: vec![],
         directive_ids: vec![],
         tier: crate::models::ModelTier::Default,
+        agent_settings: None,
         description: "v1".into(),
         created_at: now,
         updated_at: now,
@@ -3152,6 +3257,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         profile_ids: vec![],
         directive_ids: vec![],
         tier: ModelTier::Default,
+        agent_settings: None,
         description: "".into(),
         created_at: now,
         updated_at: now,
@@ -3173,6 +3279,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
             archived: false, pinned: false,
             workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
             tier: ModelTier::Default, pin_first_message: false,
+            model: None,
             summary_cache: None, summary_up_to_msg_idx: None,
             summary_strategy: crate::models::SummaryStrategy::Auto,
             introspection_call_count: 0,
@@ -3184,6 +3291,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         crate::db::discussions::insert_discussion(&conn, &d).unwrap();
         // User msg + Agent msg (with tokens + duration).
         let user_msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: format!("{}-u", disc_id), role: MessageRole::User, content: "ask".into(),
             agent_type: None, timestamp: Utc::now(), tokens_used: 0,
@@ -3191,6 +3299,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
             author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
         };
         let agent_msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: format!("{}-a", disc_id), role: MessageRole::Agent, content: "reply".into(),
             agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
@@ -3236,6 +3345,7 @@ fn quick_prompt_metrics_empty_for_qp_without_launches() {
         profile_ids: vec![],
         directive_ids: vec![],
         tier: crate::models::ModelTier::Default,
+        agent_settings: None,
         description: "".into(),
         created_at: now,
         updated_at: now,
@@ -3256,6 +3366,7 @@ fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
         variables: vec![], agent: AgentType::ClaudeCode,
         project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         tier: ModelTier::Default, description: "".into(),
+        agent_settings: None,
         created_at: now, updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
@@ -3294,6 +3405,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
         variables: vec![], agent: AgentType::ClaudeCode,
         project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         tier: ModelTier::Default, description: "".into(),
+        agent_settings: None,
         created_at: now, updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
@@ -3310,6 +3422,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
         archived: false, pinned: false,
         workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
         tier: ModelTier::Default, pin_first_message: false,
+        model: None,
         summary_cache: None, summary_up_to_msg_idx: None,
         summary_strategy: crate::models::SummaryStrategy::Auto,
         introspection_call_count: 0,
@@ -3349,6 +3462,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
         variables: vec![], agent: AgentType::ClaudeCode,
         project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
         tier: ModelTier::Default, description: "".into(),
+        agent_settings: None,
         created_at: now, updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
@@ -3360,6 +3474,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
         archived: false, pinned: false,
         workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
         tier: ModelTier::Default, pin_first_message: false,
+        model: None,
         summary_cache: None, summary_up_to_msg_idx: None,
         summary_strategy: crate::models::SummaryStrategy::Auto,
         introspection_call_count: 0,
@@ -3371,6 +3486,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
     // Three Agent replies — only the first should be counted.
     let mk = |id: &str, role: MessageRole, toks: u64, dur: u64| DiscussionMessage {
+        model: None,
         lint_report: None,
         id: id.into(), role, content: "x".into(),
         agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
@@ -3428,6 +3544,7 @@ fn quick_prompt_variables_roundtrip() {
         profile_ids: vec![],
         directive_ids: vec![],
         tier: crate::models::ModelTier::Reasoning,
+        agent_settings: None,
         description: String::new(),
         created_at: now,
         updated_at: now,
@@ -3488,6 +3605,7 @@ fn cross_agent_db_round_trip_all_types() {
             workspace_path: None,
             worktree_branch: None,
             tier: ModelTier::Default,
+            model: None,
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,

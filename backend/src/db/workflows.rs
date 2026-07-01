@@ -394,6 +394,9 @@ pub fn create_batch_run(
         parent_run_id: input.parent_run_id.clone(),
         state: ::std::collections::HashMap::new(),
         produced_branches: vec![],
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     };
 
     let lang = if input.language.is_empty() { "fr".to_string() } else { input.language };
@@ -408,6 +411,7 @@ pub fn create_batch_run(
     let discussions: Vec<(Discussion, DiscussionMessage)> = input.items.iter().map(|item| {
         let disc_id = Uuid::new_v4().to_string();
         let initial_message = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,
@@ -447,6 +451,10 @@ pub fn create_batch_run(
             workspace_path: None,
             worktree_branch: None,
             tier: qp.tier,
+            // 0.8.10 — a QP-launched batch discussion inherits the QP's explicit
+            // model (consumed via disc.model → model_override once the batch
+            // agent-run path reads it in 2b-2).
+            model: qp.agent_settings.as_ref().and_then(|s| s.model.clone()),
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
@@ -614,12 +622,64 @@ pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u
     );
     let mut stmt = conn.prepare(&sql)?;
 
-    let runs = stmt.query_map(params![workflow_id], |row| {
+    let mut runs: Vec<WorkflowRun> = stmt.query_map(params![workflow_id], |row| {
         Ok(row_to_run(row))
     })?.filter_map(|r| r.ok())
     .collect();
 
+    enrich_parent_provenance(conn, &mut runs)?;
     Ok(runs)
+}
+
+/// Fill the DERIVED `parent_workflow_id/name` + `parent_run_started_at` fields
+/// on any run that has a `parent_run_id`, via a SINGLE batch query (no N+1).
+/// Resolves each distinct parent run id → its workflow id/name + start time.
+/// A dangling parent (deleted run) simply leaves the fields `None`.
+pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRun]) -> Result<()> {
+    use std::collections::HashMap;
+    // Distinct, non-empty parent ids present in this batch.
+    let mut ids: Vec<String> = runs.iter()
+        .filter_map(|r| r.parent_run_id.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    // One query: parent run id → (parent workflow id, name, parent run start).
+    let placeholders = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT pr.id, w.id, w.name, pr.started_at \
+         FROM workflow_runs pr JOIN workflows w ON w.id = pr.workflow_id \
+         WHERE pr.id IN ({placeholders})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let params_ref: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let mut map: HashMap<String, (String, String, DateTime<Utc>)> = HashMap::new();
+    let rows = stmt.query_map(params_ref.as_slice(), |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            parse_dt(row.get::<_, String>(3)?),
+        ))
+    })?;
+    for r in rows.filter_map(|r| r.ok()) {
+        map.insert(r.0, (r.1, r.2, r.3));
+    }
+
+    for run in runs.iter_mut() {
+        if let Some(pid) = run.parent_run_id.as_deref() {
+            if let Some((wid, wname, started)) = map.get(pid) {
+                run.parent_workflow_id = Some(wid.clone());
+                run.parent_workflow_name = Some(wname.clone());
+                run.parent_run_started_at = Some(*started);
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
@@ -630,6 +690,11 @@ pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
         Ok(row_to_run(row))
     }).ok();
 
+    // Enrich provenance so a single run detail also shows "↳ depuis <parent>".
+    let mut run = run;
+    if let Some(r) = run.as_mut() {
+        enrich_parent_provenance(conn, std::slice::from_mut(r))?;
+    }
     Ok(run)
 }
 
@@ -962,6 +1027,10 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         produced_branches: produced_branches_str.as_deref()
             .and_then(|s| serde_json::from_str::<Vec<crate::models::ProducedBranch>>(s).ok())
             .unwrap_or_default(),
+        // Derived, filled by enrich_parent_provenance (never from a column).
+        parent_workflow_id: None,
+        parent_workflow_name: None,
+        parent_run_started_at: None,
     }
 }
 

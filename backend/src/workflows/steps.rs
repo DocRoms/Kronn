@@ -283,6 +283,43 @@ pub async fn execute_step(
                             }
                         }
 
+                        // 0.8.10 — quality escalation local→Claude. If a LOCAL
+                        // (Ollama) step still fails validation after repair,
+                        // retry ONCE on the paid reasoning tier before giving
+                        // up. The escalation RATE (logged on target
+                        // kronn::ollama::escalation) is the health metric that
+                        // reveals which steps are too hard for the chosen local
+                        // model. Fires only for TypedSchema (needs a schema to
+                        // validate against) that ran on Ollama.
+                        if !repair_valid
+                            && step.agent == crate::models::AgentType::Ollama
+                            && matches!(step.output_format, crate::models::StepOutputFormat::TypedSchema { .. })
+                        {
+                            tracing::warn!(
+                                target: "kronn::ollama::escalation",
+                                step = %step.name,
+                                "local schema validation failed after repair — escalating to Claude"
+                            );
+                            let escalated = escalation_step(step);
+                            if let Ok(esc) = run_agent_with_timeout(&escalated, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, None).await {
+                                total_tokens += esc.tokens_used;
+                                let esc_env = crate::workflows::template::extract_step_envelope(&esc.text);
+                                let esc_error = match (&step.output_format, &esc_env) {
+                                    (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
+                                        crate::workflows::template::validate_envelope_against_schema(&env.data_json, schema).err()
+                                    }
+                                    _ => None,
+                                };
+                                if matches!((&esc_env, &esc_error), (Some(_), None)) {
+                                    final_output = esc.text;
+                                    repair_valid = true; // valid now → don't fail below
+                                    tracing::info!(target: "kronn::ollama::escalation", step = %step.name, "escalation to Claude succeeded");
+                                } else {
+                                    tracing::warn!(target: "kronn::ollama::escalation", step = %step.name, "escalation to Claude also failed");
+                                }
+                            }
+                        }
+
                         // 0.8.3 — `on_invalid: Fail` short-circuits the
                         // step when repair didn't fix the output. Used by
                         // Feasibility-Gated triage so the implement step
@@ -431,16 +468,23 @@ pub async fn execute_step(
         }
     }
 
-    // All retries exhausted
+    // All retries exhausted. #8 — if the failure was a STALL and the step
+    // declares `on_timeout`, route via that action (Goto a recovery/notify
+    // step, or Stop) instead of failing the run: the runner honours a Goto
+    // on a Failed step (see runner.rs). The Failed result is kept for the
+    // audit trail; the run continues gracefully.
+    let stalled = is_stall_error(&last_error);
+    let (output, condition_result, condition_action) =
+        timeout_routing(stalled, &step.on_timeout, max_attempts, &last_error);
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
             status: RunStatus::Failed,
-            output: format!("Failed after {} attempts. Last error: {}", max_attempts, last_error),
+            output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
             started_at: None,
-            condition_result: None,
+            condition_result,
             envelope_detected: None,
             step_kind: None,
             step_agent: None,
@@ -450,8 +494,43 @@ pub async fn execute_step(
             is_rollback: false,
             child_run_id: None,
         },
-        condition_action: None,
+        condition_action,
     }
+}
+
+/// True when a step's last error came from the stall watchdog (no agent output
+/// for `stall_timeout_secs`), as opposed to a crash/non-zero exit. Kept in sync
+/// with the `bail!` in `drive_agent_to_output`; pure + unit-tested.
+pub(crate) fn is_stall_error(err_msg: &str) -> bool {
+    err_msg.contains("Agent stalled")
+}
+
+/// #8 — decide how an EXHAUSTED step resolves. A stall (no output for the
+/// stall timeout) with a declared `on_timeout` routes via that action
+/// (Goto a recovery/notify step, or Stop) so the run continues gracefully;
+/// anything else (crash, or a stall without `on_timeout`) fails normally and
+/// tips into the rollback chain. Returns `(output, condition_result,
+/// condition_action)`. Pure so the routing is unit-tested without an agent.
+pub(crate) fn timeout_routing(
+    stalled: bool,
+    on_timeout: &Option<ConditionAction>,
+    max_attempts: u32,
+    last_error: &str,
+) -> (String, Option<String>, Option<ConditionAction>) {
+    if stalled {
+        if let Some(action) = on_timeout {
+            return (
+                format!("Step stalled after {max_attempts} attempt(s) ({last_error}). Routed via on_timeout."),
+                Some("on_timeout".to_string()),
+                Some(action.clone()),
+            );
+        }
+    }
+    (
+        format!("Failed after {max_attempts} attempts. Last error: {last_error}"),
+        None,
+        None,
+    )
 }
 
 /// Build the suffix that closes a `🔧 ToolName` live-progress line.
@@ -483,6 +562,47 @@ fn format_tool_input_suffix(raw_input: &str) -> String {
     }
 }
 
+/// Wrap a `TypedSchema` step's author schema in the canonical envelope shape
+/// ({data, status, summary}) so Ollama's grammar-constrained `format` emits a
+/// bare envelope object that `extract_step_envelope` (strategy-2) recovers —
+/// the post-extract schema validation on `data` then runs unchanged. Returns
+/// `None` for non-TypedSchema steps (free text / vanilla Structured), which
+/// keep the streaming, prompt-injection path. Ollama-only: consumed solely by
+/// `AgentStartConfig.ollama_format`; other agents get their schema via the
+/// prompt (see the output_format addendum near the top of this module).
+fn ollama_envelope_format(output_format: &crate::models::StepOutputFormat) -> Option<serde_json::Value> {
+    match output_format {
+        crate::models::StepOutputFormat::TypedSchema { schema, .. } => Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "data": schema,
+                "status": { "type": "string" },
+                "summary": { "type": "string" }
+            },
+            "required": ["data", "status"]
+        })),
+        _ => None,
+    }
+}
+
+/// Build the escalation variant of a step: the same task, but forced onto the
+/// paid reasoning tier (Claude) instead of the local model. Used as a quality
+/// safety-net when a LOCAL (Ollama) `TypedSchema` step still fails schema
+/// validation after one repair attempt — rare, but a garbage manifest would
+/// poison downstream steps. Clears any pinned local model so tier resolution
+/// applies. Pure so the transform is unit-tested.
+fn escalation_step(step: &WorkflowStep) -> WorkflowStep {
+    let mut escalated = step.clone();
+    escalated.agent = crate::models::AgentType::ClaudeCode;
+    escalated.agent_settings = Some(crate::models::AgentSettings {
+        model: None,
+        tier: Some(crate::models::ModelTier::Reasoning),
+        reasoning_effort: None,
+        max_tokens: None,
+    });
+    escalated
+}
+
 /// Run an agent with optional stall timeout.
 /// Returns the agent output text and token usage.
 ///
@@ -510,6 +630,10 @@ async fn run_agent_with_timeout(
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(1800));
 
+    // TypedSchema → constrain Ollama decoding to the envelope-wrapped schema
+    // (owned here so it outlives the borrow in AgentStartConfig below).
+    let ollama_format = ollama_envelope_format(&step.output_format);
+
     let agent_process = runner::start_agent_with_config(runner::AgentStartConfig {
         work_dir: Some(work_dir),
         full_access,
@@ -520,6 +644,10 @@ async fn run_agent_with_timeout(
             .and_then(|s| s.tier)
             .unwrap_or_default(),
         model_tiers,
+        ollama_format: ollama_format.as_ref(),
+        // Explicit per-step model (from the wizard's model picker) — now
+        // actually consumed at run time, not just stamped for display.
+        model_override: step.agent_settings.as_ref().and_then(|s| s.model.as_deref()),
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
     }).await.map_err(|e| anyhow::anyhow!(e))?;
 
@@ -910,6 +1038,99 @@ mod tests {
         StepConditionRule { contains: contains.to_string(), action }
     }
 
+    // ─── #8 — stall detection + on_timeout routing ────────────────────────
+    #[test]
+    fn is_stall_error_matches_the_watchdog_bail() {
+        // Must stay in sync with drive_agent_to_output's bail! message.
+        assert!(is_stall_error("Agent stalled (no output for 300s)"));
+        assert!(!is_stall_error("Agent exited with exit code 1: boom"));
+        assert!(!is_stall_error("schema validation failed: missing field"));
+    }
+
+    #[test]
+    fn timeout_routing_routes_a_stall_when_on_timeout_is_set() {
+        let goto = Some(ConditionAction::Goto { step_name: "note_failed".into(), max_iterations: None });
+        let (output, cond, action) = timeout_routing(true, &goto, 1, "Agent stalled (no output for 900s)");
+        assert!(matches!(action, Some(ConditionAction::Goto { ref step_name, .. }) if step_name == "note_failed"));
+        assert_eq!(cond.as_deref(), Some("on_timeout"));
+        assert!(output.contains("Routed via on_timeout"), "output: {output}");
+    }
+
+    #[test]
+    fn timeout_routing_supports_stop_action() {
+        let (_, cond, action) = timeout_routing(true, &Some(ConditionAction::Stop), 2, "Agent stalled (no output for 60s)");
+        assert!(matches!(action, Some(ConditionAction::Stop)));
+        assert_eq!(cond.as_deref(), Some("on_timeout"));
+    }
+
+    #[test]
+    fn timeout_routing_fails_normally_without_on_timeout() {
+        // A stall but no on_timeout declared → plain failure (rollback path).
+        let (output, cond, action) = timeout_routing(true, &None, 3, "Agent stalled (no output for 300s)");
+        assert!(action.is_none());
+        assert!(cond.is_none());
+        assert!(output.contains("Failed after 3 attempts"), "output: {output}");
+    }
+
+    #[test]
+    fn timeout_routing_ignores_on_timeout_for_non_stall_failures() {
+        // A crash (not a stall) must NOT consume on_timeout — it fails normally
+        // so the real error surfaces / rollback fires.
+        let goto = Some(ConditionAction::Goto { step_name: "x".into(), max_iterations: None });
+        let (output, cond, action) = timeout_routing(false, &goto, 1, "Agent exited with exit code 1");
+        assert!(action.is_none());
+        assert!(cond.is_none());
+        assert!(output.contains("Failed after"), "output: {output}");
+    }
+
+    #[test]
+    fn ollama_envelope_format_wraps_typed_schema_data() {
+        use crate::models::{StepOutputFormat, OnInvalid};
+        let data_schema = serde_json::json!({
+            "type": "object",
+            "properties": { "score": { "type": "integer" } },
+            "required": ["score"]
+        });
+        let of = StepOutputFormat::TypedSchema {
+            schema: data_schema.clone(),
+            on_invalid: OnInvalid::Continue,
+        };
+        let wrapped = ollama_envelope_format(&of).expect("TypedSchema → envelope schema");
+        // The author schema becomes `data`; status/summary are added; data +
+        // status are required so extract_step_envelope strategy-2 recovers it.
+        assert_eq!(wrapped["properties"]["data"], data_schema);
+        assert_eq!(wrapped["properties"]["status"]["type"], "string");
+        assert_eq!(wrapped["properties"]["summary"]["type"], "string");
+        let required: Vec<&str> = wrapped["required"].as_array().unwrap()
+            .iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(required.contains(&"data") && required.contains(&"status"));
+    }
+
+    #[test]
+    fn ollama_envelope_format_none_for_freetext_and_structured() {
+        use crate::models::StepOutputFormat;
+        assert!(ollama_envelope_format(&StepOutputFormat::FreeText).is_none());
+        assert!(ollama_envelope_format(&StepOutputFormat::Structured).is_none());
+    }
+
+    #[test]
+    fn escalation_step_forces_claude_reasoning_and_clears_local_model() {
+        let mut local = make_step("summarize {{x}}");
+        local.agent = crate::models::AgentType::Ollama;
+        local.agent_settings = Some(crate::models::AgentSettings {
+            model: Some("qwen3:8b".into()),
+            tier: Some(crate::models::ModelTier::Default),
+            reasoning_effort: None,
+            max_tokens: None,
+        });
+        let esc = escalation_step(&local);
+        assert_eq!(esc.agent, crate::models::AgentType::ClaudeCode, "escalate to Claude");
+        let s = esc.agent_settings.expect("settings present");
+        assert_eq!(s.model, None, "pinned local model cleared → tier resolution");
+        assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
+        assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
+    }
+
     #[test]
     fn test_contains_stop() {
         let rules = vec![rule("STOP_SIGNAL", ConditionAction::Stop)];
@@ -992,6 +1213,7 @@ mod tests {
             mcp_config_ids: vec![],
             agent_settings: None,
             on_result: vec![],
+            on_timeout: None,
             stall_timeout_secs: None,
             retry: None,
             delay_after_secs: None,

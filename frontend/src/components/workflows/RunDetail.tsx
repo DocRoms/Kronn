@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi } from '../../lib/api';
 import type { WorkflowRun, WorkflowStep, DecideRunRequest, ProducedBranch } from '../../types/generated';
-import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle } from 'lucide-react';
+import { Trash2, ChevronRight, Square, Loader2, Plug, Send, Layers, Shield, Hand, Check, X, RotateCcw, Terminal, GitBranch, Copy, FlaskConical, AlertTriangle, CornerDownRight } from 'lucide-react';
 import { AGENT_LABELS, AGENT_COLORS } from '../../lib/constants';
 import { parseForeachEnvelope, isZeroTokenItem } from '../../lib/foreach-envelope';
 import '../../pages/WorkflowsPage.css';
@@ -31,6 +31,9 @@ export interface RunDetailProps {
   /** 2026-06-13 — jump to a (sub-)workflow's run list, e.g. from a fan-out
    *  per-task row to the child sub-workflow that ran that task. */
   onNavigateToWorkflow?: (workflowId: string) => void;
+  /** #11 — jump to a SPECIFIC child run (workflow + run id). Falls back to
+   *  onNavigateToWorkflow when not provided. */
+  onNavigateToRun?: (workflowId: string, runId: string) => void;
 }
 
 /** Live counter for the step that's currently running. The exact start
@@ -671,7 +674,7 @@ function ProducedBranchesPanel({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, onNavigateToWorkflow }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
@@ -726,6 +729,25 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, on
             </>
           )}
         </span>
+        {/* Provenance \u2014 a sub-workflow run shows which parent run/WF spawned it.
+            Resolved server-side (parent_workflow_name); clickable \u2192 parent WF. */}
+        {run.parent_workflow_name && (
+          <button
+            type="button"
+            className="wf-run-provenance"
+            disabled={!run.parent_workflow_id || !onNavigateToWorkflow}
+            onClick={() => run.parent_workflow_id && onNavigateToWorkflow?.(run.parent_workflow_id)}
+            title={t('wf.run.provenanceHint', run.parent_workflow_name)}
+          >
+            <CornerDownRight size={11} />
+            <span className="wf-run-provenance-name">{run.parent_workflow_name}</span>
+            {run.parent_run_started_at && (
+              <span className="wf-run-provenance-date">
+                {' \u00b7 '}{new Date(run.parent_run_started_at).toLocaleString()}
+              </span>
+            )}
+          </button>
+        )}
         {run.tokens_used > 0 && (
           // 0.8.2 — Explicit "total" scope. Pre-fix this badge sat next to
           // the gate's `0 tokens consumed` and read as a contradiction
@@ -1070,11 +1092,13 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, on
                               </td>
                               <td className="text-ghost" style={{ fontFamily: 'var(--kr-font-mono)' }} title={it.child_run_id ?? undefined}>
                                 {it.child_run_id
-                                  ? (childWorkflowId && onNavigateToWorkflow
+                                  ? (childWorkflowId && (onNavigateToRun || onNavigateToWorkflow)
                                       ? <button
                                           type="button"
                                           className="wf-subrun-link"
-                                          onClick={() => onNavigateToWorkflow(childWorkflowId)}
+                                          onClick={() => onNavigateToRun
+                                            ? onNavigateToRun(childWorkflowId, it.child_run_id!)
+                                            : onNavigateToWorkflow!(childWorkflowId)}
                                           title={t('wf.openSubRun')}
                                         >{it.child_run_id.slice(0, 8)}… ↗</button>
                                       : `${it.child_run_id.slice(0, 8)}…`)

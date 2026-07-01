@@ -666,6 +666,9 @@ export interface WorkflowStep {
   mcp_config_ids?: string[];
   agent_settings?: AgentSettings | null;
   on_result?: StepConditionRule[];
+  /** #8 — action taken when the step STALLS/times out (Goto a recovery step,
+   *  or Stop) instead of failing the whole run. Null = legacy fail behaviour. */
+  on_timeout?: ConditionAction | null;
   stall_timeout_secs?: number | null;
   retry?: RetryConfig | null;
   delay_after_secs?: number | null;
@@ -893,6 +896,15 @@ export interface WorkflowRun {
   batch_failed?: number;
   /** Batch runs only: display name in the sidebar group header */
   batch_name?: string | null;
+  /** Set on a sub-workflow child run: the id of the parent run that spawned it
+   *  (FK, nulled if the parent is deleted). Null for top-level runs. */
+  parent_run_id?: string | null;
+  /** 0.8.10 — provenance enrichment (derived server-side via JOIN, present only
+   *  on sub-workflow runs): the parent run's workflow id/name + tick time, so
+   *  the UI can show "↳ depuis <parent> · <date>" clickable. */
+  parent_workflow_id?: string | null;
+  parent_workflow_name?: string | null;
+  parent_run_started_at?: string | null;
   /** 0.7.0 — branches preserved by the runner during worktree cleanup
    *  because their HEAD held commits not on any known base. Empty when
    *  nothing was preserved (most cases). */
@@ -1338,6 +1350,7 @@ export interface Discussion {
   profile_ids?: string[];
   directive_ids?: string[];
   tier?: ModelTier;
+  model?: string | null;
   archived: boolean;
   pinned: boolean;
   workspace_mode: string;
@@ -1380,6 +1393,10 @@ export interface DiscussionMessage {
   tokens_used: number;
   auth_mode: string | null;
   model_tier?: string | null;
+  /** 0.8.10 — concrete model this message ran on (e.g. "qwen3:32b", "sonnet").
+   *  Per-message (a discussion can switch models mid-thread). Null = legacy row
+   *  or provider-default run with no explicit flag → fall back to model_tier. */
+  model?: string | null;
   author_pseudo?: string | null;
   author_avatar_email?: string | null;
   /** 0.8.7 anti-hallucination P2 lint report for this agent message. */
@@ -1812,6 +1829,7 @@ export interface QuickPrompt {
   /** 0.8.5 — directive binding pinned at the QP level. */
   directive_ids?: string[];
   tier?: ModelTier;
+  agent_settings?: AgentSettings | null;
   /** Human description of what this Quick Prompt does. Shown in batch picker. */
   description?: string;
   created_at: string;
@@ -1831,6 +1849,7 @@ export interface CreateQuickPromptRequest {
   /** 0.8.5 — picked in the QP form, persisted as JSON column. */
   directive_ids?: string[];
   tier?: ModelTier;
+  agent_settings?: AgentSettings | null;
   description?: string;
 }
 

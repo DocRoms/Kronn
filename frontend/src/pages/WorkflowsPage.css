@@ -1656,6 +1656,39 @@
   border: 1px solid var(--kr-border-light);
 }
 
+/* Info note shown in an Agent step when the selected agent is Ollama — warns
+   that a local, tool-less model has no file/repo/MCP access. */
+.wf-ollama-note {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-2);
+  margin-bottom: var(--kr-sp-4);
+  padding: var(--kr-sp-2) var(--kr-sp-3);
+  border-radius: var(--kr-r-sm, 4px);
+  background: color-mix(in srgb, var(--kr-warning) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--kr-warning) 35%, transparent);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs, 11px);
+  line-height: 1.4;
+}
+
+.wf-ollama-note svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  color: var(--kr-warning);
+}
+
+/* Stronger variant: the prompt looks like it needs file access (active lint). */
+.wf-ollama-note--warn {
+  background: color-mix(in srgb, var(--kr-error) 12%, transparent);
+  border-color: color-mix(in srgb, var(--kr-error) 40%, transparent);
+  color: var(--kr-text-primary);
+}
+
+.wf-ollama-note--warn svg {
+  color: var(--kr-error);
+}
+
 /* ── Summary ───────────────────────────────────────────── */
 .wf-summary-row {
   font-size: var(--kr-fs-base);
@@ -1979,6 +2012,201 @@
   transition: background 0.12s, border-color 0.12s;
 }
 
+/* #2 — run-list control bar (status filter + search + fold). */
+.wf-runs-controls {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  flex-wrap: wrap;
+  margin: var(--kr-sp-3) 0 var(--kr-sp-2);
+  padding-bottom: var(--kr-sp-2);
+  border-bottom: 1px solid var(--kr-border-light);
+}
+.wf-runs-filter { display: inline-flex; gap: 2px; }
+.wf-runs-filter-btn {
+  padding: 3px 10px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  cursor: pointer;
+}
+.wf-runs-filter-btn:hover { color: var(--kr-text-primary); background: var(--kr-bg-subtle); }
+.wf-runs-filter-btn[data-active="true"] {
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.10);
+  border-color: rgba(var(--kr-accent-rgb), 0.30);
+  font-weight: 500;
+}
+.wf-runs-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 1 1 180px;
+  min-width: 140px;
+  padding: 3px 8px;
+  background: var(--kr-bg-input, var(--kr-bg-elev));
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-muted);
+}
+.wf-runs-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+  outline: none;
+}
+.wf-runs-show-more {
+  display: block;
+  width: 100%;
+  margin-top: var(--kr-sp-2);
+  padding: 6px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-accent);
+  background: var(--kr-bg-subtle);
+  border: 1px dashed var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+}
+.wf-runs-show-more:hover { background: rgba(var(--kr-accent-rgb), 0.08); }
+
+/* #15 — read-only branch map (Goto arcs) for branching workflows. */
+.wf-branch-map-wrap {
+  margin-bottom: var(--kr-sp-4);
+  padding: var(--kr-sp-3);
+  background: var(--kr-bg-subtle);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  overflow-x: auto;
+}
+.wf-branch-map-title {
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  color: var(--kr-text-muted);
+  margin-bottom: var(--kr-sp-2);
+}
+.wf-bm-spine { stroke: var(--kr-border-medium, var(--kr-border)); stroke-width: 2; }
+.wf-bm-node { fill: var(--kr-accent); }
+.wf-bm-node-label { fill: var(--kr-text-primary); font-size: 11px; font-family: var(--kr-font-mono, monospace); }
+.wf-bm-arc { fill: none; stroke: var(--kr-accent); stroke-width: 1.5; opacity: 0.75; }
+.wf-bm-arc-back { stroke: var(--kr-warning); stroke-dasharray: 3 2; }
+.wf-bm-head { fill: var(--kr-accent); }
+.wf-bm-arc-back + .wf-bm-head,
+.wf-branch-map .wf-bm-arc-back { }
+.wf-branch-map-legend {
+  display: flex;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-2);
+  font-size: var(--kr-fs-2xs, 11px);
+}
+.wf-bm-legend-fwd { color: var(--kr-accent); }
+.wf-bm-legend-back { color: var(--kr-warning); }
+
+/* #14 — parent-tick group accordion wrapping its sub-runs' compact rows. */
+.wf-run-group { margin-bottom: 4px; }
+.wf-run-group-header {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--kr-bg-subtle);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--kr-fs-xs);
+}
+.wf-run-group-header:hover { border-color: var(--kr-border); }
+.wf-run-group-title { font-weight: 600; color: var(--kr-text-primary); }
+.wf-run-group-meta { margin-left: auto; color: var(--kr-text-muted); }
+.wf-run-group-failed { color: var(--kr-error); }
+.wf-run-group-body {
+  margin-left: var(--kr-sp-3);
+  padding-left: var(--kr-sp-2);
+  border-left: 2px solid var(--kr-border-light);
+}
+.wf-run-group-header .wf-chevron,
+.wf-run-group-header .wf-chevron-rotated { flex: 0 0 auto; color: var(--kr-text-ghost); }
+
+/* #6 — compact run row (accordion header over the full RunDetail). */
+.wf-run-item { margin-bottom: 2px; }
+.wf-run-compact {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  width: 100%;
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  cursor: pointer;
+  text-align: left;
+  font-size: var(--kr-fs-xs);
+}
+.wf-run-compact:hover { background: var(--kr-bg-subtle); border-color: var(--kr-border-light); }
+.wf-run-compact[aria-expanded="true"] { background: var(--kr-bg-subtle); }
+.wf-run-compact-status { font-weight: 600; color: var(--kr-text-faint); }
+/* Status colour, CSS-driven from data-status (no JS colour map dependency). */
+.wf-run-compact-dot { background: var(--kr-text-faint); }
+.wf-run-compact[data-status="Success"] .wf-run-compact-status,
+.wf-run-compact[data-status="Success"] .wf-run-compact-dot { color: var(--kr-success); background: var(--kr-success); }
+.wf-run-compact[data-status="Failed"] .wf-run-compact-status,
+.wf-run-compact[data-status="Failed"] .wf-run-compact-dot { color: var(--kr-error); background: var(--kr-error); }
+.wf-run-compact[data-status="Running"] .wf-run-compact-status,
+.wf-run-compact[data-status="Running"] .wf-run-compact-dot,
+.wf-run-compact[data-status="Pending"] .wf-run-compact-status,
+.wf-run-compact[data-status="Pending"] .wf-run-compact-dot { color: var(--kr-accent); background: var(--kr-accent); }
+.wf-run-compact[data-status="WaitingApproval"] .wf-run-compact-status,
+.wf-run-compact[data-status="WaitingApproval"] .wf-run-compact-dot,
+.wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-status,
+.wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-dot { color: var(--kr-warning); background: var(--kr-warning); }
+/* keep the status text coloured but the dot uses background only */
+.wf-run-compact-dot { border-radius: 50%; }
+.wf-run-compact-parent {
+  color: var(--kr-accent);
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-run-compact-time { color: var(--kr-text-muted); }
+.wf-run-compact-meta { color: var(--kr-text-faint); margin-left: auto; }
+.wf-run-compact .wf-chevron,
+.wf-run-compact .wf-chevron-rotated { flex: 0 0 auto; color: var(--kr-text-ghost); }
+
+/* Provenance pill in a sub-workflow run header (↳ depuis <parent> · date). */
+.wf-run-provenance {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 340px;
+  padding: 2px 8px;
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.18);
+  border-radius: 10px;
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-accent);
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.wf-run-provenance:hover:not(:disabled) {
+  background: rgba(var(--kr-accent-rgb), 0.14);
+  border-color: rgba(var(--kr-accent-rgb), 0.4);
+}
+.wf-run-provenance:disabled { cursor: default; opacity: 0.75; }
+.wf-run-provenance-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-run-provenance-date { color: var(--kr-text-muted); flex: 0 0 auto; }
+
 .wf-run-batch-chip:hover {
   background: rgba(var(--kr-accent-rgb), 0.14);
   border-color: rgba(var(--kr-accent-rgb), 0.4);
@@ -2049,7 +2277,7 @@
 }
 .wf-qref-banner-header strong {
   flex: 1;
-  color: var(--kr-text);
+  color: var(--kr-text-primary);
 }
 .wf-qref-override-badge {
   display: inline-flex;
@@ -2132,10 +2360,10 @@
   display: none;
 }
 .wf-qref-override-summary:hover {
-  color: var(--kr-text);
+  color: var(--kr-text-primary);
 }
 .wf-qref-override[open] > .wf-qref-override-summary {
-  color: var(--kr-text);
+  color: var(--kr-text-primary);
   border-bottom: 1px dashed rgba(var(--kr-text-faint-rgb, 128, 128, 128), 0.3);
 }
 .wf-qref-override-body {
