@@ -89,6 +89,7 @@ pub async fn start_briefing(
     let agent_type = req.agent;
 
     let initial_message = DiscussionMessage {
+        model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,

@@ -111,6 +111,7 @@ pub async fn create(
 
     let now = Utc::now();
     let initial_message = DiscussionMessage {
+        model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
@@ -317,6 +318,7 @@ pub async fn update(
             // (System messages are filtered from the agent prompt)
             let old_name = old_agent_name.as_deref().unwrap_or("?");
             let switch_msg = crate::models::DiscussionMessage {
+                model: None,
                 lint_report: None,
                 id: uuid::Uuid::new_v4().to_string(),
                 role: crate::models::MessageRole::User,

@@ -50,6 +50,7 @@ mod tests {
 
     fn make_message(id: &str, role: MessageRole, agent: Option<AgentType>) -> DiscussionMessage {
         DiscussionMessage {
+            model: None,
             lint_report: None,
             id: id.into(),
             role,
@@ -579,6 +580,7 @@ mod tests {
 
         // Simulate the switch message insertion (same as API handler does)
         let msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: "switch-msg-1".into(),
             role: MessageRole::User,

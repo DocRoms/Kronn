@@ -1,0 +1,11 @@
+-- v0.8.10 — record the CONCRETE model each agent message ran on.
+--
+-- Until now a message only stored `model_tier` (economy/default/reasoning).
+-- That's not enough for the UI: a discussion can switch models mid-thread
+-- (per-step / per-QP override, or a changed OllamaCard default), and the user
+-- asked to see the actual model PER MESSAGE (e.g. "Ollama · qwen3:32b" or
+-- "Claude Code · sonnet"). This column holds the resolved model name
+-- (runner::effective_model_flag) at the moment the reply was committed.
+-- NULL = legacy row or a provider-default run with no explicit model flag
+-- (e.g. Codex/Gemini at the default tier) → the UI falls back to the tier.
+ALTER TABLE messages ADD COLUMN model TEXT;

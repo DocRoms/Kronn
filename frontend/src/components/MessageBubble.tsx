@@ -297,8 +297,17 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
                *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
                *  reads as "Romu's ClaudeCode on the other instance". */}
               <Cpu size={10} /> {agentType}
-              {msg.model_tier && (
-                <span style={{ opacity: 0.6, fontWeight: 400 }}>· {msg.model_tier}</span>
+              {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
+               *  switch models mid-thread, so this is per-message. Fall back to
+               *  the tier when the model wasn't recorded (legacy rows / a
+               *  provider-default run with no explicit flag). */}
+              {(msg.model || msg.model_tier) && (
+                <span
+                  style={{ opacity: 0.6, fontWeight: 400 }}
+                  title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
+                >
+                  · {msg.model ?? msg.model_tier}
+                </span>
               )}
               {msg.author_pseudo && (
                 <span
@@ -557,7 +566,11 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </span>
             )}
             {msg.role === 'Agent' && msg.model_tier && (
-              <span className="disc-model-tier-badge" data-tier={msg.model_tier}>
+              <span
+                className="disc-model-tier-badge"
+                data-tier={msg.model_tier}
+                title={msg.model ? `${msg.model} (${t(`disc.tier.${msg.model_tier}`)})` : undefined}
+              >
                 {msg.model_tier === 'economy' ? '⚡' : '\ud83e\udde0'} {t(`disc.tier.${msg.model_tier}`)}
               </span>
             )}

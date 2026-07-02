@@ -131,6 +131,14 @@ pub struct DiscussionMessage {
     /// Which model tier was used for this message (economy/default/reasoning).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_tier: Option<String>,
+    /// 0.8.10 — the CONCRETE model this message ran on (e.g. "qwen3:32b",
+    /// "sonnet"), resolved via `runner::effective_model_flag` at commit time.
+    /// A discussion can switch models mid-thread, so this is per-message, not
+    /// per-discussion. `None` = legacy row or a provider-default run with no
+    /// explicit model flag (Codex/Gemini at default tier) → UI falls back to
+    /// `model_tier` / the agent name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Cost in USD (real from Claude Code, estimated for other providers)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd: Option<f64>,

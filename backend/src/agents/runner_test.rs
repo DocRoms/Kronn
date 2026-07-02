@@ -903,6 +903,56 @@ Suite de la réponse.";
         );
     }
 
+    #[test]
+    fn resolve_model_flag_ollama_default_covers_all_tiers() {
+        // 2026-07-02: Ollama has no built-in tier notion — the user picks ONE
+        // model in the OllamaCard (the `default` slot). An empty economy/
+        // reasoning slot must fall back to that single configured model, NOT to
+        // a portability fallback the user never asked for. Regression guard for
+        // the reported bug "I set qwen3:32b as default but reasoning-tier discs
+        // silently used qwen3:30b-a3b".
+        use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
+        let overrides = ModelTiersConfig {
+            ollama: ModelTierConfig {
+                economy: None,
+                default: Some("qwen3:32b".into()),
+                reasoning: None,
+            },
+            ..Default::default()
+        };
+        for tier in [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning] {
+            assert_eq!(
+                resolve_model_flag(&AgentType::Ollama, tier, Some(&overrides)),
+                Some("qwen3:32b".into()),
+                "Ollama default model must apply to EVERY tier when the tier slot is empty ({tier:?})",
+            );
+        }
+        // An explicit per-tier slot still wins over the default fallback.
+        let mixed = ModelTiersConfig {
+            ollama: ModelTierConfig {
+                economy: Some("qwen3:4b".into()),
+                default: Some("qwen3:32b".into()),
+                reasoning: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, Some(&mixed)),
+            Some("qwen3:4b".into()),
+            "An explicit economy slot must beat the default fallback",
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, Some(&mixed)),
+            Some("qwen3:32b".into()),
+            "Empty reasoning slot falls back to the user's default, not the built-in",
+        );
+        // The all-empty case is unchanged: portable built-ins per tier.
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
+            Some("qwen3:30b-a3b".into()),
+        );
+    }
+
     // ─── Ollama tier fallbacks are real, pullable tags (no opaque 404) ────────
     #[test]
     fn resolve_model_flag_ollama_tiers_are_pullable_tags() {

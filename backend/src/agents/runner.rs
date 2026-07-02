@@ -485,6 +485,22 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
                 return Some(val.clone());
             }
         }
+
+        // Ollama has no built-in notion of tiers: the user picks ONE model in
+        // the OllamaCard, which writes the `default` slot. So an empty
+        // economy/reasoning slot must fall back to that single configured model
+        // — NOT to a portability fallback the user never asked for. Without
+        // this, someone who set "qwen3:32b" as their Ollama default but whose
+        // discussions run at the reasoning tier would silently get
+        // "qwen3:30b-a3b" instead. (Cloud agents keep distinct per-tier
+        // built-ins below, since haiku/sonnet/opus are genuinely different.)
+        if *agent_type == AgentType::Ollama {
+            if let Some(ref d) = agent_cfg.default {
+                if !d.is_empty() {
+                    return Some(d.clone());
+                }
+            }
+        }
     }
 
     // Built-in defaults — explicit model for each tier so tiers are always distinct.

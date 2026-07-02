@@ -3933,6 +3933,7 @@ async fn disc_sync_request_resends_missing_messages() {
         kronn::db::discussions::find_discussion_by_shared_id(conn, "shared-sync-1")
     }).await.unwrap().unwrap();
     let msg = kronn::models::DiscussionMessage {
+        model: None,
         lint_report: None,
         id: "sync-msg-1".into(),
         role: kronn::models::MessageRole::Agent,
@@ -4066,6 +4067,7 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
     }).await.unwrap();
 
     let mk = |id: &str, content: &str, author: Option<&str>| kronn::models::DiscussionMessage {
+        model: None,
         lint_report: None,
         id: id.into(),
         role: kronn::models::MessageRole::Agent,

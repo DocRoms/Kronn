@@ -582,6 +582,7 @@ fn handle_incoming_chat_message(
     // from an older peer carry no fields → serde defaults (User / None), i.e.
     // the historical behaviour.
     let msg = crate::models::DiscussionMessage {
+        model: None,
         lint_report: None,
         id: message_id.to_string(),
         role,

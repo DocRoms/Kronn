@@ -1381,6 +1381,10 @@ export interface DiscussionMessage {
   tokens_used: number;
   auth_mode: string | null;
   model_tier?: string | null;
+  /** 0.8.10 — concrete model this message ran on (e.g. "qwen3:32b", "sonnet").
+   *  Per-message (a discussion can switch models mid-thread). Null = legacy row
+   *  or provider-default run with no explicit flag → fall back to model_tier. */
+  model?: string | null;
   author_pseudo?: string | null;
   author_avatar_email?: string | null;
   /** 0.8.7 anti-hallucination P2 lint report for this agent message. */

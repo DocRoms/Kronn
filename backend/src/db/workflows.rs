@@ -408,6 +408,7 @@ pub fn create_batch_run(
     let discussions: Vec<(Discussion, DiscussionMessage)> = input.items.iter().map(|item| {
         let disc_id = Uuid::new_v4().to_string();
         let initial_message = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: MessageRole::User,

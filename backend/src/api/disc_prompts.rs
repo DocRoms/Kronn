@@ -629,6 +629,7 @@ mod tests {
 
     fn user_msg(content: &str) -> DiscussionMessage {
         DiscussionMessage {
+            model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::User,

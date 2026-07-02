@@ -71,6 +71,7 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
 
 fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
     DiscussionMessage {
+        model: None,
         lint_report: None,
         id: id.into(),
         role,
@@ -3211,6 +3212,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
         crate::db::discussions::insert_discussion(&conn, &d).unwrap();
         // User msg + Agent msg (with tokens + duration).
         let user_msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: format!("{}-u", disc_id), role: MessageRole::User, content: "ask".into(),
             agent_type: None, timestamp: Utc::now(), tokens_used: 0,
@@ -3218,6 +3220,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
             author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
         };
         let agent_msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: format!("{}-a", disc_id), role: MessageRole::Agent, content: "reply".into(),
             agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
@@ -3404,6 +3407,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
     // Three Agent replies — only the first should be counted.
     let mk = |id: &str, role: MessageRole, toks: u64, dur: u64| DiscussionMessage {
+        model: None,
         lint_report: None,
         id: id.into(), role, content: "x".into(),
         agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),

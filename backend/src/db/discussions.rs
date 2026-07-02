@@ -102,6 +102,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
         let msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::Agent,
@@ -615,7 +616,7 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
 fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report
+        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -640,6 +641,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
             duration_ms: row.get::<_, Option<i64>>(10).unwrap_or(None).map(|d| d as u64),
             lint_report: row.get::<_, Option<String>>(11).unwrap_or(None)
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            model: row.get::<_, Option<String>>(12).unwrap_or(None),
         }))
     })?;
 
@@ -652,7 +654,7 @@ fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<Stri
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -677,6 +679,7 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
             duration_ms: row.get::<_, Option<i64>>(12).unwrap_or(None).map(|d| d as u64),
             lint_report: row.get::<_, Option<String>>(13).unwrap_or(None)
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            model: row.get::<_, Option<String>>(14).unwrap_or(None),
         })
     })?.filter_map(|r| r.ok()).collect();
 
@@ -723,8 +726,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
         .and_then(|r| serde_json::to_string(r).ok());
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             msg.id,
             discussion_id,
@@ -742,6 +745,7 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.source_msg_id,
             msg.duration_ms.map(|d| d as i64),
             lint_report_json,
+            msg.model,
         ],
     )?;
 

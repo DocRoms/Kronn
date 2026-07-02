@@ -229,6 +229,7 @@ pub async fn disc_append(
         }
 
         let msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: incoming.role.clone(),

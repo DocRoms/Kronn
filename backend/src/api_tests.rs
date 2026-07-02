@@ -963,6 +963,7 @@ mod tests {
             let content = content.to_string();
             move |conn| {
                 let msg = crate::models::DiscussionMessage {
+                    model: None,
                     lint_report: None,
                     id: uuid::Uuid::new_v4().to_string(),
                     role: match role.as_str() {
