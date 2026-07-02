@@ -3859,6 +3859,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         workspace_path: None,
         worktree_branch: None,
         tier: kronn::models::ModelTier::Default,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -3932,6 +3933,7 @@ async fn disc_sync_request_resends_missing_messages() {
         kronn::db::discussions::find_discussion_by_shared_id(conn, "shared-sync-1")
     }).await.unwrap().unwrap();
     let msg = kronn::models::DiscussionMessage {
+        model: None,
         lint_report: None,
         id: "sync-msg-1".into(),
         role: kronn::models::MessageRole::Agent,
@@ -4065,6 +4067,7 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
     }).await.unwrap();
 
     let mk = |id: &str, content: &str, author: Option<&str>| kronn::models::DiscussionMessage {
+        model: None,
         lint_report: None,
         id: id.into(),
         role: kronn::models::MessageRole::Agent,
@@ -4208,6 +4211,7 @@ async fn ws_chat_message_idempotent() {
         workspace_path: None,
         worktree_branch: None,
         tier: kronn::models::ModelTier::Default,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -5134,6 +5138,7 @@ async fn insert_test_mode_discussion(
         workspace_path: None,
         worktree_branch: worktree_branch.map(String::from),
         tier: kronn::models::ModelTier::Default,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -6636,6 +6641,7 @@ mod cold_api_handlers_tests {
             workspace_path: None,
             worktree_branch: None,
             tier: kronn::models::ModelTier::Default,
+            model: None,
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
@@ -7977,6 +7983,7 @@ mod cold_api_handlers_tests {
             profile_ids: vec![],
             directive_ids: vec![],
             tier: kronn::models::ModelTier::Default,
+            agent_settings: None,
             description: "test QP".into(),
             created_at: now,
             updated_at: now,

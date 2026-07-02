@@ -218,6 +218,7 @@ pub async fn bootstrap(
 
     let discussion_id = Uuid::new_v4().to_string();
     let initial_message = DiscussionMessage {
+        model: None,
         lint_report: None,
         id: Uuid::new_v4().to_string(),
         role: MessageRole::User,
@@ -254,6 +255,7 @@ pub async fn bootstrap(
         } else {
             crate::models::ModelTier::Default
         },
+        model: None,
         pin_first_message: true,
         worktree_branch: None,
         summary_cache: None,

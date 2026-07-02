@@ -111,6 +111,7 @@ pub async fn disc_create(
         workspace_path: None,
         worktree_branch: None,
         tier: ModelTier::Reasoning,
+        model: None,
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
@@ -228,6 +229,7 @@ pub async fn disc_append(
         }
 
         let msg = DiscussionMessage {
+            model: None,
             lint_report: None,
             id: Uuid::new_v4().to_string(),
             role: incoming.role.clone(),

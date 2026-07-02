@@ -1070,6 +1070,7 @@ mod tests {
             profile_ids: vec![],
             directive_ids: vec![],
             tier: ModelTier::Default,
+            agent_settings: None,
             description: "E2E test QP".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),

@@ -1338,6 +1338,7 @@ export interface Discussion {
   profile_ids?: string[];
   directive_ids?: string[];
   tier?: ModelTier;
+  model?: string | null;
   archived: boolean;
   pinned: boolean;
   workspace_mode: string;
@@ -1380,6 +1381,10 @@ export interface DiscussionMessage {
   tokens_used: number;
   auth_mode: string | null;
   model_tier?: string | null;
+  /** 0.8.10 — concrete model this message ran on (e.g. "qwen3:32b", "sonnet").
+   *  Per-message (a discussion can switch models mid-thread). Null = legacy row
+   *  or provider-default run with no explicit flag → fall back to model_tier. */
+  model?: string | null;
   author_pseudo?: string | null;
   author_avatar_email?: string | null;
   /** 0.8.7 anti-hallucination P2 lint report for this agent message. */
@@ -1812,6 +1817,7 @@ export interface QuickPrompt {
   /** 0.8.5 — directive binding pinned at the QP level. */
   directive_ids?: string[];
   tier?: ModelTier;
+  agent_settings?: AgentSettings | null;
   /** Human description of what this Quick Prompt does. Shown in batch picker. */
   description?: string;
   created_at: string;
@@ -1831,6 +1837,7 @@ export interface CreateQuickPromptRequest {
   /** 0.8.5 — picked in the QP form, persisted as JSON column. */
   directive_ids?: string[];
   tier?: ModelTier;
+  agent_settings?: AgentSettings | null;
   description?: string;
 }
 

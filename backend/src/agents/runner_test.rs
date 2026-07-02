@@ -60,6 +60,98 @@ mod tests {
     }
 
     #[test]
+    fn strip_thinking_leaks_catches_qwen3_short_think_tag() {
+        // Regression: the regex only matched `<thinking>`, never qwen3's
+        // shorter `<think>` / `</think>`. Now both are stripped.
+        assert_eq!(strip_thinking_leaks("<think>reasoning</think>391"), "reasoning391");
+        assert_eq!(strip_thinking_leaks("</think>"), "");
+        assert_eq!(strip_thinking_leaks("<THINK>x</THINK>"), "x");
+        // The longer form still works.
+        assert_eq!(strip_thinking_leaks("<thinking>y</thinking>"), "y");
+        // Still no false positives on the plain word.
+        assert_eq!(strip_thinking_leaks("I think so."), "I think so.");
+    }
+
+    // ─── Ollama /api/chat request body (asserts on the REQUEST, never on the
+    //     generated text — greedy-stable ≠ bit-exact on Metal, would be flaky) ─
+    #[test]
+    fn ollama_body_has_deterministic_options() {
+        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None);
+        let opts = &body["options"];
+        assert_eq!(opts["temperature"], 0);
+        assert_eq!(opts["top_k"], 1);
+        assert_eq!(opts["seed"], 42);
+        assert!(opts["num_ctx"].as_u64().unwrap() <= 8192, "num_ctx must be capped at 8192");
+        assert!(opts["num_ctx"].as_u64().unwrap() >= 2048, "num_ctx must respect the floor");
+    }
+
+    #[test]
+    fn ollama_body_injects_no_think_for_qwen3_only() {
+        // qwen3 → a dedicated `/no_think` system message is prepended.
+        let q = build_ollama_chat_body("qwen3:30b-a3b", "", "hi", None);
+        let msgs = q["messages"].as_array().unwrap();
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "/no_think");
+        // Non-qwen3 (e.g. llama3.3) → no /no_think message at all.
+        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None);
+        let lmsgs = l["messages"].as_array().unwrap();
+        assert!(!lmsgs.iter().any(|m| m["content"] == "/no_think"),
+            "no_think must be qwen3-only");
+    }
+
+    #[test]
+    fn ollama_body_format_switches_to_non_stream() {
+        // No format → stream text.
+        let free = build_ollama_chat_body("qwen3:8b", "", "hi", None);
+        assert_eq!(free["stream"], true);
+        assert!(free.get("format").is_none());
+        // TypedSchema format → non-stream (one validated JSON blob) + schema passed through.
+        let schema = serde_json::json!({"type":"object","properties":{"x":{"type":"integer"}}});
+        let typed = build_ollama_chat_body("qwen3:8b", "", "hi", Some(&schema));
+        assert_eq!(typed["stream"], false);
+        assert_eq!(typed["format"], schema);
+    }
+
+    #[test]
+    fn ollama_num_ctx_is_clamped_both_ends() {
+        assert_eq!(ollama_num_ctx("", ""), 2048, "tiny prompt → floor");
+        let huge = "x".repeat(100_000);
+        assert_eq!(ollama_num_ctx(&huge, &huge), 8192, "huge prompt → cap");
+    }
+
+    #[tokio::test]
+    async fn forward_ollama_line_forwards_content_and_captures_tokens() {
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        // A streamed content chunk...
+        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr).await;
+        // ...then the terminal `done` object (identical shape to a non-stream
+        // single-object response), carrying the token counts.
+        forward_ollama_line(
+            r#"{"message":{"content":""},"done":true,"prompt_eval_count":12,"eval_count":3}"#,
+            &tx, &stderr,
+        ).await;
+        drop(tx);
+        let mut got = String::new();
+        while let Some(s) = rx.recv().await { got.push_str(&s); }
+        assert_eq!(got, "391");
+        assert_eq!(stderr.lock().unwrap().as_slice(), &["ollama_tokens:12:3".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn forward_ollama_line_ignores_blank_and_malformed() {
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        forward_ollama_line("   ", &tx, &stderr).await;      // blank tail buffer
+        forward_ollama_line("{not json", &tx, &stderr).await; // partial/garbage
+        drop(tx);
+        assert!(rx.recv().await.is_none(), "no content forwarded");
+        assert!(stderr.lock().unwrap().is_empty(), "no token line captured");
+    }
+
+    #[test]
     fn parse_stream_text_delta_with_thinking_leak_is_skipped() {
         // End-to-end: a text_delta whose entire content is the leak should
         // NOT reach `full_response` as an empty chunk (which would still
@@ -787,7 +879,7 @@ Suite de la réponse.";
         // New 2026-05-11: the Default tier now reads `agent_cfg.default`
         // before falling through to the built-in match. Primary use case
         // = Ollama user picks `gemma3:27b` from the OllamaCard, that
-        // value overrides the hardcoded `llama3.2` fallback.
+        // value overrides the built-in qwen3:30b-a3b fallback.
         use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
         let overrides = ModelTiersConfig {
             ollama: ModelTierConfig {
@@ -800,14 +892,104 @@ Suite de la réponse.";
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&overrides)),
             Some("gemma3:27b".into()),
-            "Default-tier user override must win over built-in `llama3.2`",
+            "Default-tier user override must win over the built-in qwen3 fallback",
         );
         // Without an override, the legacy built-in is still served.
         let no_override = ModelTiersConfig::default();
         assert_eq!(
             resolve_model_flag(&AgentType::Ollama, ModelTier::Default, Some(&no_override)),
-            Some("llama3.2".into()),
-            "No override → legacy built-in default applies",
+            Some("qwen3:8b".into()),
+            "No override → portable built-in default (small, fits most machines), never a bare/absent name",
+        );
+    }
+
+    #[test]
+    fn resolve_model_flag_ollama_default_covers_all_tiers() {
+        // 2026-07-02: Ollama has no built-in tier notion — the user picks ONE
+        // model in the OllamaCard (the `default` slot). An empty economy/
+        // reasoning slot must fall back to that single configured model, NOT to
+        // a portability fallback the user never asked for. Regression guard for
+        // the reported bug "I set qwen3:32b as default but reasoning-tier discs
+        // silently used qwen3:30b-a3b".
+        use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
+        let overrides = ModelTiersConfig {
+            ollama: ModelTierConfig {
+                economy: None,
+                default: Some("qwen3:32b".into()),
+                reasoning: None,
+            },
+            ..Default::default()
+        };
+        for tier in [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning] {
+            assert_eq!(
+                resolve_model_flag(&AgentType::Ollama, tier, Some(&overrides)),
+                Some("qwen3:32b".into()),
+                "Ollama default model must apply to EVERY tier when the tier slot is empty ({tier:?})",
+            );
+        }
+        // An explicit per-tier slot still wins over the default fallback.
+        let mixed = ModelTiersConfig {
+            ollama: ModelTierConfig {
+                economy: Some("qwen3:4b".into()),
+                default: Some("qwen3:32b".into()),
+                reasoning: None,
+            },
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, Some(&mixed)),
+            Some("qwen3:4b".into()),
+            "An explicit economy slot must beat the default fallback",
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, Some(&mixed)),
+            Some("qwen3:32b".into()),
+            "Empty reasoning slot falls back to the user's default, not the built-in",
+        );
+        // The all-empty case is unchanged: portable built-ins per tier.
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
+            Some("qwen3:30b-a3b".into()),
+        );
+    }
+
+    // ─── Ollama tier fallbacks are real, pullable tags (no opaque 404) ────────
+    #[test]
+    fn resolve_model_flag_ollama_tiers_are_pullable_tags() {
+        use crate::models::ModelTier;
+        // Regression: the old fallbacks were `llama3.2` (not pulled) and the
+        // bare `qwen3` (not a pullable tag) → opaque Ollama 404 at run time.
+        // Portability-first: Default is a small, universal model (qwen3:8b);
+        // Reasoning is the only heavy opt-in fallback.
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None), Some("qwen3:4b".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None), Some("qwen3:8b".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None), Some("qwen3:30b-a3b".into()));
+    }
+
+    // ─── effective_model_flag: explicit model override beats tier ─────────────
+    #[test]
+    fn effective_model_flag_override_wins_over_tier() {
+        use crate::models::ModelTier;
+        // Explicit model beats the tier fallback — including the Economy tier
+        // that would otherwise resolve to qwen3:4b.
+        assert_eq!(
+            effective_model_flag(Some("qwen3:30b-a3b"), &AgentType::Ollama, ModelTier::Economy, None),
+            Some("qwen3:30b-a3b".into()),
+        );
+    }
+
+    #[test]
+    fn effective_model_flag_blank_or_none_falls_back_to_tier() {
+        use crate::models::ModelTier;
+        // Blank override is treated as unset → tier resolution.
+        assert_eq!(
+            effective_model_flag(Some("   "), &AgentType::Ollama, ModelTier::Default, None),
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
+        );
+        // None → identical to resolve_model_flag (here: Claude reasoning → opus).
+        assert_eq!(
+            effective_model_flag(None, &AgentType::ClaudeCode, ModelTier::Reasoning, None),
+            Some("opus".into()),
         );
     }
 

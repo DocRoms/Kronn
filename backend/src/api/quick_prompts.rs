@@ -41,6 +41,7 @@ pub async fn create(
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
         tier: req.tier,
+        agent_settings: req.agent_settings,
         description: req.description,
         created_at: now,
         updated_at: now,
@@ -78,6 +79,7 @@ pub async fn update(
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
         tier: req.tier,
+        agent_settings: req.agent_settings,
         // Description is always taken from the request, even if empty —
         // that's how the user clears it.
         description: req.description,

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { useT } from '../../lib/I18nContext';
-import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi } from '../../lib/api';
+import { workflows as workflowsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, config as configApi, ollama as ollamaApi } from '../../lib/api';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 import { STARTER_TEMPLATES, cloneTemplateSteps } from '../../lib/workflow-templates/chartbeat-top5';
 import { buildV07Presets, type ChildWorkflowPreset } from '../../lib/workflow-templates/v07-presets';
@@ -152,6 +152,15 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   const [wizardStep, setWizardStep] = useState(0);
   const [name, setName] = useState(editWorkflow?.name ?? '');
   const [projectId, setProjectId] = useState<string>(editWorkflow?.project_id ?? '');
+  // Pulled Ollama models → suggestions for the per-step model picker.
+  // Best-effort: stays empty when Ollama is offline, so the model field
+  // simply remains a free-text input (any tag / remote host still typable).
+  const [ollamaModels, setOllamaModels] = useState<string[]>([]);
+  useEffect(() => {
+    ollamaApi.models()
+      .then(r => setOllamaModels((r.models ?? []).map(m => m.name)))
+      .catch(() => {});
+  }, []);
   const [triggerType, setTriggerType] = useState<'Cron' | 'Tracker' | 'Manual'>(initTrigger?.type ?? 'Manual');
   const [cronEvery, setCronEvery] = useState(initCron?.every ?? 5);
   const [cronUnit, setCronUnit] = useState<'minutes' | 'hours' | 'days' | 'weeks' | 'months'>(initCron?.unit ?? 'minutes');
@@ -2879,8 +2888,14 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               onChange={e => updateStep(i, {
                                 agent_settings: { ...step.agent_settings, model: e.target.value || null }
                               })}
-                              placeholder="ex: o3"
+                              placeholder={step.agent === 'Ollama' ? 'ex: qwen3:8b' : 'ex: o3'}
+                              list={step.agent === 'Ollama' ? `ollama-models-${i}` : undefined}
                             />
+                            {step.agent === 'Ollama' && ollamaModels.length > 0 && (
+                              <datalist id={`ollama-models-${i}`}>
+                                {ollamaModels.map(m => <option key={m} value={m} />)}
+                              </datalist>
+                            )}
                           </div>
                           <div className="flex-1">
                             <label className="wf-label text-2xs">Reasoning effort</label>

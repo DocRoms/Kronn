@@ -25,12 +25,16 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 //   11 description
 //   12 profile_ids_json      ← added in 056
 //   13 directive_ids_json    ← added in 056
+//   14 agent_settings_json   ← added in 070 (nullable)
 fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
     let variables_json: String = row.get(4).unwrap_or_default();
     let agent_str: String = row.get(5).unwrap_or_default();
     let skill_ids_json: String = row.get(7).unwrap_or_default();
     let tier_str: String = row.get(8).unwrap_or_default();
     let description: String = row.get(11).unwrap_or_default();
+    // 070 — nullable; absent/NULL/garbage → None (fall back to tier).
+    let agent_settings = row.get::<_, Option<String>>(14).ok().flatten()
+        .and_then(|s| serde_json::from_str(&s).ok());
     // 0.8.5 — fall back to `[]` when the column is missing (pre-056 rows
     // were already backfilled with `'[]'` by the ALTER, but we keep the
     // unwrap_or_default safety net for completeness).
@@ -49,13 +53,14 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
         profile_ids: serde_json::from_str(&profile_ids_json).unwrap_or_default(),
         directive_ids: serde_json::from_str(&directive_ids_json).unwrap_or_default(),
         tier: serde_json::from_str(&format!("\"{}\"", tier_str)).unwrap_or(ModelTier::Default),
+        agent_settings,
         description,
         created_at: parse_dt(&row.get::<_, String>(9).unwrap_or_default()),
         updated_at: parse_dt(&row.get::<_, String>(10).unwrap_or_default()),
     }
 }
 
-const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json";
+const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json";
 
 pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
     let sql = format!("SELECT {} FROM quick_prompts ORDER BY updated_at DESC", SELECT_COLUMNS);
@@ -77,8 +82,8 @@ pub fn insert_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
     let agent_str = serde_json::to_string(&qp.agent)?;
     let tier_str = serde_json::to_string(&qp.tier)?;
     conn.execute(
-        "INSERT INTO quick_prompts (id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        "INSERT INTO quick_prompts (id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
             qp.id,
             qp.name,
@@ -94,6 +99,7 @@ pub fn insert_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
             qp.description,
             serde_json::to_string(&qp.profile_ids)?,
             serde_json::to_string(&qp.directive_ids)?,
+            qp.agent_settings.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     // 0.8.5 — seed the version history with v1 = initial state.
@@ -114,7 +120,7 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
     conn.execute(
         "UPDATE quick_prompts SET name = ?2, icon = ?3, prompt_template = ?4, variables_json = ?5,
          agent = ?6, project_id = ?7, skill_ids_json = ?8, tier = ?9, updated_at = ?10, description = ?11,
-         profile_ids_json = ?12, directive_ids_json = ?13
+         profile_ids_json = ?12, directive_ids_json = ?13, agent_settings_json = ?14
          WHERE id = ?1",
         params![
             qp.id,
@@ -130,6 +136,7 @@ pub fn update_quick_prompt(conn: &Connection, qp: &QuickPrompt) -> Result<()> {
             qp.description,
             serde_json::to_string(&qp.profile_ids)?,
             serde_json::to_string(&qp.directive_ids)?,
+            qp.agent_settings.as_ref().map(serde_json::to_string).transpose()?,
         ],
     )?;
     Ok(())
@@ -348,6 +355,7 @@ mod tests {
             profile_ids: vec![],
             directive_ids: vec![],
             tier: ModelTier::Default,
+            agent_settings: None,
             description: String::new(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

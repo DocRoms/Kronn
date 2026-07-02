@@ -239,6 +239,7 @@ pub async fn orchestrate(
         // Save system message
         {
             let msg = DiscussionMessage {
+                model: None,
                 lint_report: None,
                 id: Uuid::new_v4().to_string(),
                 role: MessageRole::System,
@@ -396,6 +397,7 @@ pub async fn orchestrate(
                         // Save to DB — always runs even if client is gone
                         {
                             let msg = DiscussionMessage {
+                                model: None,
                                 lint_report: None,
                                 id: Uuid::new_v4().to_string(),
                                 role: MessageRole::Agent,
@@ -471,6 +473,7 @@ pub async fn orchestrate(
                     // Save synthesis to DB — always runs even if client is gone
                     {
                         let msg = DiscussionMessage {
+                            model: None,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::Agent,
@@ -744,6 +747,7 @@ pub(super) async fn maybe_generate_summary(
                     if let Err(e) = (|| -> anyhow::Result<()> {
                         crate::db::discussions::update_summary_cache(conn, &did, &summary, non_system_count)?;
                         let sys_msg = crate::models::DiscussionMessage {
+                            model: None,
                             lint_report: None,
                             id: uuid::Uuid::new_v4().to_string(),
                             role: MessageRole::System,
