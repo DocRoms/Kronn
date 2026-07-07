@@ -16,7 +16,7 @@ export interface TourStep {
   descKey: string;
   position?: 'top' | 'bottom' | 'left' | 'right';
   waitForClick?: boolean;
-  group?: string;
+  groupKey?: string;
   pulse?: boolean;
   beforeStep?: () => void;
   afterStep?: () => void;
@@ -60,7 +60,7 @@ export const TOUR_STEPS: TourStep[] = [
     selector: null,
     titleKey: 'tour.welcome.title',
     descKey: 'tour.welcome.desc',
-    group: 'Bienvenue',
+    groupKey: 'tour.group.welcome',
   },
 
   // ── Acte 1 : Projets ──────────────────────────────────────────────
@@ -71,7 +71,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.conceptProject.title',
     descKey: 'tour.conceptProject.desc',
     position: 'bottom',
-    group: 'Projets',
+    groupKey: 'tour.group.projects',
   },
   {
     id: 'scan-btn',
@@ -80,7 +80,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.scan.title',
     descKey: 'tour.scan.desc',
     position: 'bottom',
-    group: 'Projets',
+    groupKey: 'tour.group.projects',
   },
   {
     id: 'click-new-project',
@@ -91,7 +91,7 @@ export const TOUR_STEPS: TourStep[] = [
     position: 'bottom',
     waitForClick: true,
     pulse: true,
-    group: 'Projets',
+    groupKey: 'tour.group.projects',
   },
   {
     id: 'modal-overview',
@@ -100,7 +100,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.modalOverview.title',
     descKey: 'tour.modalOverview.desc',
     position: 'left',
-    group: 'Projets',
+    groupKey: 'tour.group.projects',
     afterStep: closeModal,
   },
 
@@ -112,7 +112,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.navPlugins.title',
     descKey: 'tour.navPlugins.desc',
     position: 'bottom',
-    group: 'Plugins',
+    groupKey: 'tour.group.plugins',
   },
   {
     id: 'add-plugin-btn',
@@ -121,7 +121,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.addPlugin.title',
     descKey: 'tour.addPlugin.desc',
     position: 'bottom',
-    group: 'Plugins',
+    groupKey: 'tour.group.plugins',
   },
 
   // ── Acte 3 : Discussions ──────────────────────────────────────────
@@ -132,7 +132,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.navDiscussions.title',
     descKey: 'tour.navDiscussions.desc',
     position: 'bottom',
-    group: 'Discussions',
+    groupKey: 'tour.group.discussions',
   },
   {
     id: 'disc-sidebar',
@@ -141,7 +141,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.sidebar.title',
     descKey: 'tour.sidebar.desc',
     position: 'right',
-    group: 'Discussions',
+    groupKey: 'tour.group.discussions',
   },
   {
     id: 'click-new-disc',
@@ -152,7 +152,7 @@ export const TOUR_STEPS: TourStep[] = [
     position: 'bottom',
     waitForClick: true,
     pulse: true,
-    group: 'Discussions',
+    groupKey: 'tour.group.discussions',
   },
   {
     id: 'disc-form-overview',
@@ -161,7 +161,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.discForm.title',
     descKey: 'tour.discForm.desc',
     position: 'left',
-    group: 'Discussions',
+    groupKey: 'tour.group.discussions',
   },
   // ── Profiles — learn-by-doing, stays in the new-discussion form ──
   // Previous attempt drew a static tooltip that sat ON TOP of the form
@@ -185,7 +185,7 @@ export const TOUR_STEPS: TourStep[] = [
     position: 'left',
     waitForClick: true,
     pulse: true,
-    group: 'Discussions',
+    groupKey: 'tour.group.discussions',
   },
   {
     id: 'disc-form-profile-chip',
@@ -197,7 +197,7 @@ export const TOUR_STEPS: TourStep[] = [
     position: 'left',
     waitForClick: true,
     pulse: true,
-    group: 'Discussions',
+    groupKey: 'tour.group.discussions',
     // Safety net: if the user navigated backward and closed the
     // accordion between step 12 and step 13, re-open it so the chip
     // is visible (and the spotlight can anchor on a real, visible
@@ -213,7 +213,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.navAutomation.title',
     descKey: 'tour.navAutomation.desc',
     position: 'bottom',
-    group: 'Automatisation',
+    groupKey: 'tour.group.automation',
   },
 
   // ── Acte 5 : Config ───────────────────────────────────────────────
@@ -224,7 +224,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.navConfig.title',
     descKey: 'tour.navConfig.desc',
     position: 'bottom',
-    group: 'Config',
+    groupKey: 'tour.group.config',
   },
   {
     id: 'usage-section',
@@ -233,7 +233,7 @@ export const TOUR_STEPS: TourStep[] = [
     titleKey: 'tour.usage.title',
     descKey: 'tour.usage.desc',
     position: 'bottom',
-    group: 'Config',
+    groupKey: 'tour.group.config',
   },
 
   // ── Fin ────────────────────────────────────────────────────────────
@@ -243,6 +243,6 @@ export const TOUR_STEPS: TourStep[] = [
     selector: null,
     titleKey: 'tour.done.title',
     descKey: 'tour.done.desc',
-    group: 'Fin',
+    groupKey: 'tour.group.end',
   },
 ];

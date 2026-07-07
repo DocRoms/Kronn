@@ -440,6 +440,7 @@ fn sort_keys(mut v: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use serial_test::serial;
     use super::*;
     use std::collections::HashSet;
     use std::fs;
@@ -738,6 +739,7 @@ ATLASSIAN_TOKEN = "x"
     }
 
     #[test]
+    #[serial]
     fn entry_without_transport_is_skipped() {
         let tmp = TempDir::new().unwrap();
         let claude = r#"{
@@ -755,6 +757,7 @@ ATLASSIAN_TOKEN = "x"
     /// Risk is bounded: only KRONN_HOST_HOME is mutated and other tests
     /// don't read it. If flake surfaces, gate behind `--test-threads=1`.
     #[test]
+    #[serial]
     fn resolve_home_prefers_kronn_host_home() {
         let original = std::env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", "/host/path");

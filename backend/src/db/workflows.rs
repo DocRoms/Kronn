@@ -25,6 +25,7 @@ fn parse_run_status(s: &str) -> RunStatus {
         "Cancelled" => RunStatus::Cancelled,
         "WaitingApproval" => RunStatus::WaitingApproval,
         "StoppedByGuard" => RunStatus::StoppedByGuard,
+        "Interrupted" => RunStatus::Interrupted,
         _ => RunStatus::Pending,
     }
 }
@@ -38,7 +39,28 @@ fn run_status_str(s: &RunStatus) -> &'static str {
         RunStatus::Cancelled => "Cancelled",
         RunStatus::WaitingApproval => "WaitingApproval",
         RunStatus::StoppedByGuard => "StoppedByGuard",
+        RunStatus::Interrupted => "Interrupted",
     }
+}
+
+/// 0.8.11 (B5) — reconcile workflow runs left `Running`/`Pending` when the
+/// backend process died mid-run (crash, container restart, `kill -9`,
+/// cargo-watch reload). Without this they stay "Running" forever, poison the
+/// active-runs badge, and make a cron's "did the last run succeed?" check read a
+/// zombie as in-progress. Flips rows older than `stale_after_secs` to the
+/// terminal `Interrupted` status (distinct from `Failed`). Mirrors
+/// `audit_runs::reconcile_stale_runs`. Returns the number reconciled.
+pub fn reconcile_stale_runs(conn: &Connection, stale_after_secs: i64) -> Result<u64> {
+    let cutoff = (Utc::now() - chrono::Duration::seconds(stale_after_secs)).to_rfc3339();
+    let now_rfc = Utc::now().to_rfc3339();
+    let affected = conn.execute(
+        "UPDATE workflow_runs SET
+            status = 'Interrupted',
+            finished_at = COALESCE(finished_at, ?2)
+         WHERE status IN ('Running', 'Pending') AND started_at < ?1",
+        params![cutoff, now_rfc],
+    )?;
+    Ok(affected as u64)
 }
 
 // ─── Workflows CRUD ─────────────────────────────────────────────────────────
@@ -588,8 +610,33 @@ pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
     Ok(count)
 }
 
+/// Safety cap for the unpaginated `list_runs` — a workflow with thousands of
+/// runs (a fast cron) would otherwise load every row WITH its full
+/// `step_results_json` into memory on each page open. The UI folds at 10 and
+/// paginates; 500 recent runs is far more than any view needs. Callers that
+/// truly need everything use `list_runs_paginated` explicitly. (B7, 0.8.11)
+pub const MAX_RUNS_UNPAGINATED: u32 = 500;
+
 pub fn list_runs(conn: &Connection, workflow_id: &str) -> Result<Vec<WorkflowRun>> {
-    list_runs_paginated(conn, workflow_id, None, None)
+    list_runs_paginated(conn, workflow_id, Some(MAX_RUNS_UNPAGINATED), None)
+}
+
+/// 0.8.11 (B7) — auto-purge terminal workflow runs older than `days`. Preserves
+/// any run still referenced as a parent by a retained child (so provenance
+/// chains stay intact) and never touches non-terminal runs. Opt-in: the caller
+/// only invokes this when `run_retention_days > 0`. Returns rows deleted.
+pub fn purge_runs_older_than(conn: &Connection, days: u32) -> Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM workflow_runs
+          WHERE status IN ('Success','Failed','Cancelled','StoppedByGuard','Interrupted')
+            AND finished_at IS NOT NULL
+            AND finished_at < datetime('now', ?1)
+            AND id NOT IN (
+                SELECT parent_run_id FROM workflow_runs WHERE parent_run_id IS NOT NULL
+            )",
+        params![format!("-{} days", days)],
+    )?;
+    Ok(n)
 }
 
 /// True when at least one workflow run is currently `Running` or `Pending`.

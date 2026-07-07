@@ -14,7 +14,7 @@ import type {
   WorkspaceConfig, StepConditionRule,
   CreateWorkflowRequest, Skill, AgentProfile, Directive,
   WorkflowSuggestion, QuickPrompt, QuickApi, WorkflowGuards,
-  PromptVariable, WorkflowSummary,
+  PromptVariable, WorkflowSummary, ModelTier,
 } from '../../types/generated';
 import { ExecutionLimitsCard } from './ExecutionLimitsCard';
 import type { AgentsConfig } from '../../types/generated';
@@ -1495,16 +1495,37 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     placeholder={t('wiz.stepName')}
                   />
                   {(!step.step_type || step.step_type.type === 'Agent') && (
-                    <select
-                      className="wf-select"
-                      style={{ width: 120 }}
-                      value={step.agent}
-                      onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
-                    >
-                      {availableAgents.map(a => (
-                        <option key={a.type} value={a.type}>{a.label}</option>
-                      ))}
-                    </select>
+                    <>
+                      <select
+                        className="wf-select"
+                        style={{ width: 120 }}
+                        value={step.agent}
+                        onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
+                      >
+                        {availableAgents.map(a => (
+                          <option key={a.type} value={a.type}>{a.label}</option>
+                        ))}
+                      </select>
+                      {/* 0.8.11 — per-step model TIER. Lets one workflow mix
+                          models (e.g. an economy 8b filter + a reasoning 32b
+                          gate for a local 2-stage review). Maps to
+                          agent_settings.tier → the agent's configured
+                          economy/default/reasoning model. */}
+                      <select
+                        className="wf-select"
+                        style={{ width: 118 }}
+                        value={step.agent_settings?.tier ?? 'default'}
+                        onChange={e => updateStep(i, {
+                          agent_settings: { ...step.agent_settings, tier: e.target.value as ModelTier },
+                        })}
+                        title={t('wiz.tierHint')}
+                        aria-label={t('wiz.tierHint')}
+                      >
+                        <option value="economy">⚡ {t('disc.tier.economy')}</option>
+                        <option value="default">🎯 {t('disc.tier.default')}</option>
+                        <option value="reasoning">🧠 {t('disc.tier.reasoning')}</option>
+                      </select>
+                    </>
                   )}
                   {/* 0.6.0 UX pass — reorder buttons. Marie + Antony :
                       "je peux pas déplacer mes steps". On expose 2 chevrons

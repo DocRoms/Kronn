@@ -19,6 +19,18 @@ configure({ asyncUtilTimeout: 5000 });
 // of undefined (reading 'getItem')". Install a deterministic in-memory Storage
 // when the ambient one is missing/non-functional. No-op where happy-dom already
 // provides a working store; `configurable`/`writable` so specs can still spy.
+// 0.8.11 (D10) — getUILocale() now follows the browser's language when no
+// locale is stored. The test runner's navigator.language is 'en-US', which would
+// flip every French-asserting component test to English. Pin the browser locale
+// to French in the test env so those assertions stay deterministic (and the
+// "default French" locale tests keep their intent). Robust against
+// localStorage.clear() (unlike seeding storage). Real browser detection is
+// covered by src/lib/__tests__/i18n.test.ts via detectBrowserLocale().
+try {
+  Object.defineProperty(navigator, 'language', { value: 'fr-FR', configurable: true });
+  Object.defineProperty(navigator, 'languages', { value: ['fr-FR', 'fr'], configurable: true });
+} catch { /* some envs freeze navigator — best effort */ }
+
 function makeMemoryStorage(): Storage {
   let store = new Map<string, string>();
   return {

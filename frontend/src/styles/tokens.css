@@ -161,6 +161,38 @@
   --kr-text-glow-lime: 0 0 8px rgba(200, 255, 0, 0.45), 0 0 18px rgba(200, 255, 0, 0.20);
   --kr-text-glow-magenta: 0 0 8px rgba(255, 27, 168, 0.45), 0 0 18px rgba(255, 27, 168, 0.20);
   --kr-bevel-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+
+  /* ── Compat aliases (0.8.11) ──────────────────────────────────────────────
+     Tokens that call sites referenced without a definition (the "phantom vars"
+     the 2026-07 audit found — undefined `var()` silently drops the property).
+     Defined ONCE here as references to the canonical tokens: because custom-
+     property references resolve at use-time against the ACTIVE theme, a light/
+     matrix/… theme that overrides the canonical token automatically flows
+     through these aliases too — no per-theme duplication needed.
+     A vitest guard (tokens-defined.test.ts) fails the build if a new phantom
+     var appears. */
+  --kr-danger: var(--kr-error);
+  --kr-border-faint: var(--kr-border-ghost);
+  --kr-border-soft: var(--kr-border-light);
+  --kr-border-subtle: var(--kr-border-light);
+  --kr-radius-sm: var(--kr-r-sm);
+  --kr-radius-md: var(--kr-r-md);
+  --kr-radius-pill: 999px;
+  --kr-r-pill: 999px;
+  --kr-bg: var(--kr-bg-base);
+  --kr-bg-card: var(--kr-bg-elevated);
+  --kr-bg-card-subtle: var(--kr-bg-subtle);
+  --kr-code-bg: var(--kr-bg-code);
+  --kr-bg-accent-soft: rgba(var(--kr-accent-rgb), 0.10);
+  --kr-bg-accent-subtle: rgba(var(--kr-accent-rgb), 0.06);
+  --kr-info-bg: rgba(var(--kr-info-rgb), 0.12);
+  --kr-success-bg: rgba(var(--kr-success-rgb), 0.12);
+  --kr-warning-bg: rgba(var(--kr-warning-rgb), 0.12);
+  /* RGB triples for rgba(var(--…-rgb), α) overlays — need real triples, not a
+     ref. Dark base = light text; the light theme overrides these below. */
+  --kr-text-rgb: 232, 234, 237;
+  --kr-text-faint-rgb: 255, 255, 255;
+  --kr-text-ghost-rgb: 255, 255, 255;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -291,6 +323,12 @@
   --kr-shadow-xl: 0 8px 16px rgba(16, 24, 40, 0.10), 0 30px 60px rgba(16, 24, 40, 0.18);
   --kr-shadow-popover: 0 4px 12px rgba(16, 24, 40, 0.10), 0 12px 28px rgba(16, 24, 40, 0.12);
   --kr-shadow-modal: 0 8px 20px rgba(16, 24, 40, 0.12), 0 20px 40px rgba(16, 24, 40, 0.18);
+
+  /* 0.8.11 — dark-text RGB triples for rgba() overlays (light theme has dark
+     text on a light base, so the dark-default white triples would be invisible). */
+  --kr-text-rgb: 26, 29, 35;
+  --kr-text-faint-rgb: 10, 14, 30;
+  --kr-text-ghost-rgb: 10, 14, 30;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

@@ -251,6 +251,8 @@ mod tests {
             auth_token: None,
             auth_enabled: false,
             auth_strict_localhost: false,
+            failure_notify_url: None,
+            run_retention_days: 0,
             max_concurrent_agents: 5,
             agent_stall_timeout_min: 5,
             pseudo: None,

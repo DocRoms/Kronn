@@ -687,3 +687,33 @@ fn typed_schema_round_trips_explicit_continue() {
         other => panic!("expected TypedSchema, got {other:?}"),
     }
 }
+
+// ─── D11 (0.8.11) — typed API error codes ─────────────────────────────
+#[test]
+fn api_error_code_strings_are_stable_snake_case() {
+    use super::ApiErrorCode::*;
+    assert_eq!(NotFound.as_str(), "not_found");
+    assert_eq!(Validation.as_str(), "validation");
+    assert_eq!(Conflict.as_str(), "conflict");
+    assert_eq!(Internal.as_str(), "internal");
+}
+
+#[test]
+fn api_response_err_coded_serializes_error_code_and_plain_err_omits_it() {
+    use super::{ApiResponse, ApiErrorCode};
+    let coded = ApiResponse::<()>::err_coded(ApiErrorCode::NotFound, "Workflow not found");
+    let j = serde_json::to_value(&coded).unwrap();
+    assert_eq!(j["success"], false);
+    assert_eq!(j["error"], "Workflow not found");
+    assert_eq!(j["error_code"], "not_found");
+
+    // Legacy plain err() must NOT emit error_code (back-compatible wire).
+    let plain = ApiResponse::<()>::err("boom");
+    let jp = serde_json::to_value(&plain).unwrap();
+    assert!(jp.get("error_code").is_none(), "plain err omits error_code, got: {jp}");
+
+    // ok() likewise has no error_code.
+    let ok = ApiResponse::ok(42);
+    let jo = serde_json::to_value(&ok).unwrap();
+    assert!(jo.get("error_code").is_none());
+}

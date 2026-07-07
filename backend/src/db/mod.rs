@@ -110,6 +110,19 @@ impl Database {
             Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
         }
 
+        // 0.8.11 (B5) — same reconcile for workflow_runs: a run that was in
+        // flight when the process died stays `Running`/`Pending` forever,
+        // poisoning the active-runs badge and cron "last run" checks.
+        // Cutoff 0 (not 30 min): at BOOT there is no in-process runner state,
+        // so every `Running`/`Pending` row is by definition a zombie — a grace
+        // window would just leave a freshly-interrupted run lying about its
+        // status for up to that long (Copilot review, PR #114).
+        match workflows::reconcile_stale_runs(&conn, 0) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Reconciled {} zombie workflow_runs left 'Running'/'Pending' by a previous process → Interrupted", n),
+            Err(e) => tracing::warn!("Failed to reconcile stale workflow_runs: {}", e),
+        }
+
         // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
         // Generous default : keeps a quarter of audit trail for debug
         // while preventing unbounded growth. User can manually trigger

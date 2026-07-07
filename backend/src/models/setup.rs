@@ -94,6 +94,21 @@ pub struct ServerConfig {
     #[serde(default)]
     #[ts(skip)]
     pub auth_strict_localhost: bool,
+    /// 0.8.11 (B6) — optional webhook (Slack/Teams/generic JSON) fired when a
+    /// scheduled/triggered run ends in a non-success terminal state
+    /// (Failed / Interrupted / StoppedByGuard). Lets an autonomous cron that
+    /// dies at 6am surface immediately instead of being discovered by opening
+    /// the UI. Empty/None = no notification. Also settable via
+    /// `KRONN_FAILURE_NOTIFY_URL`.
+    #[serde(default)]
+    pub failure_notify_url: Option<String>,
+    /// 0.8.11 (B7) — auto-purge workflow runs older than N days at boot.
+    /// `0` (default) = DISABLED: never delete run history automatically (a fast
+    /// cron's run table is 76% of the DB, but silently dropping the user's
+    /// history is worse than size). Set to e.g. 90 to bound growth; parent runs
+    /// still referenced by a retained child are always preserved.
+    #[serde(default)]
+    pub run_retention_days: u32,
     /// Maximum concurrent agent processes (default: 5)
     #[serde(default = "default_max_agents")]
     pub max_concurrent_agents: usize,

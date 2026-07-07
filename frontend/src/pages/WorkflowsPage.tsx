@@ -1322,6 +1322,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         className="wf-small-btn"
                         onClick={(e) => { e.stopPropagation(); handleTrigger(wf.id); }}
                         disabled={!wf.enabled || triggering === wf.id}
+                        title={!wf.enabled ? t('wf.launchDisabledHint') : undefined}
                       >
                         {triggering === wf.id ? <Loader2 size={10} className="spin" /> : <Play size={10} />}
                         {t('wf.trigger')}
@@ -1383,6 +1384,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onNavigateToWorkflow={(wfId) => openDetail(wfId)}
                 onNavigateToRun={(wfId, runId) => openDetail(wfId, runId)}
                 focusRunId={focusRunId}
+                onToggleEnabled={async (enabled) => {
+                  // 0.8.11 UX — one-click enable from the detail (a disabled
+                  // workflow's launch button is inert; see WorkflowDetail).
+                  try {
+                    await workflowsApi.update(detailWorkflow.id, { enabled });
+                    if (toastProp) toastProp(t(enabled ? 'wf.enabledToast' : 'wf.disabledToast'), 'success');
+                    openDetail(detailWorkflow.id);
+                    refetch();
+                  } catch (e) {
+                    if (toastProp) toastProp(String(e), 'error');
+                  }
+                }}
                 onGateDecided={() => setLiveRun(null)}
                 onExport={async () => {
                   try {

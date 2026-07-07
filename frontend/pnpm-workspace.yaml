@@ -8,6 +8,12 @@
 #     • onnxruntime-node: native ORT runtime via vits-web (TTS).
 #     • protobufjs: postinstall codegen for the gRPC client transitively
 #       pulled by onnxruntime.
+#   NOTE (0.8.11): onnxruntime-node's postinstall additionally tries to
+#   download CUDA GPU binaries from api.nuget.org on linux-x64 — never
+#   used (browser app → onnxruntime-web; CPU binaries are bundled) and
+#   the download times out on GitHub runners (THE recurring CI flake).
+#   It is skipped via ONNXRUNTIME_NODE_INSTALL=skip in ci-test.yml (env)
+#   and frontend/Dockerfile — the build itself stays allowed here.
 #   Re-vet any addition — pnpm 11 errors out (ERR_PNPM_IGNORED_BUILDS,
 #   exit 1) on `pnpm install --frozen-lockfile` if a build-script dep
 #   is missing from this list, so CI catches drift.
@@ -31,3 +37,4 @@ overrides:
   flatted: '>=3.4.2'
   brace-expansion: '>=5.0.5'
   protobufjs: '>=7.5.5'
+

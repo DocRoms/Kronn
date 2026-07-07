@@ -160,7 +160,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   participants: ['ClaudeCode'],
   messages: [],           // list endpoint returns empty messages
   message_count: msgCount, non_system_message_count: msgCount, // but provides the count
-  archived: false, pinned: false,
+  archived: false, pinned: false, pin_first_message: false,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -605,7 +605,7 @@ describe('DiscussionsPage', () => {
   it('archived discussions show count in Archives section header', async () => {
     const activeDisc: Discussion = {
       ...makeListDiscussion('d1', 3),
-      archived: false, pinned: false,
+      archived: false, pinned: false, pin_first_message: false,
     };
     const archivedDisc: Discussion = {
       ...makeListDiscussion('d2', 5),
@@ -1712,7 +1712,7 @@ describe('DiscussionsPage', () => {
       { id: 'm1', role: 'User', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
     ],
     message_count: 1, non_system_message_count: 1,
-    archived: false, pinned: false,
+    archived: false, pinned: false, pin_first_message: false,
     workspace_mode: 'Direct',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',

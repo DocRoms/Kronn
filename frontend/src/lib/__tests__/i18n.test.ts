@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { t, getUILocale, setUILocale, UI_LOCALES, type UILocale } from '../i18n';
+import { t, getUILocale, setUILocale, detectBrowserLocale, UI_LOCALES, type UILocale } from '../i18n';
 
 describe('i18n', () => {
   describe('t() — translation function', () => {
@@ -47,9 +47,12 @@ describe('i18n', () => {
   });
 
   describe('locale persistence', () => {
-    it('defaults to fr when nothing stored', () => {
+    it('follows the browser language when nothing stored (D10)', () => {
       localStorage.clear();
-      expect(getUILocale()).toBe('fr');
+      // jsdom's navigator.language is 'en-US' → detection returns 'en'
+      // (no more hardcoded French default). A supported browser lang wins.
+      expect(getUILocale()).toBe(detectBrowserLocale());
+      expect(['fr', 'en', 'es']).toContain(getUILocale());
     });
 
     it('persists and retrieves locale', () => {
@@ -61,9 +64,9 @@ describe('i18n', () => {
       localStorage.clear();
     });
 
-    it('ignores invalid stored value', () => {
+    it('ignores invalid stored value (falls back to browser detection)', () => {
       localStorage.setItem('kronn:ui-locale', 'invalid');
-      expect(getUILocale()).toBe('fr');
+      expect(getUILocale()).toBe(detectBrowserLocale());
       localStorage.clear();
     });
   });

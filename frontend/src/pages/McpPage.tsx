@@ -273,7 +273,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // (0.8.11 — the old `eslint-disable react-hooks/exhaustive-deps` here was
+    // dead: with the React-19 ruleset the rule no longer reports on this hook,
+    // so the directive itself warned as unused. Removed rather than restored.)
   }, [selectedConfigId, editingCustomServerId]);
   // "Show more" for project toggles per config
   const [expandedProjectLists, setExpandedProjectLists] = useState<Set<string>>(new Set());
@@ -487,7 +489,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   // as the paste-textarea path applies server-side.
   const handleImportFromFile = async (file: File) => {
     setImportJsonError(null);
-    let text = '';
+    let text: string;
     try {
       text = await file.text();
     } catch (e) {

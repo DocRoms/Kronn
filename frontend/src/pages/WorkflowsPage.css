@@ -2046,7 +2046,7 @@
   flex: 1 1 180px;
   min-width: 140px;
   padding: 3px 8px;
-  background: var(--kr-bg-input, var(--kr-bg-elev));
+  background: var(--kr-bg-input);
   border: 1px solid var(--kr-border);
   border-radius: var(--kr-r-sm);
   color: var(--kr-text-muted);
@@ -2090,21 +2090,50 @@
   margin-bottom: var(--kr-sp-2);
 }
 .wf-bm-spine { stroke: var(--kr-border-medium, var(--kr-border)); stroke-width: 2; }
-.wf-bm-node { fill: var(--kr-accent); }
+.wf-bm-node { fill: var(--kr-text-primary); }
 .wf-bm-node-label { fill: var(--kr-text-primary); font-size: 11px; font-family: var(--kr-font-mono, monospace); }
-.wf-bm-arc { fill: none; stroke: var(--kr-accent); stroke-width: 1.5; opacity: 0.75; }
-.wf-bm-arc-back { stroke: var(--kr-warning); stroke-dasharray: 3 2; }
-.wf-bm-head { fill: var(--kr-accent); }
-.wf-bm-arc-back + .wf-bm-head,
-.wf-branch-map .wf-bm-arc-back { }
+
+/* Goto arcs — base. Colour = identity (per-arc slot below); dash = backward
+   loop (redundant with colour → A11y). Arrowhead inherits the arc's stroke via
+   `context-stroke` so each head matches its line. */
+.wf-bm-arc { fill: none; stroke-width: 1.6; opacity: 0.85; transition: opacity 0.12s, stroke-width 0.12s; }
+.wf-bm-arc-back { stroke-dasharray: 4 2.5; }
+.wf-bm-head { fill: context-stroke; }
+
+/* Categorical arc palette — fixed order, CVD-validated per theme (dataviz skill:
+   dark ΔE 18.3, light ΔE 12.5, --pairs all). Dark = Kronn brand hues; light gets
+   a distinct validated set (the light brand hues collide under CVD). Slot 'x' =
+   overflow (>5 arcs) folds to neutral, still disambiguated by geometry + dash. */
+.wf-bm-arc-c0 { stroke: #c8ff00; }
+.wf-bm-arc-c1 { stroke: #00d4ff; }
+.wf-bm-arc-c2 { stroke: #8b5cf6; }
+.wf-bm-arc-c3 { stroke: #ff5bbc; }
+.wf-bm-arc-c4 { stroke: #60a5fa; }
+.wf-bm-arc-cx { stroke: var(--kr-text-ghost); }
+:root[data-theme="light"] .wf-bm-arc-c0,
+:root[data-theme="sakura"] .wf-bm-arc-c0 { stroke: #4338ca; }
+:root[data-theme="light"] .wf-bm-arc-c1,
+:root[data-theme="sakura"] .wf-bm-arc-c1 { stroke: #0891b2; }
+:root[data-theme="light"] .wf-bm-arc-c2,
+:root[data-theme="sakura"] .wf-bm-arc-c2 { stroke: #be185d; }
+:root[data-theme="light"] .wf-bm-arc-c3,
+:root[data-theme="sakura"] .wf-bm-arc-c3 { stroke: #c2410c; }
+:root[data-theme="light"] .wf-bm-arc-c4,
+:root[data-theme="sakura"] .wf-bm-arc-c4 { stroke: #15803d; }
+
+/* Follow a crossing line: hovering the map dims every arc, hovering one arc (or
+   its head) restores + thickens it. Pointer-events on the invisible-fill path
+   are enabled via a fat transparent hit area. */
+.wf-branch-map:hover .wf-bm-arc { opacity: 0.28; }
+.wf-branch-map .wf-bm-arc:hover { opacity: 1; stroke-width: 3; }
+
 .wf-branch-map-legend {
   display: flex;
   gap: var(--kr-sp-3);
   margin-top: var(--kr-sp-2);
   font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-text-muted);
 }
-.wf-bm-legend-fwd { color: var(--kr-accent); }
-.wf-bm-legend-back { color: var(--kr-warning); }
 
 /* #14 — parent-tick group accordion wrapping its sub-runs' compact rows. */
 .wf-run-group { margin-bottom: 4px; }
@@ -2165,6 +2194,8 @@
 .wf-run-compact[data-status="WaitingApproval"] .wf-run-compact-dot,
 .wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-status,
 .wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-dot { color: var(--kr-warning); background: var(--kr-warning); }
+.wf-run-compact[data-status="Interrupted"] .wf-run-compact-status,
+.wf-run-compact[data-status="Interrupted"] .wf-run-compact-dot { color: var(--kr-text-ghost); background: var(--kr-text-ghost); }
 /* keep the status text coloured but the dot uses background only */
 .wf-run-compact-dot { border-radius: 50%; }
 .wf-run-compact-parent {
@@ -4758,3 +4789,30 @@
   font-size: var(--kr-fs-xs);
   font-family: var(--kr-font-mono);
 }
+
+/* 0.8.11 — per-step model tier badge (wizard-set), shown next to the agent in
+   the WF detail + compact pipeline. Muted + small: informative, not shouty. */
+.wf-step-tier {
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-text-muted);
+  padding: 1px 6px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.wf-pipe-chip-tier { font-size: var(--kr-fs-2xs, 11px); opacity: 0.85; }
+
+/* 0.8.11 UX — disabled-workflow state made visible next to the inert Lancer. */
+.wf-disabled-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: var(--kr-fs-2xs, 11px);
+  color: var(--kr-warning);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.35);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.wf-enable-btn { color: var(--kr-success); border-color: rgba(var(--kr-success-rgb), 0.4); }

@@ -49,7 +49,7 @@ export interface KronnToolCall {
 //     namespace prefixes (`mcp__github__create_issue`). Permissive
 //     regex accepts any non-paren, non-bracket sequence.
 const KRONN_INTERNAL_RE = /^\[kronn-internal: ([a-z_]+)(?:\(([\s\S]*?)\))?(?: → ([\s\S]*))?\]$/;
-const AGENT_NATIVE_RE = /^\[agent-native: ([^()\[\]]+?)(?:\(([\s\S]*?)\))?(?: → ([\s\S]*))?\]$/;
+const AGENT_NATIVE_RE = /^\[agent-native: ([^()[\]]+?)(?:\(([\s\S]*?)\))?(?: → ([\s\S]*))?\]$/;
 
 /** Parse a System message's content. Returns `null` when the content
  *  isn't a tool trace — callers fall back to the default System-message

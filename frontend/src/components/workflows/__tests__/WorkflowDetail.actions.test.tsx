@@ -198,6 +198,28 @@ describe('WorkflowDetail — header actions', () => {
     expect(launch.disabled).toBe(true);
   });
 
+  // ── 0.8.11 UX — a disabled workflow must EXPLAIN itself, not sit mute ──
+  it('disabled workflow: launch button carries an explanatory tooltip', () => {
+    renderDetail({ workflow: mkWorkflow({ enabled: false }) });
+    const launch = screen.getByText('wf.launch').closest('button');
+    expect(launch).toBeDisabled();
+    expect(launch).toHaveAttribute('title', 'wf.launchDisabledHint');
+  });
+
+  it('disabled workflow: shows the Désactivé chip and a one-click Activer that calls onToggleEnabled(true)', () => {
+    const onToggleEnabled = vi.fn();
+    renderDetail({ workflow: mkWorkflow({ enabled: false }), onToggleEnabled });
+    expect(screen.getByText(/wf\.disabledChip/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText('wf.enableNow'));
+    expect(onToggleEnabled).toHaveBeenCalledWith(true);
+  });
+
+  it('enabled workflow: no chip, no Activer button', () => {
+    renderDetail({ workflow: mkWorkflow({ enabled: true }), onToggleEnabled: vi.fn() });
+    expect(screen.queryByText(/wf\.disabledChip/)).toBeNull();
+    expect(screen.queryByText('wf.enableNow')).toBeNull();
+  });
+
   it('disables the launch button when the workflow is disabled', () => {
     renderDetail({ workflow: mkWorkflow({ enabled: false }) });
     const launch = screen.getByText('wf.launch').closest('button') as HTMLButtonElement;
@@ -317,6 +339,30 @@ describe('WorkflowDetail — per-run actions', () => {
     );
     await waitFor(() => expect(props.onRefresh).toHaveBeenCalled());
     await waitFor(() => expect(onGateDecided).toHaveBeenCalled());
+  });
+});
+
+// ---- 0.8.11 — per-step model tier badge -----------------------------------
+describe('WorkflowDetail — step model tier badge', () => {
+  it('shows a tier badge for a non-default (reasoning) Agent step', () => {
+    renderDetail({
+      workflow: mkWorkflow({
+        steps: [mkStep({ name: 'reason', step_type: { type: 'Agent' },
+          agent_settings: { tier: 'reasoning' } })],
+      }),
+    });
+    expect(screen.getAllByTitle('disc.tier.reasoning').length).toBeGreaterThan(0);
+  });
+
+  it('shows no tier badge for a default-tier step (default = the norm, no noise)', () => {
+    renderDetail({
+      workflow: mkWorkflow({
+        steps: [mkStep({ name: 'reason', step_type: { type: 'Agent' },
+          agent_settings: { tier: 'default' } })],
+      }),
+    });
+    expect(screen.queryByTitle('disc.tier.default')).toBeNull();
+    expect(screen.queryByTitle('disc.tier.reasoning')).toBeNull();
   });
 });
 

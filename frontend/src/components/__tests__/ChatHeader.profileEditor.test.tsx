@@ -34,7 +34,7 @@ function makeDiscussion(over: Partial<Discussion> = {}): Discussion {
     messages: [],
     message_count: 0, non_system_message_count: 0,
     archived: false,
-    pinned: false,
+    pinned: false, pin_first_message: false,
     workspace_mode: 'Direct',
     workspace_path: null,
     created_at: '2026-01-01T00:00:00Z',

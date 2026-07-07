@@ -97,6 +97,30 @@ async fn main() -> anyhow::Result<()> {
         // setups override this via the env.
         std::env::set_var("KRONN_BACKEND_URL", format!("http://127.0.0.1:{}", port));
     }
+
+    // 0.8.11 — unify the API auth token across config.toml and the
+    // KRONN_AUTH_TOKEN env, in BOTH directions, so every layer agrees:
+    //   • env → config: an operator who sets KRONN_AUTH_TOKEN (e.g. in
+    //     docker-compose) enables auth without editing config.toml — the auth
+    //     middleware reads `config.server.auth_token`, so mirror the env into it.
+    //   • config → env: spawned children (the `kronn-internal` MCP sidecar, a
+    //     grandchild via the agent CLI) read KRONN_AUTH_TOKEN and send
+    //     `Authorization: Bearer` — without it an auth-enabled / LAN-exposed
+    //     instance returned a silent 401 to its own sidecar.
+    let env_token = std::env::var("KRONN_AUTH_TOKEN")
+        .ok()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty());
+    if app_config.server.auth_token.is_none() {
+        if let Some(t) = env_token {
+            app_config.server.auth_token = Some(t);
+        }
+    }
+    if let Some(ref token) = app_config.server.auth_token {
+        if std::env::var("KRONN_AUTH_TOKEN").is_err() {
+            std::env::set_var("KRONN_AUTH_TOKEN", token);
+        }
+    }
     let max_agents = if app_config.server.max_concurrent_agents > 0 {
         app_config.server.max_concurrent_agents
     } else {
@@ -108,6 +132,27 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("API authentication enabled (Bearer token)");
     } else {
         tracing::warn!("API authentication disabled — API is open to anyone on the network");
+    }
+
+    // Security guard (0.8.11) — refuse to start when the operator exposed the
+    // instance to the LAN but left the API unauthenticated. Secure-by-default:
+    // a fresh `docker compose up` publishes on 127.0.0.1 (see docker-compose.yml
+    // `KRONN_BIND`), so this never fires for the standard install. Exposing to
+    // the LAN then requires a token, auth, or an explicit risk acknowledgment.
+    let is_docker = std::env::var("KRONN_DATA_DIR").is_ok();
+    let kronn_bind = std::env::var("KRONN_BIND").ok();
+    let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let exposed = kronn::core::net_expose::lan_exposed(is_docker, kronn_bind.as_deref(), &host);
+    if let Some(msg) = kronn::core::net_expose::insecure_lan_boot_error(
+        exposed,
+        app_config.server.auth_enabled,
+        app_config.server.auth_token.is_some(),
+        ack_insecure,
+    ) {
+        tracing::error!("{msg}");
+        return Err(anyhow::anyhow!(msg));
     }
 
     // Exactly ONE backend per data dir. Refuse to start if another instance
@@ -227,6 +272,18 @@ async fn main() -> anyhow::Result<()> {
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("Partial-response recovery failed: {}", e),
+    }
+
+    // 0.8.11 (B7) — opt-in run retention. Only when the operator set
+    // `run_retention_days > 0`; parent runs referenced by a retained child are
+    // preserved by the query. Default 0 = keep all history (no surprise loss).
+    let retention_days = state.config.read().await.server.run_retention_days;
+    if retention_days > 0 {
+        match state.db.with_conn(move |conn| kronn::db::workflows::purge_runs_older_than(conn, retention_days)).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!("Run retention: purged {n} workflow run(s) older than {retention_days} days", ),
+            Err(e) => tracing::warn!("Run retention purge failed: {}", e),
+        }
     }
 
     // Reap abandoned MCP sessions (2026-06-08). `count_live_participants` is
@@ -370,6 +427,13 @@ async fn main() -> anyhow::Result<()> {
     let learning_sweep =
         std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(state.db.clone()));
     tokio::spawn(async move { learning_sweep.start().await });
+
+    // 0.8.11 (B6) — periodic DB backup (default every 24h, keep 7). Targets
+    // KRONN_BACKUP_DIR (a host-mounted dir outside the data volume) when set;
+    // KRONN_BACKUP_INTERVAL_HOURS=0 disables it entirely.
+    if let Some(backup_scheduler) = kronn::core::backup::BackupScheduler::from_env(state.db.clone()) {
+        tokio::spawn(async move { backup_scheduler.start().await });
+    }
 
     // Start WebSocket client manager (outbound connections to contacts)
     let ws_state = state.clone();

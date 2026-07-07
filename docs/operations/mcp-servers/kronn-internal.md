@@ -2,7 +2,7 @@
 
 **Server:** `kronn-internal` (Python stdio bridge — `backend/scripts/disc-introspection-mcp.py`)
 **Source:** This repo. Auto-injected by Kronn into every supported CLI's MCP config (`.mcp.json`, `~/.codex/config.toml`, `.gemini/settings.json`, `.kiro/settings/mcp.json`, `.vibe/config.toml`).
-**Auth:** None (local stdio). The bridge talks to the Kronn backend over `KRONN_BACKEND_URL` (default `http://127.0.0.1:3140`).
+**Auth:** stdio itself is unauthenticated (local pipe), but the bridge authenticates to the Kronn backend over `KRONN_BACKEND_URL` (default `http://127.0.0.1:3140`): when the backend has a token configured, it exports `KRONN_AUTH_TOKEN` into the process env, the sidecar inherits it and sends `Authorization: Bearer <token>` on every call. On a loopback-only instance the backend's local-trust bypass makes the token optional; on a LAN-exposed instance (e.g. WSL backend / Mac frontend) it is required — otherwise the sidecar's own calls get a silent 401. `[src: file: backend/scripts/disc-introspection-mcp.py:1970-1994]` `[src: file: backend/src/main.rs:102-115]`
 
 ## What it does
 

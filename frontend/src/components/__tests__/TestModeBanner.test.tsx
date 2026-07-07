@@ -17,7 +17,7 @@ function disc(overrides: Partial<Discussion> = {}): Discussion {
     id: 'd-1', project_id: 'p-1', title: 'Switch theme tokens',
     agent: 'ClaudeCode' as any, language: 'en',
     participants: ['ClaudeCode' as any], messages: [], message_count: 0, non_system_message_count: 0,
-    archived: false, pinned: false,
+    archived: false, pinned: false, pin_first_message: false,
     workspace_mode: 'Isolated',
     worktree_branch: 'kronn/switch-theme',
     test_mode_restore_branch: 'main',

@@ -802,14 +802,14 @@ const LargeMessageFallback = memo(({ content }: { content: string }) => {
 });
 
 export const MarkdownContent = memo(({ content, discussionId }: { content: string; discussionId?: string }) => {
-  // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
-  if (content.length > MAX_MARKDOWN_CHARS) {
-    return <LargeMessageFallback content={content} />;
-  }
   // Override the `pre` handler when we have a discussion id: fenced
   // blocks tagged `kronn-doc-preview` get replaced with the DocPreview
   // component (sandboxed iframe + export buttons). Everything else
   // renders through the shared mdComponents table above.
+  // NOTE: this useMemo runs UNCONDITIONALLY (before the big-content guard
+  // below) — a hook after an early return violates rules-of-hooks. It only
+  // builds the components table, so running it for huge content is free; the
+  // expensive markdown parse is gated by the guard.
   const components = useMemo(() => {
     if (!discussionId) return mdComponents;
     return {
@@ -863,6 +863,12 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
       },
     };
   }, [discussionId]);
+
+  // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
+  // Placed AFTER all hooks (the useMemo above) to satisfy rules-of-hooks.
+  if (content.length > MAX_MARKDOWN_CHARS) {
+    return <LargeMessageFallback content={content} />;
+  }
 
   return (
     <div className="disc-md">

@@ -18,6 +18,9 @@ const STATUS_COLORS: Record<string, string> = {
   WaitingApproval: 'var(--kr-accent-ink)',
   // 0.7.0 — guard-stopped runs are amber (self-protection, not failure).
   StoppedByGuard: 'var(--kr-warning)',
+  // 0.8.11 — backend died mid-run (crash/restart). Neutral grey, not red:
+  // the workflow didn't fail, the host went away.
+  Interrupted: 'var(--kr-text-ghost)',
 };
 
 export interface RunDetailProps {

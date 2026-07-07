@@ -69,7 +69,7 @@ const mkDisc = (over: Partial<Discussion> & { id: string }): Discussion => ({
   message_count: 0,
   non_system_message_count: 0,
   archived: false,
-  pinned: false,
+  pinned: false, pin_first_message: false,
   workspace_mode: 'Direct',
   created_at: '2026-05-15T10:00:00Z',
   updated_at: '2026-05-15T10:00:00Z',
@@ -230,9 +230,9 @@ describe('DiscussionSidebar — grouping', () => {
 describe('DiscussionSidebar — pinned / favorites section', () => {
   it('renders pinned discs cross-project, sorted by updated_at desc', async () => {
     const discussions = [
-      mkDisc({ id: 'p-old', pinned: true, title: 'Pinned older', updated_at: '2026-05-10T00:00:00Z' }),
-      mkDisc({ id: 'p-new', pinned: true, title: 'Pinned newer', updated_at: '2026-05-20T00:00:00Z' }),
-      mkDisc({ id: 'reg', pinned: false, title: 'Regular' }),
+      mkDisc({ id: 'p-old', pinned: true, pin_first_message: false, title: 'Pinned older', updated_at: '2026-05-10T00:00:00Z' }),
+      mkDisc({ id: 'p-new', pinned: true, pin_first_message: false, title: 'Pinned newer', updated_at: '2026-05-20T00:00:00Z' }),
+      mkDisc({ id: 'reg', pinned: false, pin_first_message: false, title: 'Regular' }),
     ];
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
@@ -255,7 +255,7 @@ describe('DiscussionSidebar — pinned / favorites section', () => {
   });
 
   it('no favorites header when nothing is pinned', async () => {
-    const discussions = [mkDisc({ id: 'reg', pinned: false, title: 'Regular' })];
+    const discussions = [mkDisc({ id: 'reg', pinned: false, pin_first_message: false, title: 'Regular' })];
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
     expect(screen.queryByText('disc.favorites')).toBeNull();
@@ -320,7 +320,7 @@ describe('DiscussionSidebar — search filter', () => {
     const projects = [mkProject('p-acme', 'AcmeRepo', 'git@github.com:acme-org/AcmeRepo.git')];
     const discussions = [
       // A favorite that does NOT match the query — must disappear during search.
-      mkDisc({ id: 'fav1', pinned: true, title: 'Pinned unrelated note' }),
+      mkDisc({ id: 'fav1', pinned: true, pin_first_message: false, title: 'Pinned unrelated note' }),
       // A project disc that does NOT match — its folder must vanish entirely.
       mkDisc({ id: 'pj1', project_id: 'p-acme', title: 'AcmeRepo chore' }),
       // The one we're hunting for.

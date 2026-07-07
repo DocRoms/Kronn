@@ -13,6 +13,7 @@
   - **Don't clear tables absent from the payload** — only `DELETE` the tables the export actually carries (selective clear), so an old export can't wipe newer data.
   - Longer term: consider **merge/upsert** import instead of clear-then-insert.
 - **Next step**: create ticket.
+- **Status**: 🟢 RESOLVED in 0.8.10 (verified 0.8.11). `do_import_db` (`backend/src/api/setup.rs`) now clears SELECTIVELY — only the tables the payload actually carries (`import_clear_statements`) — and warns loudly on a downgrade import (`data.version < CURRENT_EXPORT_VERSION`). A v3 export onto a v4 box no longer wipes `quick_apis`/`learnings`. The destructive endpoints are also auth-gated even when app-auth is off (see `DESTRUCTIVE_PATHS` in `lib.rs`). Closing.
 
 ## Notes
 

@@ -578,3 +578,108 @@ describe('WorkflowsPage', () => {
     confirmSpy.mockRestore();
   });
 });
+
+// ── 0.8.11 UX — launch modal + disabled-state comprehension ─────────────────
+// The exact flow that silently failed for a real user: a cloned (disabled)
+// workflow's Lancer did nothing, and a variable-less workflow shows no popup.
+describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
+  const labWorkflow = (over: Partial<Workflow> = {}): Workflow => ({
+    id: 'wf-lab',
+    name: 'PR Review LAB',
+    project_id: null,
+    trigger: { type: 'Manual' },
+    steps: [
+      { name: 'prnum', agent: 'ClaudeCode', prompt_template: 'PR {{pr_number}}', mode: { type: 'Normal' } } as never,
+      // 2 steps → the wizard opens in ADVANCED mode (per-step editor cards);
+      // a single step falls into simple mode where the tier select isn't shown.
+      { name: 'reason', agent: 'ClaudeCode', prompt_template: 'Review {{steps.prnum.data.stdout}}', mode: { type: 'Normal' } } as never,
+    ],
+    actions: [],
+    safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },
+    workspace_config: null,
+    concurrency_limit: null,
+    variables: [{
+      name: 'pr_number', label: 'N° de la PR à reviewer', placeholder: '1800',
+      description: null, required: true,
+    }],
+    enabled: true,
+    created_at: '2026-01-01T00:00:00Z',
+    updated_at: '2026-01-01T00:00:00Z',
+    ...over,
+  } as Workflow);
+
+  const labSummary = (over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
+    id: 'wf-lab', name: 'PR Review LAB', project_id: null, project_name: null,
+    trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+    enabled: true, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
+  });
+
+  it('Lancer sur un WF à variables ouvre la popup, bloque les requis vides, puis déclenche avec les valeurs', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.triggerStream.mockResolvedValue(undefined);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+
+    // Click the card's Lancer (list-level trigger).
+    const lancer = screen.getAllByText('Lancer')[0];
+    await act(async () => { fireEvent.click(lancer); });
+
+    // The launch modal opens with the declared variable field + required star.
+    await waitFor(() => expect(screen.getByText('N° de la PR à reviewer')).toBeInTheDocument());
+    const input = screen.getByPlaceholderText('1800');
+
+    // Submit with the required field EMPTY → inline error, no trigger fired.
+    const goButtons = screen.getAllByText('Lancer');
+    const modalGo = goButtons[goButtons.length - 1];
+    await act(async () => { fireEvent.click(modalGo); });
+    expect(screen.getByText(/obligatoire/i)).toBeInTheDocument();
+    expect(mockWorkflowsApi.triggerStream).not.toHaveBeenCalled();
+
+    // Fill + submit → modal closes and the trigger fires with the value.
+    fireEvent.change(input, { target: { value: '1800' } });
+    await act(async () => { fireEvent.click(modalGo); });
+    await waitFor(() => expect(mockWorkflowsApi.triggerStream).toHaveBeenCalled());
+    const call = mockWorkflowsApi.triggerStream.mock.calls[0];
+    expect(call[0]).toBe('wf-lab');
+    expect(call.some((a: unknown) => !!a && typeof a === 'object' && (a as Record<string, string>).pr_number === '1800')).toBe(true);
+    expect(screen.queryByText('N° de la PR à reviewer')).toBeNull();
+  });
+
+  it('carte désactivée : Lancer est inerte MAIS porte le tooltip explicatif', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary({ enabled: false })]);
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+
+    const lancer = screen.getAllByText('Lancer')[0].closest('button');
+    expect(lancer).toBeDisabled();
+    expect(lancer?.getAttribute('title')).toMatch(/désactivé/i);
+  });
+
+  it('wizard : chaque step Agent expose le sélecteur de palier (⚡/🎯/🧠) et le changement est appliqué', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await waitFor(() => expect(screen.getByText('Éditer')).toBeDefined());
+    await act(async () => { fireEvent.click(screen.getByText('Éditer')); });
+
+    // Navigate to the Steps stage — adaptive: click "Suivant" until the step
+    // editor (name input 'prnum') is visible (a declared-variables workflow can
+    // add a stage vs the plain flow).
+    for (let i = 0; i < 5 && !screen.queryByDisplayValue('prnum'); i++) {
+      const next = screen.queryAllByText('Suivant');
+      if (!next.length) break;
+      await act(async () => { fireEvent.click(next[next.length - 1]); });
+    }
+    await waitFor(() => expect(screen.getByDisplayValue('prnum')).toBeInTheDocument());
+
+    const tierSelect = screen.getAllByTitle(/Palier de modèle/)[0] as HTMLSelectElement;
+    expect(tierSelect.value).toBe('default');
+    expect(Array.from(tierSelect.options).map(o => o.value)).toEqual(['economy', 'default', 'reasoning']);
+    fireEvent.change(tierSelect, { target: { value: 'reasoning' } });
+    expect(tierSelect.value).toBe('reasoning');
+  });
+});

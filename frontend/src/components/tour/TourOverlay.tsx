@@ -61,8 +61,8 @@ export function TourOverlay() {
         aria-label={t(currentStep.titleKey)}
       >
         {/* Group label (act name) */}
-        {currentStep.group && (
-          <div className="tour-group-label">{currentStep.group}</div>
+        {currentStep.groupKey && (
+          <div className="tour-group-label">{t(currentStep.groupKey)}</div>
         )}
 
         {/* Step counter */}
