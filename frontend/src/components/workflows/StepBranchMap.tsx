@@ -49,17 +49,23 @@ export function StepBranchMap({ steps, t }: StepBranchMapProps) {
             </text>
           </g>
         ))}
-        {/* Goto arcs in the left gutter */}
-        {edges.map((e, k) => {
-          if (e.toIndex < 0) return null; // dangling target — skip drawing
+        {/* Goto arcs in the left gutter. Each drawable arc gets: a categorical
+            hue (fixed order, index 0..4 then a neutral — CVD-validated per theme
+            in CSS), a per-index geometric offset so overlapping arcs fan out
+            instead of coinciding, and a dash for backward loops (redundant with
+            colour → A11y). Hovering the map dims all arcs; hovering one restores
+            it — so a crossing line is easy to follow. */}
+        {edges.filter(e => e.toIndex >= 0).map((e, k) => {
           const depth = Math.min(Math.abs(e.toIndex - e.fromIndex), 3);
-          const bx = spineX - 6 - depth * 12;
+          const bx = spineX - 6 - depth * 12 - (k % 4) * 6; // fan out crossings
           const d = `M ${spineX} ${cy(e.fromIndex)} C ${bx} ${cy(e.fromIndex)}, ${bx} ${cy(e.toIndex)}, ${spineX} ${cy(e.toIndex)}`;
+          const slot = k < 5 ? String(k) : 'x'; // fixed-order slot 0..4, then neutral (never cycled)
+          const cls = `wf-bm-arc wf-bm-arc-c${slot}${e.backward ? ' wf-bm-arc-back' : ''}`;
           return (
             <path
               key={k}
               d={d}
-              className={e.backward ? 'wf-bm-arc wf-bm-arc-back' : 'wf-bm-arc'}
+              className={cls}
               markerEnd="url(#wf-bm-head)"
               data-testid="wf-bm-arc"
             >
@@ -69,8 +75,8 @@ export function StepBranchMap({ steps, t }: StepBranchMapProps) {
         })}
       </svg>
       <div className="wf-branch-map-legend">
-        <span className="wf-bm-legend-fwd">— {t('wf.branchMap.legendForward')}</span>
-        <span className="wf-bm-legend-back">— {t('wf.branchMap.legendLoop')}</span>
+        <span className="wf-bm-legend-fwd">🎨 {t('wf.branchMap.legendForward')}</span>
+        <span className="wf-bm-legend-back">⇠ {t('wf.branchMap.legendLoop')}</span>
       </div>
     </div>
   );

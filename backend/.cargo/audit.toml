@@ -13,6 +13,14 @@
 #
 # TODO: drop these ignores once calamine releases a build on quick-xml >=0.41
 # (track: https://github.com/tafia/calamine/issues).
+#
+# POLICY (0.8.11): every ignore below is DATED and must be re-reviewed at the
+# review-by date — an ignore is a deferral, not a permanent waiver. At review:
+# check whether calamine ships on quick-xml >=0.41 (`cargo update -p calamine`),
+# and if so remove the entry. Do not add an ignore without a rationale + a
+# review-by date. CI runs `cargo audit` (see .github/workflows/ci-test.yml).
+#
+#   RUSTSEC-2026-0194 / -0195 — added 2026-06-30, review by 2026-09-30.
 [advisories]
 ignore = [
     "RUSTSEC-2026-0194",

@@ -254,7 +254,7 @@
   min-width: 0;
   padding: 3px 6px;
   font-size: var(--kr-fs-xs);
-  background: var(--kr-bg-input, var(--kr-bg-elev));
+  background: var(--kr-bg-input);
   color: var(--kr-text-primary);
   border: 1px solid var(--kr-border);
   border-radius: var(--kr-r-sm);

@@ -262,9 +262,12 @@ impl WorkflowEngine {
 
         // Execute in background
         tokio::spawn(async move {
-            if let Err(e) = runner::execute_run(state, &workflow, &mut run, &tokens, &agents, None, None, None).await {
+            if let Err(e) = runner::execute_run(state.clone(), &workflow, &mut run, &tokens, &agents, None, None, None).await {
                 tracing::error!("Workflow run {} failed: {}", run.id, e);
             }
+            // B6 — surface a silently-failing scheduled/auto run via webhook.
+            // Best-effort: never affects the run. `run.status` is final here.
+            crate::core::run_notify::notify_if_failed(&state, &workflow, &run).await;
         });
 
         Ok(())
@@ -287,6 +290,62 @@ fn heal_steps_in_place(steps: &mut [WorkflowStep]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── C9 (0.8.11) — cross-language step-type guard ─────────────────────
+    //
+    // The Rust runner dispatches on `StepType` at exhaustive `match` sites (no
+    // `_` arm), so the COMPILER already forces every variant to be handled at
+    // every site — adding a StepType can't silently skip the rollback/validation
+    // paths (the class of the 0.8.6 #59 incident). The one place with NO compile
+    // link to the enum is the Python MCP sidecar, which hand-lists the step types
+    // in `step_types_closed_set` (agents read it to author workflows). This test
+    // fails if that list drifts from the Rust enum — the enum side is exhaustive,
+    // so a new variant forces updating this test, which then fails until the
+    // sidecar is updated too.
+    #[test]
+    fn python_sidecar_step_types_match_rust_enum() {
+        // Exhaustive by construction: a new StepType variant is a compile error
+        // here until named.
+        fn variant_name(t: &StepType) -> &'static str {
+            match t {
+                StepType::Agent => "Agent",
+                StepType::ApiCall => "ApiCall",
+                StepType::BatchQuickPrompt => "BatchQuickPrompt",
+                StepType::Notify => "Notify",
+                StepType::Gate => "Gate",
+                StepType::Exec => "Exec",
+                StepType::BatchApiCall => "BatchApiCall",
+                StepType::JsonData => "JsonData",
+                StepType::SubWorkflow => "SubWorkflow",
+            }
+        }
+        let rust: std::collections::BTreeSet<&str> = [
+            StepType::Agent, StepType::ApiCall, StepType::BatchQuickPrompt,
+            StepType::Notify, StepType::Gate, StepType::Exec,
+            StepType::BatchApiCall, StepType::JsonData, StepType::SubWorkflow,
+        ]
+        .iter()
+        .map(variant_name)
+        .collect();
+
+        let py_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/disc-introspection-mcp.py");
+        let py = std::fs::read_to_string(py_path).expect("read sidecar script");
+        let start = py.find("\"step_types_closed_set\"").expect("step_types_closed_set present in sidecar");
+        let arr = &py[start..];
+        let open = arr.find('[').expect("[");
+        let close = arr[open..].find(']').expect("]") + open;
+        let py_types: std::collections::BTreeSet<&str> = arr[open + 1..close]
+            .split(',')
+            .map(|s| s.trim().trim_matches('"'))
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        assert_eq!(
+            rust, py_types,
+            "StepType enum and the Python sidecar's step_types_closed_set have drifted — \
+             update scripts/disc-introspection-mcp.py to match the Rust enum."
+        );
+    }
 
     // ─── Healing pass (heal_steps_in_place) ──────────────────────────────
     //

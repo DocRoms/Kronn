@@ -583,8 +583,18 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         String::new()
     };
 
-    // Use compact format for agents with small context windows (eco-design)
-    let compact = matches!(config.agent_type, AgentType::Codex | AgentType::Kiro | AgentType::Vibe);
+    // Use compact format for agents with small context windows (eco-design).
+    // 0.8.11 — Ollama added: its num_ctx is auto-sized but CAPPED (default
+    // 8192, see OLLAMA_NUM_CTX_CAP); full skill injection measured at ~6k
+    // tokens for a real 6-skill step = 74% of that budget, crowding out the
+    // actual task context (the N2 PR-review diff). Local models also exploit
+    // long generic skill dumps poorly (bench: sharp instructions > bulk
+    // context) — the ~150-char compact summary keeps the pointer without the
+    // cost. Steps that NEED full rules inline them in the prompt template.
+    let compact = matches!(
+        config.agent_type,
+        AgentType::Codex | AgentType::Kiro | AgentType::Vibe | AgentType::Ollama
+    );
 
     // Ensure this run's skills/profiles exist as native files in the
     // directory the agent ACTUALLY runs in.
@@ -1128,27 +1138,86 @@ pub(crate) fn disc_introspection_mcp_path_for_shared_config() -> Option<String> 
 const OLLAMA_NUM_CTX_CAP: u64 = 8192;
 const OLLAMA_NUM_CTX_FLOOR: u64 = 2048;
 
+/// Absolute ceiling for the AUTO-derived cap (0.8.11). Even when a model
+/// advertises a huge trained context (llama3.3:70b → 131072), allocating that
+/// KV blind is exactly the 0.2 tok/s CPU-spill cliff documented above. 32K is
+/// the RAM-blind safe upper bound; operators with headroom go beyond it via
+/// the env override (which wins over everything).
+const OLLAMA_NUM_CTX_AUTO_CEILING: u64 = 32768;
+
 /// Pure parse of the ctx-cap override (split out so it's unit-testable without
-/// mutating process env): a value below the floor or unparseable → the default.
-pub(crate) fn parse_num_ctx_cap(raw: Option<String>) -> u64 {
+/// mutating process env): a value below the floor or unparseable → None (the
+/// auto/model-derived path decides).
+pub(crate) fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
     raw.and_then(|v| v.trim().parse::<u64>().ok())
         .filter(|&v| v >= OLLAMA_NUM_CTX_FLOOR)
-        .unwrap_or(OLLAMA_NUM_CTX_CAP)
 }
 
-/// Effective ctx cap: `KRONN_OLLAMA_NUM_CTX_CAP` if set and sane, else the
-/// portable default. Read per call — cheap, and lets an operator retune without
-/// a rebuild.
-pub(crate) fn ollama_num_ctx_cap() -> u64 {
-    parse_num_ctx_cap(std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok())
+/// Effective ctx cap (0.8.11 — product default, zero configuration):
+///   1. `KRONN_OLLAMA_NUM_CTX_CAP` env — explicit operator override, wins.
+///   2. The MODEL's own trained context (from `/api/show`), clamped to
+///      [FLOOR, AUTO_CEILING] — a user who pulled qwen3:32b gets its real
+///      window automatically instead of a silent 8K truncation.
+///   3. Legacy portable default (8192) when Ollama can't be asked.
+pub(crate) fn resolve_ctx_cap(env_raw: Option<String>, model_limit: Option<u64>) -> u64 {
+    if let Some(v) = parse_num_ctx_cap(env_raw) {
+        return v;
+    }
+    match model_limit {
+        Some(l) => l.clamp(OLLAMA_NUM_CTX_FLOOR, OLLAMA_NUM_CTX_AUTO_CEILING),
+        None => OLLAMA_NUM_CTX_CAP,
+    }
 }
 
-/// Size the context window to the prompt, bounded by [FLOOR, CAP]. Coarse on
+/// Extract a model's trained context length from an Ollama `/api/show`
+/// response: `model_info` carries an arch-prefixed key (`qwen3.context_length`,
+/// `llama.context_length`, …) — match on the suffix. Pure + unit-tested.
+pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<u64> {
+    show_response
+        .get("model_info")?
+        .as_object()?
+        .iter()
+        .find(|(k, _)| k.ends_with(".context_length"))
+        .and_then(|(_, v)| v.as_u64())
+}
+
+/// Ask Ollama for `model`'s trained context length, with a process-lifetime
+/// cache (one `/api/show` per model per boot — the value is static per tag).
+/// `None` on any failure: the caller falls back to the portable default.
+async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u64> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<u64>>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(model).copied()) {
+        return hit;
+    }
+    let fetched = async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .ok()?;
+        let resp = client
+            .post(format!("{}/api/show", base))
+            .json(&serde_json::json!({ "model": model }))
+            .send()
+            .await
+            .ok()?;
+        let v: serde_json::Value = resp.json().await.ok()?;
+        parse_context_length(&v)
+    }
+    .await;
+    if let Ok(mut c) = cache.lock() {
+        c.insert(model.to_string(), fetched);
+    }
+    fetched
+}
+
+/// Size the context window to the prompt, bounded by [FLOOR, cap]. Coarse on
 /// purpose (~3 chars/token + output headroom): this is a memory guard, not
 /// fine-grained sizing.
-pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str) -> u64 {
+pub(crate) fn ollama_num_ctx(system_context: &str, user_prompt: &str, ctx_cap: u64) -> u64 {
     let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
-    est.clamp(OLLAMA_NUM_CTX_FLOOR, ollama_num_ctx_cap())
+    est.clamp(OLLAMA_NUM_CTX_FLOOR, ctx_cap.max(OLLAMA_NUM_CTX_FLOOR))
 }
 
 /// qwen3 models are hybrid-reasoning. Ollama's `think:false` API flag is NOT
@@ -1205,6 +1274,7 @@ pub(crate) fn build_ollama_chat_body(
     system_context: &str,
     user_prompt: &str,
     format: Option<&serde_json::Value>,
+    ctx_cap: u64,
 ) -> serde_json::Value {
     let mut messages = Vec::new();
     if ollama_disables_thinking(model) {
@@ -1224,7 +1294,7 @@ pub(crate) fn build_ollama_chat_body(
             "temperature": 0,
             "top_k": 1,
             "seed": 42,
-            "num_ctx": ollama_num_ctx(system_context, user_prompt),
+            "num_ctx": ollama_num_ctx(system_context, user_prompt, ctx_cap),
         },
     });
     if let Some(fmt) = format {
@@ -1286,7 +1356,26 @@ async fn start_ollama_http(
     let base = crate::api::ollama::ollama_base_url_pub();
     let url = format!("{}/api/chat", base);
 
-    let body = build_ollama_chat_body(model, system_context, user_prompt, format);
+    // 0.8.11 — ctx cap auto-derived from THE MODEL (its trained context via
+    // /api/show, cached), clamped to a RAM-safe ceiling. Zero configuration:
+    // a user who pulled qwen3:32b gets its real window instead of a silent 8K
+    // truncation. Env override still wins for experts.
+    let model_limit = ollama_model_ctx_limit(&base, model).await;
+    let ctx_cap = resolve_ctx_cap(std::env::var("KRONN_OLLAMA_NUM_CTX_CAP").ok(), model_limit);
+    let est = ((system_context.len() + user_prompt.len()) as u64 / 3) + 2048;
+    if est > ctx_cap {
+        tracing::warn!(
+            target: "kronn::ollama",
+            model = %model,
+            estimated_tokens = est,
+            ctx_cap = ctx_cap,
+            model_limit = ?model_limit,
+            "Prompt likely exceeds the context window — Ollama will TRUNCATE it. \
+             Reduce the step's input, or raise KRONN_OLLAMA_NUM_CTX_CAP if your machine has headroom."
+        );
+    }
+
+    let body = build_ollama_chat_body(model, system_context, user_prompt, format, ctx_cap);
 
     // Observability: the effective num_ctx is the #1 confound for local perf —
     // an oversized window balloons the KV cache and spills onto the CPU (0.2

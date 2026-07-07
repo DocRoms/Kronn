@@ -40,6 +40,52 @@ pub fn restart_required(configured_host: &str) -> bool {
     }
 }
 
+/// True when `host` binds ONLY loopback — safe, unreachable from other machines.
+/// Stricter than `!is_exposed_host`: a specific LAN IP (`192.168.x`) is NOT
+/// loopback (it IS reachable), whereas the `is_exposed_host` toggle semantics
+/// only flag the bind-all forms. Used by the boot security guard.
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim();
+    h == "127.0.0.1" || h == "localhost" || h == "::1" || h.starts_with("127.")
+}
+
+/// Does the operator intend LAN exposure? In Docker the backend ALWAYS binds
+/// `0.0.0.0` (nginx must reach it inside the network), so the real LAN-exposure
+/// lever is the *host port publish* — signalled to us by `KRONN_BIND`. Natively,
+/// the resolved bind host is authoritative. Pure + tested.
+pub fn lan_exposed(is_docker: bool, kronn_bind: Option<&str>, native_host: &str) -> bool {
+    if is_docker {
+        kronn_bind.map(|b| !is_loopback_host(b)).unwrap_or(false)
+    } else {
+        !is_loopback_host(native_host)
+    }
+}
+
+/// Boot security guard: `Some(message)` when the instance is LAN-exposed but the
+/// API is unauthenticated (no `auth_enabled`, no token) and the operator did not
+/// acknowledge the risk. Secure-by-default: a fresh `docker compose up` binds
+/// loopback (→ not exposed → `None`); exposing to the LAN requires either auth
+/// or an explicit `KRONN_ALLOW_INSECURE_LAN` acknowledgment. Pure + tested.
+pub fn insecure_lan_boot_error(
+    lan_exposed: bool,
+    auth_enabled: bool,
+    token_configured: bool,
+    ack_insecure: bool,
+) -> Option<String> {
+    if ack_insecure || auth_enabled || token_configured || !lan_exposed {
+        return None;
+    }
+    Some(
+        "REFUSING TO START: Kronn is exposed to the network (LAN/Tailscale) but the API \
+         is unauthenticated — any peer on your network could trigger workflows (incl. Exec \
+         steps) with your credentials.\n  Fix one of:\n    • set KRONN_AUTH_TOKEN=<secret> \
+         (recommended — the frontend and MCP sidecar pick it up automatically), or\n    • \
+         enable auth in Settings, or\n    • set KRONN_ALLOW_INSECURE_LAN=1 to keep the API \
+         open on a trusted home LAN, at your own risk."
+            .to_string(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -63,6 +109,45 @@ mod tests {
             assert!(!restart_required("0.0.0.0"));
             assert!(!restart_required("127.0.0.1"));
         }
+    }
+
+    #[test]
+    fn loopback_detection_is_strict() {
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("::1"));
+        assert!(is_loopback_host("127.0.1.1"));
+        assert!(is_loopback_host("  127.0.0.1 "));
+        // A specific LAN IP IS reachable → NOT loopback (stricter than the toggle).
+        assert!(!is_loopback_host("192.168.1.10"));
+        assert!(!is_loopback_host("0.0.0.0"));
+        assert!(!is_loopback_host("::"));
+    }
+
+    #[test]
+    fn lan_exposed_is_docker_aware() {
+        // Docker: internal bind is always 0.0.0.0 — only KRONN_BIND (host publish) counts.
+        assert!(!lan_exposed(true, Some("127.0.0.1"), "0.0.0.0"), "docker loopback publish = safe");
+        assert!(!lan_exposed(true, None, "0.0.0.0"), "docker no KRONN_BIND = default safe");
+        assert!(lan_exposed(true, Some("0.0.0.0"), "0.0.0.0"), "docker opted into LAN publish");
+        // Native: the resolved bind host is authoritative.
+        assert!(!lan_exposed(false, None, "127.0.0.1"));
+        assert!(lan_exposed(false, None, "0.0.0.0"));
+        assert!(lan_exposed(false, None, "192.168.1.10"));
+    }
+
+    #[test]
+    fn insecure_lan_guard_only_fires_when_exposed_and_unauthenticated() {
+        // Safe: not exposed → never blocks, regardless of auth.
+        assert!(insecure_lan_boot_error(false, false, false, false).is_none());
+        // Exposed + unauthenticated + not acknowledged → BLOCK.
+        assert!(insecure_lan_boot_error(true, false, false, false).is_some());
+        // Exposed but authenticated (token) → fine.
+        assert!(insecure_lan_boot_error(true, false, true, false).is_none());
+        // Exposed but auth_enabled → fine.
+        assert!(insecure_lan_boot_error(true, true, false, false).is_none());
+        // Exposed + unauthenticated but explicitly acknowledged → allowed.
+        assert!(insecure_lan_boot_error(true, false, false, true).is_none());
     }
 
     #[test]

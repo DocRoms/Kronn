@@ -14,6 +14,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
+import { useState } from 'react';
 import { splitMessageSeed } from '../MessageBubble';
 
 describe('splitMessageSeed (0.8.5)', () => {
@@ -99,8 +100,7 @@ describe('Kronn seed toggle (via splitMessageSeed + manual render)', () => {
     // Smoke render of a minimal disclosure that mirrors the production
     // KronnSeedToggle, so the assertion stays decoupled from styling.
     function Toggle({ payload }: { payload: string }) {
-      const React = require('react') as typeof import('react');
-      const [open, setOpen] = React.useState(false);
+      const [open, setOpen] = useState(false);
       return (
         <div>
           <button onClick={() => setOpen(o => !o)}>{open ? '▾' : '▸'} Contexte</button>

@@ -3472,5 +3472,51 @@ class DiscListTests(unittest.TestCase):
         self.assertEqual(out["disc_count"], 3)
 
 
+class HttpAuthHeaderTests(unittest.TestCase):
+    """0.8.11 — the sidecar authenticates to the backend: `_http`/`_http_text`
+    send `Authorization: Bearer <token>` iff KRONN_AUTH_TOKEN is set. This is the
+    contract that makes an auth-enabled / LAN-exposed backend reachable by its
+    own sidecar (was a silent 401 before the boot injects the token)."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def _ok_response(self):
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = b'{"success": true, "data": {}}'
+        cm.__exit__.return_value = False
+        return cm
+
+    def test_http_adds_bearer_when_token_present(self):
+        with mock.patch.dict(os.environ,
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_AUTH_TOKEN": "sekret"},
+                             clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
+            self.mod._http("GET", "/api/health")
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer sekret")
+
+    def test_http_omits_auth_when_no_token(self):
+        with mock.patch.dict(os.environ,
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140"},
+                             clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=self._ok_response()) as urlopen:
+            self.mod._http("GET", "/api/health")
+        req = urlopen.call_args.args[0]
+        self.assertIsNone(req.get_header("Authorization"))
+
+    def test_http_text_adds_bearer_when_token_present(self):
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = b'{"kind":"kronn.workflow"}'
+        cm.__exit__.return_value = False
+        with mock.patch.dict(os.environ,
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140", "KRONN_AUTH_TOKEN": "tok2"},
+                             clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=cm) as urlopen:
+            self.mod._http_text("GET", "/api/workflows/x/export")
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer tok2")
+
+
 if __name__ == "__main__":
     unittest.main()

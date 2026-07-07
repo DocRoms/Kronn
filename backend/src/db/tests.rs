@@ -1376,6 +1376,100 @@ fn workflow_runs_insert_and_list() {
 }
 
 #[test]
+fn purge_runs_older_than_deletes_old_terminal_but_preserves_parents_and_recent() {
+    use chrono::Duration;
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let old = || Utc::now() - Duration::days(100);
+
+    // A parent (old, terminal) referenced by a child → must be PRESERVED.
+    let mut parent = sample_run("parent", "w1");
+    parent.status = RunStatus::Success;
+    parent.finished_at = Some(old());
+    crate::db::workflows::insert_run(&conn, &parent).unwrap();
+
+    let mut child = sample_run("child", "w1");
+    child.status = RunStatus::Success;
+    child.parent_run_id = Some("parent".into());
+    child.finished_at = Some(old());
+    crate::db::workflows::insert_run(&conn, &child).unwrap();
+
+    // Old standalone terminal → DELETED.
+    let mut old_standalone = sample_run("old-standalone", "w1");
+    old_standalone.status = RunStatus::Failed;
+    old_standalone.finished_at = Some(old());
+    crate::db::workflows::insert_run(&conn, &old_standalone).unwrap();
+
+    // Recent terminal → kept (within window).
+    let mut recent = sample_run("recent", "w1");
+    recent.status = RunStatus::Success;
+    recent.finished_at = Some(Utc::now());
+    crate::db::workflows::insert_run(&conn, &recent).unwrap();
+
+    // Old but still Running (no finished_at) → never purged.
+    let mut running = sample_run("running", "w1");
+    running.status = RunStatus::Running;
+    running.started_at = old();
+    crate::db::workflows::insert_run(&conn, &running).unwrap();
+
+    let n = crate::db::workflows::purge_runs_older_than(&conn, 90).unwrap();
+    assert_eq!(n, 2, "old standalone terminal + the (unreferenced-after) child");
+
+    let exists = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().is_some();
+    assert!(exists("parent"), "parent referenced by a child is preserved");
+    assert!(!exists("old-standalone"), "old standalone terminal purged");
+    assert!(!exists("child"), "old terminal child purged");
+    assert!(exists("recent"), "recent run kept");
+    assert!(exists("running"), "non-terminal run never purged");
+}
+
+#[test]
+fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
+    use chrono::Duration;
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+
+    // Stale: Running, started 1h ago → should become Interrupted.
+    let mut stale = sample_run("stale", "w1");
+    stale.status = RunStatus::Running;
+    stale.started_at = Utc::now() - Duration::hours(1);
+    crate::db::workflows::insert_run(&conn, &stale).unwrap();
+
+    // Stale pending too.
+    let mut stale_pending = sample_run("stale-pending", "w1");
+    stale_pending.status = RunStatus::Pending;
+    stale_pending.started_at = Utc::now() - Duration::hours(1);
+    crate::db::workflows::insert_run(&conn, &stale_pending).unwrap();
+
+    // Fresh: Running, started now → must NOT be touched (< cutoff).
+    let mut fresh = sample_run("fresh", "w1");
+    fresh.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &fresh).unwrap();
+
+    // Already terminal: Success, old → must NOT be touched.
+    let mut done = sample_run("done", "w1");
+    done.status = RunStatus::Success;
+    done.started_at = Utc::now() - Duration::hours(2);
+    crate::db::workflows::insert_run(&conn, &done).unwrap();
+
+    let n = crate::db::workflows::reconcile_stale_runs(&conn, 30 * 60).unwrap();
+    assert_eq!(n, 2, "the two stale in-flight runs are reconciled");
+
+    let by_id = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().unwrap();
+    assert_eq!(by_id("stale").status, RunStatus::Interrupted);
+    assert!(by_id("stale").finished_at.is_some(), "Interrupted run gets a finished_at");
+    assert_eq!(by_id("stale-pending").status, RunStatus::Interrupted);
+    assert_eq!(by_id("fresh").status, RunStatus::Running, "recent run untouched");
+    assert_eq!(by_id("done").status, RunStatus::Success, "terminal run untouched");
+
+    // Cutoff 0 = the BOOT call (Copilot, PR #114): at boot there is no runner,
+    // so even a JUST-started zombie must flip — no 30-min lie window.
+    let n0 = crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
+    assert_eq!(n0, 1, "the fresh zombie is reconciled at cutoff 0");
+    assert_eq!(by_id("fresh").status, RunStatus::Interrupted);
+}
+
+#[test]
 fn list_runs_enriches_subworkflow_parent_provenance() {
     let conn = test_db();
     // A parent workflow with a run, and a child workflow whose run points at it.

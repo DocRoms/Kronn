@@ -1,7 +1,7 @@
 - **ID**: TD-20260510-codex-upstream-issue-draft
 - **Area**: External / upstream
 - **Severity**: Low (dependency on TD-20260510-codex-mcp-sandbox-block)
-- **Status**: 🟢 Draft prepared — needs to be filed at https://github.com/openai/codex-cli
+- **Status**: 🟢 Draft prepared — READY TO FILE at https://github.com/openai/codex-cli (0.8.11 audit follow-up). This is an UPSTREAM post, not internal code — it needs the maintainer's GitHub account to submit; once filed, close this TD. No further code action on the Kronn side.
 
 ## Purpose
 

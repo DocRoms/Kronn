@@ -71,6 +71,10 @@ services:
       # exec fails on the broken symlink target
       # (TD-20260507-claude-symlink-not-resolvable).
       - ${HOME}/.local/share:${HOME}/.local/share:ro
+      # 0.8.11 (B6) — uncomment + set KRONN_BACKUP_DIR=/backups to store scheduled
+      # DB backups on the HOST, outside the data volume (so a lost volume doesn't
+      # lose the backups too). Point the left side wherever you keep backups.
+      # - ${KRONN_BACKUP_HOST_DIR:-./kronn-backups}:/backups:rw
       - npm-cache:/home/kronn/.npm  # Persistent npm cache for npx agent execution
       - uv-cache:/home/kronn/.cache/uv  # Isolated uv cache (named volume — see TD-20260429-uv-cache-uid-mismatch: bind-mounting ~/.cache/uv left root-owned files on host pre-APP_UID, breaking host `uvx` for MCP servers in CC CLI / Codex / Gemini)
       - uv-tools:/home/kronn/.local/share/uv  # Persistent uv tool installs (CloudWatch, Atlassian MCP servers)
@@ -144,6 +148,21 @@ services:
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       - GH_TOKEN=${GH_TOKEN:-${GITHUB_TOKEN:-}}
       - OLLAMA_HOST=${OLLAMA_HOST:-http://host.docker.internal:11434}
+      # 0.8.11 — LAN exposure is opt-in. The gateway/frontend host ports below
+      # bind 127.0.0.1 by default; set KRONN_BIND=0.0.0.0 (e.g. for a WSL
+      # backend reached from a Mac frontend) to publish on the LAN. When you do,
+      # the backend REFUSES to start unauthenticated — set KRONN_AUTH_TOKEN, or
+      # KRONN_ALLOW_INSECURE_LAN=1 to keep it open on a trusted home network.
+      - KRONN_BIND=${KRONN_BIND:-127.0.0.1}
+      - KRONN_ALLOW_INSECURE_LAN=${KRONN_ALLOW_INSECURE_LAN:-}
+      - KRONN_AUTH_TOKEN=${KRONN_AUTH_TOKEN:-}
+      # 0.8.11 (B6) — failure webhook (Slack/Teams/generic) + scheduled backups.
+      # A backup dir OUTSIDE the data volume needs a host bind-mount (see the
+      # commented volume below); set KRONN_BACKUP_DIR to /backups to use it.
+      - KRONN_FAILURE_NOTIFY_URL=${KRONN_FAILURE_NOTIFY_URL:-}
+      - KRONN_BACKUP_DIR=${KRONN_BACKUP_DIR:-}
+      - KRONN_BACKUP_INTERVAL_HOURS=${KRONN_BACKUP_INTERVAL_HOURS:-24}
+      - KRONN_BACKUP_KEEP=${KRONN_BACKUP_KEEP:-7}
       # RUST_LOG: if unset, the backend reads `config.server.debug_mode` to
       # pick a sensible default (info vs debug). Set `KRONN_RUST_LOG` in the
       # env (or via `./kronn start --debug` / `make start DEBUG=1`) to
@@ -176,7 +195,8 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3141:80"
+      # 0.8.11 — loopback by default; KRONN_BIND=0.0.0.0 opts into LAN exposure.
+      - "${KRONN_BIND:-127.0.0.1}:3141:80"
     deploy:
       resources:
         limits:
@@ -202,7 +222,9 @@ services:
           memory: 128M
           cpus: '0.25'
     ports:
-      - "3140:80"
+      # 0.8.11 — main entry point. Loopback by default (secure out-of-the-box);
+      # set KRONN_BIND=0.0.0.0 to expose on the LAN (backend then requires auth).
+      - "${KRONN_BIND:-127.0.0.1}:3140:80"
     volumes:
       - ./.docker/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:

@@ -11,10 +11,17 @@ on:
 # ship Node 24-compatible entrypoints — this just flips the runtime selector.
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  # 0.8.11 — onnxruntime-node's postinstall downloads CUDA GPU binaries from
+  # api.nuget.org on linux-x64: never used in CI (browser app → onnxruntime-web,
+  # CPU binaries bundled in the npm package) and api.nuget.org regularly times
+  # out on GitHub runners — THE recurring flake killing Security Scan /
+  # build-frontend at `pnpm install`. Documented knob of the package's install
+  # script; also set in frontend/Dockerfile + frontend/.npmrc.
+  ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
   test-backend:
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -115,11 +122,33 @@ jobs:
         working-directory: frontend
         run: pnpm build
 
+      # 0.8.11 — lint gates. eslint fails on ERRORS (0 today) and ratchets the
+      # WARNING budget so the react-19-strict backlog can only shrink (see
+      # docs/tech-debt/TD-20260509-react19-effect-rules.md). lint:i18n fails on
+      # a missing/undefined translation key (caught `common.saving` at wire-up).
+      - name: Lint — eslint (0 errors, warning budget)
+        working-directory: frontend
+        run: pnpm lint --max-warnings 162
+      - name: Lint — i18n key parity (fr/en/es)
+        working-directory: frontend
+        run: pnpm lint:i18n
+
       - name: cargo check — desktop crate
         working-directory: desktop/src-tauri
         run: cargo check --locked
         # --locked so a drift in Cargo.lock vs Cargo.toml also fails here,
         # not just at release.
+
+      # 0.8.11 (C8) — typegen drift guard. Regenerate the per-type ts-rs
+      # bindings from the Rust models, then fail if a frontend-declared type in
+      # generated.ts is missing a field the Rust model has (the recurring
+      # "added a Rust field, forgot generated.ts" drift — hit 4× in 0.8.x).
+      - name: Types — ts-rs bindings + drift guard
+        # NOTE: this job's default working-directory is `backend` (see defaults
+        # at the top of the job) — paths below are relative to it.
+        run: |
+          cargo test export_bindings -- --nocapture
+          node ../frontend/scripts/check-types-drift.mjs
 
       # ── Anti-regression lints ─────────────────────────────────────────
       #
@@ -223,7 +252,7 @@ jobs:
   # as the AgentIo refactor removes the rust loop duplication. This is the
   # mechanical guard that stops agents (and humans) from merging dup'd code.
   duplication-check:
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -246,7 +275,7 @@ jobs:
   # cache behaviour, missing-env handling, idempotency-collision guard
   # on `source_session_id`. Stdlib only — zero dev deps, sub-second run.
   test-python:
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -260,7 +289,7 @@ jobs:
         run: python3 -m unittest discover -s backend/scripts -p 'test_*.py' -v
 
   test-frontend:
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -302,7 +331,7 @@ jobs:
     # 0.6.0 "Create button silent", "JsonData ghost agent", "Quick APIs
     # tab buttons leak" were all UI-only bugs that pure-JS tests can't
     # see).
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     # ── Playwright official container ─────────────────────────────────
     # Chromium + chromium_headless_shell + ffmpeg + all OS deps are BAKED
@@ -454,7 +483,7 @@ jobs:
           retention-days: 7
 
   test-shell:
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -465,7 +494,7 @@ jobs:
         run: make test-shell
 
   security-scan:
-    if: github.event.label.name == 'ci-test'
+    if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

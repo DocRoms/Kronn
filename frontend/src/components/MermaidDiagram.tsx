@@ -30,6 +30,7 @@ interface MermaidDiagramProps {
  * subsequent renders don't re-import). The init call sets a neutral
  * theme that respects Kronn's `--kr-bg-*` palette.
  */
+// eslint-disable-next-line @typescript-eslint/consistent-type-imports -- `typeof import()` is the idiomatic way to type a lazily-imported module without eagerly loading it.
 let mermaidPromise: Promise<typeof import('mermaid').default> | null = null;
 function getMermaid() {
   if (!mermaidPromise) {
@@ -190,7 +191,7 @@ function MermaidDiagramImpl({ source }: MermaidDiagramProps) {
   }
 </style>
 </head>
-<body>${svgMarkupRef.current}<script>window.addEventListener('load',()=>{setTimeout(()=>{window.print();},100);});<\/script></body>
+<body>${svgMarkupRef.current}<script>window.addEventListener('load',()=>{setTimeout(()=>{window.print();},100);});</script></body>
 </html>`);
     win.document.close();
   };

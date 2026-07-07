@@ -309,6 +309,7 @@ mod tests {
     // ─── ensure_redirectors ────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     #[serial(kronn_templates_env)]
     fn ensure_redirectors_skips_projects_without_ai_dir() {
         let tmp = setup_tmp("redir-no-ai");
@@ -323,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial(kronn_templates_env)]
     fn ensure_redirectors_creates_missing_files() {
         let tmp = setup_tmp("redir-create");
@@ -355,6 +357,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial(kronn_templates_env)]
     fn ensure_redirectors_does_not_overwrite_existing() {
         let tmp = setup_tmp("redir-no-overwrite");
@@ -1793,6 +1796,7 @@ args = ["@example/old-mcp"]
     use crate::core::mcp_scanner::{CodexSync, CopilotSync, HostMcpSync};
 
     #[test]
+    #[serial]
     fn codex_global_sync_emits_kronn_internal_into_config_toml() {
         // Redirect Codex's home-config lookup to a tmp dir via the
         // KRONN_HOST_HOME hook. We don't share global env between tests
@@ -1836,6 +1840,7 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
+    #[serial]
     fn copilot_global_sync_emits_kronn_internal_into_mcp_config_json() {
         let tmp = setup_tmp("copilot-global-inject");
         let home = tmp.join("fake-home");

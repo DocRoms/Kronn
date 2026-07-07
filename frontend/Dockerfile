@@ -15,7 +15,12 @@ RUN corepack enable
 # install-script deps). Missing it triggers ERR_PNPM_LOCKFILE_CONFIG_MISMATCH
 # on `--frozen-lockfile`. The `*` glob keeps the COPY tolerant if the file
 # isn't present in older branches.
-COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* ./
+COPY package.json pnpm-lock.yaml* pnpm-workspace.yaml* .npmrc* ./
+# 0.8.11 — onnxruntime-node's postinstall downloads CUDA GPU binaries from
+# api.nuget.org on linux-x64: never used (browser bundle → onnxruntime-web,
+# CPU binaries are bundled in the npm package) and the download regularly
+# times out. Skip it (documented knob of the package's install script).
+ENV ONNXRUNTIME_NODE_INSTALL=skip
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 

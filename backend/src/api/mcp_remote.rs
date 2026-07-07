@@ -63,6 +63,7 @@ fn avg_workflow_duration_ms(
                     | RunStatus::Failed
                     | RunStatus::Cancelled
                     | RunStatus::StoppedByGuard
+                    | RunStatus::Interrupted
             )
         })
         .filter_map(|r| {
@@ -325,6 +326,7 @@ fn is_terminal_status(status: &RunStatus) -> bool {
             | RunStatus::Failed
             | RunStatus::Cancelled
             | RunStatus::StoppedByGuard
+            | RunStatus::Interrupted
     )
 }
 

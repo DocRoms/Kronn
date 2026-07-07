@@ -716,7 +716,7 @@ pub async fn get(
 ) -> Json<ApiResponse<Workflow>> {
     match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id)).await {
         Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
-        Ok(None) => Json(ApiResponse::err("Workflow not found")),
+        Ok(None) => Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -910,7 +910,7 @@ pub async fn update(
     let wf_id = id.clone();
     let existing = match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id)).await {
         Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err("Workflow not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -1354,7 +1354,7 @@ pub async fn import_workflow(
         Ok(root_out)
     }).await {
         Ok(Some(w)) => Json(ApiResponse::ok(w)),
-        Ok(None) => Json(ApiResponse::err("Import interne : workflow racine introuvable après insertion")),
+        Ok(None) => Json(ApiResponse::err_coded(ApiErrorCode::Internal, "Import interne : workflow racine introuvable après insertion")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -2129,7 +2129,7 @@ pub async fn decide_run(
         .await
     {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err("Run not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2164,7 +2164,7 @@ pub async fn decide_run(
         .await
     {
         Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err("Workflow not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2277,7 +2277,7 @@ pub async fn get_run(
 ) -> Json<ApiResponse<WorkflowRun>> {
     match state.db.with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id)).await {
         Ok(Some(run)) => Json(ApiResponse::ok(run)),
-        Ok(None) => Json(ApiResponse::err("Run not found")),
+        Ok(None) => Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -2351,7 +2351,7 @@ pub async fn test_worktree(
         move |conn| crate::db::workflows::get_run(conn, &run_id)
     }).await {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err("Run not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2367,14 +2367,14 @@ pub async fn test_worktree(
         move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
     }).await {
         Ok(Some(w)) => w,
-        Ok(None) => return Json(ApiResponse::err("Parent workflow not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Parent workflow not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     let project_path = if let Some(pid) = workflow.project_id.clone() {
         match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
             Ok(Some(p)) => p.path,
-            _ => return Json(ApiResponse::err("Project not found for this workflow")),
+            _ => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Project not found for this workflow")),
         }
     } else {
         return Json(ApiResponse::err("Workflow has no project — cannot create a test worktree"));
@@ -2439,7 +2439,7 @@ pub async fn delete_test_worktree(
         move |conn| crate::db::workflows::get_run(conn, &run_id)
     }).await {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err("Run not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2448,7 +2448,7 @@ pub async fn delete_test_worktree(
         move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
     }).await {
         Ok(Some(w)) => w,
-        _ => return Json(ApiResponse::err("Parent workflow not found")),
+        _ => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Parent workflow not found")),
     };
 
     let project_path = if let Some(pid) = workflow.project_id.clone() {

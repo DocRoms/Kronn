@@ -81,20 +81,58 @@ pub struct AiSearchResult {
 
 // ─── Generic API response wrappers ────────────────────────────────────────
 
+/// D11 (0.8.11) — machine-readable error category, so the frontend and the MCP
+/// tools can branch on the KIND of failure instead of string-matching `error`.
+/// Serialized as a stable snake_case string in `ApiResponse.error_code`.
+/// Introduced incrementally: handlers opt in via `ApiResponse::err_coded`;
+/// legacy `ApiResponse::err` leaves `error_code` unset (back-compatible).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum ApiErrorCode {
+    /// The requested resource does not exist (→ HTTP 404 semantics).
+    NotFound,
+    /// The request is malformed / fails a business rule (→ 400/422).
+    Validation,
+    /// The request conflicts with current state (→ 409).
+    Conflict,
+    /// An unexpected server-side failure (→ 500).
+    Internal,
+}
+
+impl ApiErrorCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ApiErrorCode::NotFound => "not_found",
+            ApiErrorCode::Validation => "validation",
+            ApiErrorCode::Conflict => "conflict",
+            ApiErrorCode::Internal => "internal",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct ApiResponse<T: Serialize> {
     pub success: bool,
     pub data: Option<T>,
     pub error: Option<String>,
+    /// D11 — stable error category (see `ApiErrorCode`). Omitted from the wire
+    /// when unset so legacy clients + untouched handlers are unaffected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
 }
 
 impl<T: Serialize> ApiResponse<T> {
     pub fn ok(data: T) -> Self {
-        Self { success: true, data: Some(data), error: None }
+        Self { success: true, data: Some(data), error: None, error_code: None }
     }
 
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(msg.into()) }
+        Self { success: false, data: None, error: Some(msg.into()), error_code: None }
+    }
+
+    /// Error response with a machine-readable category. Prefer this over `err`
+    /// in new/updated handlers so the frontend + MCP can branch on the kind.
+    pub fn err_coded(code: ApiErrorCode, msg: impl Into<String>) -> Self {
+        Self { success: false, data: None, error: Some(msg.into()), error_code: Some(code.as_str().to_string()) }
     }
 }
 

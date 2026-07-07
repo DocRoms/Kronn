@@ -64,7 +64,7 @@ describe('regression tests', () => {
         participants: ['ClaudeCode'],
         messages: [],
         message_count: 5, non_system_message_count: 5,
-        archived: false, pinned: false,
+        archived: false, pinned: false, pin_first_message: false,
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
@@ -90,7 +90,7 @@ describe('regression tests', () => {
         messages: [],       // empty from list endpoint
         message_count: 10,            // inflated by 8 System rows
         non_system_message_count: 2,  // the real "to read" count
-        archived: false, pinned: false,
+        archived: false, pinned: false, pin_first_message: false,
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',

@@ -76,7 +76,7 @@ mod tests {
     //     generated text — greedy-stable ≠ bit-exact on Metal, would be flaky) ─
     #[test]
     fn ollama_body_has_deterministic_options() {
-        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None);
+        let body = build_ollama_chat_body("qwen3:8b", "sys", "hi", None, 8192);
         let opts = &body["options"];
         assert_eq!(opts["temperature"], 0);
         assert_eq!(opts["top_k"], 1);
@@ -88,12 +88,12 @@ mod tests {
     #[test]
     fn ollama_body_injects_no_think_for_qwen3_only() {
         // qwen3 → a dedicated `/no_think` system message is prepended.
-        let q = build_ollama_chat_body("qwen3:30b-a3b", "", "hi", None);
+        let q = build_ollama_chat_body("qwen3:30b-a3b", "", "hi", None, 8192);
         let msgs = q["messages"].as_array().unwrap();
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[0]["content"], "/no_think");
         // Non-qwen3 (e.g. llama3.3) → no /no_think message at all.
-        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None);
+        let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None, 8192);
         let lmsgs = l["messages"].as_array().unwrap();
         assert!(!lmsgs.iter().any(|m| m["content"] == "/no_think"),
             "no_think must be qwen3-only");
@@ -102,21 +102,21 @@ mod tests {
     #[test]
     fn ollama_body_format_switches_to_non_stream() {
         // No format → stream text.
-        let free = build_ollama_chat_body("qwen3:8b", "", "hi", None);
+        let free = build_ollama_chat_body("qwen3:8b", "", "hi", None, 8192);
         assert_eq!(free["stream"], true);
         assert!(free.get("format").is_none());
         // TypedSchema format → non-stream (one validated JSON blob) + schema passed through.
         let schema = serde_json::json!({"type":"object","properties":{"x":{"type":"integer"}}});
-        let typed = build_ollama_chat_body("qwen3:8b", "", "hi", Some(&schema));
+        let typed = build_ollama_chat_body("qwen3:8b", "", "hi", Some(&schema), 8192);
         assert_eq!(typed["stream"], false);
         assert_eq!(typed["format"], schema);
     }
 
     #[test]
     fn ollama_num_ctx_is_clamped_both_ends() {
-        assert_eq!(ollama_num_ctx("", ""), 2048, "tiny prompt → floor");
+        assert_eq!(ollama_num_ctx("", "", 8192), 2048, "tiny prompt → floor");
         let huge = "x".repeat(100_000);
-        assert_eq!(ollama_num_ctx(&huge, &huge), 8192, "huge prompt → cap");
+        assert_eq!(ollama_num_ctx(&huge, &huge, 8192), 8192, "huge prompt → cap");
     }
 
     #[tokio::test]
@@ -982,16 +982,43 @@ Suite de la réponse.";
 
     #[test]
     fn parse_num_ctx_cap_honors_override_and_guards() {
-        // No override → portable default.
-        assert_eq!(parse_num_ctx_cap(None), 8192);
-        // Valid larger value (GPU box) → honored.
-        assert_eq!(parse_num_ctx_cap(Some("16384".into())), 16384);
-        assert_eq!(parse_num_ctx_cap(Some(" 32768 ".into())), 32768);
-        // Below the floor → rejected, falls back to default (never starve ctx).
-        assert_eq!(parse_num_ctx_cap(Some("512".into())), 8192);
-        // Garbage → default.
-        assert_eq!(parse_num_ctx_cap(Some("banana".into())), 8192);
-        assert_eq!(parse_num_ctx_cap(Some("".into())), 8192);
+        // 0.8.11 — parse returns Option: None lets the model-derived auto path decide.
+        assert_eq!(parse_num_ctx_cap(None), None);
+        assert_eq!(parse_num_ctx_cap(Some("16384".into())), Some(16384));
+        assert_eq!(parse_num_ctx_cap(Some(" 32768 ".into())), Some(32768));
+        // Below the floor → rejected (never starve ctx) → auto path.
+        assert_eq!(parse_num_ctx_cap(Some("512".into())), None);
+        assert_eq!(parse_num_ctx_cap(Some("banana".into())), None);
+        assert_eq!(parse_num_ctx_cap(Some("".into())), None);
+    }
+
+    // ─── 0.8.11 — zero-config ctx cap: model-derived, env override wins ──────
+    #[test]
+    fn resolve_ctx_cap_env_wins_then_model_then_default() {
+        // Env override wins over everything (even a bigger model limit).
+        assert_eq!(resolve_ctx_cap(Some("24576".into()), Some(131072)), 24576);
+        // No env: the model's trained context, clamped to the RAM-safe ceiling.
+        assert_eq!(resolve_ctx_cap(None, Some(40960)), 32768, "qwen3 40K → ceiling 32K");
+        assert_eq!(resolve_ctx_cap(None, Some(131072)), 32768, "llama3.3 131K → ceiling");
+        assert_eq!(resolve_ctx_cap(None, Some(16384)), 16384, "model below ceiling → as-is");
+        assert_eq!(resolve_ctx_cap(None, Some(1024)), 2048, "tiny model limit → floor");
+        // Ollama unreachable → legacy portable default.
+        assert_eq!(resolve_ctx_cap(None, None), 8192);
+        // Bad env falls through to the model-derived path.
+        assert_eq!(resolve_ctx_cap(Some("banana".into()), Some(16384)), 16384);
+    }
+
+    #[test]
+    fn parse_context_length_reads_arch_prefixed_key() {
+        let show = serde_json::json!({
+            "model_info": { "general.architecture": "qwen3", "qwen3.context_length": 40960 }
+        });
+        assert_eq!(parse_context_length(&show), Some(40960));
+        let llama = serde_json::json!({ "model_info": { "llama.context_length": 131072 } });
+        assert_eq!(parse_context_length(&llama), Some(131072));
+        // No model_info / no matching key → None.
+        assert_eq!(parse_context_length(&serde_json::json!({})), None);
+        assert_eq!(parse_context_length(&serde_json::json!({"model_info": {"x": 1}})), None);
     }
 
     // ─── effective_model_flag: explicit model override beats tier ─────────────

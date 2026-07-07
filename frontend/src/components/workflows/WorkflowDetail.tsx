@@ -163,6 +163,9 @@ export interface WorkflowDetailProps {
   /** #11 — jump to a SPECIFIC child run (workflow + run id): opens that
    *  workflow's detail and focuses the exact run. */
   onNavigateToRun?: (workflowId: string, runId: string) => void;
+  /** 0.8.11 UX — one-click enable/disable from the detail header (a disabled
+   *  workflow's launch button is inert; this is the visible way out). */
+  onToggleEnabled?: (enabled: boolean) => void;
   /** #11 — a run id to auto-expand + scroll into view once loaded. */
   focusRunId?: string | null;
   /** 0.7.0 UX pass — export the workflow as a JSON file. The handler
@@ -650,6 +653,7 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             {AGENT_LABELS[step.agent] ?? step.agent}
           </span>
         )}
+        {isAgentLike && <TierBadge step={step} t={t} />}
         {isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
           <span className="flex-row gap-1 text-xs text-warning">
             <AlertTriangle size={10} />
@@ -1120,6 +1124,27 @@ export function LiveFinishedBanner({
  *  `usesTokens` splits steps into "agent" (LLM, costs tokens) vs the
  *  mechanical/deterministic ones (0 token) — the headline distinction Kronn
  *  sells. Agent + BatchQuickPrompt both run an LLM. */
+/** 0.8.11 — per-step model tier for display. Surface only a non-default choice
+ *  (economy/reasoning) — `default` is the norm, showing it would be noise. The
+ *  emote mirrors the wizard selector so a step's model class is scannable. */
+const TIER_EMOTE: Record<string, string> = { economy: '⚡', default: '🎯', reasoning: '🧠' };
+function stepTier(step: WorkflowStep): 'economy' | 'reasoning' | null {
+  const tr = step.agent_settings?.tier;
+  return tr === 'economy' || tr === 'reasoning' ? tr : null;
+}
+
+/** Non-default model-tier badge for an Agent step. `chip` = compact (emote only)
+ *  for the pipeline; otherwise emote + label for the detail card. Renders
+ *  nothing for a default/unset tier. */
+function TierBadge({ step, t, chip }: { step: WorkflowStep; t: (k: string) => string; chip?: boolean }) {
+  const tr = stepTier(step);
+  if (!tr) return null;
+  const label = t(`disc.tier.${tr}`);
+  return chip
+    ? <span className="wf-pipe-chip-tier" title={label}>{TIER_EMOTE[tr]}</span>
+    : <span className="wf-step-tier" title={label}>{TIER_EMOTE[tr]} {label}</span>;
+}
+
 function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug; usesTokens: boolean } {
   switch (step.step_type?.type) {
     case 'ApiCall': return { kind: 'api', Icon: Plug, usesTokens: false };
@@ -1133,7 +1158,7 @@ function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug;
   }
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   // Run-list control bar (#2): status filter + free-text search + fold past N.
@@ -1353,10 +1378,29 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
           className="wf-small-btn wf-small-btn-accent"
           onClick={onTrigger}
           disabled={!workflow.enabled || triggering}
+          title={!workflow.enabled ? t('wf.launchDisabledHint') : undefined}
         >
           {triggering ? <Loader2 size={10} /> : <Play size={10} />}
           {t('wf.launch')}
         </button>
+        {/* 0.8.11 UX — a disabled workflow used to leave "Lancer" silently
+            inert (clone lands disabled by design → user clicks, nothing
+            happens, no clue why). Make the state VISIBLE and actionable:
+            an explanatory chip + a one-click enable. */}
+        {!workflow.enabled && (
+          <span className="wf-disabled-chip" title={t('wf.launchDisabledHint')}>
+            ⏸ {t('wf.disabledChip')}
+          </span>
+        )}
+        {!workflow.enabled && onToggleEnabled && (
+          <button
+            className="wf-small-btn wf-enable-btn"
+            onClick={() => onToggleEnabled(true)}
+            title={t('wf.launchDisabledHint')}
+          >
+            {t('wf.enableNow')}
+          </button>
+        )}
       </div>
 
       {/* Trigger info */}
@@ -1440,6 +1484,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                           {AGENT_LABELS[step.agent] ?? step.agent}
                         </span>
                       )}
+                      {isAgentStep && <TierBadge step={step} t={t} chip />}
                     </button>
                   </Fragment>
                 );

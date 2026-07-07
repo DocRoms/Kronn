@@ -32,7 +32,7 @@ function makeDiscussion(overrides: Partial<Discussion> = {}): Discussion {
     messages: [],
     message_count: 0, non_system_message_count: 0,
     archived: false,
-    pinned: false,
+    pinned: false, pin_first_message: false,
     workspace_mode: 'Isolated',
     worktree_branch: 'kronn/test-branch',
     workspace_path: '/tmp/worktree',
