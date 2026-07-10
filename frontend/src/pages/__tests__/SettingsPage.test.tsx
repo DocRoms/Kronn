@@ -384,4 +384,23 @@ describe('SettingsPage', () => {
     const body = document.body.textContent!;
     expect(body).toContain('GitHub Copilot');
   });
+
+  it('max-agents slider reverts to the previous value and toasts when the save fails', async () => {
+    // Silent-error fix (2026-07): the slider was optimistic with no refetch,
+    // so a failed setServerConfig left the UI at a value the backend never
+    // persisted. Pin: explicit revert + visible error toast.
+    const { config } = await import('../../lib/api');
+    (config.setServerConfig as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('boom'));
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const slider = screen.getByLabelText('Agents simultanés max') as HTMLInputElement;
+    // Seeded from the getServerConfig mock (max_concurrent_agents: 5).
+    expect(slider.value).toBe('5');
+
+    await act(async () => { fireEvent.change(slider, { target: { value: '9' } }); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    expect(slider.value).toBe('5'); // reverted, not stuck at 9
+    expect(toastFn).toHaveBeenCalledWith(expect.stringContaining('boom'), 'error');
+  });
 });

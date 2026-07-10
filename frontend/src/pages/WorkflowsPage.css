@@ -2121,11 +2121,13 @@
 :root[data-theme="light"] .wf-bm-arc-c4,
 :root[data-theme="sakura"] .wf-bm-arc-c4 { stroke: #15803d; }
 
-/* Follow a crossing line: hovering the map dims every arc, hovering one arc (or
-   its head) restores + thickens it. Pointer-events on the invisible-fill path
-   are enabled via a fat transparent hit area. */
+/* Follow a crossing line: hovering the map dims every arc, hovering one arc's
+   GROUP restores + thickens it. The visible stroke is 1.6px — the actual hit
+   target is the fat transparent .wf-bm-arc-hit twin inside the group. */
+.wf-bm-arc-hit { fill: none; stroke: transparent; stroke-width: 12; pointer-events: stroke; }
+.wf-bm-arc { pointer-events: none; }
 .wf-branch-map:hover .wf-bm-arc { opacity: 0.28; }
-.wf-branch-map .wf-bm-arc:hover { opacity: 1; stroke-width: 3; }
+.wf-branch-map .wf-bm-arc-g:hover .wf-bm-arc { opacity: 1; stroke-width: 3; }
 
 .wf-branch-map-legend {
   display: flex;

@@ -178,6 +178,9 @@ RUN mkdir -p /home/kronn/.local/bin /home/kronn/.local/share/uv \
 RUN chmod 1777 /home
 
 ENV KRONN_DATA_DIR=/data
+# Explicit container marker — is_docker() must NOT key on KRONN_DATA_DIR (a
+# native user can set that too, and a false "docker" fail-opens the LAN guard).
+ENV KRONN_IN_DOCKER=1
 ENV PATH="/home/kronn/.local/bin:/usr/local/bin:${PATH}"
 # The container runs as the non-root `kronn` user, but npm's default global
 # prefix (/usr/local) is root-owned → `npm install -g <agent>` fails with

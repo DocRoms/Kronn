@@ -343,10 +343,34 @@ pub async fn execute_batch_quick_prompt_step(
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(n))) => {
                 tracing::warn!(
-                    "BatchQuickPrompt step '{}' lagged {} WS messages — keep listening",
+                    "BatchQuickPrompt step '{}' lagged {} WS messages — re-checking child run in DB",
                     step.name, n
                 );
-                continue;
+                // The dropped window may have held the SINGLE terminal
+                // BatchRunFinished (emitted exactly once) — without this
+                // re-read the step would wait the full 2h timeout and be
+                // marked Failed while the child batch is actually Success.
+                let cid = child_run_id.clone();
+                match state.db.with_conn(move |conn| crate::db::workflows::get_run(conn, &cid)).await {
+                    Ok(Some(child)) if matches!(
+                        child.status,
+                        crate::models::RunStatus::Success
+                            | crate::models::RunStatus::Failed
+                            | crate::models::RunStatus::Cancelled
+                            | crate::models::RunStatus::StoppedByGuard
+                            | crate::models::RunStatus::Interrupted
+                    ) => {
+                        final_total = child.batch_total;
+                        final_ok = child.batch_completed;
+                        final_failed = child.batch_failed;
+                        tracing::info!(
+                            "BatchQuickPrompt step '{}' recovered terminal state from DB after lag: {}/{} ok, {} failed",
+                            step.name, final_ok, final_total, final_failed
+                        );
+                        break;
+                    }
+                    _ => continue, // still running (or transient DB miss) — keep listening
+                }
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
                 return fail(step, start, "WS broadcast channel closed while waiting for batch completion");

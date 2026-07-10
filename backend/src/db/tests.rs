@@ -1452,8 +1452,10 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
     done.started_at = Utc::now() - Duration::hours(2);
     crate::db::workflows::insert_run(&conn, &done).unwrap();
 
-    let n = crate::db::workflows::reconcile_stale_runs(&conn, 30 * 60).unwrap();
-    assert_eq!(n, 2, "the two stale in-flight runs are reconciled");
+    let flipped = crate::db::workflows::reconcile_stale_runs(&conn, 30 * 60).unwrap();
+    assert_eq!(flipped.len(), 2, "the two stale in-flight runs are reconciled");
+    // The reconciler reports enough to webhook the dead runs.
+    assert!(flipped.iter().all(|r| !r.workflow_name.is_empty() && !r.started_at.is_empty()));
 
     let by_id = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().unwrap();
     assert_eq!(by_id("stale").status, RunStatus::Interrupted);
@@ -1464,9 +1466,44 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
 
     // Cutoff 0 = the BOOT call (Copilot, PR #114): at boot there is no runner,
     // so even a JUST-started zombie must flip — no 30-min lie window.
-    let n0 = crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
-    assert_eq!(n0, 1, "the fresh zombie is reconciled at cutoff 0");
+    let flipped0 = crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
+    assert_eq!(flipped0.len(), 1, "the fresh zombie is reconciled at cutoff 0");
     assert_eq!(by_id("fresh").status, RunStatus::Interrupted);
+}
+
+#[test]
+fn cancelled_status_is_sticky_in_update_run_progress() {
+    // The user's forced cancel races the runner's own writes; the runner
+    // used to win (Cancelled → Failed minutes after "stopped", or
+    // Cancelled → Running in the gate-resume window). Only a Cancelled
+    // write may touch a Cancelled row.
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r1", "w1");
+    run.status = RunStatus::Running;
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    // User cancels (what api cancel_run's forced UPDATE does).
+    run.status = RunStatus::Cancelled;
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+    assert!(crate::db::workflows::update_run_progress(&conn, snap).unwrap());
+
+    // Runner's late terminal write must be BLOCKED…
+    run.status = RunStatus::Failed;
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+    assert!(!crate::db::workflows::update_run_progress(&conn, snap).unwrap(), "Failed-over-Cancelled must be rejected");
+    // …and so must the resume path's Running resurrection.
+    run.status = RunStatus::Running;
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+    assert!(!crate::db::workflows::update_run_progress(&conn, snap).unwrap(), "Running-over-Cancelled must be rejected");
+
+    let row = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
+    assert_eq!(row.status, RunStatus::Cancelled, "row stays Cancelled");
+
+    // Idempotent cancel re-write stays allowed.
+    run.status = RunStatus::Cancelled;
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+    assert!(crate::db::workflows::update_run_progress(&conn, snap).unwrap());
 }
 
 #[test]

@@ -250,8 +250,19 @@ fn normalize_repo_url(url: &str) -> String {
 }
 
 /// Fetch all repos for the authenticated GitHub user, including organization repos.
+/// Bounded per request: discovery paginates in a loop inside a GET handler —
+/// one stalled page (self-hosted GitLab that accepts and never answers) would
+/// pin the handler forever; the UI modal has no cancel.
+fn discovery_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .unwrap_or_default()
+}
+
 async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
-    let client = reqwest::Client::new();
+    let client = discovery_client();
     let mut all_repos = vec![];
     let mut seen = std::collections::HashSet::new();
 
@@ -351,7 +362,7 @@ fn parse_github_repo(r: &serde_json::Value) -> RemoteRepo {
 
 /// Fetch all repos for the authenticated GitLab user, including group repos.
 async fn fetch_gitlab_repos(token: &str, api_url: &str) -> Result<Vec<RemoteRepo>, String> {
-    let client = reqwest::Client::new();
+    let client = discovery_client();
     let base = api_url.trim_end_matches('/');
     let mut all_repos = vec![];
     let mut seen = std::collections::HashSet::new();

@@ -385,7 +385,8 @@ fn build_from_json_entry(
 
     let transport = if let Some(cmd) = command {
         McpTransport::Stdio { command: cmd, args }
-    } else if let Some(u) = http_url.or_else(|| url.clone()) {
+    } else {
+        let u = http_url.or_else(|| url.clone())?;
         // Gemini uses `httpUrl` for Streamable; Claude uses `type: "http"`.
         // We map to Streamable when `type` is `http` or `httpUrl` is set;
         // otherwise default to SSE (legacy default).
@@ -394,8 +395,6 @@ fn build_from_json_entry(
         } else {
             McpTransport::Sse { url: u }
         }
-    } else {
-        return None; // No transport — skip silently
     };
 
     let env_keys: Vec<String> = env_map.keys().cloned().collect();

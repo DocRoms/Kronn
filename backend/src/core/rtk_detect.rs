@@ -146,6 +146,7 @@ fn resolve_home() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use std::fs;
     use std::sync::Mutex;
     use tempfile::TempDir;
@@ -183,12 +184,13 @@ mod tests {
     /// `KRONN_HOST_BIN`), NOT the container's baked `/usr/local/bin/rtk` — else
     /// the UI never offers to install RTK on the user's machine.
     #[test]
+    #[serial]
     fn rtk_binary_available_in_docker_checks_host_bins() {
         let _guard = ENV_MUTEX.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = TempDir::new().expect("tempdir");
-        let prev_data = std::env::var("KRONN_DATA_DIR").ok();
+        let prev_data = std::env::var("KRONN_IN_DOCKER").ok();
         let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
-        std::env::set_var("KRONN_DATA_DIR", "/data"); // → is_docker() == true
+        std::env::set_var("KRONN_IN_DOCKER", "1"); // → is_docker() == true
         std::env::set_var("KRONN_HOST_BIN", tmp.path());
 
         assert!(!rtk_binary_available(), "Docker + no host rtk → unavailable");
@@ -206,8 +208,8 @@ mod tests {
         }
 
         match prev_data {
-            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
-            None => std::env::remove_var("KRONN_DATA_DIR"),
+            Some(v) => std::env::set_var("KRONN_IN_DOCKER", v),
+            None => std::env::remove_var("KRONN_IN_DOCKER"),
         }
         match prev_hb {
             Some(v) => std::env::set_var("KRONN_HOST_BIN", v),

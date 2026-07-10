@@ -255,7 +255,13 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
-                        if let Ok(repair_output) = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, model_tiers, None).await {
+                        let repair_res = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, model_tiers, None).await;
+                        if let Err(ref e) = repair_res {
+                            // The repair RUN itself failed (spawn/timeout) —
+                            // distinct from "repair produced invalid output".
+                            tracing::warn!("Step '{}': repair run failed: {}", step.name, e);
+                        }
+                        if let Ok(repair_output) = repair_res {
                             total_tokens += repair_output.tokens_used;
                             let repaired_env = crate::workflows::template::extract_step_envelope(&repair_output.text);
                             let repaired_error = match (&step.output_format, &repaired_env) {
@@ -301,7 +307,16 @@ pub async fn execute_step(
                                 "local schema validation failed after repair — escalating to Claude"
                             );
                             let escalated = escalation_step(step);
-                            if let Ok(esc) = run_agent_with_timeout(&escalated, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, None).await {
+                            let esc_res = run_agent_with_timeout(&escalated, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, None).await;
+                            if let Err(ref e) = esc_res {
+                                tracing::warn!(
+                                    target: "kronn::ollama::escalation",
+                                    step = %step.name,
+                                    error = %e,
+                                    "escalation run itself failed (spawn/timeout) — falling through to on_invalid handling"
+                                );
+                            }
+                            if let Ok(esc) = esc_res {
                                 total_tokens += esc.tokens_used;
                                 let esc_env = crate::workflows::template::extract_step_envelope(&esc.text);
                                 let esc_error = match (&step.output_format, &esc_env) {
@@ -419,8 +434,17 @@ pub async fn execute_step(
                 );
                 if condition_action.is_none() && envelope_aware {
                     if let Some(env) = crate::workflows::template::extract_step_envelope(&final_output) {
-                        if env.status == "NO_RESULTS" && step.on_result.iter().any(|r| r.contains == "NO_RESULTS") {
-                            condition_action = Some(ConditionAction::Stop);
+                        if env.status == "NO_RESULTS" {
+                            // Honor the action the author DECLARED on the
+                            // matching rule (a NO_RESULTS → Goto("handle_empty")
+                            // recovery step must run) — the old hardcoded Stop
+                            // hijacked the branch whenever the agent emitted the
+                            // envelope but forgot the [SIGNAL: …] line.
+                            condition_action = step
+                                .on_result
+                                .iter()
+                                .find(|r| r.contains == "NO_RESULTS")
+                                .map(|r| r.action.clone());
                         }
                     }
                 }
@@ -759,7 +783,7 @@ async fn drive_agent_to_output(
                         line.clone()
                     } else {
                         output.push('\n');
-                        format!("\n{}", &line)
+                        format!("\n{}", line)
                     };
                     output.push_str(&line);
                     if let Some(tx) = progress_tx {
@@ -828,9 +852,11 @@ async fn drive_agent_to_output(
         stream_json_tokens
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent, &output, &stderr_lines);
-        if count > 0 {
-            output = cleaned;
-        }
+        // Adopt the cleaned output unconditionally: some agents (GeminiCli)
+        // return count=0 but still strip real noise (MCP handshake markers,
+        // "[MCP error]…" lines) — gating on count>0 silently re-injected that
+        // noise into the recorded step output and every {{steps.X.output}}.
+        output = cleaned;
         count
     };
 

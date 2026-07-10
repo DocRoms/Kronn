@@ -525,13 +525,13 @@ export function AgentsSection({
                   tabIndex={0}
                   className="flex-row gap-4 cursor-pointer"
                   onClick={async () => {
-                    try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); }
+                    try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                     refetchAgentAccess();
                   }}
                   onKeyDown={async (e) => {
                     if (e.key === ' ' || e.key === 'Enter') {
                       e.preventDefault();
-                      try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); }
+                      try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                       refetchAgentAccess();
                     }
                   }}
@@ -562,7 +562,7 @@ export function AgentsSection({
                       title={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
                       aria-label={isDisabled ? t('config.enableOverride') : t('config.disableOverride')}
                       onClick={async () => {
-                        try { await configApi.toggleTokenOverride(tf.key); } catch (err) { console.warn('Settings action failed:', err); }
+                        try { await configApi.toggleTokenOverride(tf.key); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                         refetchTokens();
                       }}
                     >
@@ -593,7 +593,7 @@ export function AgentsSection({
                       <Check size={9} style={{ color: 'rgba(var(--kr-success-rgb), 0.7)' }} className="flex-shrink-0" />
                     ) : (
                       <button className="set-icon-btn set-icon-btn-bare" title={t('config.activateKey')} aria-label={t('config.activateKey')}
-                        onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); } refetchTokens(); }}>
+                        onClick={async () => { try { await configApi.activateApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); } refetchTokens(); }}>
                         <div style={{ width: 9, height: 9, borderRadius: '50%', border: '1px solid var(--kr-text-ghost)' }} />
                       </button>
                     )}
@@ -617,7 +617,7 @@ export function AgentsSection({
                     <button className="set-icon-btn set-icon-btn-bare" title={t('config.deleteKey')} aria-label={t('config.deleteKey')}
                       onClick={async () => {
                         if (confirm(t('config.deleteKeyConfirm').replace('{0}', k.name))) {
-                          try { await configApi.deleteApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); }
+                          try { await configApi.deleteApiKey(k.id); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                           refetchTokens();
                         }
                       }}>

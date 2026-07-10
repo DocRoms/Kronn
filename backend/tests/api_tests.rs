@@ -3988,7 +3988,7 @@ async fn disc_sync_request_resends_missing_messages() {
 /// contact (base64) and rejects an unknown caller. This is the binary-transfer
 /// leg of P2P file/doc recovery.
 #[tokio::test]
-async fn fetch_file_serves_bytes_to_known_contact_and_rejects_unknown() {
+async fn fetch_file_scoped_to_shared_disc_serves_bytes_and_rejects_unknown() {
     let state = test_state();
     // A trusted contact (the caller authenticates with this invite code).
     let now = chrono::Utc::now();
@@ -4024,7 +4024,21 @@ async fn fetch_file_serves_bytes_to_known_contact_and_rejects_unknown() {
         ).map_err(|e| anyhow::anyhow!(e))
     }).await.unwrap();
 
-    // Known contact → bytes (base64 of "hello-doc-bytes").
+    // 0.9 scoping: being a KNOWN contact is no longer enough — the file's
+    // discussion must be shared with the caller. Unshared → found: false.
+    let (st, json) = post_json(
+        build_router_with_auth(state.clone(), false),
+        "/api/disc/fetch-file",
+        serde_json::json!({ "file_id": "file1", "from_invite_code": "kronn:PeerAlpha@10.0.0.9:3140" }),
+    ).await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(json["data"]["found"], false, "unshared discussion must not leak files to a mere contact");
+    assert!(json["data"]["data_base64"].is_null());
+
+    // Share the discussion with this contact → the bytes flow.
+    state.db.with_conn(|conn| {
+        kronn::db::discussions::update_discussion_sharing(conn, "d1", "sh-1", &["c1".to_string()]).map(|_| ())
+    }).await.unwrap();
     let (st, json) = post_json(
         build_router_with_auth(state.clone(), false),
         "/api/disc/fetch-file",

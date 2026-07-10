@@ -78,9 +78,32 @@ fn state_path(project_path: &Path) -> std::path::PathBuf {
 /// Read `docs/.kronn.json` if present and parseable. Any I/O or JSON error
 /// returns `None` — callers fall back to legacy detection paths.
 pub fn read(project_path: &Path) -> Option<KronnState> {
+    read_for_mutation(project_path).ok().flatten()
+}
+
+/// Like `read`, but distinguishes a MISSING file (`Ok(None)` — mutators may
+/// start from default) from an unreadable/corrupt one (`Err` — mutators must
+/// abort rather than rebuild from default and clobber the existing audit
+/// history: `bootstrapped_at`, `validated_at`, audits).
+fn read_for_mutation(project_path: &Path) -> Result<Option<KronnState>, String> {
     let path = state_path(project_path);
-    let data = std::fs::read_to_string(&path).ok()?;
-    serde_json::from_str(&data).ok()
+    match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str(&data)
+            .map(Some)
+            .map_err(|e| format!("{} exists but is not valid JSON: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Cannot read {}: {e}", path.display())),
+    }
+}
+
+/// Load state for a mutation: default for a missing file, `Err` (with a warn)
+/// for an unreadable/corrupt one so the caller aborts instead of clobbering.
+fn load_for_mutation(project_path: &Path) -> Result<KronnState, String> {
+    read_for_mutation(project_path)
+        .map(Option::unwrap_or_default)
+        .inspect_err(|e| {
+            tracing::warn!("Refusing to rewrite Kronn state from default: {e}");
+        })
 }
 
 /// Atomic-ish write of `docs/.kronn.json`. Always rewrites the `_readme`
@@ -113,7 +136,7 @@ fn kronn_version() -> String {
 /// engine itself decides whether to call this (e.g. once per successful
 /// full/partial run).
 pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String> {
-    let mut state = read(project_path).unwrap_or_default();
+    let mut state = load_for_mutation(project_path)?;
     state.audits.push(AuditEntry {
         date: today_iso(),
         kronn_version: kronn_version(),
@@ -124,7 +147,7 @@ pub fn record_audit(project_path: &Path, audit_type: &str) -> Result<(), String>
 
 /// Set `validated_at`. No-op if already set (preserves the original date).
 pub fn mark_validated(project_path: &Path) -> Result<(), String> {
-    let mut state = read(project_path).unwrap_or_default();
+    let mut state = load_for_mutation(project_path)?;
     if state.validated_at.is_none() {
         state.validated_at = Some(today_iso());
     }
@@ -133,7 +156,7 @@ pub fn mark_validated(project_path: &Path) -> Result<(), String> {
 
 /// Set `bootstrapped_at`. No-op if already set.
 pub fn mark_bootstrapped(project_path: &Path) -> Result<(), String> {
-    let mut state = read(project_path).unwrap_or_default();
+    let mut state = load_for_mutation(project_path)?;
     if state.bootstrapped_at.is_none() {
         state.bootstrapped_at = Some(today_iso());
     }
@@ -164,9 +187,15 @@ pub fn mark_bootstrapped(project_path: &Path) -> Result<(), String> {
 /// skipped. Write errors propagate as `Err(String)` — caller decides
 /// whether to log + fall through to legacy detection (read-only FS, etc.).
 pub fn backfill_from_legacy_state(project_path: &Path) -> Result<bool, String> {
-    // Skip if already present — backfill is one-shot.
-    if read(project_path).is_some() {
-        return Ok(false);
+    // Skip if already present — backfill is one-shot. A corrupt/unreadable
+    // file also skips: overwriting it would destroy the real audit history.
+    match read_for_mutation(project_path) {
+        Ok(Some(_)) => return Ok(false),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!("Skipping legacy backfill: {e}");
+            return Ok(false);
+        }
     }
 
     let has_checksums =

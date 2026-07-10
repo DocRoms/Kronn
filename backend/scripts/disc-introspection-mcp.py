@@ -1940,6 +1940,11 @@ def _current_disc_meta():
     try:
         url = f"{_backend_url()}/api/discussions/{disc_id}/meta"
         req = urllib.request.Request(url, method="GET")
+        # Same bearer as _http(): without it, an auth-enforced instance 401s
+        # this read and the silent fallback drops project/agent inheritance.
+        token = os.environ.get("KRONN_AUTH_TOKEN")
+        if token:
+            req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, timeout=5) as resp:
             payload = json.loads(resp.read().decode("utf-8"))
         data = payload.get("data") or {}

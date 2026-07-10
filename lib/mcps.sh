@@ -108,9 +108,33 @@ sync_mcp_for_repo() {
     export AWS_REGION
     AWS_REGION=$(secret_get "aws" "region")
 
+    # Refuse to write a broken file: a secret referenced by the template but
+    # empty would land as "" (opaque 401s at runtime), and `> output` used to
+    # truncate the existing GOOD file before envsubst even ran.
+    local _kronn_vars="ATLASSIAN_URL JIRA_USERNAME JIRA_API_TOKEN CONFLUENCE_USERNAME CONFLUENCE_API_TOKEN GITHUB_PERSONAL_ACCESS_TOKEN AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION"
+    local _missing="" _v
+    for _v in $_kronn_vars; do
+        if grep -q "\$[{]\?${_v}" "$template" && [[ -z "${!_v}" ]]; then
+            _missing="$_missing $_v"
+        fi
+    done
+    if [[ -n "$_missing" ]]; then
+        fail ".mcp.json NOT generated for $(basename "$repo_dir") — missing secret(s):$_missing (existing file left untouched)"
+        return 1
+    fi
+
     if command -v envsubst >/dev/null 2>&1; then
         # Restrict substitution to known Kronn secrets only — prevent leaking $HOME, $PATH, etc.
-        envsubst '$ATLASSIAN_URL $JIRA_USERNAME $JIRA_API_TOKEN $CONFLUENCE_USERNAME $CONFLUENCE_API_TOKEN $GITHUB_PERSONAL_ACCESS_TOKEN $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_REGION' < "$template" > "$output"
+        # Temp + mv: never truncate the existing file on a failed substitution.
+        local _tmp_out
+        _tmp_out=$(mktemp "${output}.XXXXXX") || return 1
+        if envsubst '$ATLASSIAN_URL $JIRA_USERNAME $JIRA_API_TOKEN $CONFLUENCE_USERNAME $CONFLUENCE_API_TOKEN $GITHUB_PERSONAL_ACCESS_TOKEN $AWS_ACCESS_KEY_ID $AWS_SECRET_ACCESS_KEY $AWS_REGION' < "$template" > "$_tmp_out"; then
+            mv "$_tmp_out" "$output"
+        else
+            rm -f "$_tmp_out"
+            fail "envsubst failed for $(basename "$repo_dir") — existing file left untouched"
+            return 1
+        fi
         success ".mcp.json generated for $(basename "$repo_dir")"
     else
         fail "envsubst not found — install gettext"

@@ -3505,6 +3505,24 @@ class HttpAuthHeaderTests(unittest.TestCase):
         req = urlopen.call_args.args[0]
         self.assertIsNone(req.get_header("Authorization"))
 
+    def test_current_disc_meta_adds_bearer_when_token_present(self):
+        # Regression (Codex audit 2026-07-12): this read used a bare urlopen —
+        # on an auth-enforced instance it 401'd silently and project/agent
+        # inheritance fell back to defaults.
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = b'{"success": true, "data": {"project_id": "p-1"}}'
+        cm.__exit__.return_value = False
+        with mock.patch.dict(os.environ,
+                             {"KRONN_BACKEND_URL": "http://127.0.0.1:3140",
+                              "KRONN_AUTH_TOKEN": "sekret",
+                              "KRONN_DISCUSSION_ID": "d-1"},
+                             clear=True), \
+             mock.patch("urllib.request.urlopen", return_value=cm) as urlopen:
+            meta = self.mod._current_disc_meta()
+        req = urlopen.call_args.args[0]
+        self.assertEqual(req.get_header("Authorization"), "Bearer sekret")
+        self.assertEqual(meta.get("project_id"), "p-1")
+
     def test_http_text_adds_bearer_when_token_present(self):
         cm = mock.MagicMock()
         cm.__enter__.return_value.read.return_value = b'{"kind":"kronn.workflow"}'

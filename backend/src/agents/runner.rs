@@ -925,8 +925,20 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         let tx_out = tx.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stdout).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if tx_out.send(line).await.is_err() { break; }
+            // Don't conflate a read error (e.g. non-UTF-8 output) with EOF:
+            // the stream is truncated either way, but truncation must be
+            // visible in the logs.
+            loop {
+                match lines.next_line().await {
+                    Ok(Some(line)) => {
+                        if tx_out.send(line).await.is_err() { break; }
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!("agent stdout read error (output truncated): {}", e);
+                        break;
+                    }
+                }
             }
         });
     }
@@ -937,8 +949,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 let tx_err = tx;
                 tokio::spawn(async move {
                     let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if tx_err.send(line).await.is_err() { break; }
+                    loop {
+                        match lines.next_line().await {
+                            Ok(Some(line)) => {
+                                if tx_err.send(line).await.is_err() { break; }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::warn!("agent stderr read error (output truncated): {}", e);
+                                break;
+                            }
+                        }
                     }
                 });
             }
@@ -948,10 +969,19 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 let capture = stderr_capture.clone();
                 stderr_handle = Some(tokio::spawn(async move {
                     let mut lines = BufReader::new(stderr).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        tracing::debug!("agent stderr: {}", line);
-                        if let Ok(mut buf) = capture.lock() {
-                            buf.push(line);
+                    loop {
+                        match lines.next_line().await {
+                            Ok(Some(line)) => {
+                                tracing::debug!("agent stderr: {}", line);
+                                if let Ok(mut buf) = capture.lock() {
+                                    buf.push(line);
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(e) => {
+                                tracing::warn!("agent stderr read error (capture truncated): {}", e);
+                                break;
+                            }
                         }
                     }
                 }));
@@ -974,7 +1004,7 @@ pub(crate) async fn ensure_kiro_cli_available() -> Result<(), String> {
         .args([
             "-c",
             "command -v unzip >/dev/null 2>&1 || { echo 'Missing dependency: unzip' >&2; exit 127; }; \
-             curl -fsSL https://cli.kiro.dev/install | bash",
+             curl -fsSL --connect-timeout 10 --max-time 300 https://cli.kiro.dev/install | bash",
         ])
         .output()
         .await
@@ -1149,8 +1179,24 @@ const OLLAMA_NUM_CTX_AUTO_CEILING: u64 = 32768;
 /// mutating process env): a value below the floor or unparseable → None (the
 /// auto/model-derived path decides).
 pub(crate) fn parse_num_ctx_cap(raw: Option<String>) -> Option<u64> {
-    raw.and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|&v| v >= OLLAMA_NUM_CTX_FLOOR)
+    let raw = raw?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    match trimmed.parse::<u64>() {
+        Ok(v) if v >= OLLAMA_NUM_CTX_FLOOR => Some(v),
+        _ => {
+            // An operator who SET the override asked for a specific (usually
+            // smaller) window; silently falling through to the auto cap can
+            // hand them up to 32K — the opposite of what they wanted on a
+            // RAM-constrained box. Loud, not silent.
+            tracing::warn!(
+                "KRONN_OLLAMA_NUM_CTX_CAP=\"{trimmed}\" ignored (not a number ≥ {OLLAMA_NUM_CTX_FLOOR}) — using the model-derived auto cap instead, which may be LARGER than intended"
+            );
+            None
+        }
+    }
 }
 
 /// Effective ctx cap (0.8.11 — product default, zero configuration):
@@ -1188,28 +1234,49 @@ async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u64> {
     static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<u64>>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
-    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(model).copied()) {
+    // Key on base+model: switching the Ollama endpoint in config must not
+    // serve the previous server's limits for the rest of the process.
+    let cache_key = format!("{base}|{model}");
+    if let Some(hit) = cache.lock().ok().and_then(|c| c.get(&cache_key).copied()) {
         return hit;
     }
-    let fetched = async {
+    // Ok(_) = definitive answer from Ollama (cacheable — the value is static
+    // per model tag, present or genuinely absent). Err = transport failure:
+    // NOT cached. /api/show typically fires at the first Ollama step after
+    // boot, exactly when Ollama may be busy cold-loading a 32b model — one
+    // transient 5s miss must not pin the 8192 fallback (and its silent
+    // truncation) for the whole process lifetime.
+    let fetched: Result<Option<u64>, ()> = async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
             .build()
-            .ok()?;
+            .map_err(|_| ())?;
         let resp = client
             .post(format!("{}/api/show", base))
             .json(&serde_json::json!({ "model": model }))
             .send()
             .await
-            .ok()?;
-        let v: serde_json::Value = resp.json().await.ok()?;
-        parse_context_length(&v)
+            .map_err(|_| ())?
+            .error_for_status()
+            .map_err(|_| ())?;
+        let v: serde_json::Value = resp.json().await.map_err(|_| ())?;
+        Ok(parse_context_length(&v))
     }
     .await;
-    if let Ok(mut c) = cache.lock() {
-        c.insert(model.to_string(), fetched);
+    match fetched {
+        Ok(limit) => {
+            if let Ok(mut c) = cache.lock() {
+                c.insert(cache_key, limit);
+            }
+            limit
+        }
+        Err(()) => {
+            tracing::warn!(
+                "Ollama /api/show failed for {model} — portable ctx fallback for this call only (will retry next step)"
+            );
+            None
+        }
     }
-    fetched
 }
 
 /// Size the context window to the prompt, bounded by [FLOOR, cap]. Coarse on
@@ -1319,15 +1386,29 @@ pub(crate) async fn forward_ollama_line(
     line: &str,
     tx: &tokio::sync::mpsc::Sender<String>,
     stderr: &Arc<Mutex<Vec<String>>>,
+    got_done: &mut bool,
+    got_error: &mut bool,
 ) -> bool {
     if line.trim().is_empty() { return true; }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+        // In-band error object ({"error":"model runner has unexpectedly
+        // stopped"}, sent on a 200 stream when the model crashes mid-
+        // generation). Swallowing it made the step SUCCEED with empty or
+        // truncated output — surface it so the step fails with the reason.
+        if let Some(err) = json["error"].as_str() {
+            tracing::warn!("Ollama in-band error: {err}");
+            if let Ok(mut stderr) = stderr.lock() {
+                stderr.push(format!("Ollama error: {err}"));
+            }
+            *got_error = true;
+        }
         if let Some(text) = json["message"]["content"].as_str() {
             if !text.is_empty() && tx.send(text.to_string()).await.is_err() {
                 return false;
             }
         }
         if json["done"].as_bool() == Some(true) {
+            *got_done = true;
             let prompt_tokens = json["prompt_eval_count"].as_u64().unwrap_or(0);
             let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
             if let Ok(mut stderr) = stderr.lock() {
@@ -1395,6 +1476,11 @@ async fn start_ollama_http(
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600)) // 10 min max for slow models
+        // Connect is bounded separately: without this, a black-holed OLLAMA_HOST
+        // (firewall DROP, wrong host.docker.internal) sits in TCP connect for the
+        // full 600s before "unreachable" surfaces, instead of failing in 5s like
+        // the /api/show probe above.
+        .connect_timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
@@ -1421,12 +1507,17 @@ async fn start_ollama_http(
     // after the stream to finalize (a `sleep 3600` placeholder blocked there
     // for an hour — the UI spinner never stopped, 2026-07-01 bug), and the
     // audit zombie-probe `try_wait()`s after 60s idle (an already-exited child
-    // would be a false zombie during a slow model cold-load). Solution: `cat`
-    // with a piped stdin whose write end is HELD BY the streaming task below —
-    // when the stream ends (or errors, or the task dies), the pipe closes,
-    // `cat` sees EOF and exits 0 → wait() returns success immediately, and
-    // while the stream lives the child is genuinely alive for the probe.
-    let mut dummy_child = crate::core::cmd::async_cmd("cat")
+    // would be a false zombie during a slow model cold-load).
+    //
+    // Solution: a tiny sh lifeline that blocks on `read` from a piped stdin
+    // held by the streaming task, then exits with the STATUS the task writes.
+    // The old `cat` variant exited 0 on every path — a mid-stream HTTP error
+    // or an in-band {"error":…} object still looked like a SUCCESSFUL step
+    // with truncated/empty output. Now: task writes "0\n" on a clean `done`,
+    // "1\n" on stream/in-band errors, and if the task dies without writing
+    // anything, `read` hits EOF and the lifeline exits 1 — fail-safe.
+    let mut dummy_child = crate::core::cmd::async_cmd("sh")
+        .args(["-c", r#"read -r s; exit "${s:-1}""#])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1436,18 +1527,32 @@ async fn start_ollama_http(
 
     // Spawn a background task to read the HTTP stream and forward text to the channel.
     tokio::spawn(async move {
-        // Holds `cat`'s stdin open for the duration of the stream — dropped on
-        // every exit path of this task, which lets the child exit.
-        let _stream_lifetime = stdin_guard;
+        // Holds the lifeline's stdin open for the duration of the stream.
+        let mut lifeline = stdin_guard;
+        // Report the stream's outcome as the lifeline child's exit code.
+        // `ok=false` also covers "consumer dropped" (cancel) — the run is
+        // being torn down anyway, so the failed wait() is never surfaced.
+        async fn finish(lifeline: &mut Option<tokio::process::ChildStdin>, ok: bool) {
+            if let Some(mut stdin) = lifeline.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(if ok { b"0\n" } else { b"1\n" }).await;
+            }
+        }
         use futures::StreamExt;
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut got_done = false;
+        let mut got_error = false;
 
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
                 Ok(b) => b,
                 Err(e) => {
                     tracing::warn!("Ollama stream error: {}", e);
+                    if let Ok(mut se) = stderr_clone.lock() {
+                        se.push(format!("Ollama stream error (connection lost mid-generation): {e}"));
+                    }
+                    got_error = true;
                     break;
                 }
             };
@@ -1459,7 +1564,8 @@ async fn start_ollama_http(
                 let line = buffer[..newline_pos].to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
                 // Consumer gone (cancel) → stop reading the HTTP body.
-                if !forward_ollama_line(&line, &tx, &stderr_clone).await {
+                if !forward_ollama_line(&line, &tx, &stderr_clone, &mut got_done, &mut got_error).await {
+                    finish(&mut lifeline, false).await;
                     return;
                 }
             }
@@ -1468,7 +1574,18 @@ async fn start_ollama_http(
         // Non-streaming responses (format-constrained / TypedSchema steps set
         // stream:false) arrive as a single JSON object with no trailing
         // newline, so the line loop above never fires — flush the remainder.
-        let _ = forward_ollama_line(buffer.trim(), &tx, &stderr_clone).await;
+        let _ = forward_ollama_line(buffer.trim(), &tx, &stderr_clone, &mut got_done, &mut got_error).await;
+
+        // A stream that ends without the terminal `done` chunk was truncated
+        // (server closed the connection, proxy cut it, model unloaded) — that
+        // must not pass as a successful step.
+        if !got_done && !got_error {
+            if let Ok(mut se) = stderr_clone.lock() {
+                se.push("Ollama stream ended without a terminal 'done' chunk — output is likely truncated".into());
+            }
+            got_error = true;
+        }
+        finish(&mut lifeline, got_done && !got_error).await;
     });
 
     Ok(AgentProcess {

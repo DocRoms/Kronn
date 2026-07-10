@@ -50,17 +50,47 @@ fn run_status_str(s: &RunStatus) -> &'static str {
 /// zombie as in-progress. Flips rows older than `stale_after_secs` to the
 /// terminal `Interrupted` status (distinct from `Failed`). Mirrors
 /// `audit_runs::reconcile_stale_runs`. Returns the number reconciled.
-pub fn reconcile_stale_runs(conn: &Connection, stale_after_secs: i64) -> Result<u64> {
+/// A run flipped to `Interrupted` by the boot reconcile — enough info to fire
+/// the failure webhook for it. The process that would normally have notified
+/// (the engine spawn's tail) died with the run, so the boot path is the ONLY
+/// place an Interrupted notification can originate.
+#[derive(Debug, Clone)]
+pub struct ReconciledRun {
+    pub run_id: String,
+    pub workflow_name: String,
+    /// RFC3339, as stored.
+    pub started_at: String,
+}
+
+pub fn reconcile_stale_runs(conn: &Connection, stale_after_secs: i64) -> Result<Vec<ReconciledRun>> {
     let cutoff = (Utc::now() - chrono::Duration::seconds(stale_after_secs)).to_rfc3339();
     let now_rfc = Utc::now().to_rfc3339();
-    let affected = conn.execute(
-        "UPDATE workflow_runs SET
-            status = 'Interrupted',
-            finished_at = COALESCE(finished_at, ?2)
-         WHERE status IN ('Running', 'Pending') AND started_at < ?1",
-        params![cutoff, now_rfc],
+    // Select-then-update is race-free here: the caller holds the single
+    // shared connection for both statements.
+    let mut stmt = conn.prepare(
+        "SELECT r.id, COALESCE(w.name, r.workflow_id), r.started_at
+         FROM workflow_runs r LEFT JOIN workflows w ON w.id = r.workflow_id
+         WHERE r.status IN ('Running', 'Pending') AND r.started_at < ?1",
     )?;
-    Ok(affected as u64)
+    let flipped: Vec<ReconciledRun> = stmt
+        .query_map(params![cutoff], |row| {
+            Ok(ReconciledRun {
+                run_id: row.get(0)?,
+                workflow_name: row.get(1)?,
+                started_at: row.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    if !flipped.is_empty() {
+        conn.execute(
+            "UPDATE workflow_runs SET
+                status = 'Interrupted',
+                finished_at = COALESCE(finished_at, ?2)
+             WHERE status IN ('Running', 'Pending') AND started_at < ?1",
+            params![cutoff, now_rfc],
+        )?;
+    }
+    Ok(flipped)
 }
 
 // ─── Workflows CRUD ─────────────────────────────────────────────────────────
@@ -566,8 +596,11 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     Ok(())
 }
 
-pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
-    conn.execute(
+/// Returns `false` when the row no longer exists (deleted concurrently) —
+/// a TYPED signal, so callers never string-match the error message.
+/// Reporting success on 0 rows would silently drop the caller's edit.
+pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
+    let n = conn.execute(
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
          concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
@@ -592,7 +625,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
         ],
     )?;
-    Ok(())
+    Ok(n > 0)
 }
 
 pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
@@ -829,7 +862,9 @@ pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus
 }
 
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
-    update_run_progress(conn, RunProgressSnapshot::from_run(run))
+    // Same Cancelled-stickiness semantics; callers of this convenience
+    // wrapper don't act on the raced-cancel signal.
+    update_run_progress(conn, RunProgressSnapshot::from_run(run)).map(|_| ())
 }
 
 /// Lightweight snapshot of a WorkflowRun for progress updates.
@@ -865,15 +900,25 @@ impl RunProgressSnapshot {
     }
 }
 
-pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<()> {
-    conn.execute(
+/// Returns `false` when the row was NOT updated — either it no longer exists,
+/// or the `Cancelled` stickiness guard blocked the write.
+///
+/// `Cancelled` is STICKY: a user's forced cancel (api cancel_run) races the
+/// runner's own progress/terminal writes, and the runner used to win —
+/// overwriting `Cancelled` with `Running` (gate-resume window) or `Failed`
+/// (rollback-chain tail) minutes after the user was told "stopped". Only a
+/// `Cancelled` write may touch a `Cancelled` row. Runner lifecycle sites
+/// treat `false` as "cancelled beneath us" and stop.
+pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<bool> {
+    let new_status = run_status_str(&snap.status);
+    let affected = conn.execute(
         "UPDATE workflow_runs SET status = ?2, step_results_json = ?3,
          tokens_used = ?4, workspace_path = ?5, finished_at = ?6, state = ?7,
          produced_branches = ?8
-         WHERE id = ?1",
+         WHERE id = ?1 AND (status != 'Cancelled' OR ?2 = 'Cancelled')",
         params![
             snap.id,
-            run_status_str(&snap.status),
+            new_status,
             serde_json::to_string(&snap.step_results)?,
             snap.tokens_used as i64,
             snap.workspace_path,
@@ -882,7 +927,7 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
             if snap.produced_branches.is_empty() { None } else { Some(serde_json::to_string(&snap.produced_branches)?) },
         ],
     )?;
-    Ok(())
+    Ok(affected > 0)
 }
 
 /// Delete a single run.
@@ -971,6 +1016,7 @@ pub fn mark_issue_processed(conn: &Connection, workflow_id: &str, issue_id: &str
 // ─── Row mappers ────────────────────────────────────────────────────────────
 
 fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
+    let id: String = row.get(0).unwrap_or_default();
     let trigger_str: String = row.get(3).unwrap_or_default();
     let steps_str: String = row.get(4).unwrap_or_default();
     let actions_str: String = row.get(5).unwrap_or_default();
@@ -983,12 +1029,33 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
     let exec_allowlist_str: Option<String> = row.get(15).unwrap_or(None);
     let variables_str: Option<String> = row.get(16).unwrap_or(None);
 
+    // These two fallbacks keep a workflow with corrupt JSON loadable (booting
+    // matters), but they MUST be loud: a silently-Manual trigger kills a cron
+    // workflow, and silently-empty steps make a corrupt workflow run green as
+    // a no-op.
+    let trigger = serde_json::from_str(&trigger_str).unwrap_or_else(|e| {
+        tracing::error!(
+            workflow_id = %id,
+            error = %e,
+            "corrupt trigger_json — falling back to Manual (scheduled/tracker triggers DISABLED for this workflow)"
+        );
+        WorkflowTrigger::Manual
+    });
+    let steps: Vec<WorkflowStep> = serde_json::from_str(&steps_str).unwrap_or_else(|e| {
+        tracing::error!(
+            workflow_id = %id,
+            error = %e,
+            "corrupt steps_json — falling back to ZERO steps (this workflow would run as a no-op)"
+        );
+        Vec::new()
+    });
+
     Workflow {
-        id: row.get(0).unwrap_or_default(),
+        id,
         name: row.get(1).unwrap_or_default(),
         project_id: row.get(2).unwrap_or(None),
-        trigger: serde_json::from_str(&trigger_str).unwrap_or(WorkflowTrigger::Manual),
-        steps: serde_json::from_str(&steps_str).unwrap_or_default(),
+        trigger,
+        steps,
         actions: serde_json::from_str(&actions_str).unwrap_or_default(),
         safety: serde_json::from_str(&safety_str).unwrap_or(WorkflowSafety {
             sandbox: false, max_files: None, max_lines: None, require_approval: false,

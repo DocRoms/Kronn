@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { config as configApi, contacts as contactsApi, type NetworkExposure } from '../../lib/api';
 import { gravatarUrl } from '../../lib/gravatar';
+import { userError } from '../../lib/userError';
 import type { NetworkInfo } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { Dropdown } from '../Dropdown';
@@ -160,7 +161,12 @@ export function IdentitySection({ toast, t }: IdentitySectionProps) {
                     configApi.saveGlobalContext(globalContext).then(() => {
                       toast(t('settings.globalContextSaved'), 'success');
                       setGlobalContextDirty(false);
-                    }).catch(() => {});
+                    }).catch(err => {
+                      // Keep the dirty flag set so the next blur retries the
+                      // save — the typed text is still visible and unsaved.
+                      console.warn('Failed to save global context:', err);
+                      toast(t('settings.globalContextSaveFailed', userError(err)), 'error');
+                    });
                   }
                 }}
                 className="set-input"

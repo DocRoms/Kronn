@@ -57,20 +57,27 @@ export function StepBranchMap({ steps, t }: StepBranchMapProps) {
             it — so a crossing line is easy to follow. */}
         {edges.filter(e => e.toIndex >= 0).map((e, k) => {
           const depth = Math.min(Math.abs(e.toIndex - e.fromIndex), 3);
-          const bx = spineX - 6 - depth * 12 - (k % 4) * 6; // fan out crossings
+          // Fan out crossings. A negative control point is fine: the cubic's
+          // actual min-x is (2·spineX + 6·bx)/8, still > 0 at the deepest fan
+          // slot — clamping here would collapse deep arcs onto each other.
+          const bx = spineX - 6 - depth * 12 - (k % 4) * 6;
           const d = `M ${spineX} ${cy(e.fromIndex)} C ${bx} ${cy(e.fromIndex)}, ${bx} ${cy(e.toIndex)}, ${spineX} ${cy(e.toIndex)}`;
           const slot = k < 5 ? String(k) : 'x'; // fixed-order slot 0..4, then neutral (never cycled)
           const cls = `wf-bm-arc wf-bm-arc-c${slot}${e.backward ? ' wf-bm-arc-back' : ''}`;
           return (
-            <path
-              key={k}
-              d={d}
-              className={cls}
-              markerEnd="url(#wf-bm-head)"
-              data-testid="wf-bm-arc"
-            >
-              <title>{`${e.fromName} → ${e.toName}${e.label ? ` (${t('wf.branchMap.onTrigger', e.label)})` : ''}`}</title>
-            </path>
+            <g key={k} className="wf-bm-arc-g">
+              {/* Fat invisible twin: the visible stroke is 1.6px — unhoverable.
+                  This one carries the pointer events (and the tooltip). */}
+              <path d={d} className="wf-bm-arc-hit" data-testid="wf-bm-arc-hit">
+                <title>{`${e.fromName} → ${e.toName}${e.label ? ` (${t('wf.branchMap.onTrigger', e.label)})` : ''}`}</title>
+              </path>
+              <path
+                d={d}
+                className={cls}
+                markerEnd="url(#wf-bm-head)"
+                data-testid="wf-bm-arc"
+              />
+            </g>
           );
         })}
       </svg>

@@ -209,11 +209,20 @@ pub async fn execute_run(
     let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, run.id.clone());
     let cancel_token = cancel_guard.token.clone();
 
-    // Update run status to Running
+    // Update run status to Running. `false` = the Cancelled-stickiness guard
+    // blocked the write: the user cancelled in the window between our caller
+    // claiming the run (insert / gate-resume claim) and this line. Without
+    // this check the write resurrected a Cancelled row to Running (fresh
+    // token, never cancelled) and the run executed to completion.
     run.status = RunStatus::Running;
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let db2 = db.clone();
-    db2.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+    let claimed = db2.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+    if !claimed {
+        tracing::info!("Run {} was cancelled (or deleted) before execution started — aborting", run.id);
+        run.status = RunStatus::Cancelled;
+        return Ok(());
+    }
 
     // Resolve project + companion-repo context. Same pattern as the
     // audit pipeline (api/audit/full.rs:58-74): pre-format the
@@ -324,6 +333,49 @@ pub async fn execute_run(
         None
     };
 
+    // TD-20260709 (A) — a run about to execute in the MAIN checkout takes a
+    // per-project exclusivity guard (isolated worktree runs skip it). Held
+    // for this execution's lifetime; the checkpoint-reset preflight covers
+    // the deferred gate-pause window.
+    let _main_tree_guard = if workspace.is_none() && !project_path.is_empty() {
+        match crate::workflows::workspace::MainTreeGuard::acquire(&project_path, &run.id) {
+            Ok(g) => Some(g),
+            Err(holder) => {
+                let msg = format!(
+                    "Refusing to run in the main checkout: run {holder} is already executing there \
+                     (two non-isolated runs would contaminate each other's files and .kronn/ state). \
+                     Wait for it, or enable worktree isolation on one of the workflows."
+                );
+                run.status = RunStatus::Failed;
+                run.step_results.push(StepResult {
+                    step_name: "__workspace__".to_string(),
+                    status: RunStatus::Failed,
+                    output: msg.clone(),
+                    tokens_used: 0,
+                    duration_ms: 0,
+                    started_at: None,
+                    condition_result: None,
+                    envelope_detected: None,
+                    step_kind: Some("Preflight".into()),
+                    step_api_plugin_slug: None,
+                    step_api_endpoint_path: None,
+                    is_rollback: false,
+                    child_run_id: None,
+                    step_agent: None,
+                    step_model: None,
+                });
+                run.finished_at = Some(Utc::now());
+                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                let db_g = db.clone();
+                db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+                emit(RunEvent::RunError { error: msg }).await;
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+
     // Determine working directory
     let work_dir = workspace.as_ref()
         .map(|ws| ws.path.to_string_lossy().to_string())
@@ -341,7 +393,13 @@ pub async fn execute_run(
     // (npm install, env preparation, etc.) the operator didn't ask for.
     if !is_resume && !is_inherited_workspace {
         if let Some(ref ws) = workspace {
-            let _ = ws.before_run().await;
+            if let Err(e) = ws.before_run().await {
+                tracing::warn!(
+                    run_id = %run.id,
+                    error = %e,
+                    "before_run hook could not be executed — workspace may be unprepared"
+                );
+            }
         }
     }
 
@@ -873,10 +931,21 @@ pub async fn execute_run(
                                 "gate_checkpoint_before skipped — workflow uses Isolated worktree mode",
                             );
                         } else if let Some(pid) = workflow.project_id.as_ref() {
-                            let project_path_opt = state.db.with_conn({
+                            let project_path_opt = match state.db.with_conn({
                                 let pid2 = pid.clone();
                                 move |conn| crate::db::projects::get_project(conn, &pid2)
-                            }).await.ok().flatten();
+                            }).await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    tracing::warn!(
+                                        run_id = %run.id,
+                                        step = %step.name,
+                                        error = %e,
+                                        "project lookup failed — gate checkpoint commit skipped"
+                                    );
+                                    None
+                                }
+                            };
                             if let Some(proj) = project_path_opt {
                                 let ckp = super::gate_checkpoint::commit_checkpoint(
                                     std::path::Path::new(&proj.path),
@@ -1499,7 +1568,13 @@ pub async fn execute_run(
     // Run after_run hook (skip when paused — the run isn't done yet).
     if !paused_for_approval {
         if let Some(ref ws) = workspace {
-            let _ = ws.after_run().await;
+            if let Err(e) = ws.after_run().await {
+                tracing::warn!(
+                    run_id = %run.id,
+                    error = %e,
+                    "after_run hook could not be executed"
+                );
+            }
         }
     }
 
@@ -1550,6 +1625,20 @@ pub async fn execute_run(
         );
 
         for rb_step in &workflow.on_failure {
+            // The ⏹ cancel was only raced against the PRIMARY step loop —
+            // a cancel during a long rollback chain was acknowledged in the
+            // UI while the remaining compensation agents kept executing (and
+            // the terminal write then flipped the row back to Failed; now
+            // blocked anyway by the Cancelled-stickiness guard).
+            if cancel_token.is_cancelled() {
+                tracing::info!(
+                    target: "kronn::workflow_rollback",
+                    run_id = %run.id,
+                    "Cancel requested — abandoning remaining rollback steps"
+                );
+                run.status = RunStatus::Cancelled;
+                break;
+            }
             emit(RunEvent::StepStart {
                 step_name: rb_step.name.clone(),
                 step_index: run.step_results.len(),
@@ -1693,9 +1782,15 @@ pub async fn execute_run(
                         });
                         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                         let db = state.db.clone();
-                        let _ = db.with_conn(move |conn| {
+                        if let Err(e) = db.with_conn(move |conn| {
                             crate::db::workflows::update_run_progress(conn, snap)
-                        }).await;
+                        }).await {
+                            tracing::error!(
+                                run_id = %run.id,
+                                error = %e,
+                                "failed to persist produced_branches — the preserved branch pointer is the only record of this run's work"
+                            );
+                        }
                     }
                 }
                 Err(e) => {
@@ -1870,22 +1965,37 @@ pub async fn resume_run(
                         &run.id,
                         workflow.workspace_config.as_ref().map(|c| c.hooks.clone()),
                     );
-                    if let Ok(outcome) = ws.cleanup().await {
-                        if let Some(preserved) = outcome.preserved {
-                            // Reject still preserves anything the agent committed —
-                            // the operator's "no" is on the gate, not on the work
-                            // already on disk. They may want to recover it.
-                            run.produced_branches.push(crate::models::ProducedBranch {
-                                branch_name: preserved.branch_name,
-                                head_sha: preserved.head_sha,
-                                ahead: preserved.ahead,
-                                pushed_upstream: preserved.pushed_upstream,
-                            });
-                            let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
-                            let db = state.db.clone();
-                            let _ = db.with_conn(move |conn| {
-                                crate::db::workflows::update_run_progress(conn, snap)
-                            }).await;
+                    match ws.cleanup().await {
+                        Ok(outcome) => {
+                            if let Some(preserved) = outcome.preserved {
+                                // Reject still preserves anything the agent committed —
+                                // the operator's "no" is on the gate, not on the work
+                                // already on disk. They may want to recover it.
+                                run.produced_branches.push(crate::models::ProducedBranch {
+                                    branch_name: preserved.branch_name,
+                                    head_sha: preserved.head_sha,
+                                    ahead: preserved.ahead,
+                                    pushed_upstream: preserved.pushed_upstream,
+                                });
+                                let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
+                                let db = state.db.clone();
+                                if let Err(e) = db.with_conn(move |conn| {
+                                    crate::db::workflows::update_run_progress(conn, snap)
+                                }).await {
+                                    tracing::error!(
+                                        run_id = %run.id,
+                                        error = %e,
+                                        "failed to persist produced_branches on Reject — the preserved branch pointer is the only record of this run's work"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                run_id = %run.id,
+                                error = %e,
+                                "workspace cleanup failed on Reject — worktree may be left behind"
+                            );
                         }
                     }
                 }
@@ -1957,9 +2067,20 @@ pub async fn resume_run(
         if let Some(sha) = run.state.get(&checkpoint_key).cloned() {
             if let Some(pid) = workflow.project_id.as_ref() {
                 let pid2 = pid.clone();
-                let project = state.db.with_conn(move |conn| {
+                let project = match state.db.with_conn(move |conn| {
                     crate::db::projects::get_project(conn, &pid2)
-                }).await.ok().flatten();
+                }).await {
+                    Ok(p) => p,
+                    Err(e) => {
+                        tracing::warn!(
+                            run_id = %run.id,
+                            gate = %gate_step_name,
+                            error = %e,
+                            "project lookup failed — checkpoint reset skipped before Goto"
+                        );
+                        None
+                    }
+                };
                 if let Some(proj) = project {
                     match super::gate_checkpoint::reset_to_checkpoint(
                         std::path::Path::new(&proj.path),

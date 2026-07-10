@@ -242,7 +242,13 @@ async fn proxy_to_sidecar(
         );
     }
 
-    let client = reqwest::Client::new();
+    // Local sidecar, but a wedged process must not pin this request forever;
+    // 300s leaves ample room for a legitimately long docgen.
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .unwrap_or_default();
     let url = format!("{}/{}", sidecar.base_url, route);
     let resp = match client.post(&url).json(&payload).send().await {
         Ok(r) => r,

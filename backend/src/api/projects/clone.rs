@@ -161,6 +161,10 @@ async fn clone_with_fallbacks(
         let res = tokio::task::spawn_blocking(move || {
             sync_cmd("git")
                 .env("GIT_TERMINAL_PROMPT", "0")
+                // Abort a clone stalled under 1 KB/s for 60s instead of
+                // pinning the blocking thread on a dead network forever.
+                .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+                .env("GIT_HTTP_LOW_SPEED_TIME", "60")
                 .args(["clone", &cand_owned, &dest_buf.to_string_lossy()])
                 .output()
         })

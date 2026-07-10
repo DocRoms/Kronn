@@ -222,10 +222,27 @@ pub async fn fetch_and_store_attachment(
         tracing::warn!("F8: host did not return bytes for {file_id}");
         return;
     };
+    // Bound the transfer: a buggy/compromised peer must not force an
+    // arbitrary allocation.
+    let cap = fetch_cap_bytes(size);
+    if !b64_len_within_cap(data_b64.len(), cap) {
+        tracing::warn!(
+            "F8: peer {} sent {} b64 bytes for {file_id} (announced {size}) — refusing oversized transfer",
+            host.pseudo, data_b64.len()
+        );
+        return;
+    }
     let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64) {
         Ok(b) => b,
         Err(_) => return,
     };
+    if bytes.len() > cap {
+        tracing::warn!(
+            "F8: decoded {} bytes for {file_id} exceeds cap {cap} (announced {size}) — dropping",
+            bytes.len()
+        );
+        return;
+    }
 
     // Mirror discs have no project work_dir → persistent config-dir store.
     let disk_path = match crate::core::context_files::save_file_to_disk(file_id, filename, &bytes) {
@@ -285,4 +302,42 @@ pub async fn fetch_and_store_attachment(
         from_invite_code: host_invite_code.to_string(),
         pending: false, // F15+ ready: binary stored → front swaps placeholder for the file
     });
+}
+
+/// Transfer cap for a fetched F8 attachment: 2× the announced size, clamped
+/// to [1 MB, 64 MB]. Pure — the announced size comes from the peer's message
+/// and is not trusted beyond sizing the allowance.
+pub(crate) fn fetch_cap_bytes(announced: i64) -> usize {
+    const MAX_FETCHED_FILE_BYTES: usize = 64 * 1024 * 1024;
+    (announced.max(0) as usize)
+        .saturating_mul(2)
+        .clamp(1024 * 1024, MAX_FETCHED_FILE_BYTES)
+}
+
+/// Pre-decode check on the base64 payload length (4/3 expansion + head slack)
+/// so an oversized body is refused BEFORE allocating the decoded buffer.
+pub(crate) fn b64_len_within_cap(b64_len: usize, cap: usize) -> bool {
+    b64_len <= cap.saturating_mul(4) / 3 + 1024
+}
+
+#[cfg(test)]
+mod transfer_cap_tests {
+    use super::*;
+
+    #[test]
+    fn fetch_cap_scales_with_announcement_within_bounds() {
+        assert_eq!(fetch_cap_bytes(0), 1024 * 1024, "no/zero announcement → 1MB floor");
+        assert_eq!(fetch_cap_bytes(-5), 1024 * 1024, "negative announcement → floor");
+        assert_eq!(fetch_cap_bytes(10 * 1024 * 1024), 20 * 1024 * 1024, "2× announced");
+        assert_eq!(fetch_cap_bytes(i64::MAX), 64 * 1024 * 1024, "absolute ceiling");
+    }
+
+    #[test]
+    fn b64_precheck_refuses_oversized_and_accepts_valid() {
+        let cap = fetch_cap_bytes(6); // tiny announcement → 1MB floor
+        assert!(b64_len_within_cap(8, cap), "a valid tiny payload passes");
+        assert!(!b64_len_within_cap(cap * 2, cap), "a payload twice the cap is refused pre-decode");
+        // Boundary: exactly the b64 expansion of the cap passes.
+        assert!(b64_len_within_cap(cap * 4 / 3, cap));
+    }
 }

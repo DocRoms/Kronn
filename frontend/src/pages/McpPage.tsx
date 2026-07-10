@@ -797,6 +797,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       refetchMcps();
     } catch (e) {
       console.warn('Failed to add MCP config:', e);
+      toast(t('mcp.custom.error', userError(e)), 'error');
     }
   };
 
@@ -826,6 +827,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       refetchMcps();
     } catch (e) {
       console.warn('Failed to toggle global:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
     }
   };
 
@@ -837,6 +839,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       refetchMcps();
     } catch (e) {
       console.warn('Failed to set host_sync:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
     }
   };
 
@@ -851,6 +854,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       refetchMcps();
     } catch (e) {
       console.warn('Failed to toggle project:', e);
+      toast(t('common.actionFailed', userError(e)), 'error');
     }
   };
 

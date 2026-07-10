@@ -4,9 +4,18 @@
 //! All checks are runtime (env vars), not compile-time — the same binary works in both contexts.
 
 /// Detect if running inside a Docker container.
-/// Docker is indicated by `KRONN_DATA_DIR` (set by docker-compose).
+///
+/// Checks the explicit `KRONN_IN_DOCKER` marker (set by our Dockerfile /
+/// docker-compose) plus the container runtimes' own markers, which also cover
+/// images launched from an older compose file. Deliberately NOT keyed on
+/// `KRONN_DATA_DIR`: that is a generic data-dir override a NATIVE user can set
+/// too, and "docker" downgrades security posture (auth off by default, the
+/// LAN-bind boot guard trusts KRONN_BIND instead of the real bind host) — a
+/// false positive there is fail-open.
 pub fn is_docker() -> bool {
-    std::env::var("KRONN_DATA_DIR").is_ok()
+    std::env::var("KRONN_IN_DOCKER").is_ok()
+        || std::path::Path::new("/.dockerenv").exists()
+        || std::path::Path::new("/run/.containerenv").exists()
 }
 
 /// Whether API auth should be ENABLED by default when a fresh config first
@@ -65,38 +74,55 @@ mod tests {
 
     #[test]
     #[serial]
-    fn is_docker_true_when_data_dir_set() {
-        let old = std::env::var("KRONN_DATA_DIR").ok();
-        std::env::set_var("KRONN_DATA_DIR", "/data");
+    fn is_docker_true_when_marker_set() {
+        let old = std::env::var("KRONN_IN_DOCKER").ok();
+        std::env::set_var("KRONN_IN_DOCKER", "1");
         assert!(is_docker());
-        if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); } else { std::env::remove_var("KRONN_DATA_DIR"); }
+        if let Some(v) = old { std::env::set_var("KRONN_IN_DOCKER", v); } else { std::env::remove_var("KRONN_IN_DOCKER"); }
     }
 
     #[test]
     #[serial]
-    fn is_docker_false_when_data_dir_unset() {
-        let old = std::env::var("KRONN_DATA_DIR").ok();
-        std::env::remove_var("KRONN_DATA_DIR");
-        assert!(!is_docker());
-        if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); }
+    fn is_docker_ignores_data_dir_override() {
+        // KRONN_DATA_DIR is a generic data-relocation knob a NATIVE user can
+        // set; it must NOT flip docker mode (fail-open on the LAN guard).
+        let old_marker = std::env::var("KRONN_IN_DOCKER").ok();
+        let old_data = std::env::var("KRONN_DATA_DIR").ok();
+        std::env::remove_var("KRONN_IN_DOCKER");
+        std::env::set_var("KRONN_DATA_DIR", "/tmp/relocated");
+        // (skip on machines actually running tests inside a container)
+        if !std::path::Path::new("/.dockerenv").exists()
+            && !std::path::Path::new("/run/.containerenv").exists()
+        {
+            assert!(!is_docker(), "data-dir override alone must not mean docker");
+        }
+        if let Some(v) = old_marker { std::env::set_var("KRONN_IN_DOCKER", v); }
+        match old_data {
+            Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
+            None => std::env::remove_var("KRONN_DATA_DIR"),
+        }
     }
 
     #[test]
     #[serial]
     fn auth_off_by_default_under_docker() {
-        let old = std::env::var("KRONN_DATA_DIR").ok();
-        std::env::set_var("KRONN_DATA_DIR", "/data");
+        let old = std::env::var("KRONN_IN_DOCKER").ok();
+        std::env::set_var("KRONN_IN_DOCKER", "1");
         assert!(!auth_on_by_default(), "Docker → auth must default OFF (localhost bypass can't see the real client behind NAT)");
-        if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); } else { std::env::remove_var("KRONN_DATA_DIR"); }
+        if let Some(v) = old { std::env::set_var("KRONN_IN_DOCKER", v); } else { std::env::remove_var("KRONN_IN_DOCKER"); }
     }
 
     #[test]
     #[serial]
     fn auth_on_by_default_when_native() {
-        let old = std::env::var("KRONN_DATA_DIR").ok();
-        std::env::remove_var("KRONN_DATA_DIR");
-        assert!(auth_on_by_default(), "Native (Tauri/CLI) → auth defaults ON; localhost bypass keeps it transparent");
-        if let Some(v) = old { std::env::set_var("KRONN_DATA_DIR", v); }
+        let old = std::env::var("KRONN_IN_DOCKER").ok();
+        std::env::remove_var("KRONN_IN_DOCKER");
+        if !std::path::Path::new("/.dockerenv").exists()
+            && !std::path::Path::new("/run/.containerenv").exists()
+        {
+            assert!(auth_on_by_default(), "Native (Tauri/CLI) → auth defaults ON; localhost bypass keeps it transparent");
+        }
+        if let Some(v) = old { std::env::set_var("KRONN_IN_DOCKER", v); }
     }
 
     #[test]

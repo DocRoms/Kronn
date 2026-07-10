@@ -137,18 +137,18 @@ pub async fn resolve_token(
             "token exchange failed ({}): {}",
             status,
             // Trim the body so we don't dump kilobytes of Adobe HTML into logs.
-            &body.chars().take(300).collect::<String>(),
+            body.chars().take(300).collect::<String>(),
         ));
     }
 
     // Accept both `access_token` (RFC 6749 canonical) and providers that
     // drift slightly. `expires_in` is seconds — default 3600 if absent.
     let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("token response JSON parse error: {} — body was: {}", e, &body.chars().take(200).collect::<String>()))?;
+        .map_err(|e| format!("token response JSON parse error: {} — body was: {}", e, body.chars().take(200).collect::<String>()))?;
 
     let access_token = json.get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("token response missing `access_token` field: {}", &body.chars().take(200).collect::<String>()))?
+        .ok_or_else(|| format!("token response missing `access_token` field: {}", body.chars().take(200).collect::<String>()))?
         .to_string();
 
     let expires_in = json.get("expires_in")
@@ -274,7 +274,7 @@ pub async fn resolve_token_exchange(
         return Err(format!(
             "token exchange failed ({}): {}",
             status,
-            &body.chars().take(300).collect::<String>(),
+            body.chars().take(300).collect::<String>(),
         ));
     }
 
@@ -282,14 +282,14 @@ pub async fn resolve_token_exchange(
         .map_err(|e| format!(
             "token response JSON parse error: {} — body was: {}",
             e,
-            &body.chars().take(200).collect::<String>(),
+            body.chars().take(200).collect::<String>(),
         ))?;
 
     // Extract via JSONPath. We use `serde_json_path` (already a workspace
     // dep for ExtractSpec). A miss is a hard error — without the token
     // there's nothing to inject downstream.
     let access_token = extract_token_jsonpath(&json, token_jsonpath)
-        .map_err(|e| format!("token extraction failed: {e} — body was: {}", &body.chars().take(200).collect::<String>()))?;
+        .map_err(|e| format!("token extraction failed: {e} — body was: {}", body.chars().take(200).collect::<String>()))?;
 
     // Cache (unless ttl=0, which only test code should use).
     if ttl_seconds > 0 {
