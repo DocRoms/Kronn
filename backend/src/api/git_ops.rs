@@ -403,6 +403,7 @@ fn ssh_to_https_with_token(remote_url: &str, token: &str) -> Option<String> {
 /// Push the current branch to origin.
 pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitPushResponse, String> {
     let branch_output = sync_cmd("git")
+        .env("GIT_TERMINAL_PROMPT", "0")
         .args(["branch", "--show-current"])
         .current_dir(repo_path)
         .output()
@@ -416,6 +417,7 @@ pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitP
     // Determine push target: if we have a token and the remote is SSH, use HTTPS with embedded token
     let push_target = if let Some(token) = github_token {
         let remote_url = sync_cmd("git")
+            .env("GIT_TERMINAL_PROMPT", "0")
             .args(["remote", "get-url", "origin"])
             .current_dir(repo_path)
             .output()
@@ -435,6 +437,13 @@ pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitP
         cmd.args(["push", "-u", "origin", &branch]);
     }
     cmd.current_dir(repo_path);
+    // Never let git block the thread on an interactive prompt (SSH passphrase,
+    // username/password): this runs on a blocking thread with no timeout, so a
+    // prompt would hang it forever. Fail fast instead. The low-speed envs abort
+    // an HTTPS push stalled under 1 KB/s for 60s (dead network / dead proxy).
+    cmd.env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_HTTP_LOW_SPEED_LIMIT", "1024")
+        .env("GIT_HTTP_LOW_SPEED_TIME", "60");
     if let Some(token) = github_token {
         cmd.env("GH_TOKEN", token);
     }

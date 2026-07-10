@@ -72,7 +72,13 @@ pub fn insecure_lan_boot_error(
     token_configured: bool,
     ack_insecure: bool,
 ) -> Option<String> {
-    if ack_insecure || auth_enabled || token_configured || !lan_exposed {
+    // Actually-enforced auth = auth_enabled AND a token. Either alone is
+    // open in the middleware (`auth_allows`: auth off → open; no token →
+    // open) — the Docker default (auth OFF + auto-generated token) used to
+    // pass this guard on `token_configured` while every endpoint stayed
+    // wide open to the LAN.
+    let auth_enforced = auth_enabled && token_configured;
+    if ack_insecure || auth_enforced || !lan_exposed {
         return None;
     }
     Some(
@@ -142,10 +148,14 @@ mod tests {
         assert!(insecure_lan_boot_error(false, false, false, false).is_none());
         // Exposed + unauthenticated + not acknowledged → BLOCK.
         assert!(insecure_lan_boot_error(true, false, false, false).is_some());
-        // Exposed but authenticated (token) → fine.
-        assert!(insecure_lan_boot_error(true, false, true, false).is_none());
-        // Exposed but auth_enabled → fine.
-        assert!(insecure_lan_boot_error(true, true, false, false).is_none());
+        // Exposed + auth ENFORCED (enabled AND token) → fine.
+        assert!(insecure_lan_boot_error(true, true, true, false).is_none());
+        // Token WITHOUT auth_enabled is a middleware no-op (auth off → every
+        // endpoint open) — the Docker default (auth off + auto-generated
+        // token) must NOT pass the guard on the strength of the dead token.
+        assert!(insecure_lan_boot_error(true, false, true, false).is_some());
+        // auth_enabled WITHOUT a token is equally open (no token → open).
+        assert!(insecure_lan_boot_error(true, true, false, false).is_some());
         // Exposed + unauthenticated but explicitly acknowledged → allowed.
         assert!(insecure_lan_boot_error(true, false, false, true).is_none());
     }

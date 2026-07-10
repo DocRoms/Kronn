@@ -77,7 +77,22 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
 
         tracing::debug!("WS client: connecting to {} ({})", contact.pseudo, ws_url);
 
-        match tokio_tungstenite::connect_async(&ws_url).await {
+        // Bound the handshake: a peer that accepts TCP but never completes the
+        // WS upgrade (NAT/relay half-open) would otherwise pin this task inside
+        // connect_async forever — and the manager loop only respawns FINISHED
+        // tasks, so that contact would stay silently unreachable until restart.
+        let connect = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio_tungstenite::connect_async(&ws_url),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "WS handshake timed out after 30s",
+            )))
+        });
+        match connect {
             Ok((ws_stream, _)) => {
                 let session_start = Instant::now();
                 tracing::info!("WS client: connected to {}", contact.pseudo);

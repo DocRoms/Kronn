@@ -18,3 +18,12 @@
 ## Notes
 
 - Surfaced 2026-06-29 while debugging "no QAs after import". Root cause was benign (the export was v3, made before `quick_apis` existed → re-export from the now-v4 source fixes it), but it exposed this destructive-downgrade footgun. The body-limit import bug fixed the same day is unrelated (`backend/src/lib.rs` `DefaultBodyLimit`).
+
+
+## Residual 2026-07-12 (Codex audit, disc 3f603a34)
+
+The downgrade wipe itself is FIXED (warning + selective clear). What remains is
+requalified as **export fidelity**, a separate concern from the original bug:
+`build_export` does not cover `quick_prompt_versions`, on-disk `context_files`
+blobs, or `learning_rejections` — a restore from export is not 100% faithful.
+Track as its own work item.

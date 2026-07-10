@@ -17,6 +17,7 @@ import {
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
   Minimize2, Maximize2, Maximize,
 } from 'lucide-react';
+import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
 import { TTS_VOICES, getTtsVoiceId, setTtsVoiceId } from '../lib/tts-models';
 import { setAuthToken } from '../lib/api';
@@ -112,6 +113,14 @@ export function SettingsPage({
   const { t, locale, setLocale } = useT();
   const { theme, setTheme, unlockedThemes, unlockTheme } = useTheme();
   const { density, setDensity } = useLayoutDensity();
+
+  // Shared failure path for settings mutations — pre-fix these catches were
+  // console.warn-only, so a failed save/delete looked like a success (the
+  // silent-error UX audit, 2026-07). Log for diagnostics + visible toast.
+  const toastActionFailed = useCallback((err: unknown) => {
+    console.warn('Settings action failed:', err);
+    toast(t('common.actionFailed', userError(err)), 'error');
+  }, [toast, t]);
 
   // Secret-code state — local to the appearance card. The code is never
   // stored (UX: if the user refreshes, they can re-enter — keeps codes
@@ -602,9 +611,10 @@ export function SettingsPage({
                 aria-label={t('config.scanDepth')}
                 onChange={async (e) => {
                   const v = Number(e.target.value);
+                  const prev = scanDepth;
                   setScanDepth(v);
                   try { await configApi.setScanDepth(v); }
-                  catch { console.warn('Failed to save scan depth'); }
+                  catch (err) { setScanDepth(prev); toastActionFailed(err); }
                 }}
                 className="set-range"
               />
@@ -631,7 +641,7 @@ export function SettingsPage({
                   onClick={async () => {
                     const updated = scanPaths.filter((_, j) => j !== i);
                     setScanPaths(updated);
-                    try { await configApi.setScanPaths(updated); } catch (err) { console.warn('Settings action failed:', err); }
+                    try { await configApi.setScanPaths(updated); } catch (err) { setScanPaths(cur => (cur === updated ? scanPaths : cur)); toastActionFailed(err); }
                   }}
                 >
                   <Trash2 size={10} className="text-error" style={{ opacity: 0.5 }} />
@@ -652,7 +662,7 @@ export function SettingsPage({
                     const updated = [...scanPaths, newScanPath.trim()];
                     setScanPaths(updated);
                     setNewScanPath('');
-                    try { await configApi.setScanPaths(updated); } catch (err) { console.warn('Settings action failed:', err); }
+                    try { await configApi.setScanPaths(updated); } catch (err) { setScanPaths(cur => (cur === updated ? scanPaths : cur)); toastActionFailed(err); }
                   }
                 }}
               />
@@ -666,7 +676,7 @@ export function SettingsPage({
                   const updated = [...scanPaths, newScanPath.trim()];
                   setScanPaths(updated);
                   setNewScanPath('');
-                  try { await configApi.setScanPaths(updated); } catch (err) { console.warn('Settings action failed:', err); }
+                  try { await configApi.setScanPaths(updated); } catch (err) { setScanPaths(cur => (cur === updated ? scanPaths : cur)); toastActionFailed(err); }
                 }}
               >
                 <Plus size={12} />
@@ -696,7 +706,7 @@ export function SettingsPage({
                     onClick={async () => {
                       const updated = scanIgnore.filter((_, j) => j !== i);
                       setScanIgnore(updated);
-                      try { await configApi.setScanIgnore(updated); } catch (err) { console.warn('Settings action failed:', err); }
+                      try { await configApi.setScanIgnore(updated); } catch (err) { setScanIgnore(cur => (cur === updated ? scanIgnore : cur)); toastActionFailed(err); }
                     }}
                   >
                     <X size={9} className="text-error" style={{ opacity: 0.5 }} />
@@ -717,7 +727,7 @@ export function SettingsPage({
                     const updated = [...scanIgnore, newIgnorePattern.trim()];
                     setScanIgnore(updated);
                     setNewIgnorePattern('');
-                    try { await configApi.setScanIgnore(updated); } catch (err) { console.warn('Settings action failed:', err); }
+                    try { await configApi.setScanIgnore(updated); } catch (err) { setScanIgnore(cur => (cur === updated ? scanIgnore : cur)); toastActionFailed(err); }
                   }
                 }}
               />
@@ -730,7 +740,7 @@ export function SettingsPage({
                   const updated = [...scanIgnore, newIgnorePattern.trim()];
                   setScanIgnore(updated);
                   setNewIgnorePattern('');
-                  try { await configApi.setScanIgnore(updated); } catch (err) { console.warn('Settings action failed:', err); }
+                  try { await configApi.setScanIgnore(updated); } catch (err) { setScanIgnore(cur => (cur === updated ? scanIgnore : cur)); toastActionFailed(err); }
                 }}
               >
                 <Plus size={12} />
@@ -944,7 +954,7 @@ export function SettingsPage({
                           await skillsApi.delete(skill.id);
                           setAvailableSkills(prev => prev.filter(s => s.id !== skill.id));
                           toast(t('skills.remove'), 'success');
-                        } catch (err) { console.warn('Settings action failed:', err); }
+                        } catch (err) { toastActionFailed(err); }
                       }}
                     >
                       <Trash2 size={10} />
@@ -1033,7 +1043,7 @@ export function SettingsPage({
                       setShowCreateSkill(false);
                       setEditingSkillId(null);
                       setNewSkillName(''); setNewSkillDesc(''); setNewSkillIcon('Star'); setNewSkillContent('');
-                    } catch (err) { console.warn('Settings action failed:', err); }
+                    } catch (err) { toastActionFailed(err); }
                   }}
                 >
                   <Check size={12} /> {editingSkillId ? t('skills.saveChanges') : t('skills.add')}
@@ -1178,7 +1188,7 @@ export function SettingsPage({
                         await directivesApi.delete(directive.id);
                         setAvailableDirectives(prev => prev.filter(d => d.id !== directive.id));
                         toast(t('directives.remove'), 'success');
-                      } catch (err) { console.warn('Settings action failed:', err); }
+                      } catch (err) { toastActionFailed(err); }
                     }}
                   >
                     <Trash2 size={10} />
@@ -1260,7 +1270,7 @@ export function SettingsPage({
                       setShowCreateDirective(false);
                       setNewDirectiveName(''); setNewDirectiveIcon('📋'); setNewDirectiveContent(''); setNewDirectiveConflicts('');
                       toast(t('directives.add'), 'success');
-                    } catch (err) { console.warn('Settings action failed:', err); }
+                    } catch (err) { toastActionFailed(err); }
                   }}
                 >
                   <Check size={12} /> {t('directives.createCustom')}
@@ -1407,8 +1417,13 @@ export function SettingsPage({
                 aria-label={t('config.maxAgents')}
                 onChange={async e => {
                   const v = Number(e.target.value);
+                  const prev = serverMaxAgents;
                   setServerMaxAgents(v);
-                  try { await configApi.setServerConfig({ max_concurrent_agents: v }); } catch { /* network blip — slider snaps back via the next refetch */ }
+                  // There is no refetch on this page — without an explicit
+                  // revert the slider would stick at a value the backend
+                  // never persisted.
+                  try { await configApi.setServerConfig({ max_concurrent_agents: v }); }
+                  catch (err) { setServerMaxAgents(prev); toastActionFailed(err); }
                 }}
                 className="set-range"
               />
@@ -1431,8 +1446,11 @@ export function SettingsPage({
                 aria-label={t('settings.stallTimeout')}
                 onChange={async (e) => {
                   const v = Number(e.target.value);
+                  const prev = serverStallTimeout;
                   setServerStallTimeout(v);
-                  try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); } catch { /* network blip — slider snaps back via the next refetch */ }
+                  // Same as max-agents above: no refetch, so revert explicitly.
+                  try { await configApi.setServerConfig({ agent_stall_timeout_min: v }); }
+                  catch (err) { setServerStallTimeout(prev); toastActionFailed(err); }
                 }}
                 className="set-range"
               />
@@ -1462,6 +1480,7 @@ export function SettingsPage({
         setServerDebugMode={setServerDebugMode}
         debugModeNeedsRestart={debugModeNeedsRestart}
         setDebugModeNeedsRestart={setDebugModeNeedsRestart}
+        toast={toast}
         t={t}
       />
 

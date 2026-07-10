@@ -101,7 +101,10 @@ pub async fn load() -> Result<Option<AppConfig>> {
     if needs_save {
         let updated = toml::to_string_pretty(&config)
             .context("Failed to serialize config")?;
-        tokio::fs::write(&path, updated).await?;
+        // Same atomic temp+fsync+rename path as save() — a plain fs::write
+        // here could truncate-then-fail and lose the encryption_secret
+        // (2026-06-30 incident class).
+        persist_atomic(config_dir()?, path, updated).await?;
     }
 
     Ok(Some(config))
@@ -123,19 +126,23 @@ pub async fn save(config: &AppConfig) -> Result<()> {
         .context("Failed to serialize config")?;
     let path = config_path()?;
 
-    // Atomic write on a blocking thread: fully-written temp (0600) → fsync →
-    // rename over the target (atomic on one filesystem) → fsync the dir. A crash
-    // or a concurrent reader never sees a half-written config, so the key/token
-    // fields can't be lost to a torn write. Replaces the old `fs::write`, which
-    // could truncate-then-fail and leave a corrupt config.
-    let dir_c = dir.clone();
-    let path_c = path.clone();
-    tokio::task::spawn_blocking(move || write_config_atomic(&dir_c, &path_c, content.as_bytes()))
+    persist_atomic(dir, path.clone(), content).await?;
+
+    tracing::info!("Config saved to {}", path.display());
+    Ok(())
+}
+
+/// Atomic write on a blocking thread: fully-written temp (0600) → fsync →
+/// rename over the target (atomic on one filesystem) → fsync the dir. A crash
+/// or a concurrent reader never sees a half-written config, so the key/token
+/// fields can't be lost to a torn write. Replaces the old `fs::write`, which
+/// could truncate-then-fail and leave a corrupt config. Shared by `save()`
+/// and the migration re-save in `load()`.
+async fn persist_atomic(dir: PathBuf, path: PathBuf, content: String) -> Result<()> {
+    tokio::task::spawn_blocking(move || write_config_atomic(&dir, &path, content.as_bytes()))
         .await
         .context("config write task panicked")?
         .context("atomic config write failed")?;
-
-    tracing::info!("Config saved to {}", path.display());
     Ok(())
 }
 
@@ -334,6 +341,7 @@ pub async fn is_first_run() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     /// Tests that mutate `KRONN_DATA_DIR` (a process-wide env var) must
     /// run serialized — parallel execution would have them stomp each
@@ -453,6 +461,7 @@ mod tests {
     }
 
     #[test]
+    #[serial] // lock path derives from KRONN_DATA_DIR — races the env-mutating tests
     fn data_dir_lock_is_exclusive() {
         let dir = scratch_dir("lock");
         let g1 = acquire_lock_in(&dir).expect("first exclusive lock must succeed");
@@ -469,6 +478,7 @@ mod tests {
     /// regeneration is exactly what orphaned every secret in the 2026-06-30
     /// incident. The DB-aware reconciler owns key resolution now.
     #[tokio::test]
+    #[serial]
     async fn load_does_not_regenerate_a_missing_encryption_secret() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("noregen");
@@ -490,6 +500,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn load_keeps_an_existing_encryption_secret() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("keepsecret");
@@ -514,6 +525,7 @@ mod tests {
     /// Legacy single-key fields (`tokens.anthropic/openai/google`) must migrate
     /// into the multi-key `keys[]` on load, and the legacy fields get cleared.
     #[tokio::test]
+    #[serial]
     async fn load_migrates_legacy_single_keys_to_multikey() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("legacymig");
@@ -543,6 +555,7 @@ mod tests {
     /// Atomic rename guarantees a concurrent flurry of `save()` never yields a
     /// torn, unparseable config — `load()` always parses cleanly.
     #[tokio::test]
+    #[serial]
     async fn concurrent_saves_never_produce_a_torn_config() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = scratch_dir("concurrent");
@@ -574,6 +587,7 @@ mod tests {
     /// persists — a backend restart must NOT reset it. Also checks
     /// secret_themes round-trips (operator-local plaintext overrides).
     #[tokio::test]
+    #[serial]
     async fn secret_theme_fields_survive_save_and_reload() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = std::env::temp_dir().join(format!(
@@ -615,6 +629,7 @@ mod tests {
     /// the default is OFF — this is the macOS-Docker 401 fix: a generated token
     /// must NOT silently turn auth on and lock the user out on first launch.
     #[tokio::test]
+    #[serial]
     async fn load_autogenerates_token_and_defaults_auth_enabled_to_platform() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = std::env::temp_dir().join(format!(
@@ -635,12 +650,14 @@ mod tests {
         cfg.server.auth_enabled = true;
         save(&cfg).await.expect("save must succeed");
 
+        // Docker mode is now the explicit KRONN_IN_DOCKER marker (KRONN_DATA_DIR
+        // alone only relocates data — a native user can set it too).
+        std::env::set_var("KRONN_IN_DOCKER", "1");
         let loaded = load().await.expect("load Ok").expect("Some after save");
         assert!(
             loaded.server.auth_token.is_some(),
             "load() must auto-generate an auth token when none is set"
         );
-        // KRONN_DATA_DIR is set here → is_docker() == true → auth_on_by_default() == false.
         assert!(
             !loaded.server.auth_enabled,
             "auth must default OFF under Docker even though the saved value was true \
@@ -648,12 +665,14 @@ mod tests {
             crate::core::env::auth_on_by_default()
         );
 
+        std::env::remove_var("KRONN_IN_DOCKER");
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[cfg(unix)]
     #[tokio::test]
+    #[serial]
     async fn save_chmods_dir_700_and_file_600_on_unix() {
         let _lock = ENV_LOCK.lock().await;
         // Real save() round-trip via KRONN_DATA_DIR override so we don't
@@ -691,6 +710,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn load_returns_none_when_no_config_file() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = std::env::temp_dir().join(format!(
@@ -712,6 +732,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn is_first_run_true_before_any_save() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = std::env::temp_dir().join(format!(
@@ -739,6 +760,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn save_then_load_preserves_default_scan_ignores() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = std::env::temp_dir().join(format!(
@@ -773,6 +795,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn save_preserves_anti_hallucination_mode_and_default_tier() {
         // 0.8.7 + 0.8.6 fields that should NEVER be dropped on roundtrip.
         let _lock = ENV_LOCK.lock().await;

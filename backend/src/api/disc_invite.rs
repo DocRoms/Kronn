@@ -796,16 +796,17 @@ pub async fn fetch_file(
     if from_code.is_empty() {
         return Json(ApiResponse::err("from_invite_code required"));
     }
-    // Authenticate the caller (must be a known contact).
-    match state
+    // Authenticate the caller (must be a known contact) — and KEEP its id:
+    // being a contact is not enough to read arbitrary files (see below).
+    let caller = match state
         .db
         .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &from_code))
         .await
     {
-        Ok(Some(_)) => {}
+        Ok(Some(c)) => c,
         Ok(None) => return Json(ApiResponse::err("unknown peer (invite code not in contacts)")),
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
-    }
+    };
 
     let file_id = req.file_id.clone();
     let cf = match state
@@ -824,6 +825,31 @@ pub async fn fetch_file(
         }
         Err(e) => return Json(ApiResponse::err(format!("file lookup error: {e}"))),
     };
+
+    // Scope check: the file's discussion must be SHARED WITH this contact.
+    // Same `found: false` shape as a missing file — no existence oracle.
+    let disc_id = cf.discussion_id.clone();
+    let shared_with_caller = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &disc_id))
+        .await
+    {
+        Ok(Some(d)) => d.shared_with.contains(&caller.id),
+        Ok(None) => false,
+        Err(e) => return Json(ApiResponse::err(format!("discussion lookup error: {e}"))),
+    };
+    if !shared_with_caller {
+        tracing::warn!(
+            "fetch-file refused: contact '{}' asked for file {} of a discussion not shared with it",
+            caller.pseudo, cf.id
+        );
+        return Json(ApiResponse::ok(FetchFileResponse {
+            found: false,
+            filename: None,
+            mime_type: None,
+            data_base64: None,
+        }));
+    }
 
     let Some(disk_path) = cf.disk_path.clone() else {
         // Text-only context file (no binary on disk) — nothing to transfer.
@@ -882,6 +908,57 @@ mod tests {
         .unwrap();
         let cfg = Arc::new(RwLock::new(default_config()));
         AppState::new_defaults(cfg, db, DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    #[tokio::test]
+    async fn fetch_file_is_scoped_to_discussions_shared_with_the_caller() {
+        // Regression (Codex audit 2026-07-12): any accepted contact could
+        // read ANY context file by id.
+        let state = make_state_with_disc("d-fetch-1").await;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let blob = tmp.path().join("doc.pdf");
+        std::fs::write(&blob, b"BYTES").unwrap();
+        let blob_str = blob.to_string_lossy().to_string();
+        state.db.with_conn(move |conn| {
+            crate::db::contacts::insert_contact(conn, &crate::models::Contact {
+                id: "c-1".into(),
+                pseudo: "peer".into(),
+                avatar_email: None,
+                kronn_url: "http://peer.local".into(),
+                invite_code: "kr-inv-abc".into(),
+                status: "accepted".into(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })?;
+            crate::db::discussions::insert_federated_context_file(
+                conn, "f-1", "d-fetch-1", "m-1", "doc.pdf", "application/pdf", 5, &blob_str,
+            ).map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        }).await.unwrap();
+
+        // Known contact, but the discussion is NOT shared with it → found: false.
+        let resp = fetch_file(State(state.clone()), Json(FetchFileRequest {
+            file_id: "f-1".into(),
+            from_invite_code: "kr-inv-abc".into(),
+        })).await;
+        let body = resp.0.data.expect("ok envelope (no existence oracle)");
+        assert!(!body.found, "unshared discussion must not leak files");
+        assert!(body.data_base64.is_none());
+
+        // Share the discussion with that contact → the bytes flow.
+        state.db.with_conn(|conn| {
+            crate::db::discussions::update_discussion_sharing(conn, "d-fetch-1", "sh-1", &["c-1".to_string()]).map(|_| ())
+        }).await.unwrap();
+        let resp = fetch_file(State(state.clone()), Json(FetchFileRequest {
+            file_id: "f-1".into(),
+            from_invite_code: "kr-inv-abc".into(),
+        })).await;
+        let body = resp.0.data.unwrap();
+        assert!(body.found);
+        use base64::Engine as _;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(body.data_base64.unwrap()).unwrap();
+        assert_eq!(bytes, b"BYTES");
     }
 
     #[tokio::test]

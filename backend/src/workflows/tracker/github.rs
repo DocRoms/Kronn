@@ -42,7 +42,14 @@ impl GitHubTracker {
             owner,
             repo,
             token,
-            client: reqwest::Client::new(),
+            // Bounded: this client is awaited INLINE from the engine's single
+            // tick loop — an unbounded hang here stalls every cron and tracker
+            // in the system until restart, not just this poll.
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 

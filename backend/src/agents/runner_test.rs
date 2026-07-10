@@ -124,14 +124,17 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done, mut err) = (false, false);
         // A streamed content chunk...
-        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr).await;
+        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr, &mut done, &mut err).await;
+        assert!(!done && !err);
         // ...then the terminal `done` object (identical shape to a non-stream
         // single-object response), carrying the token counts.
         forward_ollama_line(
             r#"{"message":{"content":""},"done":true,"prompt_eval_count":12,"eval_count":3}"#,
-            &tx, &stderr,
+            &tx, &stderr, &mut done, &mut err,
         ).await;
+        assert!(done && !err, "terminal chunk sets got_done, no error");
         drop(tx);
         let mut got = String::new();
         while let Some(s) = rx.recv().await { got.push_str(&s); }
@@ -144,11 +147,34 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
-        forward_ollama_line("   ", &tx, &stderr).await;      // blank tail buffer
-        forward_ollama_line("{not json", &tx, &stderr).await; // partial/garbage
+        let (mut done, mut err) = (false, false);
+        forward_ollama_line("   ", &tx, &stderr, &mut done, &mut err).await;      // blank tail buffer
+        forward_ollama_line("{not json", &tx, &stderr, &mut done, &mut err).await; // partial/garbage
         drop(tx);
         assert!(rx.recv().await.is_none(), "no content forwarded");
         assert!(stderr.lock().unwrap().is_empty(), "no token line captured");
+        assert!(!done && !err, "garbage neither completes nor fails the stream");
+    }
+
+    #[tokio::test]
+    async fn forward_ollama_line_surfaces_in_band_error() {
+        use std::sync::{Arc, Mutex};
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done, mut err) = (false, false);
+        // Ollama's mid-stream error shape (HTTP 200, model crashed): used to
+        // be silently ignored → step "succeeded" with empty output.
+        forward_ollama_line(
+            r#"{"error":"model runner has unexpectedly stopped"}"#,
+            &tx, &stderr, &mut done, &mut err,
+        ).await;
+        drop(tx);
+        assert!(err, "in-band error object must mark the stream failed");
+        assert!(!done);
+        assert!(rx.recv().await.is_none());
+        let lines = stderr.lock().unwrap();
+        assert!(lines.iter().any(|l| l.contains("model runner has unexpectedly stopped")),
+            "error reason must reach the stderr tail shown on step failure: {lines:?}");
     }
 
     #[test]

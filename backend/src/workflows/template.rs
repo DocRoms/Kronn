@@ -276,7 +276,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
     // know the actual JSON shape ahead of execution.
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
         regex_lite::Regex::new(
-            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json)(?:\.[A-Za-z0-9_\-]+)*|previous_step\.(data|summary|status|data_json)(?:\.[A-Za-z0-9_\-]+)*)\s*\}\}"
+            r"\{\{\s*(?:steps\.([A-Za-z0-9_\-]+)\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*)|previous_step\.(data|summary|status|data_json|output)((?:\.[A-Za-z0-9_\-]+)*))\s*\}\}"
         ).unwrap()
     });
 
@@ -315,9 +315,22 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
             if let (Some(name), Some(field)) = (caps.get(1), caps.get(2)) {
                 let target_name = name.as_str();
                 let target_field = field.as_str();
+                // `.output` is raw text — a nested subpath can never resolve
+                // and would ship the literal placeholder into the prompt.
+                if target_field == "output" && caps.get(3).map(|m| !m.as_str().is_empty()).unwrap_or(false) {
+                    errors.push(format!(
+                        "Étape '{}' référence {{{{steps.{}.output{}}}}} — `.output` est du texte brut, il n'a pas de sous-chemin. Utilise {{{{steps.{}.output}}}} tel quel, ou passe par .data pour du JSON structuré.",
+                        step.name, target_name, caps.get(3).map(|m| m.as_str()).unwrap_or(""), target_name
+                    ));
+                    continue;
+                }
                 // Look only in strictly-upstream steps (can't read self or future)
                 let upstream = steps.iter().take(idx).find(|s| s.name == target_name);
                 match upstream {
+                    // `.output` is the RAW text — any upstream format is fine;
+                    // only existence/ordering matter (a typo'd name used to
+                    // ship the literal placeholder into the prompt, silently).
+                    Some(_) if target_field == "output" => {}
                     Some(target) if produces_structured(target) => {}
                     Some(target) => errors.push(format!(
                         "Étape '{}' référence {{{{steps.{}.{}}}}}, mais l'étape '{}' est en output_format: FreeText. Passe-la en Structured pour qu'elle expose .data / .summary / .status.",
@@ -338,8 +351,15 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                         }
                     }
                 }
-            } else if let Some(field) = caps.get(3) {
+            } else if let Some(field) = caps.get(4) {
                 let target_field = field.as_str();
+                if target_field == "output" && caps.get(5).map(|m| !m.as_str().is_empty()).unwrap_or(false) {
+                    errors.push(format!(
+                        "Étape '{}' référence {{{{previous_step.output{}}}}} — `.output` est du texte brut, il n'a pas de sous-chemin.",
+                        step.name, caps.get(5).map(|m| m.as_str()).unwrap_or("")
+                    ));
+                    continue;
+                }
                 if idx == 0 {
                     errors.push(format!(
                         "Étape '{}' utilise {{{{previous_step.{}}}}} mais c'est la première étape du workflow — il n'y a pas de précédente.",
@@ -347,7 +367,7 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                     ));
                 } else {
                     let prev = &steps[idx - 1];
-                    if !produces_structured(prev) {
+                    if target_field != "output" && !produces_structured(prev) {
                         errors.push(format!(
                             "Étape '{}' utilise {{{{previous_step.{}}}}}, mais l'étape précédente '{}' est en output_format: FreeText. Passe-la en Structured.",
                             step.name, target_field, prev.name
@@ -783,7 +803,10 @@ fn value_type_name(value: &serde_json::Value) -> &'static str {
 
 /// Try to extract a `---STEP_OUTPUT--- ... ---END_STEP_OUTPUT---` envelope from raw text.
 pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
-    // Strategy 1: delimited block
+    // Strategy 1: delimited block. When markers are PRESENT they are
+    // authoritative — a malformed block returns None (→ repair) instead of
+    // falling through to strategy 2, which could adopt a quoted example
+    // from the agent's own reasoning.
     if let Some(start) = text.find("---STEP_OUTPUT---") {
         let after_delim = &text[start + "---STEP_OUTPUT---".len()..];
         if let Some(end) = after_delim.find("---END_STEP_OUTPUT---") {
@@ -800,41 +823,67 @@ pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
                 return envelope_from_json(&parsed);
             }
         }
+        return None;
     }
 
-    // Strategy 2: find last JSON object with "data" and "status" fields
-    let mut last_match = None;
-    for (i, _) in text.rmatch_indices('{') {
-        let candidate = &text[i..];
-        // Find the matching closing brace
+    // Strategy 2 (legacy, marker-less — Batch* structured output): the LAST
+    // top-level parsable JSON object of the text must ITSELF be a valid
+    // envelope. No walking back to an earlier envelope-like object.
+    let mut last_json: Option<serde_json::Value> = None;
+    let mut i = 0;
+    while let Some(rel) = text[i..].find('{') {
+        let start = i + rel;
         let mut depth = 0i32;
-        let mut end_idx = 0;
-        for (j, ch) in candidate.char_indices() {
+        let mut end = None;
+        // String-aware balancing: braces inside JSON strings don't count
+        // (`{"data": "brace } inside", ...}` must balance at the real end).
+        let mut in_string = false;
+        let mut escaped = false;
+        for (j, ch) in text[start..].char_indices() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
             match ch {
-                '{' => depth += 1,
-                '}' => {
+                '\\' if in_string => escaped = true,
+                '"' => in_string = !in_string,
+                '{' if !in_string => depth += 1,
+                '}' if !in_string => {
                     depth -= 1;
-                    if depth == 0 { end_idx = j + 1; break; }
+                    if depth == 0 { end = Some(start + j + 1); break; }
                 }
                 _ => {}
             }
         }
-        if end_idx == 0 { continue; }
-        let json_candidate = &candidate[..end_idx];
-        if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_candidate) {
-            if parsed.get("data").is_some() && parsed.get("status").is_some() {
-                last_match = envelope_from_json(&parsed);
-                break; // found the last (rightmost) valid envelope
+        match end {
+            Some(e) => {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text[start..e]) {
+                    last_json = Some(v);
+                    i = e; // nested braces of a parsed object are not top-level candidates
+                } else {
+                    i = start + 1;
+                }
             }
+            None => break,
         }
     }
-
-    last_match
+    last_json
+        .filter(|v| v.get("data").is_some() && v.get("status").is_some())
+        .as_ref()
+        .and_then(envelope_from_json)
 }
 
 fn envelope_from_json(val: &serde_json::Value) -> Option<StepEnvelope> {
     let data = val.get("data")?;
-    let status = val.get("status")?.as_str().unwrap_or("OK");
+    // The contract says `status` is a string. A present-but-non-string value
+    // must NOT read as OK: `"status": null` is a model failing mid-envelope —
+    // coercing that to success inverted the failure direction. Numbers keep
+    // their text form (`200` → "200") so contains-rules still match them.
+    let status = match val.get("status")? {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Number(n) => n.to_string(),
+        _ => "ERROR".to_string(),
+    };
     let summary = val.get("summary").and_then(|s| s.as_str()).unwrap_or("");
 
     // `data`: unwrap strings for clean prompt interpolation.
@@ -848,7 +897,7 @@ fn envelope_from_json(val: &serde_json::Value) -> Option<StepEnvelope> {
 
     Some(StepEnvelope {
         data: data_str,
-        status: status.to_string(),
+        status,
         summary: summary.to_string(),
         data_json,
     })
@@ -1375,6 +1424,82 @@ mod tests {
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
         }
+    }
+
+    #[test]
+    fn strategy2_only_accepts_the_last_toplevel_json_as_envelope() {
+        // Codex acceptance matrix for the bounded strategy-2 fallback.
+
+        // 1. Legacy bare envelope as the final JSON (Batch* shape) → OK.
+        let legacy = r#"some preamble {"data": [1, 2], "status": "OK", "summary": "s"}"#;
+        let env = extract_step_envelope(legacy).expect("legacy final envelope accepted");
+        assert_eq!(env.status, "OK");
+
+        // 2. Markers present but malformed block → None, even with a valid
+        //    bare envelope elsewhere (markers are authoritative → repair).
+        let marked_bad = r#"quoted example: {"data": "x", "status": "OK"}
+---STEP_OUTPUT---
+{"data": [1,], "status": "OK"
+---END_STEP_OUTPUT---"#;
+        assert!(extract_step_envelope(marked_bad).is_none(), "malformed marked block must not fall back");
+
+        // 3. Earlier envelope-like JSON + LATER non-envelope JSON → None
+        //    (the earlier one may be a quoted example from the reasoning).
+        let example_then_other = r#"I will emit {"data": [], "status": "OK"} at the end. Result: {"count": 3}"#;
+        assert!(extract_step_envelope(example_then_other).is_none(), "must not walk back past the last JSON");
+
+        // 4. Earlier non-envelope JSON + FINAL valid envelope → OK.
+        let other_then_envelope = r#"stats: {"count": 3} then {"data": {"items": [1]}, "status": "OK"}"#;
+        let env = extract_step_envelope(other_then_envelope).expect("final envelope accepted");
+        assert_eq!(env.status, "OK");
+
+        // 5. Codex durcissement: braces inside JSON strings must not break
+        //    the balancing (string-aware scanner).
+        let brace_in_string = r#"done: {"data": "brace } inside string", "status": "OK"}"#;
+        let env = extract_step_envelope(brace_in_string).expect("string-aware balancing");
+        assert_eq!(env.data, "brace } inside string");
+        let escaped_quote = r#"x: {"data": "quote \" then } brace", "status": "OK"}"#;
+        assert!(extract_step_envelope(escaped_quote).is_some(), "escaped quotes handled");
+    }
+
+    #[test]
+    fn validate_output_refs_check_existence_and_ordering_only() {
+        use crate::models::StepOutputFormat::FreeText;
+        // A typo'd `.output` used to pass BOTH validation layers and ship
+        // the literal placeholder into the agent prompt.
+
+        // Valid upstream .output on a FreeText producer → OK (raw-text contract).
+        let ok = vec![step("a", "do things", FreeText), step("b", "resume: {{steps.a.output}}", FreeText)];
+        assert!(validate_step_references(&ok).is_ok());
+        // previous_step.output on a FreeText predecessor → OK too.
+        let ok2 = vec![step("a", "do", FreeText), step("b", "resume: {{previous_step.output}}", FreeText)];
+        assert!(validate_step_references(&ok2).is_ok());
+
+        // Typo'd step name → save-time error.
+        let typo = vec![step("a", "do", FreeText), step("b", "resume: {{steps.typo.output}}", FreeText)];
+        let errs = validate_step_references(&typo).unwrap_err();
+        assert!(errs[0].contains("aucune étape ne porte le nom"), "{errs:?}");
+
+        // Self-reference → error.
+        let selfref = vec![step("a", "loop: {{steps.a.output}}", FreeText)];
+        assert!(validate_step_references(&selfref).is_err());
+
+        // Forward reference → error.
+        let fwd = vec![step("a", "peek: {{steps.b.output}}", FreeText), step("b", "do", FreeText)];
+        let errs = validate_step_references(&fwd).unwrap_err();
+        assert!(errs[0].contains("pas exécutée avant"), "{errs:?}");
+
+        // previous_step.output on the FIRST step → error.
+        let first = vec![step("a", "{{previous_step.output}}", FreeText)];
+        assert!(validate_step_references(&first).is_err());
+
+        // Codex blocker: a nested subpath on raw .output can never resolve.
+        let nested = vec![step("a", "do", FreeText), step("b", "x: {{steps.a.output.foo}}", FreeText)];
+        let errs = validate_step_references(&nested).unwrap_err();
+        assert!(errs[0].contains("texte brut"), "{errs:?}");
+        let nested_prev = vec![step("a", "do", FreeText), step("b", "x: {{previous_step.output.foo}}", FreeText)];
+        let errs = validate_step_references(&nested_prev).unwrap_err();
+        assert!(errs[0].contains("texte brut"), "{errs:?}");
     }
 
     #[test]

@@ -851,6 +851,7 @@ mod tests {
     // ─── restore_host_path ──────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn restore_host_path_no_host_home() {
         std::env::remove_var("KRONN_HOST_HOME");
         let path = Path::new("/some/local/path");
@@ -860,6 +861,7 @@ mod tests {
     // ─── resolve_host_path ──────────────────────────────────────────────────
 
     #[test]
+    #[serial]
     fn resolve_host_path_passthrough_without_env() {
         std::env::remove_var("KRONN_HOST_HOME");
         let result = resolve_host_path("/home/user/repos");
@@ -886,11 +888,14 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn resolve_host_path_refuses_traversal_with_host_home() {
         // Even if KRONN_HOST_HOME is set, a `..` in the path must not be
         // mapped into /host-home — that would let a caller pivot outside
         // the mount root. We return the original PathBuf so downstream
         // operations fail rather than silently succeeding on the wrong target.
+        // #[serial]: this env mutation raced every non-neighbouring #[serial]
+        // test reading KRONN_HOST_HOME (the codex_global_sync flaky).
         std::env::set_var("KRONN_HOST_HOME", "/home/user");
         let result = resolve_host_path("/home/user/../etc/passwd");
         assert_eq!(result, PathBuf::from("/home/user/../etc/passwd"));

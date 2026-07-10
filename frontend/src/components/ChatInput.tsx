@@ -382,6 +382,9 @@ export function ChatInput({
         window.dispatchEvent(new CustomEvent('kronn:discussion-updated'));
       } catch (e) {
         console.warn('auto-activate skills failed:', e);
+        // Non-blocking by design (the message still sends), but the user must
+        // know the agent runs WITHOUT the skill(s) they believe are active.
+        toast(t('skills.autoActivateFailed', triggered.map(s => s.name).join(', ')), 'warning');
       }
     }
 

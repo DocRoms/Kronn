@@ -30,6 +30,11 @@ use crate::core::config;
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
+    /// Runs flipped `Running`/`Pending` → `Interrupted` by THIS boot's
+    /// reconcile. Drained exactly once by the boot notifier
+    /// (`run_notify::notify_boot_interrupted`) — the process that would have
+    /// webhooked these failures died with them.
+    boot_interrupted: Mutex<Vec<workflows::ReconciledRun>>,
 }
 
 impl Database {
@@ -47,7 +52,11 @@ impl Database {
             .context("Failed to open in-memory database")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         migrations::run(&conn)?;
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), path: PathBuf::from(":memory:") })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            path: PathBuf::from(":memory:"),
+            boot_interrupted: Mutex::new(Vec::new()),
+        })
     }
 
     /// Open a database at a specific path (useful for testing).
@@ -100,13 +109,15 @@ impl Database {
         // 0.8.4 (#317 / B1) — reconcile stale `Running` audit_runs at
         // boot. A backend crash, container restart, or kill -9 during
         // an audit leaves the row stuck `Running` forever, polluting
-        // the recap chip strip + the "active audits" badge. Any run
-        // older than 30 min is force-flipped to `Interrupted` (the
-        // resume mechanism still works because last_completed_step
-        // survives — see `reconcile_stale_runs_preserves_last_completed_step`).
-        match audit_runs::reconcile_stale_runs(&conn, 30 * 60) {
+        // the recap chip strip + the "active audits" badge.
+        // Cutoff 0, same reasoning as the workflow_runs reconcile below:
+        // at boot no in-process audit runner exists, so every `Running`
+        // row is a zombie — and the flip is resume-safe because
+        // last_completed_step survives (see
+        // `reconcile_stale_runs_preserves_last_completed_step`).
+        match audit_runs::reconcile_stale_runs(&conn, 0) {
             Ok(0) => {}
-            Ok(n) => tracing::info!("Reconciled {} stale audit_runs (status was 'Running' for > 30 min)", n),
+            Ok(n) => tracing::info!("Reconciled {} zombie audit_runs left 'Running' by a previous process → Interrupted", n),
             Err(e) => tracing::warn!("Failed to reconcile stale audit_runs: {}", e),
         }
 
@@ -117,11 +128,18 @@ impl Database {
         // so every `Running`/`Pending` row is by definition a zombie — a grace
         // window would just leave a freshly-interrupted run lying about its
         // status for up to that long (Copilot review, PR #114).
-        match workflows::reconcile_stale_runs(&conn, 0) {
-            Ok(0) => {}
-            Ok(n) => tracing::info!("Reconciled {} zombie workflow_runs left 'Running'/'Pending' by a previous process → Interrupted", n),
-            Err(e) => tracing::warn!("Failed to reconcile stale workflow_runs: {}", e),
-        }
+        let boot_interrupted = match workflows::reconcile_stale_runs(&conn, 0) {
+            Ok(v) => {
+                if !v.is_empty() {
+                    tracing::info!("Reconciled {} zombie workflow_runs left 'Running'/'Pending' by a previous process → Interrupted", v.len());
+                }
+                v
+            }
+            Err(e) => {
+                tracing::warn!("Failed to reconcile stale workflow_runs: {}", e);
+                Vec::new()
+            }
+        };
 
         // 0.8.6 — auto-purge api_call_logs older than 90 days at boot.
         // Generous default : keeps a quarter of audit trail for debug
@@ -133,12 +151,25 @@ impl Database {
             Err(e) => tracing::warn!("Failed to auto-purge api_call_logs: {}", e),
         }
 
-        Ok(Self { conn: Arc::new(Mutex::new(conn)), path: path.clone() })
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+            path: path.clone(),
+            boot_interrupted: Mutex::new(boot_interrupted),
+        })
     }
 
     /// Get the database file path.
     pub fn path(&self) -> &PathBuf {
         &self.path
+    }
+
+    /// Drain the boot-reconciled Interrupted runs (once). Returns empty on
+    /// every subsequent call — the boot notifier is the single consumer.
+    pub fn take_boot_interrupted(&self) -> Vec<workflows::ReconciledRun> {
+        self.boot_interrupted
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
     }
 
     /// Execute a blocking closure with the database connection.
@@ -151,8 +182,33 @@ impl Database {
     {
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
-            let conn = conn.lock().map_err(|e| anyhow::anyhow!("Mutex poisoned: {e}"))?;
-            f(&conn)
+            // Poison is recoverable here: a panicked closure can't leave
+            // SQLite mid-transaction (rusqlite rolls back on drop), while
+            // treating poison as fatal turns one panic into a full outage.
+            let guard = match conn.lock() {
+                Ok(g) => g,
+                Err(poisoned) => {
+                    tracing::error!("DB mutex was poisoned by a previous panic — recovering the lock");
+                    // Clear the flag or every later lock() re-enters this
+                    // error path (log spam on each DB call, forever).
+                    conn.clear_poison();
+                    poisoned.into_inner()
+                }
+            };
+            // Catch panics BEFORE they unwind through the guard: the mutex
+            // never poisons, and the panic message reaches the API error.
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&guard))) {
+                Ok(r) => r,
+                Err(payload) => {
+                    let msg = payload
+                        .downcast_ref::<&str>()
+                        .map(|s| s.to_string())
+                        .or_else(|| payload.downcast_ref::<String>().cloned())
+                        .unwrap_or_else(|| "non-string panic payload".into());
+                    tracing::error!("DB closure panicked: {msg}");
+                    Err(anyhow::anyhow!("DB closure panicked: {msg}"))
+                }
+            }
         })
         .await
         .map_err(|e| anyhow::anyhow!("spawn_blocking failed: {e}"))?

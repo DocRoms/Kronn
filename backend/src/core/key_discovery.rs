@@ -171,11 +171,30 @@ pub fn write_gemini_key(key: Option<&str>) {
     match key {
         Some(k) => {
             let _ = std::fs::create_dir_all(&gemini_dir);
-            // Read existing settings to preserve other fields
-            let mut settings: serde_json::Value = std::fs::read_to_string(&settings_path)
-                .ok()
-                .and_then(|c| serde_json::from_str(&c).ok())
-                .unwrap_or_else(|| serde_json::json!({}));
+            // Read existing settings to preserve other fields. A MISSING file
+            // starts from {}, but an unreadable/corrupt one must abort —
+            // rewriting would replace the user's whole Gemini config
+            // (mcpServers, theme, …) with just apiKey.
+            let mut settings = match std::fs::read_to_string(&settings_path) {
+                Ok(c) => match serde_json::from_str::<serde_json::Value>(&c) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Not syncing Google key: {} is not valid JSON ({e}); refusing to overwrite it",
+                            settings_path.display()
+                        );
+                        return;
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+                Err(e) => {
+                    tracing::warn!(
+                        "Not syncing Google key: cannot read {}: {e}; refusing to overwrite it",
+                        settings_path.display()
+                    );
+                    return;
+                }
+            };
             settings["apiKey"] = serde_json::Value::String(k.to_string());
             match std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap()) {
                 Ok(_) => tracing::info!("Synced Google key to {}", settings_path.display()),
@@ -188,8 +207,10 @@ pub fn write_gemini_key(key: Option<&str>) {
                 if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(obj) = settings.as_object_mut() {
                         obj.remove("apiKey");
-                        let _ = std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap());
-                        tracing::info!("Removed Google key from {}", settings_path.display());
+                        match std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap()) {
+                            Ok(_) => tracing::info!("Removed Google key from {}", settings_path.display()),
+                            Err(e) => tracing::warn!("Failed to remove Google key from {}: {e}", settings_path.display()),
+                        }
                     }
                 }
             }
@@ -325,6 +346,69 @@ mod tests {
     async fn discover_keys_returns_vec() {
         let keys = discover_keys().await;
         assert!(keys.len() <= 10);
+    }
+
+    // ─── write_gemini_key ────────────────────────────────────────────────────
+
+    #[test]
+    #[serial]
+    fn write_gemini_key_starts_from_empty_when_file_missing() {
+        let tmp = std::env::temp_dir().join("kronn-test-gemini-write-missing");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        write_gemini_key(Some("AIza-new"));
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["apiKey"].as_str(), Some("AIza-new"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn write_gemini_key_preserves_other_fields() {
+        let tmp = std::env::temp_dir().join("kronn-test-gemini-write-preserve");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".gemini")).unwrap();
+        std::fs::write(
+            tmp.join(".gemini/settings.json"),
+            r#"{"apiKey":"old","theme":"dark","mcpServers":{"foo":{}}}"#,
+        ).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        write_gemini_key(Some("AIza-new"));
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["apiKey"].as_str(), Some("AIza-new"));
+        assert_eq!(v["theme"].as_str(), Some("dark"), "user settings must survive the sync");
+        assert!(v["mcpServers"]["foo"].is_object(), "mcpServers must survive the sync");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn write_gemini_key_refuses_to_overwrite_corrupt_settings() {
+        let tmp = std::env::temp_dir().join("kronn-test-gemini-write-corrupt");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".gemini")).unwrap();
+        let corrupt = "{ not json — user's mcpServers live here";
+        std::fs::write(tmp.join(".gemini/settings.json"), corrupt).unwrap();
+
+        let old_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &tmp);
+        write_gemini_key(Some("AIza-new"));
+        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+
+        let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
+        assert_eq!(content, corrupt, "a corrupt settings.json must be left untouched, never replaced by {{apiKey}}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ─── Cross-platform: home_dir resolution ────────────────────────────────

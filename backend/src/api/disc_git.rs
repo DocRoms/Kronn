@@ -468,13 +468,17 @@ pub async fn test_mode_enter(
             return Json(ApiResponse::err(format!("Failed to unlock worktree: {}", e)));
         }
         let did = disc.id.clone();
-        let _ = state.db.with_conn(move |conn| {
+        if let Err(e) = state.db.with_conn(move |conn| {
             conn.execute(
                 "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
                 rusqlite::params![did],
             )?;
             Ok(())
-        }).await;
+        }).await {
+            // Worktree is already gone on disk — a stale pointer is
+            // recoverable, but say so instead of pretending it's clean.
+            tracing::warn!("Test mode: worktree removed but clearing workspace_path failed: {e}");
+        }
     }
 
     // ── Checkout the discussion branch in the main repo ─────────────────
@@ -488,15 +492,29 @@ pub async fn test_mode_enter(
     }
 
     // ── Persist test-mode state in DB ────────────────────────────────────
+    // This row is the ONLY record of how to undo the working-tree mutation we
+    // just made (previous branch + the stash holding the user's dirty files).
+    // If it doesn't persist, exiting test mode can't restore and the stash
+    // pointer is lost — so a failure here rolls the checkout back instead of
+    // reporting success.
     let previous_branch = state_before.current_branch.clone();
     let restore = previous_branch.clone();
     let stash_ref_clone = if stashed { Some(stash_message.clone()) } else { None };
     let did = disc.id.clone();
-    let _ = state.db.with_conn(move |conn| {
+    if let Err(e) = state.db.with_conn(move |conn| {
         crate::db::discussions::update_discussion_test_mode(
             conn, &did, Some(&restore), stash_ref_clone.as_deref(),
         )
-    }).await;
+    }).await {
+        let _ = crate::core::worktree::checkout_branch(&repo_path, &previous_branch);
+        let _ = crate::core::worktree::reattach_worktree(&repo_path, &project.name, &disc.title, &branch);
+        if stashed {
+            let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
+        }
+        return Json(ApiResponse::err(format!(
+            "Could not persist test-mode restore state ({e}) — checkout rolled back to `{previous_branch}`"
+        )));
+    }
 
     tracing::info!(
         "Test mode ON for disc '{}': main repo {} → {} (stashed={})",

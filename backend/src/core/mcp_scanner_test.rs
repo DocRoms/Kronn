@@ -1797,6 +1797,174 @@ args = ["@example/old-mcp"]
 
     #[test]
     #[serial]
+            fn host_mcp_command_available_respects_the_host_container_boundary() {
+        // Codex review (2026-07-12): the host writers must judge availability
+        // where the HOST CLI runs, not in the backend's PATH.
+        use crate::core::mcp_scanner::host_mcp_command_available;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let prev_docker = std::env::var("KRONN_IN_DOCKER").ok();
+        let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
+
+        // Native: delegates to the backend-PATH check.
+        std::env::remove_var("KRONN_IN_DOCKER");
+        if !std::path::Path::new("/.dockerenv").exists()
+            && !std::path::Path::new("/run/.containerenv").exists()
+        {
+            assert!(!host_mcp_command_available("definitely-not-a-binary-kronn-test"));
+            assert!(host_mcp_command_available("sh"));
+        }
+
+        // Docker + host bin present as a DANGLING symlink (brew Cellar) → kept.
+        std::env::set_var("KRONN_IN_DOCKER", "1");
+        std::env::set_var("KRONN_HOST_BIN", tmp.path());
+        std::os::unix::fs::symlink("/no/such/Cellar/uv/bin/uvx", tmp.path().join("uvx")).unwrap();
+        assert!(host_mcp_command_available("uvx"), "host symlink entry counts even when dangling in-container");
+        // Docker + host bins mounted but binary absent → skip.
+        assert!(!host_mcp_command_available("glab"), "absent from host bins → dead entry");
+        // Docker + absolute path → unverifiable from the container → keep.
+        assert!(host_mcp_command_available("/usr/local/bin/uvx"));
+        // Docker without a host-bin mount → keep (never drop what may work).
+        std::env::remove_var("KRONN_HOST_BIN");
+        assert!(host_mcp_command_available("uvx"));
+
+        match prev_docker {
+            Some(v) => std::env::set_var("KRONN_IN_DOCKER", v),
+            None => std::env::remove_var("KRONN_IN_DOCKER"),
+        }
+        match prev_hb {
+            Some(v) => std::env::set_var("KRONN_HOST_BIN", v),
+            None => std::env::remove_var("KRONN_HOST_BIN"),
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn docker_host_bin_uvx_survives_the_codex_plan() {
+        // Codex blocker test, verbatim: KRONN_HOST_BIN carries `uvx` (dangling
+        // symlink, the brew shape), backend PATH does not → entry KEPT.
+        let tmp = setup_tmp("codex-hostbin-keep");
+        let home = tmp.join("fake-home");
+        let hostbin = tmp.join("host-bin");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&hostbin).unwrap();
+        std::os::unix::fs::symlink("/no/such/Cellar/uv/bin/uvx", hostbin.join("uvx")).unwrap();
+
+        let prev_home = std::env::var("KRONN_HOST_HOME").ok();
+        let prev_docker = std::env::var("KRONN_IN_DOCKER").ok();
+        let prev_hb = std::env::var("KRONN_HOST_BIN").ok();
+        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+        std::env::set_var("KRONN_IN_DOCKER", "1");
+        std::env::set_var("KRONN_HOST_BIN", hostbin.to_string_lossy().to_string());
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        crate::db::mcps::upsert_server(&conn, &crate::models::McpServer {
+            id: "srv-uvx".into(),
+            name: "Atlassian".into(),
+            description: String::new(),
+            transport: crate::models::McpTransport::Stdio {
+                command: "uvx".into(),
+                args: vec!["mcp-atlassian".into()],
+            },
+            source: crate::models::McpSource::Registry,
+            api_spec: None,
+        }).unwrap();
+        crate::db::mcps::insert_config(&conn, &crate::models::McpConfig {
+            id: "cfg-uvx".into(),
+            server_id: "srv-uvx".into(),
+            label: "atlassian".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: true,
+            include_general: true,
+            config_hash: "h".into(),
+            project_ids: vec![],
+            host_sync: crate::models::HostSyncMode::GlobalOnly,
+        }).unwrap();
+
+        let plan = CodexSync.prepare(&conn, "secret-irrelevant").expect("plan");
+        assert!(plan.content.contains("[mcp_servers.atlassian]"),
+            "a host-installed uvx MCP must survive the Codex plan under Docker. Got:\n{}",
+            plan.content);
+
+        match prev_home {
+            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        match prev_docker {
+            Some(v) => std::env::set_var("KRONN_IN_DOCKER", v),
+            None => std::env::remove_var("KRONN_IN_DOCKER"),
+        }
+        match prev_hb {
+            Some(v) => std::env::set_var("KRONN_HOST_BIN", v),
+            None => std::env::remove_var("KRONN_HOST_BIN"),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[serial]
+    fn unavailable_command_is_skipped_by_codex_and_copilot_writers() {
+        // Parity regression (Codex install, 2026-07-12): entries whose
+        // command isn't on the host failed every Codex startup with
+        // "No such file or directory" — the .mcp.json writer filters them,
+        // the host writers didn't.
+        let tmp = setup_tmp("host-sync-unavailable-cmd");
+        let home = tmp.join("fake-home");
+        std::fs::create_dir_all(&home).unwrap();
+        let prev = std::env::var("KRONN_HOST_HOME").ok();
+        std::env::set_var("KRONN_HOST_HOME", home.to_string_lossy().to_string());
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::migrations::run(&conn).unwrap();
+        let server = crate::models::McpServer {
+            id: "srv-ghost".into(),
+            name: "Ghost".into(),
+            description: String::new(),
+            transport: crate::models::McpTransport::Stdio {
+                command: "definitely-not-a-binary-kronn-test".into(),
+                args: vec!["serve".into()],
+            },
+            source: crate::models::McpSource::Registry,
+            api_spec: None,
+        };
+        crate::db::mcps::upsert_server(&conn, &server).unwrap();
+        crate::db::mcps::insert_config(&conn, &crate::models::McpConfig {
+            id: "cfg-ghost".into(),
+            server_id: "srv-ghost".into(),
+            label: "ghost".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: true,
+            include_general: true,
+            config_hash: "h".into(),
+            project_ids: vec![],
+            host_sync: crate::models::HostSyncMode::GlobalOnly,
+        }).unwrap();
+
+        let codex = CodexSync.prepare(&conn, "secret-irrelevant")
+            .expect("plan still produced (kronn-internal)");
+        assert!(!codex.content.contains("definitely-not-a-binary-kronn-test"),
+            "unavailable command must not reach config.toml:\n{}", codex.content);
+        assert!(codex.content.contains("kronn-internal"), "bridge injection survives the filter");
+
+        let copilot = CopilotSync.prepare(&conn, "secret-irrelevant")
+            .expect("plan still produced (kronn-internal)");
+        assert!(!copilot.content.contains("definitely-not-a-binary-kronn-test"),
+            "unavailable command must not reach mcp-config.json:\n{}", copilot.content);
+        assert!(copilot.content.contains("kronn-internal"), "bridge injection survives the filter");
+
+        match prev {
+            Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
+            None => std::env::remove_var("KRONN_HOST_HOME"),
+        }
+        cleanup(&tmp);
+    }
+
+    #[test]
+    #[serial]
     fn codex_global_sync_emits_kronn_internal_into_config_toml() {
         // Redirect Codex's home-config lookup to a tmp dir via the
         // KRONN_HOST_HOME hook. We don't share global env between tests
@@ -1907,6 +2075,7 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
+    #[serial] // READS KRONN_INTROSPECTION_PUBLIC_PATH — races the tests that set it
     fn write_general_mcp_json_seeds_all_agent_configs_with_kronn_internal() {
         use rusqlite::Connection;
         let tmp = setup_tmp("general-all-agents");

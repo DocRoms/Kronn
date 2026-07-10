@@ -647,6 +647,66 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(screen.queryByText('N° de la PR à reviewer')).toBeNull();
   });
 
+  it('la popup valide le pattern déclaré AVANT de fermer (le rejet backend était invisible)', async () => {
+    mockWorkflowsApi.triggerStream.mockClear();
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow({
+      variables: [{
+        name: 'pr_number', label: 'N° de la PR à reviewer', placeholder: '1800',
+        description: null, required: true, pattern: '\\d+',
+      }],
+    } as Partial<Workflow>));
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.triggerStream.mockResolvedValue(undefined);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
+    await waitFor(() => expect(screen.getByText('N° de la PR à reviewer')).toBeInTheDocument());
+
+    // A value violating the pattern → inline error, modal stays open, no trigger.
+    fireEvent.change(screen.getByPlaceholderText('1800'), { target: { value: 'PR-1800' } });
+    const goButtons = screen.getAllByText('Lancer');
+    const modalGo = goButtons[goButtons.length - 1];
+    await act(async () => { fireEvent.click(modalGo); });
+    expect(screen.getByText(/format attendu/i)).toBeInTheDocument();
+    expect(mockWorkflowsApi.triggerStream).not.toHaveBeenCalled();
+
+    // Conforming value → fires.
+    fireEvent.change(screen.getByPlaceholderText('1800'), { target: { value: '1800' } });
+    await act(async () => { fireEvent.click(modalGo); });
+    await waitFor(() => expect(mockWorkflowsApi.triggerStream).toHaveBeenCalled());
+  });
+
+  it("un échec du trigger côté carte remonte un toast d'erreur (plus de clic silencieux)", async () => {
+    mockWorkflowsApi.triggerStream.mockClear();
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    // No variables (declared OR auto-detectable) → Lancer fires directly, no modal.
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow({
+      variables: [],
+      steps: [
+        { name: 'prnum', agent: 'ClaudeCode', prompt_template: 'Review the PR', mode: { type: 'Normal' } } as never,
+        { name: 'reason', agent: 'ClaudeCode', prompt_template: 'Deep review {{steps.prnum.data.stdout}}', mode: { type: 'Normal' } } as never,
+      ],
+    } as Partial<Workflow>));
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    // triggerStream invokes its onError callback (SSE `error` event, e.g.
+    // concurrency limit) — the 4th positional arg of triggerStream.
+    mockWorkflowsApi.triggerStream.mockImplementation(
+      async (_id: string, _s: unknown, _d: unknown, _done: unknown, onError: (e: string) => void) => {
+        onError('Concurrency limit reached (2/2)');
+      },
+    );
+    const toast = vi.fn();
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} toast={toast} />);
+    await act(async () => { fireEvent.click(screen.getAllByText('Lancer')[0]); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const [msg, kind] = toast.mock.calls[0];
+    expect(String(msg)).toMatch(/Concurrency limit/);
+    expect(kind).toBe('error');
+  });
+
   it('carte désactivée : Lancer est inerte MAIS porte le tooltip explicatif', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary({ enabled: false })]);
     await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);

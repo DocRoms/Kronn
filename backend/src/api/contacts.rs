@@ -32,7 +32,7 @@ pub async fn add(
     }
 
     // Ping the peer to check reachability (non-blocking, 3s timeout)
-    let health_url = format!("{}/api/health", &kronn_url);
+    let health_url = format!("{}/api/health", kronn_url);
     let ping_error = reqwest::Client::new()
         .get(&health_url)
         .timeout(std::time::Duration::from_secs(3))

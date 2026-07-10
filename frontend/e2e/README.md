@@ -12,6 +12,30 @@ make test-e2e-ui       # UI Playwright (debug visuel, headed)
 
 Vite dev server est auto-spawné par Playwright (cf. `playwright.config.ts::webServer`). Le backend doit tourner séparément.
 
+### Navigateurs Playwright (⚠ après chaque bump de version)
+
+`pnpm test:e2e` installe automatiquement le binaire requis (via
+`e2e/ensure-browser.mjs` — skippé en CI où les navigateurs sont pré-cuits dans
+l'image conteneur). Si tu lances `npx playwright test`
+directement après un bump de `@playwright/test`, chaque spec échoue en 0ms avec
+`Executable doesn't exist … chromium_headless_shell-<rev>` — ce n'est PAS un bug
+de l'app : chaque version de Playwright épingle sa propre révision de navigateur
+(incident 2026-07-09 : deux suites entières perdues là-dessus).
+
+Deux pièges connus sur ce poste :
+- **Download qui rampe** : l'installeur Node télécharge parfois à quelques KB/s
+  alors que le CDN répond à ~4 MB/s en curl. Plan B qui marche : télécharger le
+  zip directement (`https://cdn.playwright.dev/builds/cft/<browserVersion>/mac-arm64/chrome-headless-shell-mac-arm64.zip`,
+  `browserVersion` dans `playwright-core/browsers.json`), le dézipper dans
+  `~/Library/Caches/ms-playwright/chromium_headless_shell-<rev>/` et `touch
+  INSTALLATION_COMPLETE DEPENDENCIES_VALIDATED`.
+- **Dossier partiel** : un download interrompu laisse un dossier sans le binaire
+  dedans — `rm -rf` le dossier de la révision avant de réinstaller.
+
+La CI n'est pas concernée : elle utilise l'image `mcr.microsoft.com/playwright`
+avec les navigateurs pré-installés (le tag doit matcher la version de
+`@playwright/test` — voir le commentaire dans `ci-test.yml`).
+
 ## Architecture
 
 ```

@@ -111,9 +111,28 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
-    if app_config.server.auth_token.is_none() {
-        if let Some(t) = env_token {
-            app_config.server.auth_token = Some(t);
+    if let Some(ref t) = env_token {
+        match &app_config.server.auth_token {
+            None => app_config.server.auth_token = Some(t.clone()),
+            // Both set but DIFFERENT: the middleware validates the config
+            // token while spawned children (sidecar) inherit the env one —
+            // every sidecar call 401s with no visible cause. Don't silently
+            // pick a winner; tell the operator which one wins.
+            Some(cfg) if cfg != t => tracing::warn!(
+                "KRONN_AUTH_TOKEN env differs from the token in config.toml — the API \
+                 validates the CONFIG token, but child processes (MCP sidecar, agent \
+                 CLIs) inherit the ENV one and will get 401s. Align them (unset the env \
+                 var, or clear server.auth_token in config.toml)."
+            ),
+            Some(_) => {}
+        }
+        // An operator who explicitly sets KRONN_AUTH_TOKEN is asking for auth
+        // — and the LAN boot guard's own error message promises this env var
+        // secures the instance. A token with auth_enabled=false is a no-op in
+        // the middleware, so honor the intent.
+        if !app_config.server.auth_enabled {
+            tracing::info!("KRONN_AUTH_TOKEN set — enabling API authentication (was disabled)");
+            app_config.server.auth_enabled = true;
         }
     }
     if let Some(ref token) = app_config.server.auth_token {
@@ -139,7 +158,11 @@ async fn main() -> anyhow::Result<()> {
     // a fresh `docker compose up` publishes on 127.0.0.1 (see docker-compose.yml
     // `KRONN_BIND`), so this never fires for the standard install. Exposing to
     // the LAN then requires a token, auth, or an explicit risk acknowledgment.
-    let is_docker = std::env::var("KRONN_DATA_DIR").is_ok();
+    // Real container detection (KRONN_IN_DOCKER / /.dockerenv) — NOT the old
+    // KRONN_DATA_DIR proxy: a native install relocating its data dir must not
+    // silently switch the guard to docker mode (where an unset KRONN_BIND
+    // reads as "not exposed" even when the actual bind host is 0.0.0.0).
+    let is_docker = kronn::core::env::is_docker();
     let kronn_bind = std::env::var("KRONN_BIND").ok();
     let ack_insecure = std::env::var("KRONN_ALLOW_INSECURE_LAN")
         .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
@@ -192,40 +215,41 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move { sc.start().await });
     }
 
+    // B6 — webhook the runs the PREVIOUS process died holding (flipped to
+    // Interrupted by the boot reconcile). The engine-spawn tail can never
+    // notify these; without this, "cron died at 6am" stays silent — the
+    // exact case the failure webhook exists for. Best-effort, bounded.
+    {
+        let st = state.clone();
+        tokio::spawn(async move {
+            kronn::core::run_notify::notify_boot_interrupted(&st).await;
+        });
+    }
+
     // Workflow engine gets a clone of the state so it can spawn runs that
     // need full access (batch fan-out, ws broadcasts, agent semaphore).
     let workflow_engine = Arc::new(WorkflowEngine::new(state.clone()));
 
-    // ── Orphan scan ────────────────────────────────────────────────────────
-    // Previous process may have crashed/been killed while workflow_runs or
-    // discussions were in the "Running" state. Nothing is listening for them
-    // anymore (cancel registry is empty at boot), so the UI would show them
-    // as running forever without this cleanup. We mark any still-Running row
-    // as Failed with a clear note.
-    let cleaned = state.db.with_conn(|conn| {
-        // 2026-06-10 — also reap `Pending`: a run row created but never
-        // picked up before the previous process died is just as orphaned as
-        // a `Running` one (the cancel registry is empty at boot, nothing
-        // will ever advance it). `WaitingApproval` is INTENTIONALLY left
-        // alone — it's a durable human-gate state that survives restarts by
-        // design and resumes via /decide.
-        let runs = conn.execute(
-            "UPDATE workflow_runs SET status = 'Failed', finished_at = datetime('now') \
-             WHERE status IN ('Running', 'Pending')",
+    // ── Orphan scan (workflow_runs) ─────────────────────────────────────────
+    // Superseded by the boot reconcile in `Database::open_path` (0.8.11 B5):
+    // zombies are flipped to `Interrupted` there — the terminal state the UI,
+    // the duration averages, and the failure webhook all expect. The legacy
+    // UPDATE here marked them `Failed` AFTER that reconcile (so it always
+    // matched 0 rows) and would have mislabeled + bypassed the boot
+    // notification if it ever fired. Kept as an assertion-style probe only.
+    match state.db.with_conn(|conn| {
+        conn.query_row(
+            "SELECT COUNT(*) FROM workflow_runs WHERE status IN ('Running', 'Pending')",
             [],
-        )?;
-        // Append a marker message to the last agent response so the UI shows
-        // what happened. We can't easily UPDATE the last message content from
-        // here without rehydrating the messages table schema, so we just log
-        // the count — the disc will show as "no reply yet" until re-run.
-        Ok(runs)
-    }).await;
-    match cleaned {
-        Ok(n) if n > 0 => tracing::warn!(
-            "Orphan scan: {} workflow_runs left Running by previous process, marked as Failed", n
+            |row| row.get::<_, i64>(0),
+        ).map_err(Into::into)
+    }).await {
+        Ok(0) => tracing::info!("Orphan scan: nothing to clean up (boot reconcile already ran)"),
+        Ok(n) => tracing::warn!(
+            "Orphan scan: {n} workflow_runs still Running/Pending AFTER the boot reconcile — \
+             this should be impossible, investigate db::open_path ordering"
         ),
-        Ok(_) => tracing::info!("Orphan scan: nothing to clean up"),
-        Err(e) => tracing::warn!("Orphan scan failed: {}", e),
+        Err(e) => tracing::warn!("Orphan scan probe failed: {}", e),
     }
 
     // ── Registry sync ─────────────────────────────────────────────────────
@@ -320,8 +344,16 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         if imported > 0 {
-            let _ = config::save(&config).await;
-            tracing::info!("Auto-imported {} API key(s) from agent configs", imported);
+            match config::save(&config).await {
+                Ok(_) => tracing::info!("Auto-imported {} API key(s) from agent configs", imported),
+                // Don't log success over a failed persist: the keys exist only
+                // in memory and silently vanish (with any user edits layered
+                // on them) at the next restart.
+                Err(e) => tracing::error!(
+                    "Auto-imported {} API key(s) but saving config.toml FAILED: {e} — keys are in-memory only until the next successful save",
+                    imported
+                ),
+            }
         }
     }
 

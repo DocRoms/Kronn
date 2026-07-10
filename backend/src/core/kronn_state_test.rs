@@ -27,6 +27,39 @@ fn read_malformed_returns_none() {
 }
 
 #[test]
+fn mutators_abort_on_corrupt_state_instead_of_clobbering() {
+    let tmp = fresh_tmp("corrupt-no-clobber");
+    let corrupt = "{ \"audits\": [ …truncated by a torn write";
+    std::fs::write(tmp.join("docs/.kronn.json"), corrupt).unwrap();
+
+    assert!(record_audit(&tmp, "full").is_err(), "record_audit must abort on corrupt state");
+    assert!(mark_validated(&tmp).is_err(), "mark_validated must abort on corrupt state");
+    assert!(mark_bootstrapped(&tmp).is_err(), "mark_bootstrapped must abort on corrupt state");
+
+    let content = std::fs::read_to_string(tmp.join("docs/.kronn.json")).unwrap();
+    assert_eq!(content, corrupt, "a corrupt .kronn.json must never be rebuilt from default");
+    cleanup(&tmp);
+}
+
+#[test]
+fn backfill_skips_when_state_file_is_corrupt() {
+    let tmp = fresh_tmp("backfill-skip-corrupt");
+    let corrupt = "{ not json";
+    std::fs::write(tmp.join("docs/.kronn.json"), corrupt).unwrap();
+    // A legacy signal that WOULD trigger backfill on a fresh project.
+    std::fs::write(
+        tmp.join("docs/checksums.json"),
+        r#"{"audited_at": "2026-01-01", "mappings": []}"#,
+    ).unwrap();
+
+    let did = backfill_from_legacy_state(&tmp).unwrap();
+    assert!(!did, "backfill must not overwrite a corrupt .kronn.json");
+    let content = std::fs::read_to_string(tmp.join("docs/.kronn.json")).unwrap();
+    assert_eq!(content, corrupt);
+    cleanup(&tmp);
+}
+
+#[test]
 fn record_audit_creates_file_with_readme() {
     let tmp = fresh_tmp("record-creates");
     record_audit(&tmp, "full").unwrap();

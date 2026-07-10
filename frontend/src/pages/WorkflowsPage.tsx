@@ -275,6 +275,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     status: string | null;
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // Abort the live-run SSE reader on unmount — it only stops WATCHING; the
+  // backend run is unaffected. Without it the reader outlives tab switches.
+  useEffect(() => () => { abortRef.current?.abort(); }, []);
+  // Launch generation: abort() can't cancel an already-scheduled RAF or a
+  // resolved read() microtask — callbacks must check they're still current.
+  const launchGenRef = useRef(0);
+  // openDetail response-ordering guard (see openDetail).
+  const detailSeqRef = useRef(0);
 
   const workflows = workflowList ?? [];
   // Persist collapse state across reloads — same convention as the
@@ -327,17 +335,21 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setSelectedId(id);
     setFocusRunId(runId ?? null);
     setLoadingDetail(true);
+    // Out-of-order guard: click A (slow fetch) then B (fast) — A's response
+    // landing last must not repaint the panel with A while selectedId is B.
+    const seq = ++detailSeqRef.current;
     try {
       const [wf, runs] = await Promise.all([
         workflowsApi.get(id),
         workflowsApi.listRuns(id),
       ]);
+      if (detailSeqRef.current !== seq) return;
       setDetailWorkflow(wf);
       setDetailRuns(runs);
     } catch (e) {
       console.warn('Workflow action failed:', e);
     } finally {
-      setLoadingDetail(false);
+      if (detailSeqRef.current === seq) setLoadingDetail(false);
     }
   };
 
@@ -380,6 +392,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
    *  first when a workflow declares manual variables. */
   const fireTrigger = async (id: string, variables?: Record<string, string>) => {
     setTriggering(id);
+    // Re-acquire the one-launch-at-a-time guard — the modal path released it
+    // so the user could cancel, and its submit calls fireTrigger directly.
+    triggeringRef.current = true;
+
+    // Stop watching any previous launch's stream before resetting liveRun.
+    abortRef.current?.abort();
+    const gen = ++launchGenRef.current;
+    const isCurrent = () => launchGenRef.current === gen;
 
     // Reset live run
     setLiveRun({
@@ -421,7 +441,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     const flushChunks = () => {
       rafId = null;
       const chunks = pendingChunks;
-      if (!chunks) return;
+      if (!chunks || !isCurrent()) return;
       pendingChunks = '';
       setLiveRun(prev => {
         if (!prev) return prev;
@@ -435,6 +455,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     await workflowsApi.triggerStream(
       id,
       (data) => {
+        if (!isCurrent()) return;
         // New step kicks off — wipe the live text buffer so chunks from
         // the previous step don't bleed into the new one. Stamp the
         // step's start time so the per-step elapsed badge ticks from 0
@@ -450,6 +471,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         } : prev);
       },
       (stepResult) => {
+        if (!isCurrent()) return;
         pendingChunks = '';
         setLiveRun(prev => prev ? {
           ...prev,
@@ -460,6 +482,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         } : prev);
       },
       (data) => {
+        if (!isCurrent()) return;
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         pendingChunks = '';
         setLiveRun(prev => prev ? { ...prev, finished: true, status: data.status, currentStep: null } : prev);
@@ -469,11 +492,18 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         if (selectedId === id) openDetail(id);
       },
       (error) => {
+        if (!isCurrent()) return;
         if (rafId !== null) { cancelAnimationFrame(rafId); rafId = null; }
         console.warn('Workflow trigger error:', error);
+        // Toast, because the card path renders nothing for a finished-failed
+        // liveRun — the failure would otherwise be invisible.
+        if (toastProp) toastProp(t('wf.triggerFailed', error), 'error');
         setLiveRun(prev => prev ? { ...prev, finished: true, status: 'Failed', currentStep: null } : prev);
         triggeringRef.current = false;
         setTriggering(null);
+        // A run row may still have been created before the error — show it.
+        refetch();
+        if (selectedId === id) openDetail(id);
       },
       abort.signal,
       variables,
@@ -482,6 +512,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // `currentStepText` to render the streaming agent output for the
       // in-flight step.
       (text) => {
+        if (!isCurrent()) return;
         pendingChunks += text;
         if (rafId === null) {
           rafId = requestAnimationFrame(flushChunks);
@@ -491,6 +522,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       // Stop button to call cancelRun(workflowId, runId). Without it,
       // the live view can't address the run it's watching.
       (runId) => {
+        if (!isCurrent()) return;
         setLiveRun(prev => prev ? { ...prev, runId } : prev);
       },
     );
@@ -2202,6 +2234,28 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     setLaunchingWorkflow(prev => prev ? {
                       ...prev,
                       error: t('wf.launchModalRequired').replace('{names}', missing.join(', ')),
+                    } : prev);
+                    return;
+                  }
+                  // Validate declared patterns HERE — the backend enforces
+                  // them at trigger time, but by then the modal has closed
+                  // (0.8.5 immediate-close) and its rejection was invisible.
+                  // Bounded: a pathological pattern (catastrophic backtracking)
+                  // or a huge value could freeze the UI — past these sizes we
+                  // skip the local check and let the backend be the authority.
+                  const badPattern = vars.find(v => {
+                    const val = (launchingWorkflow.values[v.name] ?? '').trim();
+                    if (!v.pattern || !val) return false;
+                    if (v.pattern.length > 200 || val.length > 512) return false;
+                    try { return !new RegExp(`^(?:${v.pattern})$`).test(val); }
+                    catch { return false; } // invalid regex → let the backend decide
+                  });
+                  if (badPattern) {
+                    setLaunchingWorkflow(prev => prev ? {
+                      ...prev,
+                      error: t('wf.launchModalPattern')
+                        .replace('{name}', badPattern.label || badPattern.name)
+                        .replace('{pattern}', badPattern.pattern ?? ''),
                     } : prev);
                     return;
                   }

@@ -57,13 +57,16 @@ fn avg_workflow_duration_ms(
     let completed: Vec<u64> = runs
         .iter()
         .filter(|r| {
+            // Interrupted is terminal but deliberately NOT a duration sample:
+            // its finished_at is stamped by the boot reconcile, so "duration"
+            // would be the crash-to-reboot gap (a laptop closed overnight =
+            // one 10h sample among ten 5min ones → next_check hours late).
             matches!(
                 r.status,
                 RunStatus::Success
                     | RunStatus::Failed
                     | RunStatus::Cancelled
                     | RunStatus::StoppedByGuard
-                    | RunStatus::Interrupted
             )
         })
         .filter_map(|r| {
@@ -244,7 +247,7 @@ pub async fn workflow_trigger(
         let agents = cfg.agents.clone();
         drop(cfg);
         if let Err(e) = crate::workflows::runner::execute_run(
-            state_for_run,
+            state_for_run.clone(),
             &wf_for_run,
             &mut run_exec,
             &tokens,
@@ -257,6 +260,9 @@ pub async fn workflow_trigger(
         {
             tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
         }
+        // Agent-triggered runs are as unattended as cron runs — same webhook
+        // contract on a non-success terminal state (best-effort, bounded).
+        crate::core::run_notify::notify_if_failed(&state_for_run, &wf_for_run, &run_exec).await;
     });
 
     Json(ApiResponse::ok(McpTriggerWorkflowResponse {

@@ -749,6 +749,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[serial(kronn_templates_env)]
     fn missing_template_only_flags_empty_dest() {
         // No template on disk (sub-audit case): we can only flag a

@@ -15,6 +15,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { agents as agentsApi, config as configApi, debugApi, fetchHealth } from '../../lib/api';
 import { buildIssueUrl, KRONN_REPO_URL } from '../../lib/bug-report';
+import { userError } from '../../lib/userError';
+import type { ToastFn } from '../../hooks/useToast';
 // Note: lucide-react 1.x removed brand icons (Github, Gitlab, …) — use
 // `ExternalLink` for the GitHub-issue CTA. Brand icons live in
 // `simple-icons` if we ever want to re-add them.
@@ -26,6 +28,7 @@ export interface DebugSectionProps {
   setServerDebugMode: (v: boolean) => void;
   debugModeNeedsRestart: boolean;
   setDebugModeNeedsRestart: (v: boolean) => void;
+  toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
 
@@ -39,6 +42,7 @@ export function DebugSection({
   setServerDebugMode,
   debugModeNeedsRestart,
   setDebugModeNeedsRestart,
+  toast,
   t,
 }: DebugSectionProps) {
   const [lines, setLines] = useState<string[]>([]);
@@ -173,9 +177,17 @@ export function DebugSection({
                 checked={serverDebugMode}
                 onChange={async e => {
                   const next = e.target.checked;
+                  const prevNeedsRestart = debugModeNeedsRestart;
                   setServerDebugMode(next);
                   setDebugModeNeedsRestart(true);
-                  try { await configApi.setServerConfig({ debug_mode: next }); } catch { /* network blip — toggle reverts on next refetch */ }
+                  // No refetch feeds this toggle — without an explicit revert
+                  // the switch would stick at a value the backend never saved.
+                  try { await configApi.setServerConfig({ debug_mode: next }); }
+                  catch (err) {
+                    setServerDebugMode(!next);
+                    setDebugModeNeedsRestart(prevNeedsRestart);
+                    toast(t('common.actionFailed', userError(err)), 'error');
+                  }
                 }}
               />
               <span className="text-sm">{serverDebugMode ? t('common.on') : t('common.off')}</span>

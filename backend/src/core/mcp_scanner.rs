@@ -521,6 +521,59 @@ pub(crate) fn sync_claude_enabled_servers(project_path: &str, mcp_servers: &Hash
 
 /// Write a .mcp.json to `target_dir` with all MCP configs that have `include_general` set.
 /// Used for general discussions (no project) so agents still have access to global MCPs.
+/// Decrypt a config's env for writing into an on-disk agent config file.
+///
+/// `Err` = the config EXPECTS secrets (`env_keys` non-empty) but decryption
+/// failed — the caller MUST abort the whole file write, leaving the existing
+/// on-disk file untouched. Both alternatives clobber previously-good secrets
+/// (the 2026-06-30 incident class): writing the entry with `env: {}` strips
+/// them, and skipping just the entry deletes it from the regenerated file.
+/// A config with no expected keys degrades to an empty map.
+pub(crate) fn decrypt_env_strict(
+    config: &crate::models::McpConfig,
+    secret: &str,
+) -> Result<HashMap<String, String>, String> {
+    match crate::db::mcps::decrypt_env(&config.env_encrypted, secret) {
+        Ok(e) => Ok(e),
+        Err(_) if config.env_keys.is_empty() => Ok(HashMap::new()),
+        Err(e) => {
+            let msg = format!(
+                "MCP '{}': {} env key(s) configured but decryption failed ({}) — ABORTING this \
+                 config-file write so existing on-disk secrets are not clobbered. Fix the \
+                 encryption key (Settings → Security) or re-enter the MCP's env values.",
+                config.label,
+                config.env_keys.len(),
+                e
+            );
+            tracing::error!("{msg}");
+            Err(msg)
+        }
+    }
+}
+
+/// Availability of `command` for a HOST CLI. Codex/Copilot read their global
+/// config on the host — natively the backend PATH IS the host PATH, but under
+/// Docker it isn't: check the mounted host bins (KRONN_HOST_BIN), accepting
+/// symlink entries (brew Cellar links dangle inside the container — see
+/// rtk_detect). Absolute paths and an unset KRONN_HOST_BIN are unverifiable
+/// from the container → keep the entry (a startup warning on the host beats
+/// silently dropping a working MCP).
+pub(crate) fn host_mcp_command_available(command: &str) -> bool {
+    if !crate::core::env::is_docker() {
+        return is_command_available(command);
+    }
+    if command.starts_with('/') || command.starts_with('.') {
+        return true;
+    }
+    match std::env::var("KRONN_HOST_BIN") {
+        Ok(hb) => std::env::split_paths(&hb).any(|dir| {
+            let p = dir.join(command);
+            p.exists() || p.symlink_metadata().is_ok()
+        }),
+        Err(_) => true,
+    }
+}
+
 pub fn write_general_mcp_json(
     conn: &rusqlite::Connection,
     secret: &str,
@@ -546,7 +599,7 @@ pub fn write_general_mcp_json(
             Some(s) => s,
             None => continue,
         };
-        let env = db::mcps::decrypt_env(&config.env_encrypted, secret).unwrap_or_default();
+        let env = decrypt_env_strict(config, secret)?;
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
@@ -678,19 +731,10 @@ pub fn sync_project_mcps_to_disk(
             continue;
         }
 
-        // Decrypt env — skip MCP if decryption fails and keys are expected
-        let env = match db::mcps::decrypt_env(&config.env_encrypted, secret) {
-            Ok(e) => e,
-            Err(e) => {
-                if !config.env_keys.is_empty() {
-                    tracing::warn!(
-                        "MCP '{}' has {} env keys but decryption failed ({}) — writing without secrets",
-                        config.label, config.env_keys.len(), e
-                    );
-                }
-                HashMap::new()
-            }
-        };
+        // Decrypt env — a failure with expected keys ABORTS the whole sync:
+        // both "write with empty env" and "drop the entry from the regenerated
+        // file" clobber the good secrets already on disk (2026-06-30 class).
+        let env = decrypt_env_strict(config, secret)?;
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
@@ -958,8 +1002,11 @@ fn sync_vibe_project_config(
             None => continue,
         };
 
-        let env = crate::db::mcps::decrypt_env(&config.env_encrypted, secret)
-            .unwrap_or_default();
+        let env = match decrypt_env_strict(config, secret) {
+            Ok(e) => e,
+            // Abort the whole Vibe write — see decrypt_env_strict.
+            Err(_) => return,
+        };
 
         let name = config.label.clone();
 
@@ -1185,8 +1232,21 @@ impl HostMcpSync for CodexSync {
                     continue;
                 }
             };
-            let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
-                .unwrap_or_default();
+            // Parity with the .mcp.json writer: a dead entry fails Codex's
+            // startup with "No such file or directory" on every spawn.
+            // Host-aware: this file is read by the HOST CLI, not the backend.
+            if !host_mcp_command_available(&command) {
+                tracing::warn!(
+                    "MCP '{}' skipped for Codex: `{}` is not installed on this host — install it (e.g. `brew install uv` for uvx) then resync",
+                    config.label, command
+                );
+                continue;
+            }
+            let env = match decrypt_env_strict(config, secret) {
+                Ok(e) => e,
+                // Abort the whole Codex sync plan — see decrypt_env_strict.
+                Err(_) => return None,
+            };
             // Codex requires names matching ^[a-zA-Z0-9_-]+$ — slugify
             let raw_key = config.label.clone();
             let key = slugify_label(&raw_key);
@@ -1320,8 +1380,19 @@ impl HostMcpSync for CopilotSync {
                 }
             };
 
-            let env = db::mcps::decrypt_env(&config.env_encrypted, secret)
-                .unwrap_or_default();
+            // Same host-aware availability parity as the Codex writer above.
+            if !host_mcp_command_available(&command) {
+                tracing::warn!(
+                    "MCP '{}' skipped for Copilot: `{}` is not installed on this host — install it then resync",
+                    config.label, command
+                );
+                continue;
+            }
+            let env = match decrypt_env_strict(config, secret) {
+                Ok(e) => e,
+                // Abort the whole Copilot sync plan — see decrypt_env_strict.
+                Err(_) => return None,
+            };
 
             let key = config.label.clone();
             mcp_servers.insert(key, McpServerEntry {
@@ -1548,10 +1619,11 @@ fn build_kronn_managed_json_entry(
     server: &crate::models::McpServer,
     secret: &str,
     use_http_url_for_streamable: bool,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, String> {
     use crate::models::McpTransport;
-    let env = crate::db::mcps::decrypt_env(&config.env_encrypted, secret)
-        .unwrap_or_default();
+    // Err = decrypt failure with expected keys → the caller must abort its
+    // whole host-config write (see decrypt_env_strict).
+    let env = decrypt_env_strict(config, secret)?;
 
     let mut obj = serde_json::Map::new();
     match &server.transport {
@@ -1582,7 +1654,7 @@ fn build_kronn_managed_json_entry(
                 obj.insert("url".into(), serde_json::Value::String(url.clone()));
             }
         }
-        McpTransport::ApiOnly => return None,
+        McpTransport::ApiOnly => return Ok(None),
     }
 
     let mut marker = serde_json::Map::new();
@@ -1590,7 +1662,7 @@ fn build_kronn_managed_json_entry(
     marker.insert("config_id".into(), serde_json::Value::String(config.id.clone()));
     obj.insert("_kronn".into(), serde_json::Value::Object(marker));
 
-    Some(serde_json::Value::Object(obj))
+    Ok(Some(serde_json::Value::Object(obj)))
 }
 
 /// Outcome of attempting to load+merge a JSON host config (Claude/Gemini/Copilot).
@@ -1786,8 +1858,11 @@ impl HostMcpSync for ClaudeSync {
             if !should_host_sync(config) { continue; }
             let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
             let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
-                Some(e) => e,
-                None => continue, // ApiOnly skipped
+                Ok(Some(e)) => e,
+                Ok(None) => continue, // ApiOnly skipped
+                // Decrypt failure: abort the whole Claude host sync so the
+                // existing on-disk secrets are preserved (already logged).
+                Err(_) => return None,
             };
             all_managed_ids.insert(config.id.clone());
 
@@ -2077,9 +2152,14 @@ impl HostMcpSync for GeminiSync {
             if !should_host_sync(config) { continue; }
             let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
             // Gemini: use `httpUrl` for Streamable HTTP.
-            if let Some(entry) = build_kronn_managed_json_entry(config, server, secret, true) {
-                kronn_entries.insert(config.label.clone(), entry);
-                kronn_config_ids.insert(config.id.clone());
+            match build_kronn_managed_json_entry(config, server, secret, true) {
+                Ok(Some(entry)) => {
+                    kronn_entries.insert(config.label.clone(), entry);
+                    kronn_config_ids.insert(config.id.clone());
+                }
+                Ok(None) => {} // ApiOnly skipped
+                // Decrypt failure: abort the whole Gemini host sync (logged).
+                Err(_) => return None,
             }
         }
 
@@ -2807,6 +2887,7 @@ fn resolve_host_path(path: &str) -> String {
 #[cfg(test)]
 mod host_sync_tests {
     use super::*;
+    use serial_test::serial;
     use std::collections::HashSet;
 
     fn kronn_entry(config_id: &str, command: &str) -> serde_json::Value {
@@ -3032,7 +3113,36 @@ mod host_sync_tests {
             source: McpSource::Registry,
             api_spec: None,
         };
-        assert!(build_kronn_managed_json_entry(&config, &server, "secret-not-used", false).is_none());
+        assert!(build_kronn_managed_json_entry(&config, &server, "secret-not-used", false).unwrap().is_none());
+    }
+
+    #[test]
+    fn decrypt_env_strict_aborts_on_undecryptable_expected_keys() {
+        use crate::models::{HostSyncMode, McpConfig};
+        // Secrets EXPECTED + garbage ciphertext → Err: the caller must abort
+        // its file write instead of clobbering on-disk secrets (2026-06-30
+        // incident class — the old code wrote env:{} silently).
+        let mut config = McpConfig {
+            id: "u1".into(), server_id: "s1".into(), label: "linear".into(),
+            env_keys: vec!["API_TOKEN".into()],
+            env_encrypted: "not-base64-not-ciphertext".into(),
+            args_override: None, is_global: false, include_general: true,
+            config_hash: String::new(), project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+        };
+        assert!(decrypt_env_strict(&config, "0123456789abcdef0123456789abcdef").is_err());
+        // No expected keys → same garbage degrades to an empty map (nothing to lose).
+        config.env_keys = vec![];
+        assert_eq!(decrypt_env_strict(&config, "0123456789abcdef0123456789abcdef").unwrap(), HashMap::new());
+        // And the builder propagates the abort signal.
+        config.env_keys = vec!["API_TOKEN".into()];
+        let server = crate::models::McpServer {
+            id: "s1".into(), name: "Linear".into(), description: String::new(),
+            transport: crate::models::McpTransport::Stdio { command: "npx".into(), args: vec![] },
+            source: crate::models::McpSource::Registry,
+            api_spec: None,
+        };
+        assert!(build_kronn_managed_json_entry(&config, &server, "0123456789abcdef0123456789abcdef", false).is_err());
     }
 
     #[test]
@@ -3051,7 +3161,7 @@ mod host_sync_tests {
             source: McpSource::Registry,
             api_spec: None,
         };
-        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false).unwrap();
+        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false).unwrap().unwrap();
         let marker = entry.get("_kronn").unwrap();
         assert_eq!(marker.get("managed").unwrap().as_bool(), Some(true));
         assert_eq!(marker.get("config_id").unwrap().as_str(), Some("uuid-marker"));
@@ -3169,6 +3279,7 @@ mod host_sync_tests {
     }
 
     #[test]
+    #[serial]
     fn inject_kronn_internal_path_resolution() {
         // Pin the user-reported bug 2026-05-10: with KRONN_INTROSPECTION_PUBLIC_PATH
         // unset AND running in Docker (= `/app/scripts/...` only), Kronn used to
@@ -3354,12 +3465,12 @@ mod host_sync_tests {
             api_spec: None,
         };
         // Gemini convention
-        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true).unwrap();
+        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true).unwrap().unwrap();
         assert_eq!(gemini_entry.get("httpUrl").unwrap().as_str(), Some("https://example.com/mcp"));
         assert!(gemini_entry.get("type").is_none());
 
         // Claude convention (type:"http" + url)
-        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false).unwrap();
+        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false).unwrap().unwrap();
         assert_eq!(claude_entry.get("type").unwrap().as_str(), Some("http"));
         assert_eq!(claude_entry.get("url").unwrap().as_str(), Some("https://example.com/mcp"));
     }

@@ -1,8 +1,10 @@
 #[cfg(test)]
 mod tests {
     use crate::core::scanner::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn resolve_host_path_no_env() {
         // Without KRONN_HOST_HOME, paths should pass through unchanged
         std::env::remove_var("KRONN_HOST_HOME");

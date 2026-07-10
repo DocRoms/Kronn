@@ -11,6 +11,45 @@ use crate::core::cmd::async_cmd;
 use crate::models::WorkspaceHooks;
 
 /// An active workspace (git worktree) for a workflow run.
+/// TD-20260709 (A) — exclusivity of a project's MAIN checkout across
+/// non-isolated runs: two of them cross-contaminate `.kronn/` machine files
+/// and each other's edits. Isolated (worktree) runs never take this lock.
+pub struct MainTreeGuard {
+    key: String,
+}
+
+fn main_tree_locks() -> &'static std::sync::Mutex<std::collections::HashMap<String, String>> {
+    static LOCKS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    LOCKS.get_or_init(Default::default)
+}
+
+impl MainTreeGuard {
+    /// `None` = another run already owns this project's main tree; the
+    /// caller must refuse to run (holder's run id is returned for the error).
+    pub fn acquire(project_path: &str, run_id: &str) -> Result<Self, String> {
+        // Canonical key: two spellings of the same checkout (symlink,
+        // relative) must not bypass the mutex.
+        let key = std::fs::canonicalize(project_path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| project_path.to_string());
+        let mut locks = main_tree_locks().lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(holder) = locks.get(&key) {
+            return Err(holder.clone());
+        }
+        locks.insert(key.clone(), run_id.to_string());
+        Ok(Self { key })
+    }
+}
+
+impl Drop for MainTreeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut locks) = main_tree_locks().lock() {
+            locks.remove(&self.key);
+        }
+    }
+}
+
 pub struct Workspace {
     /// Path to the worktree directory
     pub path: PathBuf,
@@ -306,12 +345,29 @@ impl Workspace {
 
         if let Some(cmd) = cmd {
             tracing::info!("Running workspace hook '{}': {}", hook_name, cmd);
-            let output = async_cmd("sh")
+            // Bounded: a hung hook (e.g. `npm ci` against a dead registry)
+            // would otherwise pin the run and its concurrency slot forever —
+            // this await is outside the cancel race, so Stop can't reach it.
+            // `kill_on_drop` ensures the timed-out child doesn't leak.
+            const HOOK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+            let mut command = async_cmd("sh");
+            command
                 .args(["-c", cmd])
                 .current_dir(&self.path)
-                .output()
-                .await
-                .with_context(|| format!("Failed to run {} hook", hook_name))?;
+                .kill_on_drop(true);
+            let output = match tokio::time::timeout(HOOK_TIMEOUT, command.output()).await {
+                Ok(res) => res.with_context(|| format!("Failed to run {} hook", hook_name))?,
+                Err(_) => {
+                    tracing::warn!(
+                        "Hook '{}' timed out after {}s — killing it",
+                        hook_name, HOOK_TIMEOUT.as_secs()
+                    );
+                    return Err(anyhow::anyhow!(
+                        "Failed to run {} hook: timed out after {}s",
+                        hook_name, HOOK_TIMEOUT.as_secs()
+                    ));
+                }
+            };
 
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
@@ -326,6 +382,23 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use super::MainTreeGuard;
+
+    #[test]
+    fn main_tree_guard_is_exclusive_per_project_and_released_on_drop() {
+        let dir_a = tempfile::TempDir::new().unwrap();
+        let dir_b = tempfile::TempDir::new().unwrap();
+        let a = dir_a.path().to_string_lossy().to_string();
+        let b = dir_b.path().to_string_lossy().to_string();
+        let g1 = MainTreeGuard::acquire(&a, "run-1").expect("first acquire");
+        let denied = MainTreeGuard::acquire(&a, "run-2");
+        assert_eq!(denied.err().as_deref(), Some("run-1"), "second run must be refused, naming the holder");
+        // A different project is unaffected.
+        let _other = MainTreeGuard::acquire(&b, "run-3").expect("other project free");
+        drop(g1);
+        let _g2 = MainTreeGuard::acquire(&a, "run-2").expect("released on drop");
+    }
+
     use super::*;
 
     // ─── sanitize_name ───────────────────────────────────────────────────

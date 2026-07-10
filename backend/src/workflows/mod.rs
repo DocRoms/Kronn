@@ -39,11 +39,21 @@ use crate::AppState;
 /// The workflow engine — runs in the background, checks triggers, spawns runs.
 pub struct WorkflowEngine {
     state: AppState,
+    /// End of the previous trigger-evaluation window. Each tick evaluates
+    /// `(last_trigger_check, now]` so a cron occurrence fires exactly once —
+    /// no double-fire on the 30s window seam, no skip when a slow tracker
+    /// poll delays the tick. Swapped at the START of the tick (at-most-once:
+    /// a tick that errors mid-way drops its window rather than re-firing
+    /// already-spawned runs on the retry).
+    last_trigger_check: tokio::sync::Mutex<chrono::DateTime<Utc>>,
 }
 
 impl WorkflowEngine {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            last_trigger_check: tokio::sync::Mutex::new(Utc::now()),
+        }
     }
 
     /// Convenience accessors so existing code using `self.db` / `self.config`
@@ -90,7 +100,8 @@ impl WorkflowEngine {
             let wf_clone = wf.clone();
             let db2 = self.db().clone();
             match db2.with_conn(move |conn| crate::db::workflows::update_workflow(conn, &wf_clone)).await {
-                Ok(()) => {
+                Ok(false) => tracing::warn!("Heal skipped: workflow '{}' vanished mid-pass", wf.name),
+                Ok(true) => {
                     healed_count += 1;
                     tracing::info!(
                         "Healed workflow '{}' (id={}): upgraded steps {:?} to Structured",
@@ -113,6 +124,13 @@ impl WorkflowEngine {
 
     /// Check all enabled workflows and fire triggers.
     async fn check_triggers(&self) -> anyhow::Result<()> {
+        // Claim this tick's evaluation window (see `last_trigger_check`).
+        let now = Utc::now();
+        let since = {
+            let mut last = self.last_trigger_check.lock().await;
+            std::mem::replace(&mut *last, now)
+        };
+
         let db = self.db().clone();
         let workflows = db.with_conn(|conn| {
             crate::db::workflows::list_workflows(conn)
@@ -123,7 +141,7 @@ impl WorkflowEngine {
                 continue;
             }
 
-            if !trigger::should_fire(&wf.trigger) {
+            if !trigger::should_fire(&wf.trigger, since, now) {
                 continue;
             }
 
@@ -245,10 +263,34 @@ impl WorkflowEngine {
             parent_run_started_at: None,
         };
 
-        // Persist the run
+        // Persist the run — concurrency check + insert in ONE closure (the
+        // single shared connection makes the closure atomic). The advisory
+        // check in check_triggers releases the lock before this insert; a
+        // manual HTTP trigger (which is atomic, api/workflows.rs) could land
+        // in that gap and put a limit=1 workflow at 2 concurrent runs.
         let r = run.clone();
+        let limit = wf.concurrency_limit;
+        let wf_id_check = wf.id.clone();
         let db = self.db().clone();
-        db.with_conn(move |conn| crate::db::workflows::insert_run(conn, &r)).await?;
+        let inserted = db
+            .with_conn(move |conn| {
+                if let Some(max) = limit {
+                    let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
+                    if active >= max {
+                        return Ok(false);
+                    }
+                }
+                crate::db::workflows::insert_run(conn, &r)?;
+                Ok(true)
+            })
+            .await?;
+        if !inserted {
+            tracing::info!(
+                "Workflow '{}' trigger skipped at insert — concurrency limit filled by a concurrent trigger",
+                wf.name
+            );
+            return Ok(());
+        }
 
         tracing::info!("Spawning workflow run {} for '{}'", run.id, wf.name);
 

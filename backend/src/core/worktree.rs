@@ -56,6 +56,19 @@ pub struct WorktreeInfo {
 }
 
 /// Check if a branch is checked out in any worktree (including the main repo).
+/// Path equality that survives symlinks. git prints CANONICAL paths
+/// (`/private/var/…` on macOS) while Kronn holds the user's spelling
+/// (`/var/…`, `~/Sites` symlinks…). A naive `==` made the "branch checked
+/// out in the main repo" guard misfire on macOS: instead of blocking, it
+/// took the reuse path and handed the MAIN CHECKOUT back as a "worktree"
+/// (is_main_repo: false) — the agent then edited the user's live tree
+/// believing it was isolated.
+fn same_path(a: &Path, b: &Path) -> bool {
+    let ca = a.canonicalize().unwrap_or_else(|_| a.to_path_buf());
+    let cb = b.canonicalize().unwrap_or_else(|_| b.to_path_buf());
+    ca == cb
+}
+
 fn branch_checked_out_at(repo_path: &Path, branch: &str) -> Option<PathBuf> {
     let output = sync_cmd("git")
         .args(["worktree", "list", "--porcelain"])
@@ -169,7 +182,7 @@ pub fn create_discussion_worktree(
     // branches before the agent can work. This avoids the agent modifying files under
     // a running dev environment.
     if let Some(existing_path) = branch_checked_out_at(repo_path, &branch) {
-        if existing_path == repo_path {
+        if same_path(&existing_path, repo_path) {
             return Err(format!(
                 "Branch {} is currently checked out in the main repo. Please switch to another branch before continuing.",
                 branch
@@ -301,7 +314,7 @@ pub fn reattach_worktree(
 
     // Block if branch is checked out in the main repo (user is testing)
     if let Some(existing_path) = branch_checked_out_at(repo_path, existing_branch) {
-        if existing_path == repo_path {
+        if same_path(&existing_path, repo_path) {
             return Err(format!(
                 "Branch {} is currently checked out in the main repo. Please switch to another branch first.",
                 existing_branch
@@ -1002,7 +1015,9 @@ mod tests {
         let repo = make_test_repo("checkout-at");
         let result = branch_checked_out_at(repo.path(), "main");
         assert!(result.is_some(), "main should be found as checked out");
-        assert_eq!(result.unwrap(), repo.path());
+        // Compare through same_path: git canonicalizes (`/private/var/…` on
+        // macOS) while tempfile returns the symlinked spelling (`/var/…`).
+        assert!(same_path(&result.unwrap(), repo.path()));
     }
 
     #[test]

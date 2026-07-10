@@ -76,15 +76,18 @@ afterEach(() => {
 function renderCard(props?: Partial<Parameters<typeof DebugSection>[0]>) {
   const setServerDebugMode = vi.fn();
   const setDebugModeNeedsRestart = vi.fn();
+  const toast = vi.fn();
   return {
     setServerDebugMode,
     setDebugModeNeedsRestart,
+    toast,
     ...render(
       <DebugSection
         serverDebugMode={false}
         setServerDebugMode={setServerDebugMode}
         debugModeNeedsRestart={false}
         setDebugModeNeedsRestart={setDebugModeNeedsRestart}
+        toast={toast}
         t={t}
         {...props}
       />,
@@ -150,14 +153,19 @@ describe('DebugSection — debug-mode toggle', () => {
     await waitFor(() => expect(configApi.setServerConfig).toHaveBeenCalledWith({ debug_mode: true }));
   });
 
-  it('tolerates a setServerConfig network failure silently', async () => {
+  it('reverts the optimistic toggle and toasts when setServerConfig fails', async () => {
     configApi.setServerConfig.mockRejectedValueOnce(new Error('net'));
-    const { setServerDebugMode } = renderCard();
+    const { setServerDebugMode, setDebugModeNeedsRestart, toast } = renderCard();
     await waitFor(() => expect(debugApi.getLogs).toHaveBeenCalled());
     const checkbox = screen.getAllByRole('checkbox')[0] as HTMLInputElement;
     await act(async () => { fireEvent.click(checkbox); });
-    // Optimistic UI : the local toggle fires even though the network call failed.
+    // Optimistic flip fires first…
     expect(setServerDebugMode).toHaveBeenCalledWith(true);
+    // …then the explicit revert once the save fails (no refetch feeds this
+    // toggle, so without the revert the UI would lie about backend state).
+    await waitFor(() => expect(setServerDebugMode).toHaveBeenLastCalledWith(false));
+    expect(setDebugModeNeedsRestart).toHaveBeenLastCalledWith(false);
+    expect(toast).toHaveBeenCalledWith(expect.stringContaining('common.actionFailed'), 'error');
   });
 });
 

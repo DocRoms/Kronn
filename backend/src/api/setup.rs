@@ -856,25 +856,63 @@ fn sync_codex_auth(key: Option<&str>) {
     let codex_dir = std::path::PathBuf::from(home).join(".codex");
     let codex_auth_path = codex_dir.join("auth.json");
 
+    // MERGE into the existing auth.json — never wholesale-replace it. A user
+    // logged into Codex via ChatGPT-subscription OAuth has refresh/access
+    // tokens in this file that Kronn didn't write; replacing (or deleting)
+    // the file destroyed that login. We only own two fields.
+    let existing: serde_json::Map<String, serde_json::Value> =
+        match std::fs::read_to_string(&codex_auth_path) {
+            Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
+                Ok(serde_json::Value::Object(m)) => m,
+                Ok(_) | Err(_) if key.is_some() => {
+                    // Corrupt/non-object file and we're about to write: don't
+                    // merge garbage, but say what we're replacing.
+                    tracing::warn!("{} was not valid JSON — rewriting it", codex_auth_path.display());
+                    serde_json::Map::new()
+                }
+                _ => {
+                    tracing::warn!("{} unreadable as JSON — leaving it untouched", codex_auth_path.display());
+                    return;
+                }
+            },
+            Err(_) => serde_json::Map::new(), // missing file: start fresh
+        };
+
     match key {
         Some(k) => {
-            // Create .codex dir if needed
             let _ = std::fs::create_dir_all(&codex_dir);
-            let content = serde_json::json!({
-                "auth_mode": "apikey",
-                "OPENAI_API_KEY": k,
-            });
-            // Safety: serializing a serde_json::Value literal cannot fail
+            let mut merged = existing;
+            merged.insert("auth_mode".into(), serde_json::Value::String("apikey".into()));
+            merged.insert("OPENAI_API_KEY".into(), serde_json::Value::String(k.into()));
+            let content = serde_json::Value::Object(merged);
+            // Safety: serializing a serde_json::Value cannot fail
             match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).expect("JSON Value serialization cannot fail")) {
-                Ok(_) => tracing::info!("Synced OpenAI key to {}", codex_auth_path.display()),
+                Ok(_) => tracing::info!("Synced OpenAI key into {} (other fields preserved)", codex_auth_path.display()),
                 Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
             }
         }
         None => {
-            // Delete the auth file so Codex falls back to its own login/subscription
-            match std::fs::remove_file(&codex_auth_path) {
-                Ok(_) => tracing::info!("Removed {} (Codex will use local auth)", codex_auth_path.display()),
-                Err(e) => tracing::warn!("Failed to remove {}: {}", codex_auth_path.display(), e),
+            // Remove ONLY our fields; other credentials (OAuth tokens) stay.
+            // Delete the file only when nothing else remains in it.
+            let mut merged = existing;
+            if merged.remove("OPENAI_API_KEY").is_none() && merged.get("auth_mode").and_then(|v| v.as_str()) != Some("apikey") {
+                return; // nothing of ours in there
+            }
+            if merged.get("auth_mode").and_then(|v| v.as_str()) == Some("apikey") {
+                merged.remove("auth_mode");
+            }
+            if merged.is_empty() {
+                match std::fs::remove_file(&codex_auth_path) {
+                    Ok(_) => tracing::info!("Removed {} (Codex will use local auth)", codex_auth_path.display()),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => tracing::warn!("Failed to remove {}: {}", codex_auth_path.display(), e),
+                }
+            } else {
+                let content = serde_json::Value::Object(merged);
+                match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).expect("JSON Value serialization cannot fail")) {
+                    Ok(_) => tracing::info!("Removed Kronn's API-key fields from {} (other credentials preserved)", codex_auth_path.display()),
+                    Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
+                }
             }
         }
     }
@@ -943,8 +981,17 @@ pub async fn discover_keys(
     }
 
     if imported_count > 0 {
-        let _ = config::save(&config).await;
-        tracing::info!("Auto-imported {} API key(s)", imported_count);
+        match config::save(&config).await {
+            Ok(_) => tracing::info!("Auto-imported {} API key(s)", imported_count),
+            // Keys live only in memory now — claiming success would leave the
+            // user believing they persisted (they vanish at next restart).
+            Err(e) => {
+                tracing::error!("Auto-imported {} API key(s) but SAVING the config failed: {e} — keys are in memory only and will be lost at restart", imported_count);
+                return Json(ApiResponse::err(format!(
+                    "Imported {imported_count} key(s) but persisting config.toml failed: {e}"
+                )));
+            }
+        }
     }
 
     Json(ApiResponse::ok(DiscoverKeysResponse {
@@ -1072,11 +1119,16 @@ pub async fn db_backup(
     let result = state.db.with_conn(move |conn| {
         let mut dst = rusqlite::Connection::open(&backup_path_owned)?;
         let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        // `step(-1)` runs the backup to completion in one call. For
-        // very large DBs (>500MB) we'd want to step in pages with a
-        // sleep between to keep the mutex contention down, but
-        // Kronn's DBs are typically <100MB.
-        backup.run_to_completion(5, std::time::Duration::from_millis(50), None)?;
+        // One-shot copy via `step(-1)` (all pages in a single call). Pausing
+        // between page batches only helps when OTHER connections could write
+        // in the gaps — Kronn has a single shared connection, so a pause just
+        // holds the global mutex longer (~2.5s/MB) for no benefit.
+        // NOT `run_to_completion(-1, …)`: it asserts pages_per_step > 0 and
+        // panics (2026-07-09 boot-tick incident — poisoned the DB mutex).
+        match backup.step(-1)? {
+            rusqlite::backup::StepResult::Done => {}
+            other => anyhow::bail!("backup did not complete in one step: {other:?}"),
+        }
         Ok(())
     }).await;
 
@@ -1749,6 +1801,7 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
     use crate::core::config;
 
     // ─── import_clear_statements (I10: selective clear, no downgrade wipe) ────
@@ -2032,6 +2085,7 @@ mod tests {
     /// `global_context` travels in the exported config.toml but was dropped on
     /// import before 0.8.9. The merge must now re-apply it (+ its mode).
     #[tokio::test]
+    #[serial]
     async fn import_reapplies_global_context() {
         let _lock = ENV_LOCK.lock().await;
         let tmp = std::env::temp_dir().join(format!(

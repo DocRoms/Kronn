@@ -38,8 +38,23 @@ fn row_to_learning(row: &Row) -> rusqlite::Result<Learning> {
         id: row.get(0)?,
         claim: row.get(1)?,
         evidence,
-        kind: LearningKind::from_db(&kind_s).unwrap_or(LearningKind::Inference),
-        status: LearningStatus::from_db(&status_s).unwrap_or(LearningStatus::Pending),
+        // Unknown stored labels must not be rewritten silently: a Rejected
+        // learning resurfacing as Pending is a human decision undone. Keep the
+        // fallback (row stays loadable) but name the raw value.
+        kind: LearningKind::from_db(&kind_s).unwrap_or_else(|| {
+            tracing::warn!(
+                target: "continual_learning",
+                "learning {id_for_log}: unknown kind '{kind_s}' in DB — falling back to Inference",
+            );
+            LearningKind::Inference
+        }),
+        status: LearningStatus::from_db(&status_s).unwrap_or_else(|| {
+            tracing::warn!(
+                target: "continual_learning",
+                "learning {id_for_log}: unknown status '{status_s}' in DB — falling back to Pending",
+            );
+            LearningStatus::Pending
+        }),
         scope: scope_s.as_deref().and_then(LearningScope::from_db),
         confidence: row.get(6)?,
         faithfulness: faith_s.as_deref().and_then(Faithfulness::from_db),

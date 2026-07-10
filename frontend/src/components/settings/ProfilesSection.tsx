@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { profiles as profilesApi } from '../../lib/api';
+import { userError } from '../../lib/userError';
 import type { AgentProfile } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { Plus, Trash2, Check, X } from 'lucide-react';
@@ -64,7 +65,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                             try {
                               const updated = await profilesApi.updatePersonaName(profile.id, editingPersonaValue);
                               setAvailableProfiles(prev => prev.map(p => p.id === profile.id ? updated : p));
-                            } catch (err) { console.warn('Settings action failed:', err); }
+                            } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                           }
                           setEditingPersonaId(null);
                         }}
@@ -143,7 +144,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                         await profilesApi.delete(profile.id);
                         setAvailableProfiles(prev => prev.filter(p => p.id !== profile.id));
                         toast(t('common.delete'), 'success');
-                      } catch (err) { console.warn('Settings action failed:', err); }
+                      } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                     }}
                   >
                     <Trash2 size={10} />
@@ -231,7 +232,7 @@ export function ProfilesSection({ toast, t }: ProfilesSectionProps) {
                     setShowCreateProfile(false);
                     setNewProfileName(''); setNewProfilePersonaName(''); setNewProfileRole(''); setNewProfileAvatar('\uD83E\uDD16'); setNewProfileColor('#c8a0ff'); setNewProfilePersona('');
                     toast(t('profiles.createCustom'), 'success');
-                  } catch (err) { console.warn('Settings action failed:', err); }
+                  } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                 }}
               >
                 <Check size={12} /> {t('profiles.createCustom')}

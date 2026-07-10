@@ -145,6 +145,27 @@ pub fn commit_checkpoint(
 /// have verified the SHA came from the run's own `state` map (no
 /// arbitrary-SHA reset).
 pub fn reset_to_checkpoint(project_path: &Path, sha: &str) -> Result<(), String> {
+    // TD-20260709 (C) — this can run HOURS after the checkpoint, on a tree a
+    // human or another run may have touched since. Uncommitted changes are
+    // not ours to destroy: refuse, the caller degrades gracefully.
+    let st = crate::core::cmd::sync_cmd("git")
+        .args(["status", "--porcelain"])
+        .current_dir(project_path)
+        .output()
+        .map_err(|e| format!("git status spawn failed: {e}"))?;
+    if !st.status.success() {
+        return Err(format!(
+            "git status failed before reset: {}",
+            String::from_utf8_lossy(&st.stderr)
+        ));
+    }
+    if !st.stdout.is_empty() {
+        return Err(format!(
+            "main tree has uncommitted changes not from this run — refusing `git reset --hard` \
+             (TD-20260709). Dirty entries:\n{}",
+            String::from_utf8_lossy(&st.stdout).trim_end()
+        ));
+    }
     let r = crate::core::cmd::sync_cmd("git")
         .args(["reset", "--hard", sha])
         .current_dir(project_path)
@@ -308,6 +329,26 @@ mod tests {
             "HEAD must point at the checkpoint sha after reset",
         );
 
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn reset_refuses_when_tree_has_uncommitted_changes() {
+        // TD-20260709 (C): a deferred reset must never destroy WIP the run
+        // didn't create.
+        let tmp = tmp_repo();
+        let sha = match commit_checkpoint(&tmp, "g1", "run-1") {
+            CheckpointOutcome::Committed { sha } => sha,
+            other => panic!("expected Committed, got {other:?}"),
+        };
+        fs::write(tmp.join("wip.txt"), "human work in progress").unwrap();
+        let err = reset_to_checkpoint(&tmp, &sha).unwrap_err();
+        assert!(err.contains("uncommitted changes"), "must name the refusal reason: {err}");
+        assert_eq!(
+            fs::read_to_string(tmp.join("wip.txt")).unwrap(),
+            "human work in progress",
+            "the dirty file must be untouched"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 

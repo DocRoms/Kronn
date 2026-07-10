@@ -1008,7 +1008,10 @@ pub async fn update(
 
     let w = updated.clone();
     match state.db.with_conn(move |conn| crate::db::workflows::update_workflow(conn, &w)).await {
-        Ok(()) => Json(ApiResponse::ok(updated)),
+        Ok(true) => Json(ApiResponse::ok(updated)),
+        // The workflow existed when we loaded it above but was deleted
+        // concurrently before the UPDATE landed → 404, not a fake success.
+        Ok(false) => Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -2053,14 +2056,17 @@ pub async fn cancel_run(
     //    from the agent-task finally path on their own tokens.
     let run_id_for_db2 = run_id.clone();
     let forced_statuses = state.db.with_conn(move |conn| {
+        // Pending (inserted, runner not started) and WaitingApproval (gate-
+        // paused, token dropped at pause) runs were UNCANCELLABLE before:
+        // the token no-ops and this UPDATE only matched 'Running'.
         let parent_n = conn.execute(
             "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
-             WHERE id = ?1 AND status = 'Running'",
+             WHERE id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
             rusqlite::params![&run_id_for_db2],
         )?;
         let children_n = conn.execute(
             "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
-             WHERE parent_run_id = ?1 AND status = 'Running'",
+             WHERE parent_run_id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
             rusqlite::params![&run_id_for_db2],
         )?;
         Ok((parent_n, children_n))
@@ -2225,10 +2231,14 @@ pub async fn decide_run(
         drop(cfg);
         let mut run_mut = run_for_resume;
         if let Err(e) = crate::workflows::runner::resume_run(
-            state_clone, &workflow, &mut run_mut, decision, &tokens, &agents, None,
+            state_clone.clone(), &workflow, &mut run_mut, decision, &tokens, &agents, None,
         ).await {
             tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
         }
+        // A gate-resumed run (human approve or the auto-approve timer) that
+        // then fails is exactly as unattended as its scheduled first half —
+        // same webhook contract as the engine-spawn tail.
+        crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run_mut).await;
     });
 
     Json(ApiResponse::ok(DecideRunResponse {
@@ -2374,7 +2384,8 @@ pub async fn test_worktree(
     let project_path = if let Some(pid) = workflow.project_id.clone() {
         match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
             Ok(Some(p)) => p.path,
-            _ => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Project not found for this workflow")),
+            Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Project not found for this workflow")),
+            Err(e) => return Json(ApiResponse::err_coded(ApiErrorCode::Internal, format!("DB error: {}", e))),
         }
     } else {
         return Json(ApiResponse::err("Workflow has no project — cannot create a test worktree"));
@@ -2448,13 +2459,15 @@ pub async fn delete_test_worktree(
         move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
     }).await {
         Ok(Some(w)) => w,
-        _ => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Parent workflow not found")),
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Parent workflow not found")),
+        Err(e) => return Json(ApiResponse::err_coded(ApiErrorCode::Internal, format!("DB error: {}", e))),
     };
 
     let project_path = if let Some(pid) = workflow.project_id.clone() {
         match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
             Ok(Some(p)) => p.path,
-            _ => return Json(ApiResponse::err("Project not found")),
+            Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Project not found")),
+            Err(e) => return Json(ApiResponse::err_coded(ApiErrorCode::Internal, format!("DB error: {}", e))),
         }
     } else {
         return Json(ApiResponse::err("Workflow has no project"));

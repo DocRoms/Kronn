@@ -120,6 +120,7 @@ services:
     environment:
       - KRONN_TEMPLATES_DIR=/app/templates
       - KRONN_DATA_DIR=/data
+      - KRONN_IN_DOCKER=1
       - KRONN_HOST_HOME=${HOME}
       # Path written into project-level `.mcp.json` / `.kiro/settings/…`
       # / `.gemini/settings.json` / `~/.codex/config.toml` for the

@@ -2,7 +2,9 @@ name: CI Tests
 
 on:
   pull_request:
-    types: [labeled, synchronize]
+    # `opened`/`reopened` exist for the require-ci-label guard below: a fresh
+    # PR without the label gets a visible RED check instead of zero runs.
+    types: [opened, reopened, labeled, synchronize]
 
 # Opt every JS-based action (checkout, setup-node, cache, pnpm/action-setup,
 # setup-python) into the Node 24 runtime ahead of GitHub's 2026-06-02 forced
@@ -20,6 +22,19 @@ env:
   ONNXRUNTIME_NODE_INSTALL: skip
 
 jobs:
+  # Anti green-by-skip: every other job is gated on the `ci-test` label, so an
+  # unlabeled PR used to show all-skipped — which satisfies required status
+  # checks and reads as green. This job INVERTS that: it only runs (and fails)
+  # when the label is missing, making the untested state visibly red.
+  require-ci-label:
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'ci-test') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail visibly when the ci-test label is missing
+        run: |
+          echo "::error::This PR has no 'ci-test' label — every CI job was SKIPPED (green-by-skip). Add the label to run the suite."
+          exit 1
+
   test-backend:
     if: contains(github.event.pull_request.labels.*.name, 'ci-test')
     runs-on: ubuntu-latest
