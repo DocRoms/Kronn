@@ -212,6 +212,14 @@ jobs:
           fi
           echo "✓ No silent TOML unwrap_or_default"
 
+      - name: Lint — no unwrap() inside with_conn closures
+        run: |
+          # stab-1 — a panic inside a with_conn closure poisons the shared
+          # DB mutex (recovered since 0.8.11, but still one failed request).
+          # Baseline is ZERO in prod code: keep it that way.
+          python3 scripts/ci/test_lint_with_conn_unwrap.py
+          python3 scripts/ci/lint_with_conn_unwrap.py
+
       - name: cargo test
         run: cargo test
         env:

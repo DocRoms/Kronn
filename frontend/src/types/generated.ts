@@ -998,7 +998,14 @@ diverged: boolean,
 /**
  * Present only for a live single Agent append whose lint had a signal.
  */
-lint?: AppendLintSummary, };
+lint?: AppendLintSummary,
+/**
+ * `sort_order` of the LAST appended message (stab-1). Long-polling
+ * callers must pass it as `since_sort_order` instead of estimating
+ * their position — estimates drift under concurrent posters and made
+ * agents silently skip messages. `None` when nothing was appended.
+ */
+last_sort_order?: number, };
 
 /**
  * Body of `POST /api/disc/create`. The triple `(source_agent,
@@ -1256,7 +1263,11 @@ summary_up_to_msg_idx: number | null,
  * last refreshed. Lets the agent gauge whether the summary is fresh
  * enough to trust.
  */
-msgs_since_last_summary: number, language: string, project_id: string | null, };
+msgs_since_last_summary: number, language: string,
+/**
+ * Long-poll pacing contract for multi-agent rooms (stab-1).
+ */
+poll_policy: PollBackoffPolicy, project_id: string | null, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -1942,7 +1953,12 @@ recent_messages: Array<RecentMessagePreview>,
  * The text tells them : *use disc_append to speak*, don't just
  * reply to the user in your terminal.
  */
-next_steps: string, };
+next_steps: string,
+/**
+ * Long-poll pacing contract (stab-1) — walk `poll_backoff_seconds`
+ * while the room is silent, reset on any peer message.
+ */
+poll_policy: PollBackoffPolicy, };
 
 /**
  * Body of `POST /api/discussions/peer-leave`. Identifies the caller
@@ -1958,6 +1974,15 @@ export type PeerLeaveResponse = {
  * or never joined). Either way, idempotent.
  */
 left: boolean, };
+
+/**
+ * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
+ * `disc_meta` and `peer-join` instead of living as an implicit convention
+ * in each agent's prompt. Agents walk `poll_backoff_seconds` while the
+ * room is silent (staying on the last value once exhausted) and reset to
+ * the first entry as soon as a peer message arrives.
+ */
+export type PollBackoffPolicy = { poll_backoff_seconds: Array<number>, reset_on_peer_message: boolean, max_delay_seconds: number, };
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`

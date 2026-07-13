@@ -32,6 +32,7 @@ already requiring it.
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -149,7 +150,11 @@ TOOLS = [
             "content, agent_type}, …]` to push a whole conversation "
             "history at once. Idempotent on (disc_id, source_msg_id) "
             "— re-pushing the same transcript does NOT duplicate.\n\n"
-            "Returns `{appended, skipped_as_duplicates, diverged}`. "
+            "Returns `{appended, skipped_as_duplicates, diverged, "
+            "last_sort_order}`. ALWAYS use `last_sort_order` as the "
+            "`since_sort_order` of your next `disc_wait_for_peer` — "
+            "NEVER estimate your position (+1 per post drifts under "
+            "concurrent posters and silently skips messages). "
             "`diverged=true` means the Kronn UI was edited after a "
             "previous import — warn the user before more updates."
         ),
@@ -2006,6 +2011,30 @@ def _http(method, path, body=None):
         raise RuntimeError(f"HTTP {e.code}: {body[:500]}")
 
 
+def _http_transport_retry(method, path, attempts=6, delays=(2, 4, 8, 12, 16)):
+    """`_http` with a BOUNDED retry on TRANSPORT failures only (connection
+    refused/reset, remote disconnect, socket timeout) — the signature of a
+    backend restart, e.g. `cargo watch` rebuilding for 30-60s. HTTP errors
+    (4xx/5xx) are application-level and never retried. Safe only for
+    idempotent calls: the caller re-sends the same request verbatim.
+    Total worst-case wait ≈ sum(delays) ≈ 42s + in-flight time."""
+    last_err = None
+    for i in range(attempts):
+        try:
+            return _http(method, path)
+        except RuntimeError:
+            raise  # HTTPError path from _http — application error, no retry
+        except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as e:
+            last_err = e
+            if i + 1 < attempts:
+                time.sleep(delays[min(i, len(delays) - 1)])
+    raise RuntimeError(
+        f"backend unreachable after {attempts} attempts (~{sum(delays)}s — rebuild in "
+        f"progress?): {last_err}. Nothing is lost: messages persist in the DB — call "
+        "disc_wait_for_peer again with the SAME since_sort_order."
+    )
+
+
 def _http_text(method, path):
     """Variant of `_http` for endpoints that ship raw text (not JSON / not the
     `ApiResponse` envelope) — e.g. `/api/conventions/agents-md-format-v1`
@@ -2406,7 +2435,9 @@ def call_disc_wait_for_peer(args):
         params["exclude_agent_type"] = exclude
     qs = urllib.parse.urlencode(params)
     sep = "?" if qs else ""
-    result = _unwrap(_http("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
+    # Transport-level retry (bounded): a backend restart mid-poll must not
+    # surface as a tool error — the wait is idempotent on since_sort_order.
+    result = _unwrap(_http_transport_retry("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
     # A timed-out wait (no peer activity in the window) is NORMAL in an ongoing
     # collaboration — but literal agents (notably Codex) otherwise read the empty
     # result as "conversation over" and STOP after ~60s. Surface an explicit
@@ -2417,7 +2448,10 @@ def call_disc_wait_for_peer(args):
             "agent may still be thinking. Call disc_wait_for_peer AGAIN to keep "
             "waiting (pass latest_sort_order as since_sort_order). Do NOT stop "
             "or disc_leave() just because the wait timed out — only leave when "
-            "the task is done or the user explicitly says stop."
+            "the task is done or the user explicitly says stop. PACING: apply "
+            "the room's poll_policy (from disc_join/disc_meta) — consecutive "
+            "empty waits back off 30s,30s,1m,1m,2m,2m,4m,4m then cap at 8m; "
+            "reset to 30s as soon as a peer message arrives."
         )
     return result
 

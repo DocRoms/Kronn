@@ -84,6 +84,10 @@ pub struct PeerJoinResponse {
     /// The text tells them : *use disc_append to speak*, don't just
     /// reply to the user in your terminal.
     pub next_steps: String,
+    /// Long-poll pacing contract (stab-1) — walk `poll_backoff_seconds`
+    /// while the room is silent, reset on any peer message.
+    #[serde(default)]
+    pub poll_policy: crate::api::disc_introspection::PollBackoffPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -229,6 +233,7 @@ pub async fn peer_join(
             );
 
             Ok::<_, anyhow::Error>(PeerJoinResponse {
+                poll_policy: crate::api::disc_introspection::PollBackoffPolicy::default(),
                 disc_id,
                 session_pk,
                 peer_count,

@@ -712,7 +712,11 @@ pub fn list_shared_sync_points(conn: &Connection) -> Result<Vec<(String, i64)>> 
     Ok(out)
 }
 
-pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMessage) -> Result<()> {
+/// Returns the `sort_order` assigned to the inserted message — callers that
+/// long-poll (`disc_wait_for_peer`) need their REAL position, not an estimate
+/// (stab-1: estimated positions drifted under concurrent posters and made
+/// agents silently skip messages).
+pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMessage) -> Result<i64> {
     // Get the next sort_order for this discussion
     let next_order: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages WHERE discussion_id = ?1",
@@ -755,7 +759,7 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
     )?;
 
     update_discussion_timestamp(conn, discussion_id)?;
-    Ok(())
+    Ok(next_order)
 }
 
 /// 0.8.5 — Stamp the QP lineage on a discussion that was spawned by a
