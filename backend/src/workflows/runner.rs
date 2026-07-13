@@ -440,6 +440,12 @@ pub async fn execute_run(
     // Fresh runs have no prior step_results, so this is a no-op for them.
     for prior in &run.step_results {
         ctx.set_step_output(&prior.step_name, &prior.output);
+        let prior_agent = prior.step_agent.as_ref().map(|a| format!("{a:?}"));
+        ctx.set_step_meta(
+            &prior.step_name,
+            prior_agent.as_deref(),
+            prior.step_model.as_deref(),
+        );
     }
     // 0.7.0 Phase 6 — seed durable state from the run row. On a fresh
     // run this is empty (no-op); on resume / restart-recovery it carries
@@ -1078,9 +1084,11 @@ pub async fn execute_run(
             }
         };
 
-        // Record step output for template chaining (also extracts any
-        // `---ARTIFACT:<name>---` blocks into `{{artifacts.<name>}}`).
-        ctx.set_step_output(&step.name, &outcome.result.output);
+        // Snapshot "what actually ran" onto the result row FIRST, then seed
+        // the template ctx from it — set_step_meta reads step_agent/step_model,
+        // so the order is load-bearing (Codex review: seeding before the
+        // snapshot exposed None to the next step).
+        record_step_completion(step, &mut outcome.result, &mut ctx, Some(&agents_config.model_tiers));
 
         // 0.7.0 Phase 3 — persist declared artifacts to disk so they
         // survive past the run (committable when in a worktree,
@@ -1157,15 +1165,6 @@ pub async fn execute_run(
         // the rendered message on the run-detail page. The run is
         // resumed via `resume_run` once a decision arrives.
         let paused_here = outcome.result.status == RunStatus::WaitingApproval;
-
-        // Snapshot the step's "what was actually used here" metadata
-        // onto the result row. The user can edit the workflow between
-        // runs (swap agent, retarget API plugin, change endpoint),
-        // and without this snapshot the run history would silently
-        // start describing the *current* config instead of what ran
-        // in this run. Done here so every executor path benefits, not
-        // per-executor.
-        apply_step_snapshot(step, &mut outcome.result, Some(&agents_config.model_tiers));
 
         // Emit step done event
         emit(RunEvent::StepDone { step_result: outcome.result.clone() }).await;
@@ -2285,6 +2284,23 @@ pub(crate) fn persist_declared_artifacts(
 /// Pulled out of `execute_run`'s loop so the snapshot logic is testable
 /// in isolation (the loop itself needs a full workspace + agents to
 /// drive end-to-end).
+/// Post-execution bookkeeping for one completed step: snapshot the
+/// "what actually ran" metadata onto the result row (the user can edit the
+/// workflow between runs — history must describe THIS run), THEN seed the
+/// template ctx (`steps.X.output/agent/model`) from the snapshotted result.
+/// One function so the order can't silently regress.
+pub(crate) fn record_step_completion(
+    step: &WorkflowStep,
+    result: &mut StepResult,
+    ctx: &mut TemplateContext,
+    model_tiers: Option<&crate::models::setup::ModelTiersConfig>,
+) {
+    apply_step_snapshot(step, result, model_tiers);
+    ctx.set_step_output(&step.name, &result.output);
+    let agent_name = result.step_agent.as_ref().map(|a| format!("{a:?}"));
+    ctx.set_step_meta(&step.name, agent_name.as_deref(), result.step_model.as_deref());
+}
+
 pub(crate) fn apply_step_snapshot(
     step: &WorkflowStep,
     result: &mut StepResult,
@@ -3339,6 +3355,32 @@ mod tests {
             crate::db::workflows::insert_run(conn, &run_db)?;
             Ok(())
         }).await.unwrap();
+    }
+
+    #[test]
+    fn record_step_completion_seeds_ctx_from_the_snapshot() {
+        // Codex review (stab-1 blocker): the ctx was seeded BEFORE the
+        // snapshot filled step_agent/step_model → `{{steps.X.agent}}` was
+        // None at every real run. This exercises the production helper on an
+        // Agent step with a RAW (unsnapshotted) result.
+        let mut step = fake_step("reason");
+        step.agent = AgentType::Codex;
+        step.agent_settings = Some(crate::models::AgentSettings {
+            model: Some("gpt-5.6-sol".into()), tier: None,
+            reasoning_effort: None, max_tokens: None,
+        });
+        let mut result = fake_result("reason");
+        assert!(result.step_agent.is_none(), "raw executor output has no snapshot yet");
+
+        let mut ctx = TemplateContext::new();
+        record_step_completion(&step, &mut result, &mut ctx, None);
+
+        assert_eq!(
+            ctx.render("({{steps.reason.agent}} - {{steps.reason.model}})").unwrap(),
+            "(Codex - gpt-5.6-sol)",
+            "the signature composes from the REAL run metadata"
+        );
+        assert_eq!(result.step_agent, Some(AgentType::Codex), "snapshot persisted on the row too");
     }
 
     #[tokio::test]

@@ -198,6 +198,13 @@ pub struct DiscAppendResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub lint: Option<AppendLintSummary>,
+    /// `sort_order` of the LAST appended message (stab-1). Long-polling
+    /// callers must pass it as `since_sort_order` instead of estimating
+    /// their position — estimates drift under concurrent posters and made
+    /// agents silently skip messages. `None` when nothing was appended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub last_sort_order: Option<i64>,
 }
 
 /// `POST /api/disc/append`
@@ -269,6 +276,7 @@ pub async fn disc_append(
 
     let mut appended = 0u32;
     let mut skipped = 0u32;
+    let mut last_sort_order: Option<i64> = None;
     // Freshly-inserted messages, federated to peers after the loop IF this is a
     // single-message (live-turn) append on a shared disc — see the F3 gate below.
     let mut inserted_msgs: Vec<DiscussionMessage> = Vec::new();
@@ -312,8 +320,11 @@ pub async fn disc_append(
         let insert_result = state.db.with_conn(move |conn| {
             crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
         }).await;
-        if let Err(e) = insert_result {
-            return Json(ApiResponse::err(format!("DB error appending message: {}", e)));
+        match insert_result {
+            Ok(sort_order) => last_sort_order = Some(sort_order),
+            Err(e) => {
+                return Json(ApiResponse::err(format!("DB error appending message: {}", e)))
+            }
         }
         inserted_msgs.push(msg);
         appended += 1;
@@ -364,6 +375,7 @@ pub async fn disc_append(
     Json(ApiResponse::ok(DiscAppendResponse {
         appended,
         skipped_as_duplicates: skipped,
+        last_sort_order,
         diverged,
         lint: lint_summary,
     }))
@@ -674,6 +686,29 @@ mod tests {
             Json(DiscAppendRequest { disc_id: "d-lint".into(), messages: msgs }),
         ).await;
         resp.0.data.expect("append succeeds")
+    }
+
+    #[tokio::test]
+    #[serial] // global anti-halluc mode cell
+    async fn append_returns_the_real_sort_order_of_the_last_message() {
+        // stab-1 — agents estimated their position (+1 per post) because the
+        // response carried no sort_order; concurrent posters made the
+        // estimate drift and long-polls silently skipped messages.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+
+        let first = append(&state, vec![agent_msg("s1", "un")]).await;
+        let a = first.last_sort_order.expect("appended → position present");
+
+        let second = append(&state, vec![agent_msg("s2", "deux"), agent_msg("s3", "trois")]).await;
+        let b = second.last_sort_order.expect("batch → position of the LAST message");
+        assert_eq!(b, a + 2, "two more rows after the first");
+
+        // Pure duplicate: nothing appended → no position (the caller keeps
+        // its previous marker).
+        let dup = append(&state, vec![agent_msg("s3", "trois")]).await;
+        assert_eq!(dup.skipped_as_duplicates, 1);
+        assert!(dup.last_sort_order.is_none());
     }
 
     #[tokio::test]

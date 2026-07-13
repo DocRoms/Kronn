@@ -55,6 +55,9 @@ pub struct DiscussionMeta {
     /// enough to trust.
     pub msgs_since_last_summary: u32,
     pub language: String,
+    /// Long-poll pacing contract for multi-agent rooms (stab-1).
+    #[serde(default)]
+    pub poll_policy: PollBackoffPolicy,
     pub project_id: Option<String>,
 }
 
@@ -75,6 +78,29 @@ pub struct DiscussionMessageRead {
     /// a discussed image. Empty for messages with no attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+}
+
+/// stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
+/// `disc_meta` and `peer-join` instead of living as an implicit convention
+/// in each agent's prompt. Agents walk `poll_backoff_seconds` while the
+/// room is silent (staying on the last value once exhausted) and reset to
+/// the first entry as soon as a peer message arrives.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PollBackoffPolicy {
+    pub poll_backoff_seconds: Vec<u32>,
+    pub reset_on_peer_message: bool,
+    pub max_delay_seconds: u32,
+}
+
+impl Default for PollBackoffPolicy {
+    fn default() -> Self {
+        Self {
+            poll_backoff_seconds: vec![30, 30, 60, 60, 120, 120, 240, 240, 480],
+            reset_on_peer_message: true,
+            max_delay_seconds: 480,
+        }
+    }
 }
 
 /// Lean attachment descriptor surfaced to agents via `disc_get_message`. The
@@ -144,6 +170,7 @@ pub async fn disc_meta(
     let tokens_used_total: u64 = disc.messages.iter().map(|m| m.tokens_used).sum();
 
     Json(ApiResponse::ok(DiscussionMeta {
+        poll_policy: PollBackoffPolicy::default(),
         id: disc.id,
         title: disc.title,
         agent: disc.agent,
@@ -401,5 +428,19 @@ mod tests {
     fn invalid_string_errors() {
         assert!(resolve_idx("abc", 5).is_err());
         assert!(resolve_idx("", 5).is_err());
+    }
+
+    #[test]
+    fn poll_backoff_policy_contract() {
+        use super::PollBackoffPolicy;
+        // stab-1 (Romu) — the pacing sequence is a PRODUCT contract: fine
+        // early (30s), capped at 8 min, reset on peer message. Agents and
+        // bridges rely on this exact shape.
+        let p = PollBackoffPolicy::default();
+        assert_eq!(p.poll_backoff_seconds.first(), Some(&30));
+        assert_eq!(p.poll_backoff_seconds, vec![30, 30, 60, 60, 120, 120, 240, 240, 480]);
+        assert_eq!(p.max_delay_seconds, 480, "cap = last step of the sequence");
+        assert_eq!(*p.poll_backoff_seconds.last().unwrap(), p.max_delay_seconds);
+        assert!(p.reset_on_peer_message);
     }
 }

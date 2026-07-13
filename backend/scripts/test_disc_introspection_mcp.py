@@ -1335,6 +1335,57 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.addCleanup(self.env_patch.stop)
         self.mod = _load_module()
 
+    def test_transport_cut_is_retried_with_the_same_request(self):
+        # Passe stab-1 — a backend restart (cargo watch) mid-poll used to
+        # surface as a tool error and drop the agent out of the room. The
+        # bridge now retries transport failures, SAME query string (the
+        # since_sort_order makes the resume idempotent).
+        import urllib.error
+        ok = {
+            "success": True,
+            "data": {"timed_out": True, "messages": [], "latest_sort_order": 12},
+        }
+        calls = []
+
+        def flaky(method, path, body=None):
+            calls.append(path)
+            if len(calls) < 3:
+                raise urllib.error.URLError(ConnectionRefusedError(61, "refused"))
+            return ok
+
+        with mock.patch.object(self.mod, "_http", side_effect=flaky), \
+             mock.patch.object(self.mod.time, "sleep") as mock_sleep:
+            result = self.mod.call_disc_wait_for_peer({"since_sort_order": 12})
+        self.assertEqual(len(calls), 3, "two failures then success")
+        self.assertTrue(all(p == calls[0] for p in calls), "identical request each attempt")
+        self.assertTrue(result["timed_out"])
+        self.assertEqual(mock_sleep.call_count, 2, "bounded backoff between attempts")
+
+    def test_transport_retry_is_bounded_and_names_the_resume_contract(self):
+        import urllib.error
+        with mock.patch.object(
+            self.mod, "_http",
+            side_effect=urllib.error.URLError(ConnectionRefusedError(61, "refused")),
+        ) as mock_http, mock.patch.object(self.mod.time, "sleep"):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_disc_wait_for_peer({"since_sort_order": 5})
+        self.assertEqual(mock_http.call_count, 6, "bounded — never infinite")
+        msg = str(ctx.exception)
+        self.assertIn("since_sort_order", msg, "the error must teach the resume contract")
+        self.assertIn("unreachable", msg)
+
+    def test_http_application_errors_are_never_retried(self):
+        # A 4xx/5xx is an app-level answer, not a transport cut — retrying
+        # would hammer the backend and mask real errors.
+        with mock.patch.object(
+            self.mod, "_http",
+            side_effect=RuntimeError("HTTP 404: nope"),
+        ) as mock_http, mock.patch.object(self.mod.time, "sleep") as mock_sleep:
+            with self.assertRaises(RuntimeError):
+                self.mod.call_disc_wait_for_peer({"since_sort_order": 5})
+        self.assertEqual(mock_http.call_count, 1, "no retry on HTTP errors")
+        mock_sleep.assert_not_called()
+
     def test_forwards_since_and_timeout_in_query_string(self):
         with mock.patch.object(self.mod, "_http") as mock_http:
             mock_http.return_value = {

@@ -40,6 +40,22 @@ impl TemplateContext {
     /// while `.data_json` preserves JSON representation (convenient for
     /// piping into an HTTP body or a downstream JSON parser). Needed for
     /// the désagentification ApiCall→ApiCall path where nothing re-parses.
+    /// stab-1 — expose the RESOLVED agent/model of a completed step
+    /// (`{{steps.X.agent}}` / `{{steps.X.model}}`). Lets a deterministic
+    /// step compose e.g. a review signature from run metadata instead of
+    /// asking the LLM to self-report (which drifts: an agent obeying a
+    /// prompt written for another engine signs with the wrong name).
+    pub fn set_step_meta(&mut self, step_name: &str, agent: Option<&str>, model: Option<&str>) {
+        if let Some(a) = agent {
+            self.values.insert(format!("steps.{}.agent", step_name), a.into());
+            self.values.insert("previous_step.agent".into(), a.into());
+        }
+        if let Some(m) = model {
+            self.values.insert(format!("steps.{}.model", step_name), m.into());
+            self.values.insert("previous_step.model".into(), m.into());
+        }
+    }
+
     pub fn set_step_output(&mut self, step_name: &str, output: &str) {
         self.values.insert(format!("steps.{}.output", step_name), output.into());
         self.values.insert("previous_step.output".into(), output.into());
@@ -945,6 +961,26 @@ mod tests {
         ctx.set_issue("Bug 500", "Server crash", "42", "https://gh/42", &["bug".into()]);
         let result = ctx.render("Fix: {{issue.title}} (#{{issue.number}})").unwrap();
         assert_eq!(result, "Fix: Bug 500 (#42)");
+    }
+
+    #[test]
+    fn step_meta_exposes_agent_and_model_for_deterministic_signatures() {
+        // stab-1 — the PR-review signature was self-reported by the LLM and
+        // drifted ("Claude Code - GPT-5" when Codex ran the step). A
+        // deterministic post step can now compose it from run metadata.
+        let mut ctx = TemplateContext::new();
+        ctx.set_step_output("reason", "…");
+        ctx.set_step_meta("reason", Some("Codex"), Some("gpt-5.6-sol"));
+        let sig = ctx
+            .render("— 🤖 Review automatique · cron Kronn ({{steps.reason.agent}} - {{steps.reason.model}})")
+            .unwrap();
+        assert_eq!(sig, "— 🤖 Review automatique · cron Kronn (Codex - gpt-5.6-sol)");
+        assert_eq!(ctx.render("{{previous_step.agent}}").unwrap(), "Codex");
+
+        // A step with no snapshot (deterministic Exec/ApiCall) sets nothing —
+        // the placeholders stay unresolved rather than lying.
+        ctx.set_step_meta("exec", None, None);
+        assert!(ctx.render("{{steps.exec.agent}}").unwrap().contains("{{steps.exec.agent}}"));
     }
 
     #[test]
