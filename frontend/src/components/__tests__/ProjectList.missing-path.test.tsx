@@ -31,7 +31,7 @@ function proj(id: string, name: string, path: string, path_exists?: boolean): Pr
     id, name, path,
     repo_url: null, token_override: null,
     ai_config: { detected: false, configs: [] },
-    audit_status: 'NoTemplate', ai_todo_count: 0,
+    audit_status: 'NoTemplate', ai_todo_count: 0, tech_debt_count: 0,
     needs_docs_migration: false, path_exists,
     created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
   } as Project;

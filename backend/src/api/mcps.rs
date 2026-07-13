@@ -1033,7 +1033,8 @@ pub async fn host_discovery(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ts_rs::TS)]
+#[ts(export)]
 pub struct AdoptHostMcpRequest {
     /// Source file as reported by host_discovery (e.g. "/home/user/.claude.json").
     pub source_file: String,

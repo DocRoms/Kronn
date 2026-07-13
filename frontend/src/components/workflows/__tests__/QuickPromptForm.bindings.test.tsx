@@ -128,6 +128,7 @@ describe('QuickPromptForm bindings (0.8.5)', () => {
         editPrompt={{
           id: 'qp-x', name: 'Edit me', icon: '⚡', prompt_template: 'foo',
           variables: [], agent: 'ClaudeCode',
+          project_id: null,
           skill_ids: ['s1'], profile_ids: ['p1'], directive_ids: ['d1'],
           tier: 'default', description: '',
           created_at: new Date().toISOString(), updated_at: new Date().toISOString(),

@@ -2247,6 +2247,76 @@ pub async fn decide_run(
     }))
 }
 
+/// Response for [`resume_interrupted`].
+#[derive(Debug, serde::Serialize, ts_rs::TS)]
+#[ts(export)]
+pub struct ResumeRunResponse {
+    pub run_id: String,
+    pub new_status: RunStatus,
+}
+
+/// POST /api/workflow-runs/:run_id/resume
+///
+/// A2 — manually resume an `Interrupted` run (backend restart, crash). The
+/// atomic `Interrupted → Running` claim happens BEFORE this responds, so a
+/// double-click gets exactly one resume + one clear error. Execution then
+/// continues in the background from the step after the last completed result,
+/// re-attached to the preserved worktree (refused if that worktree is gone).
+pub async fn resume_interrupted(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Json<ApiResponse<ResumeRunResponse>> {
+    let run_id_for_db = run_id.clone();
+    let run = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id_for_db))
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    let wf_id = run.workflow_id.clone();
+    let workflow = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
+
+    // Validation + atomic claim — awaited, so the caller's answer reflects
+    // whether THIS call won the run.
+    if let Err(e) = crate::workflows::runner::claim_interrupted_run(&state, &run).await {
+        return Json(ApiResponse::err(e.to_string()));
+    }
+
+    let state_clone = state.clone();
+    let run_id_for_log = run.id.clone();
+    let mut run_mut = run.clone();
+    tokio::spawn(async move {
+        let cfg = state_clone.config.read().await;
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        drop(cfg);
+        if let Err(e) = crate::workflows::runner::resume_interrupted_run(
+            state_clone.clone(), &workflow, &mut run_mut, &tokens, &agents, None,
+        ).await {
+            tracing::error!("Resume of interrupted run {} failed: {}", run_id_for_log, e);
+        }
+        // Same unattended-failure contract as the gate resume path.
+        crate::core::run_notify::notify_if_failed(&state_clone, &workflow, &run_mut).await;
+    });
+
+    Json(ApiResponse::ok(ResumeRunResponse {
+        run_id: run.id,
+        new_status: RunStatus::Running,
+    }))
+}
+
 /// Response for [`delete_batch_run`].
 #[derive(Debug, serde::Serialize)]
 pub struct DeletedBatchResponse {

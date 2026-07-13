@@ -683,11 +683,22 @@ pub async fn claim_by_token(
     let code_lookup = from_code.clone();
     let caller = match state
         .db
-        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code_lookup))
+        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code_lookup))
         .await
     {
-        Ok(Some(c)) => c,
-        Ok(None) => return Json(ApiResponse::err("unknown peer (invite code not in contacts)")),
+        Ok(crate::db::contacts::InviteAuth::Accepted(c)) => c,
+        // Pending/refused answers EXACTLY like unknown — no status oracle.
+        Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
+            tracing::warn!(
+                target: "kronn::invariant",
+                caller = %pseudo, status = %status, route = "claim-by-token",
+                "invite-code auth refused — contact is not accepted"
+            );
+            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"));
+        }
+        Ok(crate::db::contacts::InviteAuth::Unknown) => {
+            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"))
+        }
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
     };
 
@@ -800,11 +811,22 @@ pub async fn fetch_file(
     // being a contact is not enough to read arbitrary files (see below).
     let caller = match state
         .db
-        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &from_code))
+        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &from_code))
         .await
     {
-        Ok(Some(c)) => c,
-        Ok(None) => return Json(ApiResponse::err("unknown peer (invite code not in contacts)")),
+        Ok(crate::db::contacts::InviteAuth::Accepted(c)) => c,
+        // Pending/refused answers EXACTLY like unknown — no status oracle.
+        Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
+            tracing::warn!(
+                target: "kronn::invariant",
+                caller = %pseudo, status = %status, route = "fetch-file",
+                "invite-code auth refused — contact is not accepted"
+            );
+            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"));
+        }
+        Ok(crate::db::contacts::InviteAuth::Unknown) => {
+            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"))
+        }
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
     };
 
@@ -840,8 +862,9 @@ pub async fn fetch_file(
     };
     if !shared_with_caller {
         tracing::warn!(
-            "fetch-file refused: contact '{}' asked for file {} of a discussion not shared with it",
-            caller.pseudo, cf.id
+            target: "kronn::invariant",
+            caller = %caller.pseudo, file_id = %cf.id, disc_id = %cf.discussion_id,
+            "fetch-file refused — discussion not shared with the caller"
         );
         return Json(ApiResponse::ok(FetchFileResponse {
             found: false,
@@ -959,6 +982,56 @@ mod tests {
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(body.data_base64.unwrap()).unwrap();
         assert_eq!(bytes, b"BYTES");
+    }
+
+    #[tokio::test]
+    async fn non_accepted_contacts_are_refused_like_unknown_codes() {
+        // Passe D (Codex constat n°1) — a pending/refused contact keeps its
+        // invite code but must NOT pass the auth-exempt P2P routes, and the
+        // refusal must be indistinguishable from an unknown code (no oracle).
+        let state = make_state_with_disc("d-auth-1").await;
+        state.db.with_conn(|conn| {
+            for (id, code, status) in [
+                ("c-pend", "kr-inv-pend", "pending"),
+                ("c-ref", "kr-inv-ref", "refused"),
+            ] {
+                crate::db::contacts::insert_contact(conn, &crate::models::Contact {
+                    id: id.into(),
+                    pseudo: format!("peer-{status}"),
+                    avatar_email: None,
+                    kronn_url: "http://peer.local".into(),
+                    invite_code: code.into(),
+                    status: status.into(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                })?;
+            }
+            Ok(())
+        }).await.unwrap();
+
+        for code in ["kr-inv-pend", "kr-inv-ref", "kr-inv-ghost"] {
+            // fetch-file: same error string for pending, refused and unknown.
+            let resp = fetch_file(State(state.clone()), Json(FetchFileRequest {
+                file_id: "f-any".into(),
+                from_invite_code: code.into(),
+            })).await;
+            assert_eq!(
+                resp.0.error.as_deref(),
+                Some("unknown peer (invite code not in contacts)"),
+                "{code} must be refused with the unknown-code message"
+            );
+
+            // claim-by-token: same contract.
+            let resp = claim_by_token(State(state.clone()), Json(ClaimByTokenRequest {
+                token: "kr-join-whatever".into(),
+                from_invite_code: code.into(),
+            })).await;
+            assert_eq!(
+                resp.0.error.as_deref(),
+                Some("unknown peer (invite code not in contacts)"),
+                "{code} must be refused with the unknown-code message"
+            );
+        }
     }
 
     #[tokio::test]

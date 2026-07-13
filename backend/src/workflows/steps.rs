@@ -237,7 +237,11 @@ pub async fn execute_step(
                         } else {
                             "missing envelope".into()
                         };
-                        tracing::info!("Step '{}': output {}, attempting repair", step.name, reason);
+                        tracing::warn!(
+                            target: "kronn::invariant",
+                            step = %step.name, reason = %reason,
+                            "step output broke the envelope contract — repair attempt"
+                        );
                         // Truncate by char count — `&s[..2000]` panics if
                         // byte 2000 falls inside a UTF-8 sequence (emoji,
                         // accented chars in the LLM output).

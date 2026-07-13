@@ -8,7 +8,7 @@ use ts_rs::TS;
 
 use super::{
     AgentProfile, Contact, Directive, Discussion, Learning, McpConfig, McpServer, Project,
-    QuickApi, QuickPrompt, Skill, Workflow,
+    LearningRejection, QuickApi, QuickPrompt, QuickPromptVersion, Skill, Workflow,
 };
 
 #[derive(Debug, Serialize, TS)]
@@ -29,7 +29,7 @@ pub struct DbInfo {
 /// Current export schema version. Bump when a new table/field is added to
 /// `DbExport` so import can WARN when restoring an older backup (whose missing
 /// tables must NOT wipe newer data — see `do_import_db`'s selective clear).
-pub const CURRENT_EXPORT_VERSION: u32 = 4;
+pub const CURRENT_EXPORT_VERSION: u32 = 5;
 
 #[derive(Debug, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -62,6 +62,13 @@ pub struct DbExport {
     /// facts/preferences). Same back-compat default as `quick_apis`.
     #[serde(default)]
     pub learnings: Vec<Learning>,
+    /// v5 (passe D) — QP version history; without it, imports silently lost
+    /// the version metrics lineage. `default` keeps v4 exports importable.
+    #[serde(default)]
+    pub quick_prompt_versions: Vec<QuickPromptVersion>,
+    /// v5 (passe D) — anti-repetition rejection counters for learnings.
+    #[serde(default)]
+    pub learning_rejections: Vec<LearningRejection>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]

@@ -63,6 +63,12 @@
     any other `Link`-paginated bare-array API — so workflows stop silently
     truncating long lists.
 - **Next step**: create ticket.
+- **Status (plan 0.9, C2 — 2026-07-13)**: ✅ RESOLVED.
+  - `send_with_retry` now returns the raw `Link` response header alongside the parsed body; `parse_link_next` extracts `rel="next"` (quoted and unquoted forms).
+  - New `PaginationSpec::LinkHeader { page_size_param, page_size, max_pages }` variant: seeds page 1 (e.g. `per_page=100`), then follows the server's own `rel="next"` URL verbatim (its query params adopted wholesale) until absent — reusing the existing `max_pages` cap + `[SIGNAL: PAGINATION_TRUNCATED]`.
+  - `walk_pages` accumulates **bare top-level arrays** (the merged result is then a plain array, so `$[*].id` extracts work); object-envelope bodies with a `Link` header (GitHub search) still merge via `detect_items_key`.
+  - Locked by wiremock tests: 3-page bare-array merge in order, single page without `Link`, cap → truncated signal, and `parse_link_next` unit cases.
+  - The PR-Review workflow's `per_page=100` mitigation can now be replaced by `{"type":"LinkHeader","page_size_param":"per_page","page_size":100}` on `fetch_reviews`/`fetch_comments`/`fetch_files` to cover the >100 case.
 
 ## Notes
 

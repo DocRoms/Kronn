@@ -31,7 +31,7 @@ const proj = (id: string, name: string): Project => ({
   repo_url: null, token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'NoTemplate',
-  ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+  ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
   default_skill_ids: [],
   briefing_notes: null,
   linked_repos: [],

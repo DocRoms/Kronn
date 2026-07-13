@@ -1395,6 +1395,12 @@ export const workflows = {
     api<{ run_cancelled: boolean; child_discs_cancelled: number }>(
       'POST', `/workflows/${id}/runs/${runId}/cancel`, {}
     ),
+  /** A2 — resume an Interrupted run (backend restart/crash). Atomic claim
+   *  backend-side: a double-click gets one resume + one error. */
+  resumeRun: (runId: string) =>
+    api<{ run_id: string; new_status: string }>(
+      'POST', `/workflow-runs/${runId}/resume`, {}
+    ),
   /** 0.7.0 Phase 4 — submit operator's decision on a paused (Gate) run.
    *  `decision` ∈ "approve" | "request_changes" | "reject".
    *  `comment` is required for request_changes (the agent needs feedback).

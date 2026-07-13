@@ -743,6 +743,20 @@ pub enum PaginationSpec {
         max_pages: Option<u32>,
     },
 
+    /// GitHub-style: the continuation signal is the `Link: <…>; rel="next"`
+    /// RESPONSE HEADER, not a body field, and the body is typically a bare
+    /// top-level array. Walks `rel="next"` until absent. `page_size_param` /
+    /// `page_size` seed page 1 (e.g. `per_page=100`); later pages reuse the
+    /// server's own next URL verbatim.
+    LinkHeader {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_size_param: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page_size: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_pages: Option<u32>,
+    },
+
     /// Page number: increment `page_param` from 1, stop when `has_more_path`
     /// is false or there are no more results.
     Page {
@@ -1075,6 +1089,22 @@ pub enum RunStatus {
     /// `Failed` (the workflow didn't error — the host went away) so it doesn't
     /// poison "last run succeeded" cron logic or read as a real failure.
     Interrupted,
+}
+
+impl RunStatus {
+    /// Canonical terminal set — the states no ordinary write may leave.
+    /// Exhaustive match on purpose: adding a variant breaks compilation here,
+    /// so a future status can't silently escape the state-machine guards.
+    pub fn is_terminal(&self) -> bool {
+        match self {
+            RunStatus::Success
+            | RunStatus::Failed
+            | RunStatus::Cancelled
+            | RunStatus::StoppedByGuard
+            | RunStatus::Interrupted => true,
+            RunStatus::Pending | RunStatus::Running | RunStatus::WaitingApproval => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

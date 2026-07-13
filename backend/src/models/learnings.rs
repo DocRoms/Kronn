@@ -77,6 +77,18 @@ pub struct Evidence {
     pub quote: Option<String>,
 }
 
+/// One row of `learning_rejections` — the anti-repetition counter keyed by
+/// claim hash. Exported/imported with the DB (passe D: losing it reset the
+/// auto-reject threshold after a migration).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LearningRejection {
+    pub claim_hash: String,
+    pub reason: String,
+    pub count: i64,
+    pub last_at: String,
+}
+
 /// A continual-learning candidate (table `learnings`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]

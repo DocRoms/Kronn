@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { Plug, Play, Loader2, ChevronDown, ChevronRight as ChevRight, KeyRound, Link2, X as XIcon } from 'lucide-react';
 import { workflows as workflowsApi } from '../../lib/api';
-import type { AgentType, McpConfigDisplay, McpServer, WorkflowStep, ExtractSpec, StepType, QuickApi } from '../../types/generated';
+import type { AgentType, McpConfigDisplay, McpServer, WorkflowStep, ExtractSpec, StepType, QuickApi, JsonValue } from '../../types/generated';
 import { ApiCallAiHelper } from './ApiCallAiHelper';
 import { Dropdown } from '../Dropdown';
 import { authSlotsForServer, type AuthSlot } from './apiCallAuth';
@@ -842,7 +842,8 @@ function BodyEditor({
   label,
 }: {
   value: unknown;
-  onChange: (next: unknown) => void;
+  // The committed value comes from JSON.parse — structurally a JsonValue.
+  onChange: (next: JsonValue | null) => void;
   label: string;
 }) {
   // Local draft so the user can type freely without losing focus on

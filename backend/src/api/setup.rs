@@ -1175,6 +1175,12 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
     // matter on a migrated box (None filters = no status / no project narrowing).
     let learnings = state.db.with_conn(|conn| crate::db::learnings::list(conn, None, None)).await
         .map_err(|e| format!("DB error: {}", e))?;
+    // v5 (passe D) — QP version lineage + rejection counters, previously lost.
+    let quick_prompt_versions = state.db
+        .with_conn(crate::db::quick_prompts::list_all_quick_prompt_versions).await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let learning_rejections = state.db.with_conn(crate::db::learnings::list_rejections).await
+        .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
         .into_iter().filter(|s| !s.is_builtin).collect();
@@ -1198,6 +1204,8 @@ async fn build_export(state: &AppState) -> Result<DbExport, String> {
         quick_prompts,
         quick_apis,
         learnings,
+        quick_prompt_versions,
+        learning_rejections,
     })
 }
 
@@ -1354,8 +1362,15 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
     }
     if !data.contacts.is_empty() { stmts.push("DELETE FROM contacts"); }
     if !data.quick_prompts.is_empty() { stmts.push("DELETE FROM quick_prompts"); }
+    // Versions clear ONLY when the archive carries some (v5+): a v4 export
+    // must not wipe local lineage it knows nothing about. Referential
+    // integrity vs the replaced parents is handled by the post-import prune.
+    if !data.quick_prompt_versions.is_empty() {
+        stmts.push("DELETE FROM quick_prompt_versions");
+    }
     if !data.quick_apis.is_empty() { stmts.push("DELETE FROM quick_apis"); }
     if !data.learnings.is_empty() { stmts.push("DELETE FROM learnings"); }
+    if !data.learning_rejections.is_empty() { stmts.push("DELETE FROM learning_rejections"); }
     if !data.projects.is_empty() { stmts.push("DELETE FROM projects"); }
     stmts
 }
@@ -1481,6 +1496,14 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         }
     }
 
+    // Import QP version history (v5) — verbatim rows, after their parents.
+    for v in &data.quick_prompt_versions {
+        let v = v.clone();
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt_version_row(conn, &v)).await {
+            tracing::warn!("Import quick prompt version error: {}", e);
+        }
+    }
+
     // Import quick APIs
     for qa in &data.quick_apis {
         let a = qa.clone();
@@ -1496,6 +1519,32 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         let l = learning.clone();
         if let Err(e) = state.db.with_conn(move |conn| crate::db::learnings::insert(conn, &l)).await {
             tracing::warn!("Import learning error: {}", e);
+        }
+    }
+
+    // Referential prune — local version rows whose parent QP no longer
+    // exists after the import (v4 archive: parents replaced, lineage kept
+    // for same-id QPs, orphans dropped).
+    match state.db.with_conn(|conn| {
+        conn.execute(
+            "DELETE FROM quick_prompt_versions
+             WHERE quick_prompt_id NOT IN (SELECT id FROM quick_prompts)",
+            [],
+        ).map_err(Into::into)
+    }).await {
+        Ok(n) if n > 0 => warnings.push(format!(
+            "{n} quick-prompt version row(s) dropped — their prompts are not part of this import"
+        )),
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Import version prune error: {}", e),
+    }
+
+    // Import rejection counters (v5) — verbatim, keeps the anti-repetition
+    // threshold armed across a migration.
+    for rej in &data.learning_rejections {
+        let r = rej.clone();
+        if let Err(e) = state.db.with_conn(move |conn| crate::db::learnings::insert_rejection_row(conn, &r)).await {
+            tracing::warn!("Import learning rejection error: {}", e);
         }
     }
 
@@ -1556,6 +1605,32 @@ async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<Stri
     warnings
 }
 
+/// Per-entry DECOMPRESSED caps for the import ZIP (passe D). The 512 MiB
+/// route-layer limit only bounds the compressed upload — a highly
+/// compressible entry could otherwise balloon to an arbitrary allocation
+/// (zip bomb) before any validation runs.
+const ZIP_CAP_DATA_JSON: u64 = 512 * 1024 * 1024;
+const ZIP_CAP_CONFIG_TOML: u64 = 1024 * 1024;
+const ZIP_CAP_RECOVERY_KEY: u64 = 64 * 1024;
+
+/// Read a ZIP entry into a String, refusing past `cap` decompressed bytes.
+/// `take(cap + 1)` makes the overflow detectable without allocating it.
+fn read_zip_entry_capped(
+    f: impl std::io::Read,
+    name: &str,
+    cap: u64,
+) -> Result<String, String> {
+    let mut contents = String::new();
+    std::io::Read::read_to_string(&mut f.take(cap + 1), &mut contents)
+        .map_err(|e| format!("Failed to read {name}: {e}"))?;
+    if contents.len() as u64 > cap {
+        return Err(format!(
+            "{name} exceeds the {cap}-byte decompressed limit — refusing (zip bomb?)"
+        ));
+    }
+    Ok(contents)
+}
+
 /// Extract data.json, config.toml and the optional recovery blob from a ZIP
 /// file (synchronous, no await).
 fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option<String>), String> {
@@ -1567,35 +1642,27 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option
     let data: DbExport = {
         let mut f = archive.by_name("data.json")
             .map_err(|e| format!("data.json not found in ZIP: {}", e))?;
-        let mut contents = String::new();
-        std::io::Read::read_to_string(&mut f, &mut contents)
-            .map_err(|e| format!("Failed to read data.json: {}", e))?;
+        let contents = read_zip_entry_capped(&mut f, "data.json", ZIP_CAP_DATA_JSON)?;
         serde_json::from_str(&contents)
             .map_err(|e| format!("Invalid data.json: {}", e))?
     };
 
-    // Read config.toml (optional)
+    // Read config.toml (optional) — but an OVERSIZED one is a hard error,
+    // not a silent None (that would downgrade a bomb into "no config").
     let imported_config = if let Ok(mut f) = archive.by_name("config.toml") {
-        let mut contents = String::new();
-        if std::io::Read::read_to_string(&mut f, &mut contents).is_ok() {
-            toml::from_str::<AppConfig>(&contents).ok()
-        } else {
-            None
-        }
+        let contents = read_zip_entry_capped(&mut f, "config.toml", ZIP_CAP_CONFIG_TOML)?;
+        toml::from_str::<AppConfig>(&contents).ok()
     } else {
         None
     };
 
     // Read recovery.key (optional, P2) — kept only if it parses as a valid
     // recovery code; a corrupt entry is dropped, never an import error.
+    // An oversized one is refused like the others.
     let recovery_code = if let Ok(mut f) = archive.by_name("recovery.key") {
-        let mut contents = String::new();
-        if std::io::Read::read_to_string(&mut f, &mut contents).is_ok() {
-            let trimmed = contents.trim().to_string();
-            crate::core::recovery::from_code(&trimmed).ok().map(|_| trimmed)
-        } else {
-            None
-        }
+        let contents = read_zip_entry_capped(&mut f, "recovery.key", ZIP_CAP_RECOVERY_KEY)?;
+        let trimmed = contents.trim().to_string();
+        crate::core::recovery::from_code(&trimmed).ok().map(|_| trimmed)
     } else {
         None
     };
@@ -1789,6 +1856,16 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
     if !req.url.starts_with("http://") && !req.url.starts_with("https://") {
         return Json(ApiResponse::err("Only http/https URLs are allowed"));
     }
+    // Test binaries (target/*/deps) must never launch a real browser: the
+    // integration suite exercises this endpoint's contract, and on macOS the
+    // real open() popped an example.com tab at every `cargo test` run.
+    let in_test_binary = std::env::current_exe()
+        .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
+        .unwrap_or(false);
+    if in_test_binary {
+        tracing::info!("open-url suppressed in a test binary: {}", req.url);
+        return Json(ApiResponse::ok(()));
+    }
     match open::that(&req.url) {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => {
@@ -1804,6 +1881,144 @@ mod tests {
     use serial_test::serial;
     use crate::core::config;
 
+    // ─── extract_zip decompressed caps (passe D: zip bomb) ────────────────
+
+    fn zip_with(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut w = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            for (name, bytes) in entries {
+                w.start_file(*name, opts).unwrap();
+                w.write_all(bytes).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    #[test]
+    fn extract_zip_refuses_oversized_decompressed_entries() {
+        // A tiny COMPRESSED upload can hide megabytes of zeros — the
+        // route-layer 512 MiB body limit never sees the decompressed size.
+        let data = serde_json::to_vec(&empty_export()).unwrap();
+        let bomb_key = vec![b' '; (ZIP_CAP_RECOVERY_KEY + 1024) as usize];
+        let bytes = zip_with(&[("data.json", &data), ("recovery.key", &bomb_key)]);
+        let err = extract_zip(&bytes).expect_err("oversized recovery.key must refuse");
+        assert!(err.contains("zip bomb"), "{err}");
+
+        let bomb_cfg = vec![b' '; (ZIP_CAP_CONFIG_TOML + 1024) as usize];
+        let bytes = zip_with(&[("data.json", &data), ("config.toml", &bomb_cfg)]);
+        let err = extract_zip(&bytes).expect_err("oversized config.toml must refuse");
+        assert!(err.contains("zip bomb"), "{err}");
+
+        // Within caps → the archive still imports (recovery dropped as
+        // non-parsing, config parsed, data ok).
+        let bytes = zip_with(&[("data.json", &data), ("recovery.key", b"not-a-code")]);
+        let (export, cfg, key) = extract_zip(&bytes).expect("valid archive imports");
+        assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
+        assert!(cfg.is_none());
+        assert!(key.is_none(), "non-parsing recovery code is dropped, not an error");
+    }
+
+    // ─── export v5 round-trip (passe D: QP versions + rejection counters) ────
+
+    #[tokio::test]
+    async fn export_v5_round_trips_qp_versions_and_rejection_counters() {
+        let mk_state = || async {
+            let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+            let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(crate::core::config::default_config()));
+            crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+        };
+        let source = mk_state().await;
+
+        // Seed: one QP + one snapshot version + one armed rejection counter.
+        source.db.with_conn(|conn| {
+            let qp: crate::models::QuickPrompt = serde_json::from_value(serde_json::json!({
+                "id": "qp-1", "name": "QP", "icon": "x", "prompt_template": "T {{v}}",
+                "variables": [], "agent": "ClaudeCode", "project_id": null,
+                "skill_ids": [], "profile_ids": [], "directive_ids": [],
+                "tier": "default", "description": "",
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            })).unwrap();
+            // insert_quick_prompt auto-snapshots version 1; a second snapshot
+            // gives the lineage a real history to round-trip.
+            crate::db::quick_prompts::insert_quick_prompt(conn, &qp)?;
+            crate::db::quick_prompts::snapshot_quick_prompt_version(conn, &qp)?;
+            crate::db::learnings::record_rejection(conn, "hash-1", "too vague")?;
+            crate::db::learnings::record_rejection(conn, "hash-1", "too vague")?;
+            Ok(())
+        }).await.unwrap();
+
+        let export = build_export(&source).await.expect("export");
+        assert_eq!(export.version, 5);
+        assert_eq!(export.quick_prompt_versions.len(), 2, "version lineage exported");
+        assert_eq!(export.learning_rejections.len(), 1);
+        assert_eq!(export.learning_rejections[0].count, 2, "cumulative count exported");
+
+        // Import into a FRESH instance — both tables restored verbatim.
+        let target = mk_state().await;
+        do_import_db(&target, &export).await.expect("import");
+        let (versions, rej_count) = target.db.with_conn(|conn| {
+            let v = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-1")?;
+            let c = crate::db::learnings::rejection_count(conn, "hash-1")?;
+            Ok((v, c))
+        }).await.unwrap();
+        assert_eq!(versions.len(), 2, "version history survives the migration");
+        assert_eq!(versions[0].version_index, 2, "newest first, indices preserved verbatim");
+        assert_eq!(rej_count, 2, "anti-repetition threshold stays armed");
+    }
+
+    #[tokio::test]
+    async fn v4_import_preserves_local_lineage_and_prunes_orphans() {
+        // Codex review (export v5): a v4 archive carries quick_prompts but no
+        // versions — importing it must NOT wipe the local lineage of QPs it
+        // re-imports (same id), while versions of QPs absent from the archive
+        // are pruned with their parents.
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(crate::core::config::default_config()));
+        let state = crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        let mk_qp = |id: &str| -> crate::models::QuickPrompt {
+            serde_json::from_value(serde_json::json!({
+                "id": id, "name": id, "icon": "x", "prompt_template": "T",
+                "variables": [], "agent": "ClaudeCode", "project_id": null,
+                "skill_ids": [], "profile_ids": [], "directive_ids": [],
+                "tier": "default", "description": "",
+                "created_at": chrono::Utc::now().to_rfc3339(),
+                "updated_at": chrono::Utc::now().to_rfc3339(),
+            })).unwrap()
+        };
+
+        // Local state: two versioned QPs.
+        let (kept, dropped) = (mk_qp("qp-kept"), mk_qp("qp-dropped"));
+        {
+            let (kept, dropped) = (kept.clone(), dropped.clone());
+            state.db.with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &kept)?;
+                crate::db::quick_prompts::insert_quick_prompt(conn, &dropped)?;
+                Ok(())
+            }).await.unwrap();
+        }
+
+        // v4 archive: carries qp-kept only, no version lineage at all.
+        let mut v4 = empty_export();
+        v4.version = 4;
+        v4.quick_prompts = vec![kept];
+        do_import_db(&state, &v4).await.expect("v4 import");
+
+        let (kept_versions, dropped_versions) = state.db.with_conn(|conn| {
+            let k = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-kept")?;
+            let d = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-dropped")?;
+            Ok((k, d))
+        }).await.unwrap();
+        assert!(!kept_versions.is_empty(), "v4 import must NOT wipe local lineage of a re-imported QP");
+        assert!(dropped_versions.is_empty(), "orphaned lineage (parent gone) is pruned");
+    }
+
     // ─── import_clear_statements (I10: selective clear, no downgrade wipe) ────
 
     fn empty_export() -> crate::models::db::DbExport {
@@ -1814,6 +2029,7 @@ mod tests {
             mcp_servers: vec![], mcp_configs: vec![], custom_skills: vec![],
             custom_directives: vec![], custom_profiles: vec![], contacts: vec![],
             quick_prompts: vec![], quick_apis: vec![], learnings: vec![],
+            quick_prompt_versions: vec![], learning_rejections: vec![],
         }
     }
 
@@ -1934,6 +2150,8 @@ mod tests {
         let data = DbExport {
             version: 4,
             exported_at: Utc::now(),
+            quick_prompt_versions: vec![],
+            learning_rejections: vec![],
             projects: vec![],
             discussions: vec![],
             workflows: vec![],
@@ -2067,7 +2285,7 @@ mod tests {
         state.db.with_conn(move |conn| crate::db::learnings::insert(conn, &l)).await.unwrap();
 
         let export = build_export(&state).await.expect("build_export");
-        assert_eq!(export.version, 4, "payload bumped to v4");
+        assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION, "payload bumped to the current export version");
         assert_eq!(export.quick_apis.len(), 1, "quick_apis must be exported");
         assert_eq!(export.learnings.len(), 1, "learnings must be exported");
 
@@ -2138,6 +2356,8 @@ mod tests {
         let data = DbExport {
             version: 4,
             exported_at: Utc::now(),
+            quick_prompt_versions: vec![],
+            learning_rejections: vec![],
             projects: vec![],
             discussions: vec![],
             workflows: vec![],

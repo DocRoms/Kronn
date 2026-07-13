@@ -5,7 +5,9 @@ import type { WorkflowRun } from '../../types/generated';
 const mk = (over: Partial<WorkflowRun>): WorkflowRun => ({
   id: 'run-x', workflow_id: 'wf', status: 'Success', trigger_context: null,
   step_results: [], tokens_used: 0, workspace_path: null,
-  started_at: '2026-07-06T06:13:00Z', finished_at: null, ...over,
+  started_at: '2026-07-06T06:13:00Z', finished_at: null,
+  run_type: 'linear', batch_total: 0, batch_completed: 0, batch_failed: 0,
+  batch_name: null, parent_run_id: null, state: {}, produced_branches: [], ...over,
 });
 
 describe('runFilters — status', () => {
@@ -30,7 +32,7 @@ describe('runFilters — search', () => {
     const run = mk({
       id: 'abc12345-run',
       parent_workflow_name: 'PR Review cron v2',
-      step_results: [{ step_name: 'reason', status: 'Success', output: 'review of PR #1841', tokens_used: 0, duration_ms: 1 }],
+      step_results: [{ step_name: 'reason', status: 'Success', output: 'review of PR #1841', tokens_used: 0, duration_ms: 1, is_rollback: false }],
     });
     expect(runMatchesSearch(run, 'abc123')).toBe(true);
     expect(runMatchesSearch(run, 'cron v2')).toBe(true);
@@ -42,9 +44,9 @@ describe('runFilters — search', () => {
 describe('runFilters — combined', () => {
   it('applies status AND search together', () => {
     const runs = [
-      mk({ id: 'a', status: 'Failed', step_results: [{ step_name: 's', status: 'Failed', output: 'PR #10', tokens_used: 0, duration_ms: 1 }] }),
-      mk({ id: 'b', status: 'Success', step_results: [{ step_name: 's', status: 'Success', output: 'PR #10', tokens_used: 0, duration_ms: 1 }] }),
-      mk({ id: 'c', status: 'Failed', step_results: [{ step_name: 's', status: 'Failed', output: 'PR #99', tokens_used: 0, duration_ms: 1 }] }),
+      mk({ id: 'a', status: 'Failed', step_results: [{ step_name: 's', status: 'Failed', output: 'PR #10', tokens_used: 0, duration_ms: 1, is_rollback: false }] }),
+      mk({ id: 'b', status: 'Success', step_results: [{ step_name: 's', status: 'Success', output: 'PR #10', tokens_used: 0, duration_ms: 1, is_rollback: false }] }),
+      mk({ id: 'c', status: 'Failed', step_results: [{ step_name: 's', status: 'Failed', output: 'PR #99', tokens_used: 0, duration_ms: 1, is_rollback: false }] }),
     ];
     const out = filterRuns(runs, 'failed', '10');
     expect(out.map(r => r.id)).toEqual(['a']);

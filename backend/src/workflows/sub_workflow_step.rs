@@ -335,6 +335,23 @@ pub(crate) fn current_task_template_vars(item: &serde_json::Value) -> Vec<(Strin
 /// child's prompts read ONLY their slice, then re-enters the runner. A failed
 /// item doesn't stop the loop (PARTIAL surfaces it); parent cancel is honoured
 /// between items.
+/// A2 — durable per-item done marker on the PARENT run, written only AFTER a
+/// durable effect (commit landed / child Success). Best-effort: child rows and
+/// the git ledger remain the reconciliation sources at resume.
+async fn record_foreach_done(
+    state: &crate::AppState,
+    parent_run_id: &str,
+    step_name: &str,
+    entry: serde_json::Value,
+) {
+    let (rid, sname) = (parent_run_id.to_string(), step_name.to_string());
+    if let Err(e) = state.db.with_conn(move |conn| {
+        crate::db::workflows::append_foreach_done(conn, &rid, &sname, entry)
+    }).await {
+        tracing::warn!(target: "kronn::sub_workflow", "foreach done-set write failed: {e}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_foreach(
     state: &crate::AppState,
@@ -373,6 +390,39 @@ async fn execute_foreach(
         Err(e) => return fail(step, start, format!("DB error loading sub-workflow `{target}`: {e}")),
     };
 
+    // A2 resume reconciliation — three sources, trusted in this order:
+    //   1. git ledger (`[item_id]` commit subjects, checked per-item below)
+    //   2. Success child rows (a child that finished right before a crash,
+    //      before its done-set entry landed)
+    //   3. the done-set in run.state — NEVER trusted alone: an entry that
+    //      neither the ledger nor a child row confirms is stale and the
+    //      item re-runs (warn below).
+    let child_done: std::collections::HashSet<String> = {
+        let pid = parent_run_id.to_string();
+        state.db.with_conn(move |c| crate::db::workflows::successful_child_item_ids(c, &pid))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, error=%e,
+                    "cannot load Success child rows — reconciliation falls back to the git ledger only");
+                Default::default()
+            })
+    };
+    let state_done: std::collections::HashSet<String> = {
+        let pid = parent_run_id.to_string();
+        let key = format!("__kronn.foreach_done.{}", step.name);
+        state.db.with_conn(move |c| crate::db::workflows::get_run(c, &pid)).await
+            .ok().flatten()
+            .and_then(|r| r.state.get(&key).cloned())
+            .and_then(|doc| serde_json::from_str::<serde_json::Value>(&doc).ok())
+            .and_then(|d| d.get("items").and_then(|i| i.as_array()).map(|items| {
+                items.iter()
+                    .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(String::from))
+                    .filter(|i| !i.is_empty())
+                    .collect()
+            }))
+            .unwrap_or_default()
+    };
+
     let task_file = std::path::Path::new(&ws).join(".kronn/current_task.json");
     let mut results: Vec<serde_json::Value> = Vec::with_capacity(items.len());
     let mut succeeded = 0usize;
@@ -400,17 +450,25 @@ async fn execute_foreach(
         // everything. Deterministic, 0 token. Cross-RUN resume is out of
         // scope (a new run gets a fresh worktree/branch).
         if !item_id.is_empty() {
-            let done = crate::core::cmd::async_cmd("git")
+            let git_done = crate::core::cmd::async_cmd("git")
                 .args(["log", "--oneline", "--fixed-strings", "--grep", &format!("[{item_id}]")])
                 .current_dir(&ws)
                 .output().await
                 .map(|o| o.status.success() && !o.stdout.is_empty())
                 .unwrap_or(false);
-            if done {
-                tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, item=%idx, item_id=%item_id, "foreach: item already committed — skipping");
+            if git_done || child_done.contains(&item_id) {
+                tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, item=%idx, item_id=%item_id,
+                    source = if git_done { "git-ledger" } else { "child-row" },
+                    "foreach: item already done — skipping");
                 succeeded += 1;
                 results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "SkippedAlreadyDone" }));
+                record_foreach_done(state, parent_run_id, &step.name,
+                    json!({"idx": idx, "id": item_id, "status": "SkippedAlreadyDone", "child_run_id": null})).await;
                 continue;
+            }
+            if state_done.contains(&item_id) {
+                tracing::warn!(target: "kronn::sub_workflow", parent_run=%parent_run_id, item=%idx, item_id=%item_id,
+                    "foreach: done-set entry not confirmed by git ledger or a Success child row — stale marker ignored, re-running the item");
             }
         }
 
@@ -449,6 +507,8 @@ async fn execute_foreach(
                             tracing::info!(target: "kronn::sub_workflow", item_id=%item_id, files=files.len(), "mechanical item engine-applied (0 tokens)");
                             succeeded += 1;
                             results.push(json!({ "item": idx, "id": item_id, "child_run_id": null, "status": "MechanicalApplied", "files": files.len() }));
+                            record_foreach_done(state, parent_run_id, &step.name,
+                                json!({"idx": idx, "id": item_id, "status": "MechanicalApplied", "child_run_id": null})).await;
                             continue;
                         }
                         tracing::warn!(target: "kronn::sub_workflow", item_id=%item_id, "mechanical commit failed — falling back to agent");
@@ -554,6 +614,12 @@ async fn execute_foreach(
             "child_run_id": child_run.id,
             "status": format!("{:?}", child_run.status),
         }));
+        // Done ONLY on child Success — a Failed child must be re-attempted
+        // by a resume, never skipped on the strength of a stale marker.
+        if ok {
+            record_foreach_done(state, parent_run_id, &step.name,
+                json!({"idx": idx, "id": item_id, "status": "Success", "child_run_id": child_run.id})).await;
+        }
     }
     let _ = std::fs::remove_file(&task_file); // best-effort cleanup
 
@@ -653,6 +719,200 @@ fn child_depth_exceeds(current_depth: usize) -> bool {
 mod tests {
     use super::child_depth_exceeds;
     use super::{aggregate_foreach, parse_foreach_items, MAX_SUBWORKFLOW_DEPTH};
+
+    // ── A2 — foreach resume reconciliation (3 sources) ──────────────────
+
+    fn step_json(v: serde_json::Value) -> crate::models::WorkflowStep {
+        serde_json::from_value(v).expect("minimal step JSON")
+    }
+
+    /// Parent Running run + trivial JsonData child workflow + a git-init'd
+    /// worktree holding `tasks.json` with items T1/T2. Returns everything a
+    /// reconciliation test needs to call `execute_sub_workflow_step`.
+    async fn foreach_fixture() -> (
+        crate::AppState,
+        crate::models::TokensConfig,
+        crate::models::AgentsConfig,
+        tempfile::TempDir,
+        crate::models::WorkflowStep,
+    ) {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let cfg = crate::core::config::default_config();
+        let tokens = cfg.tokens.clone();
+        let agents = cfg.agents.clone();
+        let config = std::sync::Arc::new(tokio::sync::RwLock::new(cfg));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        // Child workflow: one deterministic JsonData step — no LLM, no project.
+        let child_wf = crate::models::Workflow {
+            id: "child-wf".into(),
+            name: "child".into(),
+            project_id: None,
+            trigger: crate::models::WorkflowTrigger::Manual,
+            steps: vec![step_json(serde_json::json!({
+                "name": "emit", "step_type": {"type": "JsonData"},
+                "json_data_payload": { "done": true },
+            }))],
+            actions: vec![],
+            safety: crate::models::WorkflowSafety { sandbox: false, max_files: None, max_lines: None, require_approval: false },
+            workspace_config: None,
+            concurrency_limit: None,
+            guards: None,
+            artifacts: Default::default(),
+            on_failure: vec![],
+            exec_allowlist: vec![],
+            variables: vec![],
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let parent_run = crate::models::WorkflowRun {
+            id: "parent-run".into(),
+            workflow_id: "parent-wf".into(),
+            status: crate::models::RunStatus::Running,
+            trigger_context: None,
+            step_results: vec![],
+            tokens_used: 0,
+            workspace_path: None,
+            started_at: chrono::Utc::now(),
+            finished_at: None,
+            run_type: "linear".into(),
+            batch_total: 0,
+            batch_completed: 0,
+            batch_failed: 0,
+            batch_name: None,
+            parent_run_id: None,
+            state: Default::default(),
+            produced_branches: vec![],
+            parent_workflow_id: None,
+            parent_workflow_name: None,
+            parent_run_started_at: None,
+        };
+        // FK: the parent run's workflow row must exist too.
+        let mut parent_wf = child_wf.clone();
+        parent_wf.id = "parent-wf".into();
+        state.db.with_conn(move |c| {
+            crate::db::workflows::insert_workflow(c, &child_wf)?;
+            crate::db::workflows::insert_workflow(c, &parent_wf)?;
+            crate::db::workflows::insert_run(c, &parent_run)
+        }).await.unwrap();
+
+        // Worktree stand-in: a real git repo with the items file.
+        let ws = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args).current_dir(ws.path()).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::create_dir_all(ws.path().join(".kronn")).unwrap();
+        std::fs::write(
+            ws.path().join("tasks.json"),
+            r#"[{"id":"T1","what":"a"},{"id":"T2","what":"b"}]"#,
+        ).unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let step = step_json(serde_json::json!({
+            "name": "fanout", "step_type": {"type": "SubWorkflow"},
+            "sub_workflow_id": "child-wf",
+            "sub_workflow_foreach_file": "tasks.json",
+        }));
+        (state, tokens, agents, ws, step)
+    }
+
+    async fn run_foreach(
+        state: &crate::AppState,
+        tokens: &crate::models::TokensConfig,
+        agents: &crate::models::AgentsConfig,
+        ws: &tempfile::TempDir,
+        step: &crate::models::WorkflowStep,
+    ) -> serde_json::Value {
+        let outcome = super::execute_sub_workflow_step(
+            state, "parent-run", 0, step, tokens, agents,
+            crate::workflows::runner::SharedBudget::root(50),
+            Some(ws.path().to_string_lossy().to_string()),
+        ).await;
+        assert_eq!(outcome.result.status, crate::models::RunStatus::Success,
+            "foreach must succeed: {}", outcome.result.output);
+        crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output)["data"].clone()
+    }
+
+    async fn child_rows_for(state: &crate::AppState, item_id: &str) -> usize {
+        let iid = item_id.to_string();
+        state.db.with_conn(move |c| {
+            let mut stmt = c.prepare(
+                "SELECT trigger_context FROM workflow_runs WHERE parent_run_id = 'parent-run'",
+            )?;
+            let rows = stmt.query_map([], |r| r.get::<_, Option<String>>(0))?;
+            let mut n = 0;
+            for row in rows {
+                if row?.as_deref().map(|t| t.contains(&format!("\"{iid}\""))).unwrap_or(false) {
+                    n += 1;
+                }
+            }
+            Ok(n)
+        }).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn foreach_skips_items_already_in_the_git_ledger() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        // The crash happened after T1's commit landed.
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t",
+                   "commit", "-q", "--allow-empty", "-m", "Kronn AutoPilot [T1] done"])
+            .current_dir(ws.path()).output().unwrap();
+        assert!(out.status.success());
+
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        let items = data["items"].as_array().unwrap();
+        assert_eq!(items[0]["status"], "SkippedAlreadyDone", "T1 confirmed by the ledger");
+        assert_eq!(items[1]["status"], "Success", "T2 ran its child");
+        assert_eq!(child_rows_for(&state, "T1").await, 0, "no duplicate child for T1");
+        assert_eq!(child_rows_for(&state, "T2").await, 1);
+    }
+
+    #[tokio::test]
+    async fn foreach_rebuilds_from_a_success_child_row_without_duplicating() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        // Crash window: T1's child finished (row Success) but the parent died
+        // BEFORE writing the done-set entry — and its child made no commit.
+        state.db.with_conn(|c| {
+            c.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, status, run_type, parent_run_id, trigger_context, started_at)
+                 VALUES ('pre-child', 'child-wf', 'Success', 'subworkflow', 'parent-run',
+                         '{\"__subwf_item_id__\":\"T1\"}', datetime('now'))",
+                [],
+            ).map_err(Into::into)
+        }).await.unwrap();
+
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        let items = data["items"].as_array().unwrap();
+        assert_eq!(items[0]["status"], "SkippedAlreadyDone", "T1 rebuilt from the child row");
+        assert_eq!(items[1]["status"], "Success");
+        assert_eq!(child_rows_for(&state, "T1").await, 1, "only the pre-crash child — no duplicate");
+    }
+
+    #[tokio::test]
+    async fn foreach_ignores_a_stale_done_set_entry_and_reruns_the_item() {
+        let (state, tokens, agents, ws, step) = foreach_fixture().await;
+        // A done-set entry NOBODY confirms (no commit, no child row) — e.g. a
+        // hand-edited or corrupted state. Trusting it would silently drop T1.
+        state.db.with_conn(|c| {
+            crate::db::workflows::set_run_state_key(
+                c, "parent-run", "__kronn.foreach_done.fanout",
+                r#"{"v":1,"items":[{"idx":0,"id":"T1","status":"Success","child_run_id":"ghost"}]}"#,
+                &[crate::models::RunStatus::Running],
+            ).map(|_| ())
+        }).await.unwrap();
+
+        let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
+        let items = data["items"].as_array().unwrap();
+        assert_eq!(items[0]["status"], "Success", "stale marker ignored — T1 re-ran");
+        assert_eq!(child_rows_for(&state, "T1").await, 1, "T1 got a real child this time");
+    }
 
     #[test]
     fn depth_guard_allows_up_to_cap_and_refuses_beyond() {

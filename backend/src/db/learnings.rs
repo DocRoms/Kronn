@@ -259,6 +259,34 @@ pub fn record_rejection(conn: &Connection, claim_hash: &str, reason: &str) -> Re
     )?)
 }
 
+/// Passe D (export v5) — every rejection counter row, for DB export.
+pub fn list_rejections(conn: &Connection) -> Result<Vec<crate::models::LearningRejection>> {
+    let mut stmt = conn.prepare(
+        "SELECT claim_hash, reason, count, last_at FROM learning_rejections",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(crate::models::LearningRejection {
+            claim_hash: r.get(0)?,
+            reason: r.get(1)?,
+            count: r.get(2)?,
+            last_at: r.get(3)?,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Passe D (import v5) — restore a rejection row VERBATIM (count and last_at
+/// preserved — `record_rejection` would restart the counter at 1).
+pub fn insert_rejection_row(conn: &Connection, rej: &crate::models::LearningRejection) -> Result<()> {
+    conn.execute(
+        "INSERT INTO learning_rejections (claim_hash, reason, count, last_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(claim_hash) DO UPDATE SET reason = ?2, count = ?3, last_at = ?4",
+        params![rej.claim_hash, rej.reason, rej.count, rej.last_at],
+    )?;
+    Ok(())
+}
+
 pub fn rejection_count(conn: &Connection, claim_hash: &str) -> Result<i64> {
     Ok(conn
         .query_row(

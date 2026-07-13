@@ -19,7 +19,19 @@ use kronn::{build_router_with_auth, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
 // concurrent set_var/remove_var can't cross-contaminate.
 static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 
+/// See api_tests.rs — without this, handler-level config saves during tests
+/// write the developer's REAL config.toml (2026-07-13 incident).
+fn isolate_config_dir() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+    });
+}
+
 fn app_with(enabled: bool) -> Router {
+    isolate_config_dir();
     let db = Arc::new(kronn::db::Database::open_in_memory().expect("in-memory DB"));
     let mut cfg = kronn::core::config::default_config();
     cfg.server.auth_token = None;

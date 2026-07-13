@@ -24,7 +24,21 @@ use futures::{SinkExt, StreamExt};
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /// Create a test AppState with an in-memory database and default config.
+/// Every config::save reached through a handler under test would otherwise
+/// write the DEVELOPER'S REAL config.toml (config_dir() falls back to the
+/// platform dir when KRONN_DATA_DIR is unset) — a full `cargo test` used to
+/// wipe pseudo/avatar/model-tiers on the host (2026-07-13 incident).
+fn isolate_config_dir() {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("kronn-inttest-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        std::env::set_var("KRONN_DATA_DIR", &dir);
+    });
+}
+
 fn test_state() -> AppState {
+    isolate_config_dir();
     let db = Arc::new(
         kronn::db::Database::open_in_memory().expect("Failed to open in-memory DB"),
     );
@@ -47,6 +61,10 @@ async fn get_json(app: Router, uri: &str) -> (StatusCode, Value) {
         .body(Body::empty())
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -63,6 +81,10 @@ async fn post_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) {
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -78,6 +100,10 @@ async fn delete_json(app: Router, uri: &str) -> (StatusCode, Value) {
         .body(Body::empty())
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -94,6 +120,10 @@ async fn patch_json(app: Router, uri: &str, body: Value) -> (StatusCode, Value) 
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -211,6 +241,10 @@ async fn context_files_upload_text_file() {
         .body(Body::from(body))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -254,6 +288,10 @@ async fn context_files_upload_image_lands_in_persistent_dir_not_temp() {
         .header("content-type", format!("multipart/form-data; boundary={}", boundary))
         .body(Body::from(body))
         .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let json: Value = serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
 
@@ -288,6 +326,10 @@ async fn context_files_upload_arbitrary_file_lands_on_disk() {
         .body(Body::from(body))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let json: Value = serde_json::from_slice(&body).unwrap();
@@ -335,6 +377,10 @@ async fn context_files_delete_nonexistent_returns_error() {
 /// GET the raw bytes of an attachment; returns (status, content-type, body).
 async fn get_raw(app: Router, uri: &str) -> (StatusCode, Option<String>, Vec<u8>) {
     let req = Request::builder().method("GET").uri(uri).body(Body::empty()).unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let ct = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).map(String::from);
@@ -471,6 +517,10 @@ async fn context_file_content_sanitizes_filename_in_content_disposition() {
     let req = Request::builder().method("GET")
         .uri(format!("/api/discussions/{}/context-files/cf-evil/content", disc_id))
         .body(Body::empty()).unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let cd = resp.headers().get("content-disposition").unwrap().to_str().unwrap();
@@ -1325,6 +1375,10 @@ async fn discussions_send_message_blocks_while_partial_pending() {
             "target_agent": null,
         })).unwrap()))
         .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1693,6 +1747,10 @@ async fn config_export_empty_db() {
         .body(Body::empty())
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
@@ -1710,7 +1768,7 @@ async fn config_export_empty_db() {
         let mut contents = String::new();
         std::io::Read::read_to_string(&mut data_file, &mut contents).unwrap();
         let data: Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(data["version"], 4);
+        assert_eq!(data["version"], kronn::models::db::CURRENT_EXPORT_VERSION);
         assert!(data["projects"].as_array().unwrap().is_empty());
         assert!(data["discussions"].as_array().unwrap().is_empty());
         assert!(data["workflows"].as_array().unwrap().is_empty());
@@ -2346,6 +2404,10 @@ async fn bootstrap_invalid_payload_returns_error() {
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     // Axum rejects malformed JSON payloads with 422 (Unprocessable Entity)
@@ -2907,6 +2969,10 @@ async fn disc_git_diff_route_exists() {
     // git-diff may return non-JSON (raw diff text), so just verify the route exists (not 404)
     let app = test_app();
     let req = Request::builder().method("GET").uri("/api/discussions/nonexistent/git-diff").body(Body::empty()).unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     assert_ne!(resp.status(), StatusCode::NOT_FOUND, "Route must exist");
 }
@@ -4141,6 +4207,10 @@ async fn send_message_to_no_agent_disc_skips_the_runner() {
             "target_agent": null,
         })).unwrap()))
         .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -4435,6 +4505,10 @@ async fn export_returns_zip() {
         .body(Body::empty())
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
@@ -4461,7 +4535,7 @@ async fn export_returns_zip() {
     let mut contents = String::new();
     std::io::Read::read_to_string(&mut data_file, &mut contents).unwrap();
     let data: Value = serde_json::from_str(&contents).unwrap();
-    assert_eq!(data["version"], 4);
+    assert_eq!(data["version"], kronn::models::db::CURRENT_EXPORT_VERSION);
 }
 
 #[tokio::test]
@@ -4491,7 +4565,11 @@ async fn import_zip_roundtrip() {
             .uri("/api/config/export")
             .body(Body::empty())
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         resp.into_body().collect().await.unwrap().to_bytes()
     };
 
@@ -4513,6 +4591,10 @@ async fn import_zip_roundtrip() {
         .body(Body::from(multipart_body))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -4559,6 +4641,10 @@ async fn import_accepts_payload_over_2mb_default_body_limit() {
         .header("content-type", format!("multipart/form-data; boundary={}", boundary))
         .body(Body::from(body))
         .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let json: Value = serde_json::from_slice(
@@ -4648,6 +4734,10 @@ async fn import_legacy_json_via_multipart() {
         .body(Body::from(multipart_body))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let status = resp.status();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
@@ -4760,6 +4850,10 @@ async fn workflow_update_project_id_persists() {
             "project_id": project_id
         })).unwrap()))
         .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let update_json: Value = serde_json::from_slice(&body).unwrap();
@@ -4782,6 +4876,10 @@ async fn workflow_update_project_id_persists() {
             "project_id": null
         })).unwrap()))
         .unwrap();
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     let body = resp.into_body().collect().await.unwrap().to_bytes();
     let detach_json: Value = serde_json::from_slice(&body).unwrap();
@@ -4852,6 +4950,10 @@ async fn test_step_returns_sse_stream() {
         })).unwrap()))
         .unwrap();
 
+    let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
     let resp = app.oneshot(req).await.unwrap();
     // Should return 200 with SSE content-type (stream starts immediately)
     assert_eq!(resp.status(), StatusCode::OK);
@@ -5709,17 +5811,26 @@ mod auth_middleware_tests {
     // ── Localhost bypass via X-Real-IP (nginx setup) ───────────────────────
 
     #[tokio::test]
-    async fn x_real_ip_localhost_bypasses_auth_when_strict_off() {
-        // The Docker setup ships nginx that sets X-Real-IP to the real
-        // client IP. A loopback X-Real-IP means the request originated
-        // from the host machine and should bypass auth (documented
-        // self-hosted default).
+    #[serial_test::serial]
+    async fn x_real_ip_localhost_bypasses_auth_only_in_docker() {
+        // Docker: the bundled nginx OVERWRITES X-Real-IP, so a loopback value
+        // really means the host machine — trusted (self-hosted default).
+        std::env::set_var("KRONN_IN_DOCKER", "1");
         let app = app_with_auth("expected-secret", false);
         let r = req_with_header("/api/setup/status", "x-real-ip", "127.0.0.1");
         assert_eq!(status_of(app, r).await, StatusCode::OK);
+
+        // Native: axum faces clients directly, the header is CLIENT-supplied —
+        // a LAN peer minting `X-Real-IP: 127.0.0.1` must not gain local trust
+        // (passe D: it bypassed the whole destructive gate).
+        std::env::remove_var("KRONN_IN_DOCKER");
+        let app = app_with_auth("expected-secret", false);
+        let r = req_with_header("/api/setup/status", "x-real-ip", "127.0.0.1");
+        assert_eq!(status_of(app, r).await, StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn x_real_ip_public_does_not_bypass_auth() {
         // A public IP forwarded by nginx must require Bearer auth ;
         // otherwise any internet client trivially bypasses by relying
@@ -5730,6 +5841,7 @@ mod auth_middleware_tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn x_real_ip_forged_localhost_string_does_not_bypass() {
         // Hardened on 2026-05-10 — `is_local_ip("localhost")` returns
         // false. A misconfigured upstream forwarding the literal
@@ -6038,7 +6150,11 @@ mod cold_api_handlers_tests {
                 .body(Body::from(serde_json::to_vec(b).unwrap())).unwrap(),
             _ => panic!("unsupported method/body combo"),
         };
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         let st = resp.status();
         // We want : either 2xx (envelope or pass-through OK) or 4xx
         // (NotFound / BadRequest), NEVER a 5xx panic.
@@ -6126,7 +6242,11 @@ mod cold_api_handlers_tests {
         let req = Request::builder()
             .method("PUT").uri(uri).header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         let st = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
@@ -6507,7 +6627,11 @@ mod cold_api_handlers_tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&serde_json::json!({ "label": "x" })).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         assert!(resp.status().is_success() || resp.status().is_client_error());
     }
     envelope_delete!(mcps_delete_config_unknown_id, "/api/mcps/configs/nope");
@@ -6525,7 +6649,11 @@ mod cold_api_handlers_tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&serde_json::json!({ "name": "x" })).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         assert!(resp.status().is_success() || resp.status().is_client_error());
     }
     envelope_delete!(profiles_delete_unknown_id, "/api/profiles/nope");
@@ -6537,7 +6665,11 @@ mod cold_api_handlers_tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&serde_json::json!({ "name": "x" })).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         assert!(resp.status().is_success() || resp.status().is_client_error());
     }
     envelope_delete!(directives_delete_unknown_id, "/api/directives/nope");
@@ -6551,7 +6683,11 @@ mod cold_api_handlers_tests {
             .header("content-type", "application/json")
             .body(Body::from(serde_json::to_vec(&serde_json::json!({ "name": "x" })).unwrap()))
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
+        let mut req = req;
+    req.extensions_mut().insert(axum::extract::ConnectInfo(
+        std::net::SocketAddr::from(([127, 0, 0, 1], 45678)),
+    ));
+    let resp = app.oneshot(req).await.unwrap();
         assert!(resp.status().is_success() || resp.status().is_client_error());
     }
 

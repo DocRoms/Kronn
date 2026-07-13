@@ -21,7 +21,8 @@ use crate::AppState;
 
 const NEGATIVE_LEARNING_THRESHOLD: i64 = 3;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ts_rs::TS)]
+#[ts(export, rename = "LearningProposeRequest")]
 pub struct ProposeRequest {
     pub claim: String,
     pub evidence: Vec<Evidence>,
@@ -36,7 +37,8 @@ pub struct ProposeRequest {
     pub confidence: Option<f32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ts_rs::TS)]
+#[ts(export)]
 pub struct ProposeResult {
     pub accepted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -67,7 +67,7 @@ const mkDisc = (over: Partial<Discussion> & { id: string }): Discussion => ({
   participants: ['ClaudeCode'],
   messages: [],
   message_count: 0,
-  non_system_message_count: 0,
+  non_system_message_count: 0, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
   archived: false,
   pinned: false, pin_first_message: false,
   workspace_mode: 'Direct',
@@ -84,7 +84,7 @@ const mkProject = (id: string, name: string, repo_url: string | null = null): Pr
   token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'NoTemplate',
-  ai_todo_count: 0,
+  ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
   created_at: '2026-05-15T10:00:00Z',
   updated_at: '2026-05-15T10:00:00Z',
 });
@@ -213,7 +213,7 @@ describe('DiscussionSidebar — grouping', () => {
     // System rows). Here the disc has 12 raw rows but only 7 user/agent ones.
     const discussions = [mkDisc({
       id: 'd1', project_id: null, title: 'Click me',
-      message_count: 12, non_system_message_count: 7,
+      message_count: 12, non_system_message_count: 7, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
     })];
     render(<DiscussionSidebar {...baseProps} discussions={discussions} onSelect={onSelect} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());

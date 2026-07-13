@@ -76,7 +76,7 @@ function renderBubble(lint: LintReport | null) {
 describe('MessageBubble — anti-hallucination lint pill', () => {
   it('renders a fabricated (red) pill when a citation did not verify', () => {
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [
         { raw: 'ghost.rs:1', kind: 'file', status: 'not_found', detail: 'file not found: ghost.rs' },
@@ -91,7 +91,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
   it('renders an unsourced (amber) pill when only the heuristic flagged claims', () => {
     renderBubble({
-      unsourced_count: 2,
+      unverified_count: 0, unsourced_count: 2,
       flagged_spans: [{ text: 'The retry uses backoff', reason: 'uses ' }],
       sources: [],
       fabricated_count: 0,
@@ -104,7 +104,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
   it('fabricated takes precedence over unsourced for the headline color', () => {
     renderBubble({
-      unsourced_count: 3,
+      unverified_count: 0, unsourced_count: 3,
       flagged_spans: [{ text: 'x', reason: 'y' }],
       sources: [{ raw: 'a.rs:9', kind: 'file', status: 'out_of_bounds', detail: 'beyond length' }],
       fabricated_count: 1,
@@ -123,7 +123,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     // green pill (see "renders a verified (green) pill …" below), so the
     // pre-0.8.7 shape (verified source = no pill) is no longer the contract.
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [],
       fabricated_count: 0,
@@ -133,7 +133,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
   it('clicking the pill toggles a detail panel with bad sources + flagged spans', () => {
     renderBubble({
-      unsourced_count: 1,
+      unverified_count: 0, unsourced_count: 1,
       flagged_spans: [{ text: 'The cache lives in memory', reason: 'lives in' }],
       sources: [
         { raw: 'ghost.rs:1', kind: 'file', status: 'not_found', detail: 'file not found: ghost.rs' },
@@ -162,7 +162,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     // but the render must not surface a pill on a User/System message.
     const userMsg = {
       ...makeAgentMessage({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'x.rs:9', kind: 'file' as const, status: 'not_found' as const, detail: 'nope' }],
         fabricated_count: 1,
@@ -179,7 +179,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
   it('detail panel surfaces the "verified ≠ true" caveat', () => {
     renderBubble({
-      unsourced_count: 1,
+      unverified_count: 0, unsourced_count: 1,
       flagged_spans: [{ text: 'x', reason: 'y' }],
       sources: [],
       fabricated_count: 0,
@@ -193,7 +193,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   // Green pill ("verified"), shows the source list when expanded.
   it('renders a verified (green) pill when every cited source resolved', () => {
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [
         { raw: 'src/foo.rs:14', kind: 'file', status: 'verified', detail: 'file exists' },
@@ -213,7 +213,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     // Option B (2026-05-30): instead of being hidden, they get the NEUTRAL
     // "unverifiable" pill — never a green chip Kronn didn't earn.
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [
         { raw: 'https://example.com/doc', kind: 'url', status: 'unchecked', detail: 'URL — not network-checked' },
@@ -230,7 +230,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     // Priority guard : one bad citation must not be hidden under a green chip
     // just because another verified. Color encodes the worst signal.
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [
         { raw: 'src/ok.rs:1', kind: 'file', status: 'verified', detail: 'file exists' },
@@ -243,7 +243,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
   it('green pill click expands a positive "Verified sources" list', () => {
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [
         { raw: 'src/foo.rs:14', kind: 'file', status: 'verified', detail: 'file exists' },
@@ -261,7 +261,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     // GREEN pill expanded onto an orange panel that read as "not good".
     // The drawer must echo the pill's severity so the CSS can colour it green.
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [{ raw: 'src/foo.rs:14', kind: 'file', status: 'verified', detail: 'file exists' }],
       fabricated_count: 0,
@@ -272,7 +272,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
   it('fabricated drawer carries data-severity="fabricated"', () => {
     renderBubble({
-      unsourced_count: 0,
+      unverified_count: 0, unsourced_count: 0,
       flagged_spans: [],
       sources: [{ raw: 'ghost.rs:1', kind: 'file', status: 'not_found', detail: 'nope' }],
       fabricated_count: 1,
@@ -293,7 +293,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('severity priority matrix (fabricated > unsourced > verified)', () => {
     it('all three present → pill AND drawer are fabricated (red)', () => {
       renderBubble({
-        unsourced_count: 4,
+        unverified_count: 0, unsourced_count: 4,
         flagged_spans: [{ text: 'claim alpha', reason: 'heuristic' }],
         sources: [
           { raw: 'src/ok.rs:1', kind: 'file', status: 'verified', detail: 'file exists' },
@@ -309,7 +309,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('unsourced + verified (no fabricated) → pill AND drawer are unsourced (amber)', () => {
       renderBubble({
-        unsourced_count: 1,
+        unverified_count: 0, unsourced_count: 1,
         flagged_spans: [{ text: 'claim beta', reason: 'heuristic' }],
         sources: [{ raw: 'src/ok.rs:1', kind: 'file', status: 'verified', detail: 'file exists' }],
         fabricated_count: 0,
@@ -322,7 +322,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('verified only → pill AND drawer are verified (green)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'src/ok.rs:1', kind: 'file', status: 'verified', detail: 'file exists' }],
         fabricated_count: 0,
@@ -335,7 +335,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('unsourced count > 0 but fabricated_count 0 with NO verified source → amber (heuristic-only)', () => {
       renderBubble({
-        unsourced_count: 5,
+        unverified_count: 0, unsourced_count: 5,
         flagged_spans: [{ text: 'claim gamma', reason: 'heuristic' }],
         sources: [],
         fabricated_count: 0,
@@ -348,7 +348,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('pill label counts + i18n keys', () => {
     it('fabricated pill shows fabricated_count (not the source-array length)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         // 3 bad sources but the backend-supplied count is the source of truth
         sources: [
@@ -367,7 +367,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('unsourced pill shows unsourced_count + disc.lintUnsourced', () => {
       renderBubble({
-        unsourced_count: 9,
+        unverified_count: 0, unsourced_count: 9,
         flagged_spans: [{ text: 'x', reason: 'y' }],
         sources: [],
         fabricated_count: 0,
@@ -380,7 +380,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('verified pill shows verifiedCount (count of verified sources, not array length)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [
           { raw: 'a.rs:1', kind: 'file', status: 'verified', detail: 'ok' },
@@ -401,7 +401,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('drawer grouping per severity', () => {
     it('fabricated drawer lists every bad status under lintSourcesTitle, hides verified + unchecked', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [
           { raw: 'bad-notfound.rs:1', kind: 'file', status: 'not_found', detail: 'missing' },
@@ -435,7 +435,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('verified drawer lists verified sources under lintVerifiedTitle, hides unchecked', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [
           { raw: 'src/foo.rs:14', kind: 'file', status: 'verified', detail: 'file exists' },
@@ -454,7 +454,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('flagged spans listed under lintUnsourcedTitle on an amber drawer', () => {
       renderBubble({
-        unsourced_count: 2,
+        unverified_count: 0, unsourced_count: 2,
         flagged_spans: [
           { text: 'span one text', reason: 'r1' },
           { text: 'span two text', reason: 'r2' },
@@ -471,7 +471,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('caveat is always present in the drawer (fabricated)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'ghost.rs:1', kind: 'file', status: 'not_found', detail: 'no' }],
         fabricated_count: 1,
@@ -482,7 +482,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('caveat is always present in the drawer (verified)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'ok.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
         fabricated_count: 0,
@@ -497,7 +497,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     it('only unchecked sources (url/user/inferred) → NEUTRAL "unverifiable" pill', () => {
       // Option B: surfaced honestly (not hidden, not green).
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [
           { raw: 'https://example.com', kind: 'url', status: 'unchecked', detail: 'url' },
@@ -513,7 +513,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('unchecked sources do NOT suppress an amber pill when a claim is flagged', () => {
       renderBubble({
-        unsourced_count: 1,
+        unverified_count: 0, unsourced_count: 1,
         flagged_spans: [{ text: 'flagged claim', reason: 'heuristic' }],
         sources: [{ raw: 'https://x', kind: 'url', status: 'unchecked', detail: 'url' }],
         fabricated_count: 0,
@@ -526,7 +526,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('mixed amber report (verified source + flagged claim)', () => {
     it('amber drawer shows the flagged span but does NOT list the verified source', () => {
       renderBubble({
-        unsourced_count: 1,
+        unverified_count: 0, unsourced_count: 1,
         flagged_spans: [{ text: 'unsourced claim here', reason: 'heuristic' }],
         sources: [{ raw: 'src/verified.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
         fabricated_count: 0,
@@ -550,7 +550,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     badStatuses.forEach(status => {
       it(`status "${status}" → fabricated (red) pill + listed in drawer`, () => {
         renderBubble({
-          unsourced_count: 0,
+          unverified_count: 0, unsourced_count: 0,
           flagged_spans: [],
           sources: [{ raw: `bad-${status}.rs:1`, kind: 'file', status, detail: `${status} detail` }],
           fabricated_count: 1,
@@ -568,7 +568,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('toggle lifecycle & guards', () => {
     it('toggles the drawer open → close → open across three clicks', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'ok.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
         fabricated_count: 0,
@@ -585,7 +585,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('aria-expanded mirrors the drawer state', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'ok.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
         fabricated_count: 0,
@@ -599,7 +599,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     it('System message never shows a pill even with a fabricated report', () => {
       const sysMsg = {
         ...makeAgentMessage({
-          unsourced_count: 0,
+          unverified_count: 0, unsourced_count: 0,
           flagged_spans: [],
           sources: [{ raw: 'x.rs:9', kind: 'file' as const, status: 'not_found' as const, detail: 'no' }],
           fabricated_count: 1,
@@ -624,7 +624,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('per-item data-status colour hook', () => {
     it('verified items carry data-status="verified"', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [{ raw: 'ok.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
         fabricated_count: 0,
@@ -637,7 +637,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('bad items carry their own status code (e.g. out_of_bounds)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         sources: [
           { raw: 'a.rs:1', kind: 'file', status: 'out_of_bounds', detail: 'beyond' },
@@ -679,6 +679,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
     it('unverified ranks BELOW fabricated and unsourced (red/amber win)', () => {
       renderBubble({ ...unverifiedReport(), fabricated_count: 1 });
       expect(screen.getByTestId('lint-pill').getAttribute('data-severity')).toBe('fabricated');
+      // unverified_count stays 1 (from the fixture) — the point IS the clash.
       renderBubble({ ...unverifiedReport(), unsourced_count: 1 });
       // second render: query the latest pill — both mounted; assert at least one unsourced
       expect(screen.getAllByTestId('lint-pill').some(p => p.getAttribute('data-severity') === 'unsourced')).toBe(true);
@@ -725,7 +726,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
   describe('verified count shown alongside a warning pill', () => {
     it('unsourced + verified → BOTH the amber warning pill and a green verified pill', () => {
       renderBubble({
-        unsourced_count: 1,
+        unverified_count: 0, unsourced_count: 1,
         flagged_spans: [{ text: 'a claim with no source', reason: 'heuristic' }],
         sources: [
           { raw: 'src/a.rs:1', kind: 'file', status: 'verified', detail: 'exists' },
@@ -746,7 +747,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('fabricated + verified → the red pill AND the verified count both show', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         fabricated_count: 1,
         sources: [
@@ -760,7 +761,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('verified-only report does NOT render a duplicate verified pill (headline already green)', () => {
       renderBubble({
-        unsourced_count: 0,
+        unverified_count: 0, unsourced_count: 0,
         flagged_spans: [],
         fabricated_count: 0,
         sources: [{ raw: 'src/a.rs:1', kind: 'file', status: 'verified', detail: 'exists' }],
@@ -771,7 +772,7 @@ describe('MessageBubble — anti-hallucination lint pill', () => {
 
     it('warning with NO verified sources shows no extra pill', () => {
       renderBubble({
-        unsourced_count: 2,
+        unverified_count: 0, unsourced_count: 2,
         flagged_spans: [{ text: 'x', reason: 'y' }],
         sources: [],
         fabricated_count: 0,

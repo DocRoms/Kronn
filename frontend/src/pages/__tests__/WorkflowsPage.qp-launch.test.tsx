@@ -91,8 +91,9 @@ const sampleQpWithVar: QuickPrompt = {
   name: 'Analyse ticket',
   icon: '🎯',
   prompt_template: 'Analyse the ticket {{ticket}} and report findings.',
-  variables: [{ name: 'ticket', label: 'Ticket', placeholder: 'EW-1234' }],
+  variables: [{ name: 'ticket', label: 'Ticket', placeholder: 'EW-1234', description: '', required: true }],
   agent: 'ClaudeCode',
+  project_id: null, skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', description: '',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 };
@@ -104,6 +105,7 @@ const sampleQpNoVar: QuickPrompt = {
   prompt_template: 'Summarize what changed since yesterday.',
   variables: [],
   agent: 'ClaudeCode',
+  project_id: null, skill_ids: [], profile_ids: [], directive_ids: [], tier: 'default', description: '',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 };
@@ -356,8 +358,8 @@ describe('WorkflowsPage — QP launch double-click race', () => {
       id: 'qp-3',
       prompt_template: 'Investigate {{ticket}} priority {{priority}}.',
       variables: [
-        { name: 'ticket', label: 'Ticket', placeholder: 'EW-1234' },
-        { name: 'priority', label: 'Priority', placeholder: 'P1' },
+        { name: 'ticket', label: 'Ticket', placeholder: 'EW-1234', description: '', required: true },
+        { name: 'priority', label: 'Priority', placeholder: 'P1', description: '', required: true },
       ],
     };
     mockQuickPromptsApi.list.mockResolvedValue([twoVarQp]);

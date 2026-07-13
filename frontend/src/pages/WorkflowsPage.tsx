@@ -8,6 +8,7 @@ import type {
   Project, WorkflowSummary, Workflow, WorkflowRun,
   AgentType, AgentsConfig, StepResult, QuickPrompt, CreateQuickPromptRequest,
   QuickApi, CreateQuickApiRequest,
+  JsonValue,
 } from '../types/generated';
 import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
@@ -673,7 +674,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setExpandedQARows(new Set());
     try {
       const res = await quickApisApi.batchRunQa(qa.id, {
-        items: parsed.items,
+        items: parsed.items as JsonValue[],
         concurrent_limit: batchQAConcurrentLimit,
       });
       const env = res.envelope as { data?: { items?: Array<{ input: unknown; status: string; response?: unknown; error?: string; http_status?: number }>; total?: number; succeeded?: number; failed?: number } } | null;

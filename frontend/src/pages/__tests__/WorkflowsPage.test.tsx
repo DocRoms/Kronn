@@ -205,8 +205,8 @@ describe('WorkflowsPage', () => {
       project_id: null,
       trigger: { type: 'Manual' },
       steps: [
-        { name: 'analyze', agent: 'ClaudeCode', prompt_template: 'Analyse this bug', mode: { type: 'Normal' } },
-        { name: 'fix', agent: 'Codex', prompt_template: 'Fix: {{previous_step.output}}', mode: { type: 'Normal' } },
+        { name: 'analyze', agent: 'ClaudeCode', prompt_template: 'Analyse this bug', mode: { type: 'Normal' }, step_type: { type: 'Agent' }, output_format: { type: 'FreeText' } },
+        { name: 'fix', agent: 'Codex', prompt_template: 'Fix: {{previous_step.output}}', mode: { type: 'Normal' }, step_type: { type: 'Agent' }, output_format: { type: 'FreeText' } },
       ],
       actions: [],
       safety: { sandbox: false, max_files: null, max_lines: null, require_approval: false },

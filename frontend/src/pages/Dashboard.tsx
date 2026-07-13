@@ -306,7 +306,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   }, [projects]);
 
   const mcpRegistry = registry ?? [];
-  const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [] };
+  const mcpOverview = mcpOverviewData ?? { servers: [], configs: [], customized_contexts: [], incompatibilities: [], incomplete_configs: [] };
   const agents = agentList ?? [];
   const allDiscussions = discussionList ?? [];
   const allSkills = skillList ?? [];
