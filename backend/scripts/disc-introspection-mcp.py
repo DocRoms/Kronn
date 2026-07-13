@@ -29,8 +29,10 @@ agent CLIs all run with system Python by virtue of vibe-runner.py
 already requiring it.
 """
 
+import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 import urllib.error
@@ -1811,16 +1813,57 @@ def _infer_agent_type_from_client_name(name):
 # Resolution order, evaluated ONCE at module load :
 #   1. `KRONN_SESSION_ID` env (Kronn-launched agents inherit this)
 #   2. `KRONN_CALLER_SESSION_ID` env (older alias)
-#   3. Random `adhoc-<uuid4>` (host-launched, no Kronn env injection)
+#   3. `adhoc-<ppid>-<parent start token>` — deterministic from the
+#      PARENT CLI process identity, so it survives bridge reloads
+#      (stab PR 118: a per-process uuid meant every MCP reload joined
+#      as a NEW participant; the backend dedup on (agent_type,
+#      session_id) could never match and chips piled up in the header)
+#   4. Random `adhoc-<uuid4>` when the parent identity is unreadable
 #
 # Stays stable for the entire bridge process lifetime so every tool
 # call from the same CLI session uses the same row in
 # `discussion_sessions`.
-_BRIDGE_SESSION_ID = (
-    os.environ.get("KRONN_SESSION_ID")
-    or os.environ.get("KRONN_CALLER_SESSION_ID")
-    or f"adhoc-{uuid.uuid4()}"
-)
+
+
+def _parent_start_token():
+    """Opaque token identifying the parent process INSTANCE — pid reuse
+    alone would alias two different CLIs, the start time disambiguates.
+    Linux/WSL reads /proc, macOS falls back to `ps lstart`. `None` when
+    neither source is available (the caller then keeps the uuid path).
+    """
+    ppid = os.getppid()
+    try:
+        with open(f"/proc/{ppid}/stat", "rb") as fh:
+            raw = fh.read().decode("ascii", errors="replace")
+        # comm (field 2) may contain spaces/parens — everything after
+        # the LAST ')' is positional. starttime is field 22 overall,
+        # i.e. index 19 once fields 1-2 are stripped.
+        return raw.rsplit(")", 1)[1].split()[19]
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(ppid), "-o", "lstart="],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).strip()
+        if out:
+            return hashlib.sha256(out).hexdigest()[:12]
+    except Exception:
+        pass
+    return None
+
+
+def _resolve_bridge_session_id():
+    env_sid = os.environ.get("KRONN_SESSION_ID") or os.environ.get("KRONN_CALLER_SESSION_ID")
+    if env_sid:
+        return env_sid
+    start_token = _parent_start_token()
+    if start_token is not None:
+        return f"adhoc-{os.getppid()}-{start_token}"
+    return f"adhoc-{uuid.uuid4()}"
+
+
+_BRIDGE_SESSION_ID = _resolve_bridge_session_id()
 
 
 def _session_id_for_caller():
@@ -2443,15 +2486,22 @@ def call_disc_wait_for_peer(args):
     # result as "conversation over" and STOP after ~60s. Surface an explicit
     # next-action hint so the agent keeps waiting instead of leaving.
     if isinstance(result, dict) and result.get("timed_out"):
+        pacing = result.get("pacing") or {}
+        delay = pacing.get("next_delay_seconds")
+        regime = pacing.get("regime", "cold")
+        pace_line = (
+            f"PACING (server-computed, regime={regime}): wait ~{delay}s before "
+            "your next disc_wait_for_peer."
+            if delay is not None else
+            "PACING: apply the room's poll_policy (disc_join/disc_meta) — back "
+            "off 30s,30s,1m,1m,2m,2m,4m,4m cap 8m, reset on peer message."
+        )
         result["hint"] = (
             "No peer posted during this window. This is NORMAL — the other "
             "agent may still be thinking. Call disc_wait_for_peer AGAIN to keep "
             "waiting (pass latest_sort_order as since_sort_order). Do NOT stop "
             "or disc_leave() just because the wait timed out — only leave when "
-            "the task is done or the user explicitly says stop. PACING: apply "
-            "the room's poll_policy (from disc_join/disc_meta) — consecutive "
-            "empty waits back off 30s,30s,1m,1m,2m,2m,4m,4m then cap at 8m; "
-            "reset to 30s as soon as a peer message arrives."
+            "the task is done or the user explicitly says stop. " + pace_line
         )
     return result
 

@@ -1155,31 +1155,32 @@ pub async fn db_backup(
 
 /// Build the DbExport from current state
 async fn build_export(state: &AppState) -> Result<DbExport, String> {
-    let projects = state.db.with_conn(crate::db::projects::list_projects).await
+    // ADR-001 O2 — the export walks EVERY table; read connection.
+    let projects = state.db.with_read_conn(crate::db::projects::list_projects).await
         .map_err(|e| format!("DB error: {}", e))?;
-    let discussions = state.db.with_conn(crate::db::discussions::list_discussions_with_messages).await
+    let discussions = state.db.with_read_conn(crate::db::discussions::list_discussions_with_messages).await
         .map_err(|e| format!("DB error: {}", e))?;
-    let (workflows, mcp_servers, mcp_configs) = state.db.with_conn(|conn| {
+    let (workflows, mcp_servers, mcp_configs) = state.db.with_read_conn(|conn| {
         let wf = crate::db::workflows::list_workflows(conn)?;
         let servers = crate::db::mcps::list_servers(conn)?;
         let configs = crate::db::mcps::list_configs(conn)?;
         Ok((wf, servers, configs))
     }).await.map_err(|e| format!("DB error: {}", e))?;
-    let contacts = state.db.with_conn(crate::db::contacts::list_contacts).await
+    let contacts = state.db.with_read_conn(crate::db::contacts::list_contacts).await
         .map_err(|e| format!("DB error: {}", e))?;
-    let quick_prompts = state.db.with_conn(crate::db::quick_prompts::list_quick_prompts).await
+    let quick_prompts = state.db.with_read_conn(crate::db::quick_prompts::list_quick_prompts).await
         .map_err(|e| format!("DB error: {}", e))?;
-    let quick_apis = state.db.with_conn(crate::db::quick_apis::list_quick_apis).await
+    let quick_apis = state.db.with_read_conn(crate::db::quick_apis::list_quick_apis).await
         .map_err(|e| format!("DB error: {}", e))?;
     // All learnings, every status — pending candidates and promoted facts both
     // matter on a migrated box (None filters = no status / no project narrowing).
-    let learnings = state.db.with_conn(|conn| crate::db::learnings::list(conn, None, None)).await
+    let learnings = state.db.with_read_conn(|conn| crate::db::learnings::list(conn, None, None)).await
         .map_err(|e| format!("DB error: {}", e))?;
     // v5 (passe D) — QP version lineage + rejection counters, previously lost.
     let quick_prompt_versions = state.db
-        .with_conn(crate::db::quick_prompts::list_all_quick_prompt_versions).await
+        .with_read_conn(crate::db::quick_prompts::list_all_quick_prompt_versions).await
         .map_err(|e| format!("DB error: {}", e))?;
-    let learning_rejections = state.db.with_conn(crate::db::learnings::list_rejections).await
+    let learning_rejections = state.db.with_read_conn(crate::db::learnings::list_rejections).await
         .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()

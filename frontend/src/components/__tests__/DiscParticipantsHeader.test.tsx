@@ -5,10 +5,12 @@ vi.mock('../../lib/api', () => ({
   discussions: {
     participants: vi.fn(),
     invitePeer: vi.fn(),
+    meta: vi.fn(),
   },
 }));
 
 import { DiscParticipantsHeader } from '../DiscParticipantsHeader';
+import { freshnessOf, DEFAULT_AWAY_AFTER_MS } from '../../lib/discPresence';
 import { discussions as discussionsApi } from '../../lib/api';
 
 const toast = vi.fn();
@@ -17,6 +19,9 @@ const t = (key: string, ...args: (string | number)[]) =>
 
 beforeEach(() => {
   vi.clearAllMocks();
+  (discussionsApi.meta as ReturnType<typeof vi.fn>).mockResolvedValue({
+    poll_policy: { max_delay_seconds: 480 },
+  });
 });
 
 afterEach(() => {
@@ -126,5 +131,35 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     await act(async () => { await Promise.resolve(); });
     expect(discussionsApi.participants).toHaveBeenCalledWith('d-2');
     expect((discussionsApi.participants as ReturnType<typeof vi.fn>).mock.calls.length).toBe(2);
+  });
+});
+
+describe('freshnessOf — presence thresholds aligned with PollBackoffPolicy (stab-3)', () => {
+  // Timestamps are built relative to Date.now() so the assertions pin the
+  // BOUNDARIES (2 min fresh/idle, awayAfterMs idle/away), not wall-clock.
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+  it('treats a missing or unparseable last_seen as away', () => {
+    expect(freshnessOf(null, DEFAULT_AWAY_AFTER_MS)).toBe('away');
+    expect(freshnessOf(undefined, DEFAULT_AWAY_AFTER_MS)).toBe('away');
+    expect(freshnessOf('not-a-date', DEFAULT_AWAY_AFTER_MS)).toBe('away');
+  });
+
+  it('is fresh under 2 min, idle beyond', () => {
+    expect(freshnessOf(ago(60_000), DEFAULT_AWAY_AFTER_MS)).toBe('fresh');
+    expect(freshnessOf(ago(2 * 60_000 + 1_000), DEFAULT_AWAY_AFTER_MS)).toBe('idle');
+  });
+
+  it('stays idle up to the away threshold, away beyond it', () => {
+    // A cold-regime agent sleeping the full max_delay is "en veille" (idle),
+    // not absent — grey only once it missed its own pacing contract.
+    expect(freshnessOf(ago(DEFAULT_AWAY_AFTER_MS - 5_000), DEFAULT_AWAY_AFTER_MS)).toBe('idle');
+    expect(freshnessOf(ago(DEFAULT_AWAY_AFTER_MS + 1_000), DEFAULT_AWAY_AFTER_MS)).toBe('away');
+  });
+
+  it('follows a server-provided threshold instead of the fallback constant', () => {
+    const threeMin = 3 * 60_000;
+    expect(freshnessOf(ago(2.5 * 60_000), threeMin)).toBe('idle');
+    expect(freshnessOf(ago(4 * 60_000), threeMin)).toBe('away');
   });
 });

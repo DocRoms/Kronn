@@ -18,6 +18,7 @@ import type {
   UpdateMcpConfigRequest,
   LinkMcpConfigRequest,
   Discussion,
+  DiscussionMeta,
   CreateDiscussionRequest,
   SendMessageRequest,
   OrchestrationRequest,
@@ -1065,6 +1066,9 @@ export const discussions = {
       agent_type: 'Custom',
       session_id: webSessionId(),
     }),
+  /** Disc metadata incl. the server's `poll_policy` — the UI derives its
+   *  presence thresholds from it instead of hardcoding the pacing cap. */
+  meta: (id: string) => api<DiscussionMeta>('GET', `/discussions/${id}/meta`),
   /** 0.8.6 phase 2 — list active+paused participants of a disc.
    *  Powers the header chips + `[+ Inviter]` button. `left` sessions
    *  are excluded server-side (audit history only). */

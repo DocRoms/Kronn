@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.8.11] - 2026-07-13
+## [0.8.11] - 2026-07-14
 
 _« Socle clean » — the Phase-1 hardening batch from the 2026-07 full audit (security defaults, honest CI, operational reliability, the typegen/step-dispatch structural taxes), extended by the run-lifecycle campaign reviewed pass-by-pass with Codex: run state machine + resume, envelope contract, typegen contract, Link-header pagination, and the API/auth surface._
 
@@ -84,6 +84,20 @@ _« Socle clean » — the Phase-1 hardening batch from the 2026-07 full audit (
 - **Run history queries are bounded.** The unpaginated `GET /:id/runs` now caps at the 500 most recent runs (loading every row *with its full step results* on each page-open was the growth risk on a fast cron); the UI already folds + paginates. Optional retention (`server.run_retention_days`, default 0 = off) purges terminal runs older than N days at boot while preserving parent runs still referenced by a retained child — bounding the run table (76% of the DB) without silently dropping history unless you opt in.
 - **Frontend lint gates are now enforced in CI.** `eslint` (0 errors, with a ratcheted warning budget so the React-19-strict backlog can only shrink) and `lint:i18n` (fails on a missing/undefined translation key — it caught `common.saving`, now added in all three locales) run on every CI push. Fixed the 31 pre-existing eslint errors (mostly useless-escapes in the i18n JSON examples; plus one real conditional-hook bug in `MarkdownContent`).
 - **A vitest guard fails the build on phantom CSS variables.** Any `var(--kr-…)` used without a fallback and not defined in `tokens.css` now fails a test. Defined the ~20 phantom tokens the audit found (aliased to canonical tokens so they adapt across all themes; RGB triples for `rgba()` overlays in both dark and light). This is the class of bug behind the earlier black-on-dark contrast issue.
+
+### Added (stabilisation pass — multi-agent rooms & DB read path, reviewed live with Codex)
+
+- **Rooms pace themselves — the server computes it, agents apply it verbatim.** Every wait/meta/join response now carries a `PacingState`: **hot** (40s polls) while a human message is within a 30-min attention lease, **cold** otherwise with a deterministic 30s→8min backoff step derived statelessly from the elapsed silence — every client gets the same answer, no per-session counters, no client-side interpretation (the root of agents "leaving" rooms was each one guessing its own cadence).
+- **Heavy reads no longer freeze the whole API.** A dedicated read-only SQLite companion connection (`PRAGMA query_only`, ADR-001 O2) serves the heaviest read endpoints (run list with full step results, discussions sidebar polling, whole-DB export) while writes hold the main connection. Opened only when WAL is confirmed effective — in-memory DBs, failed opens and WAL-off fall back to the shared connection, explicitly logged.
+
+### Fixed (stabilisation pass)
+
+- **Agents no longer silently skip room messages under concurrent posting.** `disc_append` returns the REAL `last_sort_order` of the inserted message (estimated cursors drifted when two agents posted at once, making long-polls skip whatever landed in between — observed live as "nobody answered" while messages were there).
+- **A backend rebuild window no longer kicks agents out of the room.** The MCP bridge retries transport-level failures (connection refused/reset during a `cargo watch` rebuild) with a 2→16s backoff before giving up, and its final error teaches the exact resume contract instead of leaving the agent unbound.
+- **Reloading the MCP no longer spawns phantom participants.** The bridge's fallback session identity is now derived from the parent CLI process (pid + start time) instead of a per-process random UUID — a reload rebinds to the SAME `discussion_sessions` row, so the participants header stops accumulating duplicate chips (they used to linger up to the 24h reaper).
+- **The presence header tells the truth about the pacing contract.** A cold-regime agent legitimately sleeping up to the 8-min cap shows as "en veille", grey "absent" only beyond cap + margin — and the threshold is read from the server's `poll_policy` at runtime instead of a hardcoded constant. Pacing anchors run on a reception clock (`messages.received_at`, new migration) over the newest row by `sort_order` — a federated message stamped in the past still resets the ramp and renews the lease, while `timestamp` stays the author's clock for display.
+- **`{{steps.X.agent}}` / `{{steps.X.model}}` template variables resolve on real runs.** The step snapshot was applied AFTER the template context was seeded, so both variables were always empty outside tests; `record_step_completion` now orders the two in one place.
+- **CI rejects `.unwrap()` inside `with_conn` closures.** A lexer-based lint (string/raw-string/char-literal aware, no scan cap) guards the panic-poisons-the-shared-connection class at the source; its own fixtures run in CI first.
 
 ---
 

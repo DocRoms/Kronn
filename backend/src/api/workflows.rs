@@ -1949,7 +1949,9 @@ pub async fn list_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<WorkflowRun>>> {
-    match state.db.with_conn(move |conn| crate::db::workflows::list_runs(conn, &id)).await {
+    // ADR-001 O2 — heaviest read of the app (full step_results per run):
+    // served from the read connection so a busy writer can't freeze it.
+    match state.db.with_read_conn(move |conn| crate::db::workflows::list_runs(conn, &id)).await {
         Ok(runs) => Json(ApiResponse::ok(runs)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }

@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { discussions as discussionsApi } from '../lib/api';
+import { freshnessOf, DEFAULT_AWAY_AFTER_MS, AWAY_MARGIN_MS } from '../lib/discPresence';
+import type { Freshness } from '../lib/discPresence';
 import type { ToastFn } from '../hooks/useToast';
 import { UserPlus, Copy, X } from 'lucide-react';
 
@@ -39,26 +41,18 @@ interface ParticipantRow {
   last_seen?: string | null;
 }
 
-// Presence freshness from `last_seen` (the row's last activity heartbeat):
-// active <2 min (green) / quiet-but-working <10 min (amber) / away beyond (grey).
-// An agent that idles between turns is NOT "gone" — this distinguishes
-// working-and-quiet from actually-absent without a noisy online/offline flip.
-type Freshness = 'fresh' | 'idle' | 'away';
-function freshnessOf(lastSeen?: string | null): Freshness {
-  if (!lastSeen) return 'away';
-  const ageMs = Date.now() - new Date(lastSeen).getTime();
-  if (Number.isNaN(ageMs) || ageMs >= 10 * 60_000) return 'away';
-  return ageMs < 2 * 60_000 ? 'fresh' : 'idle';
-}
+// Presence thresholds live in `lib/discPresence.ts` (pure, unit-tested);
+// the away cap follows the server's poll_policy fetched from the disc meta.
 const FRESH_COLOR: Record<Freshness, string> = {
   fresh: 'var(--kr-success)',
   idle: 'var(--kr-warning)',
   away: 'var(--kr-text-tertiary, #888)',
 };
-const FRESH_LABEL: Record<Freshness, string> = {
-  fresh: 'actif',
-  idle: 'silencieux',
-  away: 'absent',
+// User-visible labels go through t(...) — keys per freshness state.
+const FRESH_LABEL_KEY: Record<Freshness, string> = {
+  fresh: 'disc.presenceFresh',
+  idle: 'disc.presenceIdle',
+  away: 'disc.presenceAway',
 };
 
 // Agent-type → emoji icon. Distinct glyphs per CLI but none of them
@@ -80,6 +74,7 @@ const iconFor = (agentType: string) => AGENT_ICON[agentType] ?? '👤';
 
 export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHeaderProps) {
   const [participants, setParticipants] = useState<ParticipantRow[]>([]);
+  const [awayAfterMs, setAwayAfterMs] = useState(DEFAULT_AWAY_AFTER_MS);
   const [inviting, setInviting] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [invite, setInvite] = useState<{ token: string; instruction: string; expiresAt: string; ttlSecs: number } | null>(null);
@@ -93,6 +88,24 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
       // less noisy than a popup every time the user opens a disc.
       console.warn('[DiscParticipantsHeader] participants fetch failed:', e);
     }
+  }, [discId]);
+
+  useEffect(() => {
+    // The away threshold follows the server's poll policy — a single meta
+    // fetch per disc; on ANY failure the fallback constant stays in place.
+    let cancelled = false;
+    (async () => {
+      try {
+        const m = await discussionsApi.meta(discId);
+        const maxDelaySeconds = m.poll_policy?.max_delay_seconds;
+        if (!cancelled && typeof maxDelaySeconds === 'number') {
+          setAwayAfterMs(maxDelaySeconds * 1000 + AWAY_MARGIN_MS);
+        }
+      } catch (e) {
+        console.warn('[DiscParticipantsHeader] meta fetch failed:', e);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [discId]);
 
   useEffect(() => {
@@ -145,7 +158,7 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
         </span>
       )}
       {participants.map(p => {
-        const f = freshnessOf(p.last_seen);
+        const f = freshnessOf(p.last_seen, awayAfterMs);
         return (
           <span
             key={p.id}
@@ -153,7 +166,7 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
             data-status={p.status}
             data-role={p.role}
             data-freshness={f}
-            title={`${p.agent_type} (${p.role}) — ${FRESH_LABEL[f]}`}
+            title={`${p.agent_type} (${p.role}) — ${t(FRESH_LABEL_KEY[f])}`}
           >
             <span
               aria-hidden

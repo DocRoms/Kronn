@@ -29,6 +29,12 @@ use crate::core::config;
 /// (tokio::sync::Mutex cannot be used in a blocking context).
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
+    /// ADR-001 O2 (stab-2) — dedicated READ connection (`PRAGMA query_only`).
+    /// WAL lets it read a consistent snapshot while the write connection
+    /// holds its lock, so heavy reads stop freezing the whole API. `None`
+    /// for in-memory databases (a second `:memory:` handle would be a
+    /// DIFFERENT db) — `with_read_conn` falls back to the write connection.
+    read_conn: Option<Arc<Mutex<Connection>>>,
     path: PathBuf,
     /// Runs flipped `Running`/`Pending` → `Interrupted` by THIS boot's
     /// reconcile. Drained exactly once by the boot notifier
@@ -54,6 +60,7 @@ impl Database {
         migrations::run(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            read_conn: None,
             path: PathBuf::from(":memory:"),
             boot_interrupted: Mutex::new(Vec::new()),
         })
@@ -72,6 +79,7 @@ impl Database {
         // busy_timeout: wait up to 5s if the DB is locked by another writer
         conn.execute_batch("PRAGMA busy_timeout=5000;")?;
 
+        let mut wal_effective = false;
         if use_wal {
             // Setting journal_mode requires a query that yields the *actual*
             // mode. SQLite silently falls back to TRUNCATE/PERSIST when the
@@ -85,7 +93,8 @@ impl Database {
             ).context("Failed to set WAL journal mode")?;
             conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
 
-            if !actual_mode.eq_ignore_ascii_case("wal") {
+            wal_effective = actual_mode.eq_ignore_ascii_case("wal");
+            if !wal_effective {
                 tracing::warn!(
                     "Requested journal_mode=WAL but SQLite fell back to '{}'. \
                      The database file at {} is likely on a network or sync \
@@ -151,11 +160,51 @@ impl Database {
             Err(e) => tracing::warn!("Failed to auto-purge api_call_logs: {}", e),
         }
 
+        // ADR-001 O2 — open the read-only companion connection, ONLY when WAL
+        // is actually effective: in DELETE/TRUNCATE journal modes a reader's
+        // shared lock can BLOCK the writer, which would be worse than the
+        // single-connection status quo (Codex review). Best-effort: any
+        // failure degrades to the historical single-connection behaviour.
+        let read_conn = if !wal_effective {
+            tracing::info!(
+                "WAL not effective (KRONN_DB_WAL=0 or filesystem fallback) — \
+                 skipping the read-only companion connection, reads share the \
+                 write connection (pre-O2 behaviour)"
+            );
+            None
+        } else {
+            match Self::open_read_connection(path) {
+                Ok(c) => Some(Arc::new(Mutex::new(c))),
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not open the read-only DB connection ({e}) — heavy reads \
+                         will share the write connection (pre-O2 behaviour)"
+                    );
+                    None
+                }
+            }
+        };
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
+            read_conn,
             path: path.clone(),
             boot_interrupted: Mutex::new(boot_interrupted),
         })
+    }
+
+    /// The O2 read companion, opened with SQLite's READ_ONLY flag — the
+    /// guarantee lives in the file handle itself, not in a per-connection
+    /// pragma a future closure could flip back (Copilot round 3).
+    /// `query_only=1` stays as a second, cheap belt.
+    fn open_read_connection(path: &PathBuf) -> Result<Connection> {
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .with_context(|| format!("read connection at {}", path.display()))?;
+        conn.execute_batch("PRAGMA busy_timeout=5000; PRAGMA query_only=1;")?;
+        Ok(conn)
     }
 
     /// Get the database file path.
@@ -172,6 +221,25 @@ impl Database {
             .unwrap_or_default()
     }
 
+    /// ADR-001 O2 — execute a READ-ONLY closure on the dedicated read
+    /// connection (WAL snapshot, never blocked by the writer). Falls back to
+    /// the write connection when no read connection exists: in-memory DBs,
+    /// a failed open at boot, or WAL not effective (KRONN_DB_WAL=0 /
+    /// filesystem fallback — a DELETE-mode reader could BLOCK the writer).
+    /// When the dedicated connection is active, `PRAGMA query_only` makes
+    /// any write attempt through this path an immediate SQLite error.
+    pub async fn with_read_conn<F, T>(&self, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let conn = match &self.read_conn {
+            Some(rc) => rc.clone(),
+            None => self.conn.clone(),
+        };
+        Self::run_on(conn, f).await
+    }
+
     /// Execute a blocking closure with the database connection.
     /// Runs inside `spawn_blocking` so the Tokio worker thread is never blocked
     /// waiting on the mutex or executing a synchronous SQLite query.
@@ -180,7 +248,16 @@ impl Database {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
         T: Send + 'static,
     {
-        let conn = self.conn.clone();
+        Self::run_on(self.conn.clone(), f).await
+    }
+
+    /// Shared executor for both connections: spawn_blocking + poison
+    /// recovery + panic containment (0.8.11 hardening semantics).
+    async fn run_on<F, T>(conn: Arc<Mutex<Connection>>, f: F) -> Result<T>
+    where
+        F: FnOnce(&Connection) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
         tokio::task::spawn_blocking(move || {
             // Poison is recoverable here: a panicked closure can't leave
             // SQLite mid-transaction (rusqlite rolls back on drop), while

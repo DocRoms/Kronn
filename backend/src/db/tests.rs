@@ -11,6 +11,145 @@ fn test_db() -> Connection {
     conn
 }
 
+// ─── ADR-001 O2 (stab-2) — read-connection guards ───────────────────────
+
+// Both WAL-reader tests assume the companion actually opened — on a
+// filesystem where WAL is not effective, Database silently falls back to
+// the write connection and their assertions no longer describe reality.
+fn read_companion_available(db: &crate::db::Database) -> bool {
+    if db.read_conn.is_none() {
+        eprintln!("skipping: WAL not effective here, no read companion");
+        return false;
+    }
+    true
+}
+
+#[tokio::test]
+async fn read_conn_sees_committed_writes_and_refuses_its_own() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = crate::db::Database::open_path(&tmp.path().join("o2.db")).unwrap();
+    if !read_companion_available(&db) {
+        return;
+    }
+
+    db.with_conn(|conn| {
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('p-o2', 'O2', '/tmp/o2', datetime('now'), datetime('now'))",
+            [],
+        ).map_err(Into::into)
+    }).await.unwrap();
+
+    // Visibility: the WAL reader sees the committed write.
+    let name: String = db.with_read_conn(|conn| {
+        conn.query_row("SELECT name FROM projects WHERE id = 'p-o2'", [], |r| r.get(0))
+            .map_err(Into::into)
+    }).await.unwrap();
+    assert_eq!(name, "O2");
+
+    // query_only guard: a stray write through the read path is an
+    // immediate SQLite error, not a silent drift.
+    let err = db.with_read_conn(|conn| {
+        conn.execute("DELETE FROM projects WHERE id = 'p-o2'", [])
+            .map_err(Into::into)
+            .map(|_| ())
+    }).await.expect_err("writes must be refused on the read connection");
+    assert!(err.to_string().to_lowercase().contains("readonly"), "{err}");
+
+    // Codex round 4: flip `query_only` OFF and try again — the write must
+    // STILL be refused because the handle itself is SQLITE_OPEN_READ_ONLY.
+    // Locks the open flag: a regression back to a read-write open guarded
+    // only by the pragma would pass the assertion above but fail here.
+    let err = db.with_read_conn(|conn| {
+        conn.execute_batch("PRAGMA query_only=0;")?;
+        conn.execute("DELETE FROM projects WHERE id = 'p-o2'", [])
+            .map_err(Into::into)
+            .map(|_| ())
+    }).await.expect_err("the READ_ONLY handle must refuse writes even without query_only");
+    assert!(err.to_string().to_lowercase().contains("readonly"), "{err}");
+}
+
+#[tokio::test]
+async fn reads_are_not_blocked_by_a_busy_writer() {
+    // The O2 point: a slow closure holding the WRITE connection used to
+    // freeze every read. The read connection completes while the writer
+    // sleeps. Generous bounds — this asserts ORDERING, not precise timing.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = std::sync::Arc::new(
+        crate::db::Database::open_path(&tmp.path().join("o2b.db")).unwrap(),
+    );
+    if !read_companion_available(&db) {
+        return;
+    }
+
+    // Copilot round 4: the reader must start behind a writer that REALLY
+    // holds the mutex — a fixed sleep can't guarantee scheduling under CI
+    // load. The closure signals once it's inside (lock held), and only
+    // then does the read race begin.
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel::<()>();
+    let db_w = db.clone();
+    let writer = tokio::spawn(async move {
+        db_w.with_conn(move |_conn| {
+            let _ = locked_tx.send(());
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            Ok(())
+        }).await
+    });
+    locked_rx.await.expect("writer must signal lock acquisition");
+
+    let started = std::time::Instant::now();
+    let n: i64 = db.with_read_conn(|conn| {
+        conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .map_err(Into::into)
+    }).await.unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(n, 0);
+    assert!(
+        elapsed < std::time::Duration::from_millis(1000),
+        "read must complete while the writer still holds its lock (took {elapsed:?})"
+    );
+    writer.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+#[serial_test::serial] // mutates KRONN_DB_WAL
+async fn wal_disabled_skips_the_reader_and_falls_back() {
+    // Codex review (stab-2 blocker): in DELETE journal mode a reader's
+    // shared lock can BLOCK the writer — the companion must not exist
+    // there. Observable: a write through with_read_conn SUCCEEDS (it's
+    // the write connection, no query_only guard).
+    let prev_wal = std::env::var("KRONN_DB_WAL").ok();
+    std::env::set_var("KRONN_DB_WAL", "0");
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db = crate::db::Database::open_path(&tmp.path().join("nowal.db"));
+    match prev_wal {
+        Some(v) => std::env::set_var("KRONN_DB_WAL", v),
+        None => std::env::remove_var("KRONN_DB_WAL"),
+    }
+    let db = db.unwrap();
+
+    db.with_read_conn(|conn| {
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('p-nowal', 'NoWal', '/tmp/nw', datetime('now'), datetime('now'))",
+            [],
+        ).map_err(Into::into).map(|_| ())
+    }).await.expect("without WAL the read path IS the write connection (fallback)");
+}
+
+#[tokio::test]
+async fn in_memory_db_falls_back_to_the_write_connection() {
+    // A second `:memory:` handle would be a DIFFERENT database — the read
+    // path must fall back so tests keep working on one shared connection.
+    let db = crate::db::Database::open_in_memory().unwrap();
+    let n: i64 = db.with_read_conn(|conn| {
+        conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+            .map_err(Into::into)
+    }).await.unwrap();
+    assert_eq!(n, 0);
+}
+
 fn sample_project(id: &str, name: &str) -> Project {
     let now = Utc::now();
     Project {
