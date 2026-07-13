@@ -88,6 +88,12 @@ pub struct PeerJoinResponse {
     /// while the room is silent, reset on any peer message.
     #[serde(default)]
     pub poll_policy: crate::api::disc_introspection::PollBackoffPolicy,
+    /// stab-3 — server-computed pacing, same contract as wait/meta: apply
+    /// `next_delay_seconds` verbatim before the FIRST wait. Included at
+    /// join so a fresh peer doesn't need a meta/wait round-trip to pace
+    /// itself (Copilot review: join was the one response missing it).
+    #[serde(default)]
+    pub pacing: crate::api::disc_introspection::PacingState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -234,6 +240,10 @@ pub async fn peer_join(
 
             Ok::<_, anyhow::Error>(PeerJoinResponse {
                 poll_policy: crate::api::disc_introspection::PollBackoffPolicy::default(),
+                // Cold-cap placeholder — replaced with the real
+                // server-computed value right after the closure (pacing
+                // needs an async read the closure can't perform).
+                pacing: Default::default(),
                 disc_id,
                 session_pk,
                 peer_count,
@@ -245,7 +255,10 @@ pub async fn peer_join(
         .await;
 
     match res {
-        Ok(r) => Json(ApiResponse::ok(r)),
+        Ok(mut r) => {
+            r.pacing = pacing_for_disc(&state, &r.disc_id).await;
+            Json(ApiResponse::ok(r))
+        }
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
 }
@@ -446,6 +459,44 @@ pub struct WaitForPeerResponse {
     /// `since_sort_order` when timed out). Lets the agent advance its
     /// `since` cursor without inspecting the messages.
     pub latest_sort_order: i64,
+    /// stab-3 — server-computed pacing: apply `next_delay_seconds` before
+    /// the next wait, verbatim. Hot (short interval) while a User message is
+    /// within the attention lease; otherwise the next DETERMINISTIC step of
+    /// the cold backoff ramp, derived from the elapsed silence.
+    pub pacing: crate::api::disc_introspection::PacingState,
+}
+
+/// stab-3 — pacing for a disc: hot while the last User message is within
+/// the attention lease. DB errors degrade to cold (the conservative regime).
+pub(crate) async fn pacing_for_disc(
+    state: &AppState,
+    disc_id: &str,
+) -> crate::api::disc_introspection::PacingState {
+    let did = disc_id.to_string();
+    let (last_user, last_any) = match state
+        .db
+        .with_read_conn(move |conn| {
+            Ok((
+                crate::db::discussions::last_user_message_at(conn, &did)?,
+                crate::db::discussions::last_message_at(conn, &did)?,
+            ))
+        })
+        .await
+    {
+        Ok(anchors) => anchors,
+        Err(e) => {
+            // Explicit degradation: a DB failure yields the conservative
+            // cold regime, and the incident is visible (Codex review).
+            tracing::warn!(disc = %disc_id, error = %e, "pacing anchors unavailable — cold fallback");
+            (None, None)
+        }
+    };
+    crate::api::disc_introspection::pacing_for(
+        last_user,
+        last_any,
+        chrono::Utc::now(),
+        &crate::api::disc_introspection::PollBackoffPolicy::default(),
+    )
 }
 
 const WAIT_POLL_INTERVAL_MS: u64 = 1000;
@@ -548,18 +599,22 @@ pub async fn wait_for_peer(
 
         if !messages.is_empty() {
             let latest_sort_order = messages.iter().map(|m| m.sort_order).max().unwrap_or(since);
+            let pacing = pacing_for_disc(&state, &disc_id).await;
             return Json(ApiResponse::ok(WaitForPeerResponse {
                 timed_out: false,
                 messages,
                 latest_sort_order,
+                pacing,
             }));
         }
 
         if std::time::Instant::now() >= deadline {
+            let pacing = pacing_for_disc(&state, &disc_id).await;
             return Json(ApiResponse::ok(WaitForPeerResponse {
                 timed_out: true,
                 messages: vec![],
                 latest_sort_order: since,
+                pacing,
             }));
         }
 
@@ -1095,6 +1150,85 @@ mod tests {
         assert_eq!(data.peer_count, 1, "exactly the joining session is active");
         assert_eq!(data.disc_title, "Test disc");
         assert_eq!(data.recent_messages.len(), 0, "empty disc → no previews");
+        // Empty disc ⇒ cold at the cap (no anchors). The HOT proof that
+        // pacing is really computed lives in the dedicated test below.
+        assert_eq!(data.pacing.regime, crate::api::disc_introspection::PacingRegime::Cold);
+        assert_eq!(data.pacing.next_delay_seconds, data.poll_policy.max_delay_seconds);
+    }
+
+    #[tokio::test]
+    async fn peer_join_returns_the_server_computed_pacing() {
+        // Copilot review (PR 118): join was the one response missing
+        // `pacing`. A fresh User message puts the disc in the HOT regime —
+        // on an empty disc the real computation and the cold-cap Default
+        // placeholder coincide, so hot is the only observable proof the
+        // handler actually ran `pacing_for_disc`.
+        let state = make_state_with_disc("d-join-pace").await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, agent_type, timestamp, sort_order)
+                     VALUES ('m-u1', 'd-join-pace', 'User', 'ping', NULL, ?1, 1)",
+                    rusqlite::params![chrono::Utc::now().to_rfc3339()],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let invite_resp =
+            invite_peer(State(state.clone()), Path("d-join-pace".to_string())).await;
+        let token = invite_resp.0.data.unwrap().token;
+        let join_resp = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token,
+                agent_type: "Codex".into(),
+                session_id: "sess-pace".into(),
+            }),
+        )
+        .await;
+        let data = join_resp.0.data.expect("join must succeed");
+        assert_eq!(data.pacing.regime, crate::api::disc_introspection::PacingRegime::Hot);
+        assert_eq!(data.pacing.next_delay_seconds, data.poll_policy.hot_poll_seconds);
+        assert!(data.pacing.attention_until.is_some(), "hot carries the lease end");
+    }
+
+    #[tokio::test]
+    async fn disc_meta_pacing_uses_the_reception_clock_like_wait_and_join() {
+        // Codex round 4: meta must share the SAME anchors as wait/join. A
+        // federated User message authored 3h ago but received NOW must put
+        // meta in the hot regime — an anchor on the authored timestamp
+        // would answer cold and the endpoints would contradict each other.
+        let state = make_state_with_disc("d-meta-pace").await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                     VALUES ('m-fed', 'd-meta-pace', 'User', 'ping', ?1, 1, ?2)",
+                    rusqlite::params![
+                        (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339(),
+                        chrono::Utc::now().to_rfc3339(),
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = crate::api::disc_introspection::disc_meta(
+            State(state.clone()),
+            Path("d-meta-pace".to_string()),
+        )
+        .await;
+        let meta = resp.0.data.expect("meta must succeed");
+        let pacing = meta.pacing.expect("meta carries pacing");
+        assert_eq!(pacing.regime, crate::api::disc_introspection::PacingRegime::Hot, "reception clock renews the lease");
+        assert!(pacing.attention_until.is_some());
     }
 
     #[tokio::test]

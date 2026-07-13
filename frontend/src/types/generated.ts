@@ -1267,7 +1267,11 @@ msgs_since_last_summary: number, language: string,
 /**
  * Long-poll pacing contract for multi-agent rooms (stab-1).
  */
-poll_policy: PollBackoffPolicy, project_id: string | null, };
+poll_policy: PollBackoffPolicy,
+/**
+ * stab-3 — current server-computed regime for this disc.
+ */
+pacing?: PacingState, project_id: string | null, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -1886,6 +1890,20 @@ export type OnInvalid = "Continue" | "Fail";
 export type OrchestrationRequest = { agents: Array<AgentType>, max_rounds?: number | null, skill_ids?: Array<string>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
 
 /**
+ * stab-3 — pacing state COMPUTED BY THE SERVER (the agents apply it, they
+ * don't interpret): hot while the last User message is within the lease,
+ * cold otherwise. In BOTH regimes `next_delay_seconds` is the instruction
+ * to apply verbatim — in cold it is the backoff-ramp step derived
+ * statelessly from the elapsed silence (see `pacing_for`).
+ * Closed set — a typo'd regime must fail to COMPILE, and the generated TS
+ * side gets the `"hot" | "cold"` union instead of `string` (Copilot round 5).
+ * Wire format stays the lowercase string the bridge already reads.
+ */
+export type PacingRegime = "hot" | "cold";
+
+export type PacingState = { regime: PacingRegime, next_delay_seconds: number, attention_until?: string, };
+
+/**
  * Pagination strategy for an `ApiCall` step. `Auto` covers the three most
  * common REST patterns; explicit variants let advanced users hardcode the
  * cursor/offset paths for non-standard APIs (Cloudflare GraphQL for ex.).
@@ -1958,7 +1976,14 @@ next_steps: string,
  * Long-poll pacing contract (stab-1) — walk `poll_backoff_seconds`
  * while the room is silent, reset on any peer message.
  */
-poll_policy: PollBackoffPolicy, };
+poll_policy: PollBackoffPolicy,
+/**
+ * stab-3 — server-computed pacing, same contract as wait/meta: apply
+ * `next_delay_seconds` verbatim before the FIRST wait. Included at
+ * join so a fresh peer doesn't need a meta/wait round-trip to pace
+ * itself (Copilot review: join was the one response missing it).
+ */
+pacing: PacingState, };
 
 /**
  * Body of `POST /api/discussions/peer-leave`. Identifies the caller
@@ -1982,7 +2007,17 @@ left: boolean, };
  * room is silent (staying on the last value once exhausted) and reset to
  * the first entry as soon as a peer message arrives.
  */
-export type PollBackoffPolicy = { poll_backoff_seconds: Array<number>, reset_on_peer_message: boolean, max_delay_seconds: number, };
+export type PollBackoffPolicy = { poll_backoff_seconds: Array<number>, reset_on_peer_message: boolean, max_delay_seconds: number,
+/**
+ * stab-3 — poll interval while a HUMAN attention lease is active
+ * (a User message opens/renews the lease). Debated Claude/Codex,
+ * Romu's requirement: sub-minute answers while he is present.
+ */
+hot_poll_seconds: number,
+/**
+ * How long a User message keeps the room in the hot regime.
+ */
+user_attention_lease_seconds: number, };
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
@@ -2967,7 +3002,14 @@ messages: Array<WaitForPeerMessage>,
  * `since_sort_order` when timed out). Lets the agent advance its
  * `since` cursor without inspecting the messages.
  */
-latest_sort_order: number, };
+latest_sort_order: number,
+/**
+ * stab-3 — server-computed pacing: apply `next_delay_seconds` before
+ * the next wait, verbatim. Hot (short interval) while a User message is
+ * within the attention lease; otherwise the next DETERMINISTIC step of
+ * the cold backoff ramp, derived from the elapsed silence.
+ */
+pacing: PacingState, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**

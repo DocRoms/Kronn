@@ -712,6 +712,56 @@ pub fn list_shared_sync_points(conn: &Connection) -> Result<Vec<(String, i64)>> 
     Ok(out)
 }
 
+/// stab-3 — timestamp of the LAST message (any role): the reset anchor of
+/// the cold backoff ramp (`reset_on_peer_message`).
+pub fn last_message_at(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    // Latest by sort_order AND on the reception clock (Copilot + Codex,
+    // PR 118): a federated message can arrive stamped in the past — the
+    // reset contract is about when THIS instance received it, so the anchor
+    // reads `received_at` (072; COALESCE covers pre-migration rows) on the
+    // newest row by sort_order, riding the (discussion_id, sort_order)
+    // index. A query error is a REAL SQL failure and must reach the caller.
+    let ts: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(received_at, timestamp) FROM messages
+              WHERE discussion_id = ?1
+              ORDER BY sort_order DESC LIMIT 1",
+            params![discussion_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(ts
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc)))
+}
+
+/// stab-3 — timestamp of the LAST User message in a disc, the anchor of
+/// the human attention lease (pacing hot/cold regime).
+pub fn last_user_message_at(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+    // Latest User message on the reception clock — same rationale as
+    // `last_message_at`: an old-stamped federated User message must still
+    // RENEW the lease, so the anchor is `received_at` on the newest User
+    // row by sort_order.
+    let ts: Option<String> = conn
+        .query_row(
+            "SELECT COALESCE(received_at, timestamp) FROM messages
+              WHERE discussion_id = ?1 AND role = 'User'
+              ORDER BY sort_order DESC LIMIT 1",
+            params![discussion_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(ts
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+        .map(|d| d.with_timezone(&chrono::Utc)))
+}
+
 /// Returns the `sort_order` assigned to the inserted message — callers that
 /// long-poll (`disc_wait_for_peer`) need their REAL position, not an estimate
 /// (stab-1: estimated positions drifted under concurrent posters and made
@@ -730,8 +780,8 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
         .and_then(|r| serde_json::to_string(r).ok());
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, received_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             msg.id,
             discussion_id,
@@ -750,6 +800,9 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
             msg.duration_ms.map(|d| d as i64),
             lint_report_json,
             msg.model,
+            // Reception clock (072): THIS instance's now, never the author's
+            // timestamp — the pacing anchors depend on it.
+            chrono::Utc::now().to_rfc3339(),
         ],
     )?;
 

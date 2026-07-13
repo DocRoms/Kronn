@@ -58,6 +58,10 @@ pub struct DiscussionMeta {
     /// Long-poll pacing contract for multi-agent rooms (stab-1).
     #[serde(default)]
     pub poll_policy: PollBackoffPolicy,
+    /// stab-3 — current server-computed regime for this disc.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pacing: Option<PacingState>,
     pub project_id: Option<String>,
 }
 
@@ -91,6 +95,12 @@ pub struct PollBackoffPolicy {
     pub poll_backoff_seconds: Vec<u32>,
     pub reset_on_peer_message: bool,
     pub max_delay_seconds: u32,
+    /// stab-3 — poll interval while a HUMAN attention lease is active
+    /// (a User message opens/renews the lease). Debated Claude/Codex,
+    /// Romu's requirement: sub-minute answers while he is present.
+    pub hot_poll_seconds: u32,
+    /// How long a User message keeps the room in the hot regime.
+    pub user_attention_lease_seconds: u32,
 }
 
 impl Default for PollBackoffPolicy {
@@ -99,7 +109,95 @@ impl Default for PollBackoffPolicy {
             poll_backoff_seconds: vec![30, 30, 60, 60, 120, 120, 240, 240, 480],
             reset_on_peer_message: true,
             max_delay_seconds: 480,
+            hot_poll_seconds: 40,
+            user_attention_lease_seconds: 1800,
         }
+    }
+}
+
+/// stab-3 — pacing state COMPUTED BY THE SERVER (the agents apply it, they
+/// don't interpret): hot while the last User message is within the lease,
+/// cold otherwise. In BOTH regimes `next_delay_seconds` is the instruction
+/// to apply verbatim — in cold it is the backoff-ramp step derived
+/// statelessly from the elapsed silence (see `pacing_for`).
+/// Closed set — a typo'd regime must fail to COMPILE, and the generated TS
+/// side gets the `"hot" | "cold"` union instead of `string` (Copilot round 5).
+/// Wire format stays the lowercase string the bridge already reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "lowercase")]
+pub enum PacingRegime {
+    Hot,
+    Cold,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PacingState {
+    pub regime: PacingRegime,
+    pub next_delay_seconds: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub attention_until: Option<String>,
+}
+
+impl Default for PacingState {
+    /// Conservative cold-cap placeholder — response builders overwrite it
+    /// with the real `pacing_for` result; a leaked default can only slow
+    /// an agent down, never make it hammer the server.
+    fn default() -> Self {
+        Self {
+            regime: PacingRegime::Cold,
+            next_delay_seconds: PollBackoffPolicy::default().max_delay_seconds,
+            attention_until: None,
+        }
+    }
+}
+
+/// Compute the pacing. Hot while the last USER message is within the
+/// attention lease. Cold otherwise — with the backoff ramp derived
+/// STATELESSLY from the time elapsed since the last message of ANY role
+/// (Codex review: the server must decide the cold delay too, not leave a
+/// "MAY ramp up" ambiguity to clients; deriving the ramp position from
+/// elapsed time gives every client the same deterministic answer without
+/// per-session counters). Walk the cumulative schedule: right after
+/// activity the delays are short, converging to the cap as silence lasts.
+pub fn pacing_for(
+    last_user_msg_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_any_msg_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+    policy: &PollBackoffPolicy,
+) -> PacingState {
+    if let Some(t) = last_user_msg_at {
+        let lease_end = t + chrono::Duration::seconds(policy.user_attention_lease_seconds as i64);
+        if now < lease_end {
+            return PacingState {
+                regime: PacingRegime::Hot,
+                next_delay_seconds: policy.hot_poll_seconds,
+                attention_until: Some(lease_end.to_rfc3339()),
+            };
+        }
+    }
+    let next_delay_seconds = match last_any_msg_at {
+        Some(t) => {
+            let elapsed = (now - t).num_seconds().max(0) as u64;
+            let mut cum: u64 = 0;
+            let mut pick = policy.max_delay_seconds;
+            for &step in &policy.poll_backoff_seconds {
+                cum += step as u64;
+                if elapsed < cum {
+                    pick = step;
+                    break;
+                }
+            }
+            pick
+        }
+        None => policy.max_delay_seconds,
+    };
+    PacingState {
+        regime: PacingRegime::Cold,
+        next_delay_seconds,
+        attention_until: None,
     }
 }
 
@@ -169,8 +267,14 @@ pub async fn disc_meta(
 
     let tokens_used_total: u64 = disc.messages.iter().map(|m| m.tokens_used).sum();
 
+    // Same computation as the wait/join paths — pacing_for_disc reads the
+    // RECEPTION-clock anchors (072), while `disc.messages[..].timestamp` is
+    // the authored clock (Copilot round 3: the two answers must not diverge
+    // on a federated message stamped in the past).
+    let pacing = crate::api::disc_invite::pacing_for_disc(&state, &id).await;
     Json(ApiResponse::ok(DiscussionMeta {
         poll_policy: PollBackoffPolicy::default(),
+        pacing: Some(pacing),
         id: disc.id,
         title: disc.title,
         agent: disc.agent,
@@ -442,5 +546,61 @@ mod tests {
         assert_eq!(p.max_delay_seconds, 480, "cap = last step of the sequence");
         assert_eq!(*p.poll_backoff_seconds.last().unwrap(), p.max_delay_seconds);
         assert!(p.reset_on_peer_message);
+        // stab-3 — hot regime: sub-minute while a human is around, 30 min lease.
+        assert_eq!(p.hot_poll_seconds, 40);
+        assert_eq!(p.user_attention_lease_seconds, 1800);
+    }
+
+    #[test]
+    fn pacing_regime_follows_the_user_attention_lease() {
+        use super::{pacing_for, PollBackoffPolicy};
+        let p = PollBackoffPolicy::default();
+        let now = chrono::Utc::now();
+        let ago = |m: i64| Some(now - chrono::Duration::minutes(m));
+
+        // User spoke 5 min ago → hot, 40s, lease end exposed.
+        let hot = pacing_for(ago(5), ago(5), now, &p);
+        assert_eq!(hot.regime, super::PacingRegime::Hot);
+        assert_eq!(hot.next_delay_seconds, 40);
+        assert!(hot.attention_until.is_some());
+
+        // User spoke 31 min ago, nothing since → cold at the CAP
+        // (elapsed 1860s exceeds the whole ramp schedule of 1380s).
+        let cold = pacing_for(ago(31), ago(31), now, &p);
+        assert_eq!(cold.regime, super::PacingRegime::Cold);
+        assert_eq!(cold.next_delay_seconds, 480);
+        assert!(cold.attention_until.is_none());
+
+        // No message ever → cold, cap.
+        assert_eq!(pacing_for(None, None, now, &p).regime, super::PacingRegime::Cold);
+        assert_eq!(pacing_for(None, None, now, &p).next_delay_seconds, 480);
+    }
+
+    #[test]
+    fn cold_ramp_is_derived_statelessly_from_elapsed_silence() {
+        // Codex review (stab-3 blocker) — the server decides the COLD delay
+        // too: ramp position = where the elapsed silence falls in the
+        // cumulative schedule (30,60,120,180,300,420,660,900,1380). Every
+        // client gets the same deterministic answer, no per-session state.
+        use super::{pacing_for, PollBackoffPolicy};
+        let p = PollBackoffPolicy::default();
+        let now = chrono::Utc::now();
+        let cold_after = |secs: i64| {
+            // Agent peer spoke `secs` ago; the user has been gone for hours.
+            pacing_for(
+                Some(now - chrono::Duration::hours(3)),
+                Some(now - chrono::Duration::seconds(secs)),
+                now,
+                &p,
+            )
+            .next_delay_seconds
+        };
+        assert_eq!(cold_after(0), 30, "right after activity: shortest step");
+        assert_eq!(cold_after(45), 30, "within the second 30s step");
+        assert_eq!(cold_after(90), 60, "then 1m");
+        assert_eq!(cold_after(250), 120, "then 2m");
+        assert_eq!(cold_after(700), 240, "then 4m");
+        assert_eq!(cold_after(1000), 480, "tail of the schedule");
+        assert_eq!(cold_after(5000), 480, "long silence: the cap");
     }
 }

@@ -26,14 +26,15 @@ pub async fn list(
         let page = pq.page;
         let per_page = pq.per_page.min(200);
         let offset = (page - 1) * per_page;
-        return match state.db.with_conn(move |conn| {
+        // ADR-001 O2 — dashboard/sidebar polling read, off the write path.
+        return match state.db.with_read_conn(move |conn| {
             crate::db::discussions::list_discussions_paginated(conn, Some(per_page), Some(offset))
         }).await {
             Ok(discussions) => Json(ApiResponse::ok(discussions)),
             Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
         };
     }
-    match state.db.with_conn(crate::db::discussions::list_discussions).await {
+    match state.db.with_read_conn(crate::db::discussions::list_discussions).await {
         Ok(discussions) => Json(ApiResponse::ok(discussions)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }

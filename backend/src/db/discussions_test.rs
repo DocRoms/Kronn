@@ -897,4 +897,69 @@ mod tests {
         assert_eq!(d.message_count, 3);
         assert_eq!(d.non_system_message_count, 3);
     }
+
+    #[test]
+    fn pacing_anchors_use_the_reception_clock_not_the_authored_timestamp() {
+        // Copilot + Codex reviews (PR 118): a federated message arriving
+        // stamped 3h in the past must STILL reset the ramp / renew the
+        // lease — the contract is about reception on THIS instance
+        // (`received_at`, 072), not the author's clock.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-anchor")).unwrap();
+
+        let mut stale_stamped = make_message("m-stale", MessageRole::User, None);
+        stale_stamped.timestamp = Utc::now() - chrono::Duration::hours(3);
+        insert_message(&conn, "d-anchor", &stale_stamped).unwrap();
+
+        let recent = Utc::now() - chrono::Duration::seconds(60);
+        let any = last_message_at(&conn, "d-anchor").unwrap().unwrap();
+        assert!(any > recent, "anchor must be reception time (~now), got {any}");
+        let user = last_user_message_at(&conn, "d-anchor").unwrap().unwrap();
+        assert!(user > recent, "lease anchor must renew on reception, got {user}");
+    }
+
+    #[test]
+    fn pacing_anchors_follow_the_newest_row_by_sort_order() {
+        // The ordering axis is sort_order (the event log), never a MAX()
+        // over clocks — received_at values are skewed by hand to prove it.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-order")).unwrap();
+        insert_message(&conn, "d-order", &make_message("m1", MessageRole::User, None)).unwrap();
+        insert_message(&conn, "d-order", &make_message("m2", MessageRole::User, None)).unwrap();
+
+        let older = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        conn.execute(
+            "UPDATE messages SET received_at = ?1 WHERE id = 'm2'",
+            rusqlite::params![older],
+        )
+        .unwrap();
+
+        // m1 has the LARGER received_at, but m2 is the newest event.
+        let any = last_message_at(&conn, "d-order").unwrap().unwrap();
+        assert_eq!(any.to_rfc3339(), older, "anchor follows sort_order, not MAX(received_at)");
+    }
+
+    #[test]
+    fn last_user_message_at_skips_agent_rows_and_empty_discs() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-roles")).unwrap();
+        assert!(last_message_at(&conn, "d-roles").unwrap().is_none());
+        assert!(last_user_message_at(&conn, "d-roles").unwrap().is_none());
+
+        insert_message(&conn, "d-roles", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(&conn, "d-roles", &make_message("a1", MessageRole::Agent, Some(AgentType::Codex))).unwrap();
+        let user_received = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        conn.execute(
+            "UPDATE messages SET received_at = ?1 WHERE id = 'u1'",
+            rusqlite::params![user_received],
+        )
+        .unwrap();
+
+        // The User lease anchor stays on the User row even though an Agent
+        // row is newer; the any-role anchor follows the Agent row.
+        let user_anchor = last_user_message_at(&conn, "d-roles").unwrap().unwrap();
+        assert_eq!(user_anchor.to_rfc3339(), user_received);
+        let any_anchor = last_message_at(&conn, "d-roles").unwrap().unwrap();
+        assert!(any_anchor > user_anchor, "any-role anchor follows the newest (Agent) row");
+    }
 }

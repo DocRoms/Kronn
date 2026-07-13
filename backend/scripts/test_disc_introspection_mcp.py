@@ -1278,6 +1278,55 @@ class StableSessionIdAcrossCallsTests(unittest.TestCase):
             f"host-launched bridge should fall back to adhoc- prefix, got {sid!r}",
         )
 
+    def test_adhoc_id_survives_a_bridge_reload_for_the_same_parent(self):
+        # PR 118 — an MCP reload spawns a NEW bridge process under the
+        # SAME parent CLI. The adhoc id must be identical across the two
+        # module loads, otherwise the backend dedup on (agent_type,
+        # session_id) misses and the header piles up duplicate chips.
+        mod2 = _load_module()
+        self.assertEqual(
+            self.mod._session_id_for_caller(),
+            mod2._session_id_for_caller(),
+            "same parent process ⇒ same adhoc session id across reloads",
+        )
+
+    def test_adhoc_id_differs_for_a_different_parent_instance(self):
+        # Two genuinely different CLIs must NOT collapse into one
+        # participant. `_parent_start_token` is mocked non-None so the
+        # assertion locks the ppid+token DERIVATION — an unreadable
+        # parent would silently take the uuid fallback and pass anyway.
+        with mock.patch.object(self.mod, "_parent_start_token", return_value="tok-A"):
+            with mock.patch.object(self.mod.os, "getppid", return_value=1111):
+                id_a = self.mod._resolve_bridge_session_id()
+            with mock.patch.object(self.mod.os, "getppid", return_value=2222):
+                id_b = self.mod._resolve_bridge_session_id()
+        self.assertEqual(id_a, "adhoc-1111-tok-A", "deterministic ppid+token form")
+        self.assertEqual(id_b, "adhoc-2222-tok-A")
+        self.assertNotEqual(id_a, id_b, "different parent ⇒ different adhoc session id")
+
+    def test_recycled_pid_with_a_new_start_token_is_a_new_identity(self):
+        # Same pid after a reboot/pid-recycle: the start token is what
+        # disambiguates — same ppid, different token ⇒ different id.
+        with mock.patch.object(self.mod.os, "getppid", return_value=1111):
+            with mock.patch.object(self.mod, "_parent_start_token", return_value="boot-1"):
+                id_a = self.mod._resolve_bridge_session_id()
+            with mock.patch.object(self.mod, "_parent_start_token", return_value="boot-2"):
+                id_b = self.mod._resolve_bridge_session_id()
+        self.assertNotEqual(id_a, id_b, "recycled pid ⇒ still a distinct identity")
+
+    def test_adhoc_id_falls_back_to_uuid_when_parent_is_unreadable(self):
+        with mock.patch.object(self.mod, "_parent_start_token", return_value=None):
+            sid_a = self.mod._resolve_bridge_session_id()
+            sid_b = self.mod._resolve_bridge_session_id()
+        self.assertTrue(sid_a.startswith("adhoc-"))
+        self.assertNotEqual(sid_a, sid_b, "uuid fallback stays random per resolution")
+
+    def test_env_session_id_still_wins_over_the_parent_identity(self):
+        # Priority contract unchanged: Kronn-launched agents keep their
+        # injected KRONN_SESSION_ID regardless of parent-derived ids.
+        with mock.patch.dict(os.environ, {"KRONN_SESSION_ID": "kronn-injected-9"}):
+            self.assertEqual(self.mod._resolve_bridge_session_id(), "kronn-injected-9")
+
     def test_session_id_picks_up_env_when_set_at_module_load(self):
         with mock.patch.dict(os.environ, {"KRONN_SESSION_ID": "kronn-launched-123"}):
             mod2 = _load_module()
