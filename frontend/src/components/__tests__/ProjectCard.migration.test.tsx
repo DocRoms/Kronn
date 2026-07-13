@@ -38,7 +38,7 @@ function legacyProject(overrides: Partial<Project> = {}): Project {
     token_override: null,
     ai_config: { detected: false, configs: [] },
     audit_status: 'NoTemplate',
-    ai_todo_count: 0,
+    ai_todo_count: 0, tech_debt_count: 0, path_exists: true,
     needs_docs_migration: true,
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',

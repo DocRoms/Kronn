@@ -7,7 +7,7 @@
 // Extracted from the React component so the namespace-exclusion rules
 // stay pinned by unit tests — they're easy to silently regress when
 // adding a new runtime namespace.
-import type { WorkflowStep } from '../../types/generated';
+import type { JsonValue, WorkflowStep } from '../../types/generated';
 
 // Multi-segment template namespaces resolved by the workflow runner at
 // run-time. A bare identifier (no dot) is NEVER considered runtime — the
@@ -102,6 +102,7 @@ export function substitutePlaceholders(
     api_query: subRecord(s.api_query) ?? null,
     api_path_params: subRecord(s.api_path_params) ?? null,
     api_headers: subRecord(s.api_headers) ?? null,
-    api_body: subBody(s.api_body),
+    // subBody maps a JSON tree to a JSON tree — the unknown is structural.
+    api_body: subBody(s.api_body) as JsonValue | undefined,
   };
 }

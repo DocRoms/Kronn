@@ -154,16 +154,19 @@ jobs:
         # --locked so a drift in Cargo.lock vs Cargo.toml also fails here,
         # not just at release.
 
-      # 0.8.11 (C8) — typegen drift guard. Regenerate the per-type ts-rs
-      # bindings from the Rust models, then fail if a frontend-declared type in
-      # generated.ts is missing a field the Rust model has (the recurring
-      # "added a Rust field, forgot generated.ts" drift — hit 4× in 0.8.x).
-      - name: Types — ts-rs bindings + drift guard
+      # C1 (plan 0.9) — typegen drift guard. `generated.ts` is now FULLY
+      # regenerated from the ts-rs bindings; a PR that changes a Rust model
+      # without running `make typegen` fails here on the diff.
+      - name: Types — regenerate generated.ts and fail on drift
         # NOTE: this job's default working-directory is `backend` (see defaults
         # at the top of the job) — paths below are relative to it.
         run: |
           cargo test export_bindings -- --nocapture
-          node ../frontend/scripts/check-types-drift.mjs
+          node ../frontend/scripts/assemble-generated-types.mjs
+          git diff --exit-code ../frontend/src/types/generated.ts || {
+            echo "::error::frontend/src/types/generated.ts drifted from the Rust models — run 'make typegen' and commit the result."
+            exit 1
+          }
 
       # ── Anti-regression lints ─────────────────────────────────────────
       #

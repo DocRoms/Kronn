@@ -174,6 +174,17 @@ pub struct DiscAppendRequest {
     pub messages: Vec<DiscAppendMessage>,
 }
 
+/// Compact lint feedback echoed to the POSTING agent (tool result), so it can
+/// self-correct unverifiable `[src:]` citations in its next message. The full
+/// report rides the stored message (UI badge), same as streaming replies.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct AppendLintSummary {
+    pub fabricated_count: u32,
+    pub unsourced_count: u32,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscAppendResponse {
@@ -183,6 +194,10 @@ pub struct DiscAppendResponse {
     /// last import — the caller should warn the user before pushing
     /// MORE messages (they might be applying stale state on top).
     pub diverged: bool,
+    /// Present only for a live single Agent append whose lint had a signal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lint: Option<AppendLintSummary>,
 }
 
 /// `POST /api/disc/append`
@@ -194,13 +209,11 @@ pub async fn disc_append(
     let exists = state.db.with_conn(move |conn| {
         crate::db::discussions::get_discussion(conn, &did)
     }).await;
-    if !matches!(exists, Ok(Some(_))) {
-        return match exists {
-            Ok(None) => Json(ApiResponse::err("Discussion not found")),
-            Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
-            _ => unreachable!(),
-        };
-    }
+    let disc = match exists {
+        Ok(Some(d)) => d,
+        Ok(None) => return Json(ApiResponse::err("Discussion not found")),
+        Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
+    };
 
     // 0.8.4 (#294) — `diverged_at` lives on the table but NOT on the
     // `Discussion` struct (see migration 054 + the model comment).
@@ -210,6 +223,50 @@ pub async fn disc_append(
     let diverged = state.db.with_conn(move |conn| {
         crate::db::disc_source::get_diverged_at(conn, &did_div)
     }).await.ok().flatten().is_some();
+    // Lint-on-append (contract 2026-07-13): ONLY a live single Agent append
+    // is linted — bulk imports, User/System messages and project-less discs
+    // are exempt — and the insert is NEVER blocked. The full report rides the
+    // stored message (UI badge); the summary rides the response (tool result)
+    // so the posting agent can self-correct.
+    let live_agent_append = req.messages.len() == 1
+        && matches!(req.messages[0].role, MessageRole::Agent);
+    let mut live_lint_report: Option<crate::core::anti_halluc::LintReport> = None;
+    let mut lint_summary: Option<AppendLintSummary> = None;
+    if live_agent_append && crate::core::anti_halluc::current_mode().is_active() {
+        if let Some(pid) = disc.project_id.clone() {
+            let roots = state.db.with_conn(move |conn| {
+                let p = crate::db::projects::get_project(conn, &pid)?;
+                Ok(p.map(|p| {
+                    let linked = p.linked_repos.iter()
+                        .map(|lr| lr.location.clone())
+                        .filter(|loc| !loc.starts_with("http://") && !loc.starts_with("https://"))
+                        .collect::<Vec<_>>();
+                    (p.path, linked)
+                }))
+            }).await.ok().flatten();
+            if let Some((project_path, linked)) = roots.filter(|(p, _)| !p.is_empty()) {
+                live_lint_report = crate::core::anti_halluc::finalize_lint_report(
+                    &req.messages[0].content,
+                    None,
+                    &project_path,
+                    &linked,
+                );
+                // Echo a summary only when something actually FAILED — a
+                // report with soft signals but zero failures would pair a
+                // scary note with 0/0 counts (caught by live dogfooding).
+                if let Some(ref r) = live_lint_report {
+                    if r.fabricated_count > 0 || r.unsourced_count > 0 {
+                        lint_summary = Some(AppendLintSummary {
+                            fabricated_count: r.fabricated_count,
+                            unsourced_count: r.unsourced_count,
+                            note: "Some citations in your message could not be verified against the discussion's project tree — re-check the [src:] paths/lines and correct in your next message if needed.".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     let mut appended = 0u32;
     let mut skipped = 0u32;
     // Freshly-inserted messages, federated to peers after the loop IF this is a
@@ -230,7 +287,8 @@ pub async fn disc_append(
 
         let msg = DiscussionMessage {
             model: None,
-            lint_report: None,
+            // Only a live single Agent append carries a report (loop runs once).
+            lint_report: live_lint_report.take(),
             id: Uuid::new_v4().to_string(),
             role: incoming.role.clone(),
             content: incoming.content.clone(),
@@ -307,6 +365,7 @@ pub async fn disc_append(
         appended,
         skipped_as_duplicates: skipped,
         diverged,
+        lint: lint_summary,
     }))
 }
 
@@ -569,6 +628,124 @@ mod tests {
     //! invariants (no I/O).
 
     use super::*;
+    use serial_test::serial;
+
+    /// In-memory state with a project rooted at a real tempdir + one disc.
+    async fn lint_state(bind_project: bool) -> (crate::AppState, tempfile::TempDir) {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/real.rs"), "fn real() {}\n").unwrap();
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let path = tmp.path().to_string_lossy().to_string();
+        let bind = bind_project;
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-lint', 'LintProj', ?1, ?2, ?2)",
+                rusqlite::params![path, now],
+            )?;
+            conn.execute(
+                "INSERT INTO discussions (id, project_id, title, agent, language, participants_json,
+                 created_at, updated_at, message_count, workspace_mode)
+                 VALUES ('d-lint', ?1, 'T', 'ClaudeCode', 'fr', '[]', datetime('now'), datetime('now'), 0, 'Direct')",
+                rusqlite::params![if bind { Some("p-lint") } else { None }],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
+        (crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS), tmp)
+    }
+
+    fn agent_msg(id: &str, content: &str) -> DiscAppendMessage {
+        DiscAppendMessage {
+            source_msg_id: id.into(),
+            role: MessageRole::Agent,
+            content: content.into(),
+            agent_type: Some(AgentType::Codex),
+        }
+    }
+
+    async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
+        let resp = disc_append(
+            axum::extract::State(state.clone()),
+            Json(DiscAppendRequest { disc_id: "d-lint".into(), messages: msgs }),
+        ).await;
+        resp.0.data.expect("append succeeds")
+    }
+
+    #[tokio::test]
+    #[serial] // global anti-halluc mode cell
+    async fn live_agent_append_with_fabricated_source_carries_lint() {
+        crate::core::anti_halluc::set_mode("warn");
+        let (state, _tmp) = lint_state(true).await;
+        let out = append(&state, vec![agent_msg("m1",
+            "Confirmed the bug. [src: file: src/does-not-exist.rs:42]")]).await;
+        assert_eq!(out.appended, 1, "insert is NEVER blocked");
+        let lint = out.lint.expect("fabricated citation must produce a summary");
+        assert!(lint.fabricated_count >= 1, "{lint:?}");
+        // The stored message carries the full report (UI badge).
+        let msg = state.db.with_conn(|conn| {
+            crate::db::discussions::list_messages(conn, "d-lint")
+        }).await.unwrap().pop().unwrap();
+        assert!(msg.lint_report.is_some());
+        crate::core::anti_halluc::set_mode("off");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_agent_append_with_valid_source_has_no_fabricated() {
+        crate::core::anti_halluc::set_mode("warn");
+        let (state, _tmp) = lint_state(true).await;
+        let out = append(&state, vec![agent_msg("m1",
+            "Verified. [src: file: src/real.rs:1]")]).await;
+        assert_eq!(out.appended, 1);
+        if let Some(l) = out.lint {
+            assert_eq!(l.fabricated_count, 0, "valid citation must not read as fabricated: {l:?}");
+        }
+        crate::core::anti_halluc::set_mode("off");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn bulk_import_and_user_messages_are_never_linted() {
+        crate::core::anti_halluc::set_mode("warn");
+        let (state, _tmp) = lint_state(true).await;
+        // Bulk (2 messages) with a fabricated citation → no lint.
+        let out = append(&state, vec![
+            agent_msg("b1", "one [src: file: src/ghost.rs:1]"),
+            agent_msg("b2", "two"),
+        ]).await;
+        assert!(out.lint.is_none(), "bulk import must not lint");
+        // Single USER message with a fabricated citation → no lint.
+        let user = DiscAppendMessage {
+            source_msg_id: "u1".into(),
+            role: MessageRole::User,
+            content: "look at [src: file: src/ghost.rs:1]".into(),
+            agent_type: None,
+        };
+        let out = append(&state, vec![user]).await;
+        assert!(out.lint.is_none(), "user messages must not lint");
+        crate::core::anti_halluc::set_mode("off");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn projectless_disc_and_off_mode_skip_lint() {
+        // Project-less disc: no roots → no lint, no false fabricated.
+        crate::core::anti_halluc::set_mode("warn");
+        let (state, _tmp) = lint_state(false).await;
+        let out = append(&state, vec![agent_msg("m1", "x [src: file: src/ghost.rs:1]")]).await;
+        assert!(out.lint.is_none(), "no project → no lint");
+        // Mode off: bound project but lint disabled.
+        crate::core::anti_halluc::set_mode("off");
+        let (state2, _tmp2) = lint_state(true).await;
+        let out = append(&state2, vec![agent_msg("m1", "x [src: file: src/ghost.rs:1]")]).await;
+        assert!(out.lint.is_none(), "mode off → no lint");
+    }
+
 
     #[test]
     fn disc_create_request_deserializes_with_optional_source_binding() {

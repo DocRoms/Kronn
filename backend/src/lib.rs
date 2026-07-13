@@ -309,6 +309,7 @@ async fn auth_middleware(
     };
 
     if auth_allows(
+        request.method(),
         request.uri().path(),
         auth_enabled,
         expected_token.is_some(),
@@ -320,17 +321,31 @@ async fn auth_middleware(
     Err(StatusCode::UNAUTHORIZED)
 }
 
-/// Endpoints that irreversibly destroy user data (wipe the DB, clobber config)
-/// or change the encryption-key material. Gated even when app-wide auth is
-/// disabled — see `auth_allows`. `recovery/set` reads the active key and writes
-/// a recovery blob; `recovery/restore` swaps the live key — both must never be
-/// callable by an unauthenticated LAN peer.
-const DESTRUCTIVE_PATHS: &[&str] = &[
+/// POST endpoints that irreversibly destroy user data, change key material or
+/// mutate the host system. Gated even when app-wide auth is disabled — see
+/// `auth_allows`. DELETE routes don't need listing: the VERB itself is the
+/// criterion (passe D) — a hand-maintained path list diverged from the route
+/// table as soon as new deletes were added.
+const DESTRUCTIVE_POSTS: &[&str] = &[
     "/api/setup/reset",
     "/api/config/import",
     "/api/config/recovery/set",
     "/api/config/recovery/restore",
+    "/api/audit-runs/cleanup",
+    "/api/api-call-logs/purge",
+    "/api/debug/logs/clear",
+    "/api/agents/uninstall",
+    "/api/rtk/deactivate",
 ];
+
+/// Passe D — the destructive-request criterion: every DELETE (no benign DELETE
+/// exists in this API), the listed POSTs, and the parameterized
+/// `/api/mcps/custom/{id}/cleanup-orphan-env`.
+fn is_destructive(method: &axum::http::Method, path: &str) -> bool {
+    method == axum::http::Method::DELETE
+        || DESTRUCTIVE_POSTS.contains(&path)
+        || path.ends_with("/cleanup-orphan-env")
+}
 
 /// Pure auth decision for a request that already cleared the always-open
 /// exceptions (health, ws, claim-by-token). `true` = allow.
@@ -341,13 +356,14 @@ const DESTRUCTIVE_PATHS: &[&str] = &[
 /// wipe the instance. Everything else keeps the historical behaviour: auth off →
 /// open; no token configured → open; otherwise local-bypass-or-token.
 fn auth_allows(
+    method: &axum::http::Method,
     path: &str,
     auth_enabled: bool,
     token_configured: bool,
     local_trusted: bool,
     has_valid_token: bool,
 ) -> bool {
-    if DESTRUCTIVE_PATHS.contains(&path) {
+    if is_destructive(method, path) {
         return local_trusted || has_valid_token;
     }
     if !auth_enabled {
@@ -363,9 +379,15 @@ fn auth_allows(
 /// nginx sets (Docker), or the direct peer address (Tauri desktop / no proxy).
 /// Does NOT apply the strict-localhost policy; callers combine it as needed.
 fn request_is_local_ip(headers: &HeaderMap, request: &axum::extract::Request) -> bool {
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        if is_local_ip(real_ip) {
-            return true;
+    // Passe D — `X-Real-IP` is only trustworthy when the bundled nginx sets
+    // it (Docker). On a native bind axum talks to clients DIRECTLY, so the
+    // header is attacker-controlled: a LAN peer sending `X-Real-IP:
+    // 127.0.0.1` used to mint local trust and bypass the destructive gate.
+    if crate::core::env::is_docker() {
+        if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+            if is_local_ip(real_ip) {
+                return true;
+            }
         }
     }
     if let Some(ci) = request
@@ -739,6 +761,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/workflows/import", post(api::workflows::import_workflow))
         .route("/api/workflow-runs/batch-summaries", get(api::workflows::list_batch_run_summaries))
         .route("/api/workflow-runs/{run_id}", delete(api::workflows::delete_batch_run))
+        .route("/api/workflow-runs/{run_id}/resume", post(api::workflows::resume_interrupted))
         // ── Quick Prompts ──
         .route("/api/quick-prompts", get(api::quick_prompts::list).post(api::quick_prompts::create))
         .route("/api/quick-prompts/{id}", put(api::quick_prompts::update).delete(api::quick_prompts::delete))
@@ -1009,8 +1032,9 @@ mod audit_tracker_tests {
 #[cfg(test)]
 mod auth_tests {
     use super::{auth_allows, is_local_ip};
+    use axum::http::Method;
 
-    // ── auth_allows decision matrix (I9: destructive-op gating) ──────────────
+    // ── auth_allows decision matrix (I9 + passe D: destructive-op gating) ────
     const RESET: &str = "/api/setup/reset";
     const IMPORT: &str = "/api/config/import";
     const NORMAL: &str = "/api/projects";
@@ -1019,17 +1043,17 @@ mod auth_tests {
     fn destructive_from_remote_is_denied_even_when_auth_off() {
         // THE fix: Docker default (auth off, 0.0.0.0). A LAN peer — not local,
         // no token — must NOT be able to wipe/overwrite the instance.
-        assert!(!auth_allows(RESET, false, true, false, false));
-        assert!(!auth_allows(IMPORT, false, true, false, false));
+        assert!(!auth_allows(&Method::POST, RESET, false, true, false, false));
+        assert!(!auth_allows(&Method::POST, IMPORT, false, true, false, false));
         // …and still denied even if no token is configured at all.
-        assert!(!auth_allows(RESET, false, false, false, false));
+        assert!(!auth_allows(&Method::POST, RESET, false, false, false, false));
     }
 
     #[test]
     fn destructive_allowed_for_local_or_valid_token() {
-        assert!(auth_allows(RESET, false, true, true, false), "local host may reset");
-        assert!(auth_allows(RESET, false, true, false, true), "valid token may reset");
-        assert!(auth_allows(IMPORT, true, true, true, false), "local host may import (auth on)");
+        assert!(auth_allows(&Method::POST, RESET, false, true, true, false), "local host may reset");
+        assert!(auth_allows(&Method::POST, RESET, false, true, false, true), "valid token may reset");
+        assert!(auth_allows(&Method::POST, IMPORT, true, true, true, false), "local host may import (auth on)");
     }
 
     #[test]
@@ -1037,24 +1061,47 @@ mod auth_tests {
         // recovery/set reads the active key, recovery/restore swaps it — both
         // must be denied to an unauthenticated remote peer even with auth off.
         for p in ["/api/config/recovery/set", "/api/config/recovery/restore"] {
-            assert!(!auth_allows(p, false, true, false, false), "{p} must deny remote+no-token");
-            assert!(auth_allows(p, false, true, true, false), "{p} allows local");
-            assert!(auth_allows(p, false, true, false, true), "{p} allows valid token");
+            assert!(!auth_allows(&Method::POST, p, false, true, false, false), "{p} must deny remote+no-token");
+            assert!(auth_allows(&Method::POST, p, false, true, true, false), "{p} allows local");
+            assert!(auth_allows(&Method::POST, p, false, true, false, true), "{p} allows valid token");
+        }
+    }
+
+    #[test]
+    fn every_delete_is_gated_even_when_auth_off() {
+        // Passe D — the VERB is the criterion: a LAN peer on an auth-off bind
+        // must not delete projects/discussions/workflows/… whatever the path.
+        for p in ["/api/projects/p1", "/api/discussions/d1", "/api/workflow-runs/r1", "/api/anything/new"] {
+            assert!(!auth_allows(&Method::DELETE, p, false, true, false, false), "{p} DELETE must deny remote");
+            assert!(auth_allows(&Method::DELETE, p, false, true, true, false), "{p} DELETE allows local");
+            assert!(auth_allows(&Method::DELETE, p, false, true, false, true), "{p} DELETE allows token");
+        }
+    }
+
+    #[test]
+    fn destructive_posts_inventory_is_gated() {
+        // Passe D — system mutations + purges reachable by POST.
+        for p in ["/api/audit-runs/cleanup", "/api/api-call-logs/purge",
+                  "/api/debug/logs/clear", "/api/agents/uninstall", "/api/rtk/deactivate",
+                  "/api/mcps/custom/srv-1/cleanup-orphan-env"] {
+            assert!(!auth_allows(&Method::POST, p, false, true, false, false), "{p} must deny remote+no-token");
+            assert!(auth_allows(&Method::POST, p, false, true, true, false), "{p} allows local");
         }
     }
 
     #[test]
     fn non_destructive_keeps_historical_behaviour() {
-        // auth off → open.
-        assert!(auth_allows(NORMAL, false, true, false, false));
+        // auth off → open (GET and ordinary POST alike).
+        assert!(auth_allows(&Method::GET, NORMAL, false, true, false, false));
+        assert!(auth_allows(&Method::POST, NORMAL, false, true, false, false));
         // auth on, no token configured → open (first-run/back-compat).
-        assert!(auth_allows(NORMAL, true, false, false, false));
+        assert!(auth_allows(&Method::GET, NORMAL, true, false, false, false));
         // auth on, token configured, remote & no token → denied.
-        assert!(!auth_allows(NORMAL, true, true, false, false));
+        assert!(!auth_allows(&Method::GET, NORMAL, true, true, false, false));
         // auth on, local trusted → open.
-        assert!(auth_allows(NORMAL, true, true, true, false));
+        assert!(auth_allows(&Method::GET, NORMAL, true, true, true, false));
         // auth on, valid token → open.
-        assert!(auth_allows(NORMAL, true, true, false, true));
+        assert!(auth_allows(&Method::GET, NORMAL, true, true, false, true));
     }
 
     // Localhost auth-bypass relies entirely on `is_local_ip`. A

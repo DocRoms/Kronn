@@ -63,7 +63,7 @@ describe('regression tests', () => {
         language: 'fr',
         participants: ['ClaudeCode'],
         messages: [],
-        message_count: 5, non_system_message_count: 5,
+        message_count: 5, non_system_message_count: 5, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
         archived: false, pinned: false, pin_first_message: false,
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
@@ -90,6 +90,7 @@ describe('regression tests', () => {
         messages: [],       // empty from list endpoint
         message_count: 10,            // inflated by 8 System rows
         non_system_message_count: 2,  // the real "to read" count
+        tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
         archived: false, pinned: false, pin_first_message: false,
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',

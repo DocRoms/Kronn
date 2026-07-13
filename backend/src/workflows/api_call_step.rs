@@ -153,7 +153,8 @@ pub fn pagination_max_pages(spec: &PaginationSpec) -> u32 {
         PaginationSpec::Auto { max_pages }
         | PaginationSpec::Offset { max_pages, .. }
         | PaginationSpec::Cursor { max_pages, .. }
-        | PaginationSpec::Page { max_pages, .. } => *max_pages,
+        | PaginationSpec::Page { max_pages, .. }
+        | PaginationSpec::LinkHeader { max_pages, .. } => *max_pages,
         PaginationSpec::None => return 1,
     };
     override_value.unwrap_or(DEFAULT_MAX_PAGES)

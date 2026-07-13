@@ -1,6 +1,6 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::models::*;
@@ -820,10 +820,25 @@ pub fn increment_batch_progress(
     child_succeeded: bool,
 ) -> Result<Option<WorkflowRun>> {
     let column = if child_succeeded { "batch_completed" } else { "batch_failed" };
-    conn.execute(
-        &format!("UPDATE workflow_runs SET {0} = {0} + 1 WHERE id = ?1 AND run_type = 'batch'", column),
+    // Counters are part of the terminal state (waiters/UI read them): a late
+    // child must not advance a batch already Cancelled/Interrupted.
+    let bumped = conn.execute(
+        &format!(
+            "UPDATE workflow_runs SET {0} = {0} + 1              WHERE id = ?1 AND run_type = 'batch' AND status = 'Running'",
+            column
+        ),
         params![run_id],
     )?;
+    if bumped == 0 {
+        // A′ observability — a frozen counter means a child completed after
+        // the batch left Running (late finisher post-cancel/terminal).
+        tracing::warn!(
+            target: "kronn::invariant",
+            run_id = %run_id, counter = %column,
+            "batch progress bump blocked — batch no longer Running"
+        );
+        return Ok(None);
+    }
 
     // Re-read the run to check if we've reached batch_total.
     let Some(mut run) = get_run(conn, run_id)? else { return Ok(None); };
@@ -837,7 +852,7 @@ pub fn increment_batch_progress(
         let final_status = if run.batch_completed > 0 { RunStatus::Success } else { RunStatus::Failed };
         let finished = chrono::Utc::now();
         conn.execute(
-            "UPDATE workflow_runs SET status = ?2, finished_at = ?3 WHERE id = ?1",
+            "UPDATE workflow_runs SET status = ?2, finished_at = ?3              WHERE id = ?1 AND status = 'Running'",
             params![run_id, run_status_str(&final_status), finished.to_rfc3339()],
         )?;
         run.status = final_status;
@@ -853,12 +868,121 @@ pub fn increment_batch_progress(
 /// double-click, or a human racing the auto-approve timer) used to both
 /// pass the read-then-check and spawn two concurrent `resume_run`s on the
 /// same run; the conditional UPDATE makes exactly one of them win.
-pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus) -> Result<bool> {
+/// Atomic status claim: flips `from_status` → `new_status` iff the row still
+/// holds `from_status`. Exactly ONE concurrent caller wins (TOCTOU-free).
+/// The only sanctioned way OUT of `WaitingApproval` (gate decide) and
+/// `Interrupted` (manual resume) — ordinary snapshots can't touch those.
+/// Atomically merge ONE key into a run's durable `state` map, guarded by
+/// status (A2). Unlike a full `update_run_progress` snapshot, this can't
+/// clobber concurrent fields and can't move the run's status — it only lands
+/// while the row still holds one of `allowed` (read+merge+write under the
+/// single shared connection; the UPDATE re-checks the observed status).
+/// Returns `false` when the run is gone or its status changed hands.
+pub fn set_run_state_key(
+    conn: &Connection,
+    run_id: &str,
+    key: &str,
+    value: &str,
+    allowed: &[RunStatus],
+) -> Result<bool> {
+    let row: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT state, status FROM workflow_runs WHERE id = ?1",
+            params![run_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((state_json, status_s)) = row else { return Ok(false) };
+    let status = parse_run_status(&status_s);
+    if !allowed.contains(&status) {
+        return Ok(false);
+    }
+    let mut map: std::collections::HashMap<String, String> = state_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    map.insert(key.to_string(), value.to_string());
     let n = conn.execute(
-        "UPDATE workflow_runs SET status = ?2 WHERE id = ?1 AND status = 'WaitingApproval'",
-        params![run_id, run_status_str(new_status)],
+        "UPDATE workflow_runs SET state = ?2 WHERE id = ?1 AND status = ?3",
+        params![run_id, serde_json::to_string(&map)?, status_s],
     )?;
     Ok(n == 1)
+}
+
+/// A2 — append one entry to the versioned foreach done-set
+/// (`__kronn.foreach_done.<step>` → `{"v":1,"items":[…]}`), only while the
+/// parent is still `Running`. One connection borrow = atomic read+append+write.
+pub fn append_foreach_done(
+    conn: &Connection,
+    run_id: &str,
+    step_name: &str,
+    entry: serde_json::Value,
+) -> Result<bool> {
+    let key = format!("__kronn.foreach_done.{step_name}");
+    let cur: Option<Option<String>> = conn
+        .query_row(
+            "SELECT state FROM workflow_runs WHERE id = ?1",
+            params![run_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(state_json) = cur else { return Ok(false) };
+    let map: std::collections::HashMap<String, String> = state_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
+    let mut doc: serde_json::Value = map
+        .get(&key)
+        .and_then(|v| serde_json::from_str(v).ok())
+        .unwrap_or_else(|| serde_json::json!({"v": 1, "items": []}));
+    if let Some(items) = doc.get_mut("items").and_then(|i| i.as_array_mut()) {
+        items.push(entry);
+    }
+    set_run_state_key(conn, run_id, &key, &doc.to_string(), &[RunStatus::Running])
+}
+
+/// A2 — item ids of this parent's `Success` sub-workflow children (read off
+/// `trigger_context.__subwf_item_id__`). Resume reconciliation source #2:
+/// a child that finished right before the crash counts as done even when the
+/// parent died before writing its done-set entry.
+pub fn successful_child_item_ids(
+    conn: &Connection,
+    parent_run_id: &str,
+) -> Result<std::collections::HashSet<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT trigger_context FROM workflow_runs
+         WHERE parent_run_id = ?1 AND run_type = 'subworkflow' AND status = 'Success'",
+    )?;
+    let rows = stmt.query_map(params![parent_run_id], |r| r.get::<_, Option<String>>(0))?;
+    let mut ids = std::collections::HashSet::new();
+    for row in rows {
+        if let Some(id) = row?
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+            .and_then(|v| v.get("__subwf_item_id__").and_then(|i| i.as_str()).map(String::from))
+            .filter(|i| !i.is_empty())
+        {
+            ids.insert(id);
+        }
+    }
+    Ok(ids)
+}
+
+pub fn claim_run_status(
+    conn: &Connection,
+    run_id: &str,
+    from_status: &RunStatus,
+    new_status: &RunStatus,
+) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE workflow_runs SET status = ?3 WHERE id = ?1 AND status = ?2",
+        params![run_id, run_status_str(from_status), run_status_str(new_status)],
+    )?;
+    Ok(n == 1)
+}
+
+pub fn claim_waiting_run(conn: &Connection, run_id: &str, new_status: &RunStatus) -> Result<bool> {
+    claim_run_status(conn, run_id, &RunStatus::WaitingApproval, new_status)
 }
 
 pub fn update_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
@@ -900,22 +1024,23 @@ impl RunProgressSnapshot {
     }
 }
 
-/// Returns `false` when the row was NOT updated — either it no longer exists,
-/// or the `Cancelled` stickiness guard blocked the write.
+/// Returns `false` when the row was NOT updated — it no longer exists, or the
+/// state-machine guard blocked the write.
 ///
-/// `Cancelled` is STICKY: a user's forced cancel (api cancel_run) races the
-/// runner's own progress/terminal writes, and the runner used to win —
-/// overwriting `Cancelled` with `Running` (gate-resume window) or `Failed`
-/// (rollback-chain tail) minutes after the user was told "stopped". Only a
-/// `Cancelled` write may touch a `Cancelled` row. Runner lifecycle sites
-/// treat `false` as "cancelled beneath us" and stop.
+/// Guard (0.8.11 A1): a progress snapshot may only land when the row is
+/// `Pending`/`Running`, or when it rewrites the SAME status (idempotence).
+/// Every terminal status is sticky (a zombie runner's late snapshot could
+/// resurrect `Cancelled`/`Interrupted`/`Failed`/`Success`), and
+/// `WaitingApproval` only leaves via the claim family (`claim_run_status`),
+/// never via an ordinary snapshot. Runner sites treat `false` as "the run
+/// changed hands beneath us" and stop.
 pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Result<bool> {
     let new_status = run_status_str(&snap.status);
     let affected = conn.execute(
         "UPDATE workflow_runs SET status = ?2, step_results_json = ?3,
          tokens_used = ?4, workspace_path = ?5, finished_at = ?6, state = ?7,
          produced_branches = ?8
-         WHERE id = ?1 AND (status != 'Cancelled' OR ?2 = 'Cancelled')",
+         WHERE id = ?1 AND (status = ?2 OR status IN ('Pending', 'Running'))",
         params![
             snap.id,
             new_status,
@@ -927,6 +1052,30 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
             if snap.produced_branches.is_empty() { None } else { Some(serde_json::to_string(&snap.produced_branches)?) },
         ],
     )?;
+    if affected == 0 {
+        // A′ observability — a blocked write is either the stickiness guard
+        // doing its job (late runner write racing a Cancel) or a genuinely
+        // impossible transition; both must be visible, not silent.
+        let held: Option<String> = conn
+            .query_row(
+                "SELECT status FROM workflow_runs WHERE id = ?1",
+                params![snap.id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match held {
+            Some(held) => tracing::warn!(
+                target: "kronn::invariant",
+                run_id = %snap.id, held = %held, attempted = %new_status,
+                "run progress write blocked by status guard"
+            ),
+            None => tracing::warn!(
+                target: "kronn::invariant",
+                run_id = %snap.id, attempted = %new_status,
+                "run progress write targets a missing run row"
+            ),
+        }
+    }
     Ok(affected > 0)
 }
 

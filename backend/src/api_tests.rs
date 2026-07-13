@@ -13,6 +13,7 @@ mod tests {
     use tokio::sync::RwLock;
     use tower::ServiceExt; // for `oneshot`
 
+    use serial_test::serial;
     use crate::{
         build_router_with_auth,
         core::config::default_config,
@@ -21,6 +22,22 @@ mod tests {
     };
 
     // ─── Helper: build a test AppState with an in-memory DB ──────────────────
+
+    /// Handlers under test call config::save — without KRONN_DATA_DIR that
+    /// writes the developer's REAL config.toml (2026-07-13 incident; the
+    /// persist_atomic guard now panics instead).
+    fn isolate_config_dir() {
+        // Called ONLY by the #[serial] tests whose handlers SAVE config —
+        // a global call from test_state() would mutate KRONN_DATA_DIR from
+        // 80 non-serial tests and race the serialized env family. Once-guarded
+        // so repeated calls never re-mutate the env mid-run (Copilot, PR 116).
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            let dir = std::env::temp_dir().join(format!("kronn-libtest-cfg-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok();
+            std::env::set_var("KRONN_DATA_DIR", &dir);
+        });
+    }
 
     fn test_state() -> AppState {
         let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
@@ -411,7 +428,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn config_language_set_and_get() {
+        isolate_config_dir();
         let state = test_state();
 
         // Set language to "en"
@@ -784,7 +803,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial]
     async fn agents_toggle_changes_state() {
+        isolate_config_dir();
         let state = test_state();
 
         // Toggle Vibe off
@@ -860,7 +881,9 @@ mod tests {
     // ─── Q13: Config API additional tests ─────────────────────────────────────
 
     #[tokio::test]
+    #[serial]
     async fn config_server_get_and_set() {
+        isolate_config_dir();
         let state = test_state();
 
         // GET current server config
@@ -2142,7 +2165,9 @@ mod tests {
     /// existence is the frontend's job. Guards against a race where
     /// the frontend toggles a skill that was just deleted.
     #[tokio::test]
+    #[serial]
     async fn auto_trigger_toggle_unknown_skill_still_works() {
+        isolate_config_dir();
         let state = test_state();
         let req = Request::builder()
             .method("POST")
@@ -2158,7 +2183,9 @@ mod tests {
     /// Sending the toggle twice ends at the original state (idempotent
     /// round-trip), and the GET endpoint returns the live list.
     #[tokio::test]
+    #[serial]
     async fn auto_trigger_toggle_flips_and_persists() {
+        isolate_config_dir();
         let state = test_state();
 
         // First toggle on kronn-docs → disables.

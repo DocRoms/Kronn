@@ -17,6 +17,7 @@ import type {
   PromptVariable,
   QuickApi,
   WorkflowStep,
+  JsonValue,
 } from '../../types/generated';
 import { ApiCallStepCard, type ApiPluginOption } from './ApiCallStepCard';
 
@@ -96,7 +97,7 @@ export function QuickApiForm({
   const [apiQuery, setApiQuery] = useState<Record<string, string> | null>(editApi?.api_query ?? null);
   const [apiPathParams, setApiPathParams] = useState<Record<string, string> | null>(editApi?.api_path_params ?? null);
   const [apiHeaders, setApiHeaders] = useState<Record<string, string> | null>(editApi?.api_headers ?? null);
-  const [apiBody, setApiBody] = useState<unknown | null>(editApi?.api_body ?? null);
+  const [apiBody, setApiBody] = useState<JsonValue | null>(editApi?.api_body ?? null);
   const [apiExtract, setApiExtract] = useState<QuickApi['api_extract']>(editApi?.api_extract ?? null);
   const [apiPagination, setApiPagination] = useState<QuickApi['api_pagination']>(editApi?.api_pagination ?? null);
   const [apiTimeoutMs, setApiTimeoutMs] = useState<number | null>(editApi?.api_timeout_ms ?? null);

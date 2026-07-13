@@ -161,6 +161,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   messages: [],           // list endpoint returns empty messages
   message_count: msgCount, non_system_message_count: msgCount, // but provides the count
   archived: false, pinned: false, pin_first_message: false,
+  tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
@@ -606,6 +607,7 @@ describe('DiscussionsPage', () => {
     const activeDisc: Discussion = {
       ...makeListDiscussion('d1', 3),
       archived: false, pinned: false, pin_first_message: false,
+  tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
     };
     const archivedDisc: Discussion = {
       ...makeListDiscussion('d2', 5),
@@ -703,8 +705,8 @@ describe('DiscussionsPage', () => {
   });
 
   it('groups project discussions by org when multiple orgs exist', async () => {
-    const proj1 = { id: 'p1', name: 'web-app', path: '/repos/web-app', repo_url: 'git@github.com:acme-org/web-app.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
-    const proj2 = { id: 'p2', name: 'api-server', path: '/repos/api-server', repo_url: 'git@github.com:johndoe/api-server.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' };
+    const proj1 = { id: 'p1', name: 'web-app', path: '/repos/web-app', repo_url: 'git@github.com:acme-org/web-app.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, needs_docs_migration: false };
+    const proj2 = { id: 'p2', name: 'api-server', path: '/repos/api-server', repo_url: 'git@github.com:johndoe/api-server.git', token_override: null, ai_config: { detected: false, configs: [] }, audit_status: 'NoTemplate' as AiAuditStatus, ai_todo_count: 0, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', path_exists: true, tech_debt_count: 0, needs_docs_migration: false };
 
     const disc1 = { ...makeListDiscussion('d1', 1), project_id: 'p1', messages: [{ id: 'm1', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
     const disc2 = { ...makeListDiscussion('d2', 1), project_id: 'p2', messages: [{ id: 'm2', role: 'User' as const, content: 'test', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null }] };
@@ -931,7 +933,7 @@ describe('DiscussionsPage', () => {
         ...initialDisc.messages,
         { id: 'persisted-agent', role: 'Agent', content: 'Streamed agent reply.', agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:01Z', tokens_used: 12, auth_mode: null },
       ],
-      message_count: 2, non_system_message_count: 2,
+      message_count: 2, non_system_message_count: 2, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
     };
     let getCallCount = 0;
     vi.mocked(discussionsApi.get).mockImplementation(async () => {
@@ -1696,7 +1698,7 @@ describe('DiscussionsPage', () => {
     repo_url: null, token_override: null,
     ai_config: { detected: false, configs: [] },
     audit_status,
-    ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+    ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
     default_skill_ids: [],
     briefing_notes: briefing ?? null,
     linked_repos: [],
@@ -1711,7 +1713,7 @@ describe('DiscussionsPage', () => {
     messages: [
       { id: 'm1', role: 'User', content: 'Tell me about my project', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
     ],
-    message_count: 1, non_system_message_count: 1,
+    message_count: 1, non_system_message_count: 1, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
     archived: false, pinned: false, pin_first_message: false,
     workspace_mode: 'Direct',
     created_at: '2026-01-01T00:00:00Z',

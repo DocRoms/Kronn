@@ -126,13 +126,13 @@ mod tests {
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
         let (mut done, mut err) = (false, false);
         // A streamed content chunk...
-        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr, &mut done, &mut err).await;
+        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr, &mut done, &mut err, 0).await;
         assert!(!done && !err);
         // ...then the terminal `done` object (identical shape to a non-stream
         // single-object response), carrying the token counts.
         forward_ollama_line(
             r#"{"message":{"content":""},"done":true,"prompt_eval_count":12,"eval_count":3}"#,
-            &tx, &stderr, &mut done, &mut err,
+            &tx, &stderr, &mut done, &mut err, 0,
         ).await;
         assert!(done && !err, "terminal chunk sets got_done, no error");
         drop(tx);
@@ -148,12 +148,39 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
         let (mut done, mut err) = (false, false);
-        forward_ollama_line("   ", &tx, &stderr, &mut done, &mut err).await;      // blank tail buffer
-        forward_ollama_line("{not json", &tx, &stderr, &mut done, &mut err).await; // partial/garbage
+        forward_ollama_line("   ", &tx, &stderr, &mut done, &mut err, 0).await;      // blank tail buffer
+        forward_ollama_line("{not json", &tx, &stderr, &mut done, &mut err, 0).await; // partial/garbage
         drop(tx);
         assert!(rx.recv().await.is_none(), "no content forwarded");
         assert!(stderr.lock().unwrap().is_empty(), "no token line captured");
         assert!(!done && !err, "garbage neither completes nor fails the stream");
+    }
+
+    #[tokio::test]
+    async fn forward_ollama_line_flags_prompt_that_filled_the_window() {
+        use std::sync::{Arc, Mutex};
+        let (tx, _rx) = tokio::sync::mpsc::channel::<String>(8);
+        let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done, mut err) = (false, false);
+        // prompt_eval_count within 64 of num_ctx → Ollama silently dropped the
+        // overflow; the terminal chunk must surface it (exact, unlike the
+        // pre-flight estimate).
+        forward_ollama_line(
+            r#"{"message":{"content":""},"done":true,"prompt_eval_count":8180,"eval_count":3}"#,
+            &tx, &stderr, &mut done, &mut err, 8192,
+        ).await;
+        assert!(done && !err, "truncation warns, it does not fail the step");
+        let lines = stderr.lock().unwrap().clone();
+        assert!(lines.iter().any(|l| l.contains("Ollama truncation")), "{lines:?}");
+
+        // Comfortable margin → no truncation marker.
+        let stderr2 = Arc::new(Mutex::new(Vec::<String>::new()));
+        let (mut done2, mut err2) = (false, false);
+        forward_ollama_line(
+            r#"{"message":{"content":""},"done":true,"prompt_eval_count":4000,"eval_count":3}"#,
+            &tx, &stderr2, &mut done2, &mut err2, 8192,
+        ).await;
+        assert!(!stderr2.lock().unwrap().iter().any(|l| l.contains("truncation")));
     }
 
     #[tokio::test]
@@ -166,7 +193,7 @@ mod tests {
         // be silently ignored → step "succeeded" with empty output.
         forward_ollama_line(
             r#"{"error":"model runner has unexpectedly stopped"}"#,
-            &tx, &stderr, &mut done, &mut err,
+            &tx, &stderr, &mut done, &mut err, 0,
         ).await;
         drop(tx);
         assert!(err, "in-band error object must mark the stream failed");
@@ -853,9 +880,9 @@ Suite de la réponse.";
     #[test]
     fn resolve_model_flag_codex_tiers() {
         use crate::models::ModelTier;
-        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None), Some("gpt-5-codex-mini".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None), Some("gpt-5.6-luna".into()));
         assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Default, None), None);
-        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Reasoning, None), Some("gpt-5.4".into()));
+        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Reasoning, None), Some("gpt-5.6-sol".into()));
     }
 
     #[test]

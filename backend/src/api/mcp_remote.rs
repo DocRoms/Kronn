@@ -326,14 +326,9 @@ fn excerpt(s: &str) -> String {
 }
 
 fn is_terminal_status(status: &RunStatus) -> bool {
-    matches!(
-        status,
-        RunStatus::Success
-            | RunStatus::Failed
-            | RunStatus::Cancelled
-            | RunStatus::StoppedByGuard
-            | RunStatus::Interrupted
-    )
+    // Single source of truth — RunStatus::is_terminal is exhaustive-matched,
+    // so a future variant can't diverge between this surface and the guards.
+    status.is_terminal()
 }
 
 /// GET /api/mcp/workflow-run-status/:run_id

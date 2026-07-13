@@ -246,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
     }).await {
         Ok(0) => tracing::info!("Orphan scan: nothing to clean up (boot reconcile already ran)"),
         Ok(n) => tracing::warn!(
+            target: "kronn::invariant",
             "Orphan scan: {n} workflow_runs still Running/Pending AFTER the boot reconcile — \
              this should be impossible, investigate db::open_path ordering"
         ),

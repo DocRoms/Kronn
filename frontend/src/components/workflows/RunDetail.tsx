@@ -29,6 +29,9 @@ export interface RunDetailProps {
   onDelete: () => void;
   /** Cancel a Running workflow run. Button is only rendered for Running status. */
   onCancel?: () => void;
+  /** A2 — resume an Interrupted run. Button is only rendered for Interrupted
+   *  status; the top-level runs only (children resume through their parent). */
+  onResume?: () => void;
   /** 0.7.0 Phase 4 — submit a gate decision (approve / request_changes / reject). */
   onDecide?: (payload: DecideRunRequest) => Promise<void> | void;
   /** 2026-06-13 — jump to a (sub-)workflow's run list, e.g. from a fan-out
@@ -677,7 +680,7 @@ function ProducedBranchesPanel({
   );
 }
 
-export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
+export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
 
@@ -776,6 +779,16 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onDecide, on
           >
             <Square size={10} style={{ fill: 'currentColor' }} />
             {t('wf.cancelRun')}
+          </button>
+        )}
+        {run.status === 'Interrupted' && !run.parent_run_id && run.run_type !== 'batch' && onResume && (
+          <button
+            className="wf-run-cancel-btn"
+            onClick={(e) => { e.stopPropagation(); onResume(); }}
+            title={t('wf.resumeRunHint')}
+          >
+            <RotateCcw size={10} />
+            {t('wf.resumeRun')}
           </button>
         )}
         <button

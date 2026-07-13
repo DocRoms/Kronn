@@ -739,10 +739,12 @@ export function AgentsSection({
                   modelsUrl: 'https://docs.anthropic.com/en/docs/about-claude/models',
                 },
                 codex: {
-                  economy: ['gpt-5-codex-mini', 'gpt-5.1-codex', 'gpt-5-codex'],
-                  default: ['gpt-5.5', 'gpt-5.4', 'gpt-5.1-codex'],
-                  reasoning: ['gpt-5.5', 'gpt-5.4', 'gpt-5.3-codex', 'gpt-5.2-codex', 'gpt-5.1-codex-max'],
-                  fallbackEconomy: 'gpt-5-codex-mini', fallbackDefault: null, fallbackReasoning: 'gpt-5.4',
+                  // 2026-07 refresh: the gpt-5.6 generation (sol = frontier,
+                  // terra = balanced, luna = fast/affordable) + 5.5/5.4 line.
+                  economy: ['gpt-5.6-luna', 'gpt-5.4-mini', 'gpt-5-codex-mini'],
+                  default: ['gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4'],
+                  reasoning: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.5', 'gpt-5.4'],
+                  fallbackEconomy: 'gpt-5.6-luna', fallbackDefault: null, fallbackReasoning: 'gpt-5.6-sol',
                   modelsUrl: 'https://developers.openai.com/codex/models',
                 },
                 gemini_cli: {

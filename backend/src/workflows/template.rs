@@ -809,7 +809,22 @@ pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
     // from the agent's own reasoning.
     if let Some(start) = text.find("---STEP_OUTPUT---") {
         let after_delim = &text[start + "---STEP_OUTPUT---".len()..];
-        if let Some(end) = after_delim.find("---END_STEP_OUTPUT---") {
+        // The payload may itself CONTAIN the marker text inside a JSON string
+        // (a foreach envelope carries the child's full output — markers
+        // included — in `last_output`), so the FIRST end-marker match can cut
+        // the JSON mid-string. Try candidates outermost-first: an embedded
+        // marker never yields valid JSON, the real closer does.
+        // The real closer is the LAST marker (format_step_output ends the
+        // block there) or just before trailing prose that quotes one — so
+        // bound the parse attempts by keeping the last 8 candidates, not the
+        // first 8 (with ≥8 embedded markers the first-8 window missed the
+        // real closer entirely).
+        let all_ends: Vec<usize> = after_delim
+            .match_indices("---END_STEP_OUTPUT---")
+            .map(|(i, _)| i)
+            .collect();
+        let start_at = all_ends.len().saturating_sub(8);
+        for end in all_ends[start_at..].iter().rev().copied() {
             let json_str = after_delim[..end].trim();
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
                 return envelope_from_json(&parsed);
@@ -820,9 +835,19 @@ pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
                 .trim_end_matches("```")
                 .trim();
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stripped) {
+                tracing::info!(
+                    target: "kronn::invariant",
+                    "envelope salvaged by stripping markdown fences — agent wrapped the block in ```"
+                );
                 return envelope_from_json(&parsed);
             }
         }
+        // A′ observability — the agent TRIED to emit an envelope (markers
+        // present) and botched it; distinct from marker-less free text.
+        tracing::warn!(
+            target: "kronn::invariant",
+            "STEP_OUTPUT markers present but the block is unparsable"
+        );
         return None;
     }
 
@@ -1423,6 +1448,110 @@ mod tests {
             sub_workflow_id: None,
             sub_workflow_foreach_file: None,
             multi_agent_review: None,
+        }
+    }
+
+    #[test]
+    fn envelope_with_embedded_child_markers_parses_via_outermost_end() {
+        // REAL-BUG (passe B) — a foreach envelope carries the child's FULL
+        // output (markers included) in `data.last_output`; the first
+        // end-marker match used to cut the outer JSON mid-string and reject a
+        // perfectly valid envelope into the repair loop.
+        let child_output = "---STEP_OUTPUT---\n{\"data\":{\"done\":true},\"status\":\"OK\",\"summary\":\"child\"}\n---END_STEP_OUTPUT---\nOK";
+        let outer = serde_json::json!({
+            "data": { "succeeded": 2, "failed": 0, "last_output": child_output },
+            "status": "OK",
+            "summary": "Sous-workflow x 2",
+        });
+        let text = format!("---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\nOK", outer);
+        let env = extract_step_envelope(&text).expect("outer envelope must parse");
+        assert_eq!(env.status, "OK");
+        let data: serde_json::Value = serde_json::from_str(&env.data_json).unwrap();
+        assert_eq!(data["succeeded"], 2);
+        assert!(data["last_output"].as_str().unwrap().contains("---END_STEP_OUTPUT---"),
+            "the child's markers survive intact inside the string");
+    }
+
+    #[test]
+    fn envelope_with_many_embedded_markers_still_finds_the_real_closer() {
+        // Codex review (lot B): with >=8 embedded end-markers, a first-8
+        // candidate window never reached the real (last) closer and a valid
+        // envelope fell into the repair loop.
+        let embedded: Vec<String> = (0..9)
+            .map(|i| format!("---STEP_OUTPUT---\n{{\"n\":{i}}}\n---END_STEP_OUTPUT---"))
+            .collect();
+        let outer = serde_json::json!({
+            "data": { "children": embedded },
+            "status": "OK",
+            "summary": "fan-out"
+        });
+        let text = format!("---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\nOK", outer);
+        let env = extract_step_envelope(&text).expect("nine embedded markers must not defeat the extractor");
+        assert_eq!(env.status, "OK");
+    }
+
+    #[test]
+    fn envelope_corpus_of_degenerate_agent_outputs() {
+        // Table of real failure classes seen in -lab runs / hardening passes.
+        // (name, input, expected status: Some(status) or None → repair path)
+        let valid = "{\"data\":{\"n\":1},\"status\":\"OK\",\"summary\":\"s\"}";
+        let cases: Vec<(&str, String, Option<&str>)> = vec![
+            ("canonical", format!("---STEP_OUTPUT---\n{valid}\n---END_STEP_OUTPUT---\nOK"), Some("OK")),
+            ("crlf line endings", format!("---STEP_OUTPUT---\r\n{valid}\r\n---END_STEP_OUTPUT---\r\nOK"), Some("OK")),
+            ("fenced json inside markers", format!("---STEP_OUTPUT---\n```json\n{valid}\n```\n---END_STEP_OUTPUT---"), Some("OK")),
+            ("prose before and after", format!("Voilà le résultat :\n---STEP_OUTPUT---\n{valid}\n---END_STEP_OUTPUT---\nEt ensuite je vais…"), Some("OK")),
+            ("truncated mid-string", "---STEP_OUTPUT---\n{\"data\":{\"n\":1},\"status\":\"OK\",\"su".to_string(), None),
+            ("open marker only, no close", format!("---STEP_OUTPUT---\n{valid}"), None),
+            ("close marker only", format!("{valid}\n---END_STEP_OUTPUT---"), Some("OK")), // no open marker → strategy 2 on the bare JSON
+            ("empty block", "---STEP_OUTPUT---\n\n---END_STEP_OUTPUT---".to_string(), None),
+            ("emoji + accents in strings", "---STEP_OUTPUT---\n{\"data\":{\"msg\":\"réussi ✅ à 100%\"},\"status\":\"OK\",\"summary\":\"été\"}\n---END_STEP_OUTPUT---".to_string(), Some("OK")),
+            ("brace inside string (strategy 2)", "{\"data\":\"brace } inside\",\"status\":\"OK\",\"summary\":\"s\"}".to_string(), Some("OK")),
+            ("malformed block does NOT fall through to a quoted example",
+             "---STEP_OUTPUT---\n{broken\n---END_STEP_OUTPUT---\nexample: {\"data\":{},\"status\":\"OK\",\"summary\":\"quoted\"}".to_string(), None),
+            // 0.8.11 semantics: a present-but-non-string status must not read
+            // as success — it maps to ERROR (failure direction preserved).
+            ("null status maps to ERROR", "---STEP_OUTPUT---\n{\"data\":{},\"status\":null,\"summary\":\"s\"}\n---END_STEP_OUTPUT---".to_string(), Some("ERROR")),
+        ];
+        for (name, input, expected) in cases {
+            let got = extract_step_envelope(&input);
+            match expected {
+                Some(status) => {
+                    let env = got.unwrap_or_else(|| panic!("case `{name}` must parse"));
+                    assert_eq!(env.status, status, "case `{name}`");
+                }
+                None => assert!(got.is_none(), "case `{name}` must be rejected (repair path)"),
+            }
+        }
+    }
+
+    #[test]
+    fn envelope_extraction_never_panics_on_mutated_input() {
+        // Fuzz-lite, deterministic (no rand dep, no Date): every prefix
+        // truncation + single-byte corruptions at a stride, over both
+        // strategy shapes. The property is total absence of panics —
+        // Option::None is always acceptable.
+        let bases = [
+            format!("---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\nPARTIAL",
+                "{\"data\":{\"items\":[{\"id\":\"T1\"}],\"note\":\"brace } et « accents » ✅\"},\"status\":\"PARTIAL\",\"summary\":\"s\"}"),
+            "prose {\"data\":{\"a\":1},\"status\":\"OK\",\"summary\":\"s\"} tail".to_string(),
+        ];
+        for base in &bases {
+            for cut in 0..base.len() {
+                if !base.is_char_boundary(cut) { continue; }
+                let _ = extract_step_envelope(&base[..cut]);
+            }
+            let bytes = base.as_bytes();
+            for pos in (0..bytes.len()).step_by(7) {
+                for repl in [b'{', b'}', b'"', b'\\', 0xC3u8] {
+                    let mut mutated = bytes.to_vec();
+                    mutated[pos] = repl;
+                    // Invalid UTF-8 mutants are legitimately unrepresentable
+                    // as &str — the parser only ever sees valid UTF-8.
+                    if let Ok(s) = std::str::from_utf8(&mutated) {
+                        let _ = extract_step_envelope(s);
+                    }
+                }
+            }
         }
     }
 

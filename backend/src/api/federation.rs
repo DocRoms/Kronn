@@ -175,17 +175,28 @@ pub async fn fetch_and_store_attachment(
         return;
     }
 
-    // Resolve the announcing host's URL from its invite code.
+    // Resolve the announcing host's URL from its invite code — accepted
+    // contacts only (passe D): a pending/refused peer must not be able to
+    // make us download bytes from it via a FileAttached announce.
     let code = host_invite_code.to_string();
     let host = state
         .db
-        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code))
-        .await
-        .ok()
-        .flatten();
-    let Some(host) = host else {
-        tracing::warn!("F8: FileAttached from unknown host, cannot fetch {file_id}");
-        return;
+        .with_conn(move |conn| crate::db::contacts::authenticate_invite_code(conn, &code))
+        .await;
+    let host = match host {
+        Ok(crate::db::contacts::InviteAuth::Accepted(c)) => c,
+        Ok(crate::db::contacts::InviteAuth::NotAccepted { pseudo, status }) => {
+            tracing::warn!(
+                target: "kronn::invariant",
+                host = %pseudo, status = %status, file_id = %file_id,
+                "F8: FileAttached from a non-accepted contact — fetch refused"
+            );
+            return;
+        }
+        _ => {
+            tracing::warn!("F8: FileAttached from unknown host, cannot fetch {file_id}");
+            return;
+        }
     };
 
     // Our own code authenticates the fetch (same trust model as claim-by-token).

@@ -60,7 +60,7 @@ const mkProject = (over: Partial<Project> = {}): Project => ({
   token_override: null,
   ai_config: { detected: false, configs: [] },
   audit_status: 'None' as Project['audit_status'],
-  ai_todo_count: 0,
+  ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false, path_exists: true,
   created_at: '2026-05-01T00:00:00Z',
   updated_at: '2026-05-01T00:00:00Z',
   ...over,

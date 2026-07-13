@@ -1472,6 +1472,160 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
 }
 
 #[test]
+fn set_run_state_key_merges_one_key_under_status_guard() {
+    use crate::models::RunStatus::*;
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r-state-1", "w1");
+    run.status = Running;
+    run.state.insert("existing".into(), "kept".into());
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    // Merge lands while Running, without clobbering sibling keys.
+    assert!(crate::db::workflows::set_run_state_key(&conn, "r-state-1", "k", "v1", &[Running]).unwrap());
+    let row = crate::db::workflows::get_run(&conn, "r-state-1").unwrap().unwrap();
+    assert_eq!(row.state.get("k").map(String::as_str), Some("v1"));
+    assert_eq!(row.state.get("existing").map(String::as_str), Some("kept"), "sibling keys untouched");
+
+    // Refused once the run changed hands (Interrupted), row unchanged.
+    run.status = crate::models::RunStatus::Interrupted;
+    let snap = crate::db::workflows::RunProgressSnapshot::from_run(&row);
+    let mut snap = snap; snap.status = crate::models::RunStatus::Interrupted;
+    assert!(crate::db::workflows::update_run_progress(&conn, snap).unwrap());
+    assert!(!crate::db::workflows::set_run_state_key(&conn, "r-state-1", "k", "v2", &[Running]).unwrap());
+    let row = crate::db::workflows::get_run(&conn, "r-state-1").unwrap().unwrap();
+    assert_eq!(row.state.get("k").map(String::as_str), Some("v1"), "guarded write must not land");
+
+    // Missing run → false.
+    assert!(!crate::db::workflows::set_run_state_key(&conn, "r-ghost", "k", "v", &[Running]).unwrap());
+}
+
+#[test]
+fn append_foreach_done_builds_versioned_doc_and_freezes_off_running() {
+    use crate::models::RunStatus::*;
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+    let mut run = sample_run("r-fd-1", "w1");
+    run.status = Running;
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+    for (idx, id) in [(0u32, "t-a"), (1u32, "t-b")] {
+        assert!(crate::db::workflows::append_foreach_done(
+            &conn, "r-fd-1", "fanout",
+            serde_json::json!({"idx": idx, "id": id, "status": "Success", "child_run_id": "c"}),
+        ).unwrap());
+    }
+    let row = crate::db::workflows::get_run(&conn, "r-fd-1").unwrap().unwrap();
+    let doc: serde_json::Value =
+        serde_json::from_str(row.state.get("__kronn.foreach_done.fanout").unwrap()).unwrap();
+    assert_eq!(doc["v"], 1);
+    let items = doc["items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[1]["id"], "t-b");
+
+    // Frozen once the parent left Running.
+    let mut snap = crate::db::workflows::RunProgressSnapshot::from_run(&row);
+    snap.status = Cancelled;
+    assert!(crate::db::workflows::update_run_progress(&conn, snap).unwrap());
+    assert!(!crate::db::workflows::append_foreach_done(
+        &conn, "r-fd-1", "fanout",
+        serde_json::json!({"idx": 2, "id": "t-late", "status": "Success", "child_run_id": "c"}),
+    ).unwrap(), "late child must not extend a frozen done-set");
+}
+
+#[test]
+fn run_status_state_machine_is_locked_for_progress_snapshots() {
+    // Property test (A1): update_run_progress may move a row ONLY when it is
+    // Pending/Running, or when it rewrites the SAME status. Exhaustive over
+    // every (from, to) pair so a future transition can't slip in untested.
+    use crate::models::RunStatus::*;
+    let all = [Pending, Running, Success, Failed, Cancelled, WaitingApproval, StoppedByGuard, Interrupted];
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+
+    for (i, from) in all.iter().enumerate() {
+        for (j, to) in all.iter().enumerate() {
+            let id = format!("r-{i}-{j}");
+            let mut run = sample_run(&id, "w1");
+            run.status = from.clone();
+            crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+            run.status = to.clone();
+            let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
+            let allowed = crate::db::workflows::update_run_progress(&conn, snap).unwrap();
+
+            let expected = from == to || matches!(from, Pending | Running);
+            assert_eq!(allowed, expected, "snapshot {from:?} -> {to:?}");
+            let row = crate::db::workflows::get_run(&conn, &id).unwrap().unwrap();
+            let final_expected = if expected { to } else { from };
+            assert_eq!(&row.status, final_expected, "row after {from:?} -> {to:?}");
+        }
+    }
+}
+
+#[test]
+fn claim_run_status_requires_exact_from_and_single_winner() {
+    use crate::models::RunStatus::*;
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+
+    // Exact-from required: claiming Interrupted -> Running on a Running row fails.
+    let mut run = sample_run("r-claim-1", "w1");
+    run.status = Running;
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    assert!(!crate::db::workflows::claim_run_status(&conn, "r-claim-1", &Interrupted, &Running).unwrap());
+
+    // Right from → wins once; the second identical claim loses (double-click).
+    let mut run = sample_run("r-claim-2", "w1");
+    run.status = Interrupted;
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    assert!(crate::db::workflows::claim_run_status(&conn, "r-claim-2", &Interrupted, &Running).unwrap());
+    assert!(!crate::db::workflows::claim_run_status(&conn, "r-claim-2", &Interrupted, &Running).unwrap(),
+        "second claim must lose");
+    let row = crate::db::workflows::get_run(&conn, "r-claim-2").unwrap().unwrap();
+    assert_eq!(row.status, Running);
+
+    // Wrapper keeps the gate contract.
+    let mut run = sample_run("r-claim-3", "w1");
+    run.status = WaitingApproval;
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    assert!(crate::db::workflows::claim_waiting_run(&conn, "r-claim-3", &Running).unwrap());
+}
+
+#[test]
+fn batch_counters_and_final_status_freeze_off_running() {
+    use crate::models::RunStatus::*;
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
+
+    for frozen in [Cancelled, Interrupted] {
+        let id = format!("r-batch-{frozen:?}");
+        let mut run = sample_run(&id, "w1");
+        run.status = frozen.clone();
+        run.run_type = "batch".into();
+        run.batch_total = 2;
+        run.batch_completed = 1;
+        crate::db::workflows::insert_run(&conn, &run).unwrap();
+
+        // A late child completion must not move counters nor status.
+        let out = crate::db::workflows::increment_batch_progress(&conn, &id, true).unwrap();
+        assert!(out.is_none(), "late child on a {frozen:?} batch is a no-op");
+        let row = crate::db::workflows::get_run(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.batch_completed, 1, "counter frozen on {frozen:?}");
+        assert_eq!(row.status, frozen, "status frozen");
+    }
+
+    // Sanity: a Running batch still counts up and finalizes.
+    let mut run = sample_run("r-batch-live", "w1");
+    run.status = Running;
+    run.run_type = "batch".into();
+    run.batch_total = 1;
+    crate::db::workflows::insert_run(&conn, &run).unwrap();
+    let out = crate::db::workflows::increment_batch_progress(&conn, "r-batch-live", true).unwrap().unwrap();
+    assert_eq!(out.status, Success);
+}
+
+#[test]
 fn cancelled_status_is_sticky_in_update_run_progress() {
     // The user's forced cancel races the runner's own writes; the runner
     // used to win (Cancelled → Failed minutes after "stopped", or

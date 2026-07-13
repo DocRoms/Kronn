@@ -181,6 +181,54 @@ pub fn snapshot_quick_prompt_version(conn: &Connection, qp: &QuickPrompt) -> Res
     Ok(next)
 }
 
+/// Passe D (export v5) — every version row of every QP, for DB export.
+pub fn list_all_quick_prompt_versions(conn: &Connection) -> Result<Vec<QuickPromptVersion>> {
+    let mut ids = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT DISTINCT quick_prompt_id FROM quick_prompt_versions")?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        for r in rows { ids.push(r?); }
+    }
+    let mut all = Vec::new();
+    for id in ids {
+        all.extend(list_quick_prompt_versions(conn, &id)?);
+    }
+    Ok(all)
+}
+
+/// Passe D (import v5) — insert a version row VERBATIM (id, version_index and
+/// created_at preserved), unlike `snapshot_quick_prompt_version` which mints
+/// the next index. Import-only.
+pub fn insert_quick_prompt_version_row(conn: &Connection, v: &QuickPromptVersion) -> Result<()> {
+    let agent_str = serde_json::to_string(&v.agent)?;
+    let tier_str = serde_json::to_string(&v.tier)?;
+    conn.execute(
+        "INSERT INTO quick_prompt_versions (
+            id, quick_prompt_id, version_index, name, icon, prompt_template, variables_json,
+            agent, project_id, skill_ids_json, profile_ids_json, directive_ids_json,
+            tier, description, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+        params![
+            v.id,
+            v.quick_prompt_id,
+            v.version_index as i64,
+            v.name,
+            v.icon,
+            v.prompt_template,
+            serde_json::to_string(&v.variables)?,
+            agent_str.trim_matches('"'),
+            v.project_id,
+            serde_json::to_string(&v.skill_ids)?,
+            serde_json::to_string(&v.profile_ids)?,
+            serde_json::to_string(&v.directive_ids)?,
+            tier_str.trim_matches('"'),
+            v.description,
+            v.created_at.to_rfc3339(),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Return all stored versions for a QP, newest first.
 pub fn list_quick_prompt_versions(conn: &Connection, qp_id: &str) -> Result<Vec<QuickPromptVersion>> {
     let mut stmt = conn.prepare(

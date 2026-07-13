@@ -260,12 +260,9 @@ check:
 typegen:
 	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models...$(RESET)"
 	cd backend && cargo test export_bindings -- --nocapture
-	@echo "$(GREEN)▸ Checking generated.ts for field drift vs the Rust models...$(RESET)"
-	@node frontend/scripts/check-types-drift.mjs || { \
-	  echo "$(YELLOW)▸ generated.ts is missing fields — add them (see backend/bindings/<Name>.ts),$(RESET)"; \
-	  echo "$(YELLOW)  or run 'node frontend/scripts/assemble-generated-types.mjs' for a full regen.$(RESET)"; \
-	  exit 1; }
-	@echo "$(GREEN)▸ generated.ts is in sync with the Rust models.$(RESET)"
+	@echo "$(GREEN)▸ Assembling frontend/src/types/generated.ts from the bindings...$(RESET)"
+	@node frontend/scripts/assemble-generated-types.mjs
+	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"
 
 ## Run backend tests (skips ts-rs exports to avoid overwriting generated.ts)
 test-backend:

@@ -237,6 +237,7 @@ export function BatchItemsList({
       name: `__batch_item_${i}__`,
       step_type: { type: 'Agent' },
       agent: quickPromptAgent as AgentType,
+      output_format: { type: 'FreeText' },
       prompt_template: prompt,
       mode: { type: 'Normal' },
     };
@@ -1832,6 +1833,18 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                   // Cancel errors are rare (run already finished, registry
                   // poisoned) — the UI refreshes automatically via onRefresh
                   // so we just swallow silently.
+                }
+              }}
+              onResume={async () => {
+                try {
+                  await workflowsApi.resumeRun(run.id);
+                  onRefresh();
+                } catch (e) {
+                  // Claim lost (double-click, benign: the other click won) or
+                  // worktree gone — same silent-refresh convention as onCancel
+                  // above; the precise backend message lands in the console.
+                  console.warn('resumeRun failed:', e);
+                  onRefresh();
                 }
               }}
               onDecide={async (payload) => {

@@ -18,7 +18,89 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const BINDINGS = join(HERE, '..', '..', 'backend', 'bindings');
+const RUST_SRC = join(HERE, '..', '..', 'backend', 'src');
 const OUT = join(HERE, '..', 'src', 'types', 'generated.ts');
+
+// ─── serde-default → optional (C1) ─────────────────────────────────────────
+// ts-rs only emits `?` for `skip_serializing_if` / `#[ts(optional)]`; a bare
+// `#[serde(default)]` — the contract that lets API clients omit the field —
+// stays REQUIRED in the binding. That information only exists in the Rust
+// source, so scan it: struct → set of fields to optionalize in the aggregate.
+// Container-level `#[serde(default)]` marks every field. Handles per-field
+// `serde(rename)`, container `rename_all = "camelCase"`, `#[ts(rename)]`.
+
+const toCamel = s => s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
+
+export function scanRustOptionals(dir) {
+  /** @type {Map<string, Set<string>>} TS type name → field names to mark `?` */
+  const optionals = new Map();
+  const stack = [dir];
+  while (stack.length) {
+    const d = stack.pop();
+    for (const name of readdirSync(d)) {
+      const p = join(d, name);
+      if (statSync(p).isDirectory()) { stack.push(p); continue; }
+      if (!name.endsWith('.rs')) continue;
+      const src = readFileSync(p, 'utf8');
+      // One match per struct: the attribute block directly above + the body.
+      for (const m of src.matchAll(
+        /((?:^[ \t]*#\[[^\n]*\]\s*\n|^[ \t]*\/\/\/[^\n]*\n)+)^[ \t]*pub struct (\w+)\s*\{([\s\S]*?)^\}/gm
+      )) {
+        const [, attrs, rustName, body] = m;
+        if (!/derive\([^)]*\bTS\b/.test(attrs) && !/#\[ts\(/.test(attrs)) continue;
+        // Only REQUEST-direction types: there `serde(default)` (or a plain
+        // `Option<T>`, which serde reads as None when missing) means "the
+        // client may omit this". On a response/bidirectional type the field
+        // is always present in the payload — optionalizing it would force
+        // spurious null-checks at every read site. Direction = Deserialize
+        // without Serialize, or an explicit `…Request` name (some request
+        // types derive Serialize incidentally).
+        const tsName = attrs.match(/#\[ts\([^\]]*rename\s*=\s*"(\w+)"/)?.[1] ?? rustName;
+        const derives = attrs.match(/derive\(([^)]*)\)/)?.[1] ?? '';
+        const isRequest = (/\bDeserialize\b/.test(derives) && !/\bSerialize\b/.test(derives))
+          || /Request$/.test(tsName);
+        if (!isRequest) continue;
+        const containerDefault = /#\[serde\((?:[^\]]*,\s*)?default\s*[,)\]]/.test(attrs);
+        const renameAll = attrs.match(/rename_all\s*=\s*"(\w+)"/)?.[1];
+        const set = optionals.get(tsName) ?? new Set();
+        // Walk fields with the attribute lines attached to each.
+        for (const f of body.matchAll(
+          /((?:^[ \t]*#\[[^\n]*\]\s*\n)*)^[ \t]*pub (?:r#)?(\w+)\s*:\s*([^,\n]+)/gm
+        )) {
+          const [, fAttrs, fName, fType] = f;
+          if (/#\[serde\([^\]]*skip[,)\s]/.test(fAttrs)) continue; // not exported
+          const fieldDefault = /#\[serde\([^\]]*\bdefault\b/.test(fAttrs);
+          // serde deserializes a MISSING `Option<T>` as None even without
+          // `default` — on a request type every Option field is omittable.
+          const isOption = /^Option\s*</.test(fType.trim());
+          if (!containerDefault && !fieldDefault && !isOption) continue;
+          let tsField = fAttrs.match(/#\[serde\([^\]]*rename\s*=\s*"([^"]+)"/)?.[1] ?? fName;
+          if (!fAttrs.includes('rename =') && renameAll === 'camelCase') tsField = toCamel(fName);
+          set.add(tsField);
+        }
+        if (set.size) optionals.set(tsName, set);
+      }
+    }
+  }
+  return optionals;
+}
+
+/** Mark the scanned serde-default fields optional inside one type block. */
+export function applyOptionals(name, block, optionals) {
+  const fields = optionals.get(name);
+  if (!fields) return block;
+  for (const f of fields) {
+    // `field:` preceded by `{`, `,` or start-of-line — never touches an
+    // already-optional `field?:` nor occurrences inside string literals.
+    block = block.replace(new RegExp(`([{,]\\s*|^\\s*)${f}:`, 'gm'), `$1${f}?:`);
+  }
+  return block;
+}
+
+// ─── assembly (runs only when invoked directly, so tests can import) ───────
+import { argv } from 'node:process';
+import { resolve } from 'node:path';
+const invokedDirectly = argv[1] && resolve(argv[1]) === fileURLToPath(import.meta.url);
 
 function walk(dir) {
   const out = [];
@@ -30,6 +112,8 @@ function walk(dir) {
   return out;
 }
 
+if (invokedDirectly) {
+const OPTIONALS = scanRustOptionals(RUST_SRC);
 const files = walk(BINDINGS);
 // Sort by type name (basename) for deterministic output.
 files.sort((a, b) => basename(a).localeCompare(basename(b)));
@@ -53,6 +137,10 @@ for (const f of files) {
   // JSON.parse yields `number` anyway (not BigInt). Matches the convention the
   // hand-maintained file used before this generator existed.
   src = src.replace(/\bbigint\b/g, 'number');
+  // ts-rs leaves trailing spaces after fields that precede doc comments —
+  // thousands of `git diff --check` violations. Normalize per line.
+  src = src.split('\n').map(l => l.replace(/[ \t]+$/, '')).join('\n');
+  src = applyOptionals(name, src, OPTIONALS);
   blocks.push(src);
 }
 
@@ -66,3 +154,4 @@ const header = `// ╔═══════════════════�
 
 writeFileSync(OUT, header + '\n' + blocks.join('\n\n') + '\n');
 console.log(`assembled ${blocks.length} types → ${OUT}`);
+}

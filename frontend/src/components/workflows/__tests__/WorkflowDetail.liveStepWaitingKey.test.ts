@@ -6,7 +6,7 @@ import { liveStepWaitingKey } from '../WorkflowDetail';
 // step showed "L'agent démarre…"). Only Agent steps stream chunks.
 
 const key = (type?: string) =>
-  liveStepWaitingKey({ step_type: type ? ({ type } as never) : undefined });
+  liveStepWaitingKey({ step_type: type ? ({ type } as never) : (undefined as never) });
 
 describe('liveStepWaitingKey', () => {
   it('uses the agent-streaming copy for Agent steps', () => {

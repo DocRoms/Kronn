@@ -512,6 +512,24 @@ TOOLS = [
         },
     },
     {
+        "name": "workflow_resume_run",
+        "description": (
+            "Resume an INTERRUPTED run (backend restart/crash killed it "
+            "mid-flight). Continues from the step after the last completed "
+            "one, re-attached to the preserved worktree; a foreach step "
+            "re-runs only the items not yet done. Refused when the run is "
+            "not Interrupted, is a sub-workflow child (resume the parent) "
+            "or a batch, or when its worktree is gone."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "run_id": {"type": "string"},
+            },
+            "required": ["run_id"],
+        },
+    },
+    {
         "name": "qp_list",
         "description": (
             "List every Quick Prompt in the user's library — compact "
@@ -1194,7 +1212,7 @@ TOOLS = [
                 "api_headers": {"type": "object", "description": "Extra request headers. NEVER pass auth — Kronn injects per the plugin spec."},
                 "api_body": {"description": "JSON body for POST/PUT/PATCH (object/array). String leaves can contain `{{var}}` placeholders."},
                 "api_extract": {"type": "object", "description": "Optional JSONPath extract spec: `{path: \"$.items\", fail_on_empty: false}`."},
-                "api_pagination": {"type": "object", "description": "Optional pagination spec (page/offset/cursor strategies)."},
+                "api_pagination": {"type": "object", "description": "Optional pagination spec — internally tagged `{\"type\": ...}`: Auto | Offset | Cursor | Page | LinkHeader (GitHub-style bare array + `Link: rel=next` header; fields page_size_param/page_size/max_pages)."},
                 "api_timeout_ms": {"type": "integer", "description": "Optional per-call timeout in ms. Defaults to plugin default."},
                 "api_max_retries": {"type": "integer", "description": "Optional retry count on transient HTTP errors."},
                 "variables": {
@@ -2934,6 +2952,15 @@ def call_workflow_cancel_run(args):
     return _unwrap(_http("POST", f"/api/workflows/{wid}/runs/{rid}/cancel"))
 
 
+def call_workflow_resume_run(args):
+    """Resume an Interrupted run — atomic claim backend-side, so a double
+    call gets one resume + one clear error."""
+    rid = args.get("run_id")
+    if not rid:
+        raise RuntimeError("workflow_resume_run: missing required 'run_id'")
+    return _unwrap(_http("POST", f"/api/workflow-runs/{rid}/resume"))
+
+
 def call_workflow_update(args):
     """Patch an existing workflow. `UpdateWorkflowRequest` is already a
     TRUE patch backend-side (any omitted field preserves its current
@@ -3947,6 +3974,7 @@ DISPATCH = {
     "workflow_runs": call_workflow_runs,
     "workflow_run_get": call_workflow_run_get,
     "workflow_cancel_run": call_workflow_cancel_run,
+    "workflow_resume_run": call_workflow_resume_run,
     "qp_list": call_qp_list,
     "qa_list": call_qa_list,
     "mcp_list": call_mcp_list,

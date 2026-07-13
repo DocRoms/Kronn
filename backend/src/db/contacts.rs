@@ -52,6 +52,25 @@ pub fn get_contact(conn: &Connection, id: &str) -> Result<Option<Contact>> {
     Ok(rows.next().and_then(|r| r.ok()))
 }
 
+/// Passe D — the ONE sanctioned way to authenticate a P2P caller by invite
+/// code: a known contact whose status is `accepted`. A pending/refused
+/// contact keeps its code but must not pass the auth-exempt routes
+/// (claim-by-token, fetch-file). `NotAccepted` carries the real status for
+/// telemetry; callers MUST answer exactly like `Unknown` (no oracle).
+pub enum InviteAuth {
+    Accepted(Contact),
+    NotAccepted { pseudo: String, status: String },
+    Unknown,
+}
+
+pub fn authenticate_invite_code(conn: &Connection, invite_code: &str) -> Result<InviteAuth> {
+    Ok(match find_contact_by_invite_code(conn, invite_code)? {
+        Some(c) if c.status == "accepted" => InviteAuth::Accepted(c),
+        Some(c) => InviteAuth::NotAccepted { pseudo: c.pseudo, status: c.status },
+        None => InviteAuth::Unknown,
+    })
+}
+
 pub fn find_contact_by_invite_code(conn: &Connection, invite_code: &str) -> Result<Option<Contact>> {
     let mut stmt = conn.prepare(
         "SELECT id, pseudo, avatar_email, kronn_url, invite_code, status, created_at, updated_at
@@ -129,6 +148,35 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         migrations::run(&conn).unwrap();
         conn
+    }
+
+    #[test]
+    fn only_accepted_contacts_authenticate_by_invite_code() {
+        // Passe D (Codex constat n°1) — pending/refused contacts keep their
+        // code but must not pass invite-code auth; the enum carries the real
+        // status so callers can log it without re-implementing the rule.
+        let conn = test_conn();
+        for (id, code, status) in [
+            ("a", "kr-a", "accepted"), ("b", "kr-b", "pending"), ("c", "kr-c", "refused"),
+        ] {
+            insert_contact(&conn, &crate::models::Contact {
+                id: id.into(),
+                pseudo: format!("p-{id}"),
+                avatar_email: None,
+                kronn_url: "http://x".into(),
+                invite_code: code.into(),
+                status: status.into(),
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            }).unwrap();
+        }
+        assert!(matches!(authenticate_invite_code(&conn, "kr-a").unwrap(),
+            InviteAuth::Accepted(c) if c.id == "a"));
+        assert!(matches!(authenticate_invite_code(&conn, "kr-b").unwrap(),
+            InviteAuth::NotAccepted { ref status, .. } if status == "pending"));
+        assert!(matches!(authenticate_invite_code(&conn, "kr-c").unwrap(),
+            InviteAuth::NotAccepted { ref status, .. } if status == "refused"));
+        assert!(matches!(authenticate_invite_code(&conn, "kr-ghost").unwrap(), InviteAuth::Unknown));
     }
 
     #[test]

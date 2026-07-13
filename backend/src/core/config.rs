@@ -139,6 +139,28 @@ pub async fn save(config: &AppConfig) -> Result<()> {
 /// could truncate-then-fail and leave a corrupt config. Shared by `save()`
 /// and the migration re-save in `load()`.
 async fn persist_atomic(dir: PathBuf, path: PathBuf, content: String) -> Result<()> {
+    // Write chokepoint guard: a test writing config without KRONN_DATA_DIR
+    // clobbers the developer's REAL config.toml (a full `cargo test` wiped
+    // pseudo/avatar/model-tiers on the host, 2026-07-13). Two layers because
+    // integration binaries compile this lib WITHOUT cfg(test): the runtime
+    // check keys on the executable living in `target/*/deps/` — true for
+    // every cargo test/bench binary, never for `cargo run` or installed
+    // binaries. Reads stay free; only the destructive act is fenced.
+    #[cfg(test)]
+    if std::env::var("KRONN_DATA_DIR").is_err() {
+        panic!("test attempted to WRITE the real config.toml — set KRONN_DATA_DIR (tempdir) in this test");
+    }
+    #[cfg(not(test))]
+    if std::env::var("KRONN_DATA_DIR").is_err()
+        && std::env::current_exe()
+            .map(|p| p.components().any(|c| c.as_os_str() == "deps"))
+            .unwrap_or(false)
+    {
+        anyhow::bail!(
+            "test binary attempted to WRITE the real config.toml — call isolate_config_dir() \
+             (set KRONN_DATA_DIR to a tempdir) in this integration test"
+        );
+    }
     tokio::task::spawn_blocking(move || write_config_atomic(&dir, &path, content.as_bytes()))
         .await
         .context("config write task panicked")?
@@ -470,7 +492,20 @@ mod tests {
             "a second exclusive lock on the same data dir must be refused"
         );
         drop(g1); // releasing lets a later acquire succeed
-        assert!(acquire_lock_in(&dir).is_ok(), "lock must be re-acquirable after release");
+        // Retry briefly: under full-suite load the re-open can hit transient
+        // resource errors (EMFILE from parallel git/sqlite fds). A genuinely
+        // stuck lock still fails after the window — with the REAL error shown.
+        let mut last_err = None;
+        for _ in 0..20 {
+            match acquire_lock_in(&dir) {
+                Ok(_) => { last_err = None; break; }
+                Err(e) => {
+                    last_err = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+        assert!(last_err.is_none(), "lock must be re-acquirable after release: {last_err:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

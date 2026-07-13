@@ -54,7 +54,7 @@ const mkDisc = (id: string, msgCount: number, archived = false): Discussion => (
   language: 'fr',
   participants: ['ClaudeCode'],
   messages: [],
-  message_count: msgCount, non_system_message_count: msgCount,
+  message_count: msgCount, non_system_message_count: msgCount, tier: "default" as const, summary_strategy: "Auto" as const, introspection_call_count: 0,
   archived,
   pinned: false, pin_first_message: false,
   workspace_mode: 'Direct',

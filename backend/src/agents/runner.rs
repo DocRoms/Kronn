@@ -509,9 +509,10 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         (AgentType::ClaudeCode, ModelTier::Economy)  => Some("haiku".into()),
         (AgentType::ClaudeCode, ModelTier::Default)   => Some("sonnet".into()),
         (AgentType::ClaudeCode, ModelTier::Reasoning) => Some("opus".into()),
-        (AgentType::Codex, ModelTier::Economy)        => Some("gpt-5-codex-mini".into()),
+        // 2026-07: gpt-5.6 generation (sol=frontier, terra=balanced, luna=fast).
+        (AgentType::Codex, ModelTier::Economy)        => Some("gpt-5.6-luna".into()),
         (AgentType::Codex, ModelTier::Default)        => None, // Codex default is fine
-        (AgentType::Codex, ModelTier::Reasoning)      => Some("gpt-5.4".into()),
+        (AgentType::Codex, ModelTier::Reasoning)      => Some("gpt-5.6-sol".into()),
         (AgentType::GeminiCli, ModelTier::Economy)    => Some("gemini-2.5-flash".into()),
         (AgentType::GeminiCli, ModelTier::Default)    => None, // Gemini default is fine
         (AgentType::GeminiCli, ModelTier::Reasoning)  => Some("gemini-3.1-pro-preview".into()),
@@ -1388,6 +1389,10 @@ pub(crate) async fn forward_ollama_line(
     stderr: &Arc<Mutex<Vec<String>>>,
     got_done: &mut bool,
     got_error: &mut bool,
+    // Requested num_ctx — lets the terminal chunk detect ACTUAL truncation
+    // (prompt_eval_count at the window) instead of relying on the pre-flight
+    // chars/3 estimate, which is blind to token-dense content. 0 = unknown.
+    num_ctx: u64,
 ) -> bool {
     if line.trim().is_empty() { return true; }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
@@ -1413,6 +1418,22 @@ pub(crate) async fn forward_ollama_line(
             let eval_tokens = json["eval_count"].as_u64().unwrap_or(0);
             if let Ok(mut stderr) = stderr.lock() {
                 stderr.push(format!("ollama_tokens:{}:{}", prompt_tokens, eval_tokens));
+            }
+            // A prompt that FILLED the window was almost certainly cut by
+            // Ollama (it silently drops the overflow) — exact signal, unlike
+            // the pre-flight estimate.
+            if num_ctx > 0 && prompt_tokens >= num_ctx.saturating_sub(64) {
+                tracing::warn!(
+                    target: "kronn::ollama",
+                    prompt_tokens, num_ctx,
+                    "prompt filled the context window — input was silently TRUNCATED by Ollama; \
+                     reduce the step's input or raise KRONN_OLLAMA_NUM_CTX_CAP"
+                );
+                if let Ok(mut stderr) = stderr.lock() {
+                    stderr.push(format!(
+                        "Ollama truncation: prompt_eval_count {prompt_tokens} filled num_ctx {num_ctx}"
+                    ));
+                }
             }
         }
     }
@@ -1564,7 +1585,7 @@ async fn start_ollama_http(
                 let line = buffer[..newline_pos].to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
                 // Consumer gone (cancel) → stop reading the HTTP body.
-                if !forward_ollama_line(&line, &tx, &stderr_clone, &mut got_done, &mut got_error).await {
+                if !forward_ollama_line(&line, &tx, &stderr_clone, &mut got_done, &mut got_error, ctx_cap).await {
                     finish(&mut lifeline, false).await;
                     return;
                 }
@@ -1574,7 +1595,7 @@ async fn start_ollama_http(
         // Non-streaming responses (format-constrained / TypedSchema steps set
         // stream:false) arrive as a single JSON object with no trailing
         // newline, so the line loop above never fires — flush the remainder.
-        let _ = forward_ollama_line(buffer.trim(), &tx, &stderr_clone, &mut got_done, &mut got_error).await;
+        let _ = forward_ollama_line(buffer.trim(), &tx, &stderr_clone, &mut got_done, &mut got_error, ctx_cap).await;
 
         // A stream that ends without the terminal `done` chunk was truncated
         // (server closed the connection, proxy cut it, model unloaded) — that

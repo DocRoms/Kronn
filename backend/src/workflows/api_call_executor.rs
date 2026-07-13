@@ -1055,12 +1055,20 @@ async fn walk_pages(
             current_query.entry(page_param.clone()).or_insert_with(|| "1".to_string());
             current_query.entry(page_size_param.clone()).or_insert_with(|| page_size.to_string());
         }
+        PaginationSpec::LinkHeader { page_size_param: Some(p), page_size: Some(n), .. } => {
+            current_query.entry(p.clone()).or_insert_with(|| n.to_string());
+        }
         _ => {}
     }
 
     let mut first_response: Option<Value> = None;
     let mut items_key: Option<String> = None;
+    // C2 — GitHub-style bodies are a bare top-level array: no items key, the
+    // whole body IS the page. Merged result is then a plain array too.
+    let mut bare_array = false;
     let mut accumulated_items: Vec<Value> = Vec::new();
+    let mut next_link: Option<Url> = None;
+    let mut page_url_base = base_url.clone();
     let mut truncated = false;
 
     for page_idx in 0..max_pages {
@@ -1079,17 +1087,24 @@ async fn walk_pages(
                     current_query.insert(page_param.clone(), next_page_num.to_string());
                     current_query.insert(page_size_param.clone(), page_size.to_string());
                 }
+                PaginationSpec::LinkHeader { .. } => {
+                    let Some(next) = next_link.take() else { break };
+                    // The server's next URL carries its own cursor params —
+                    // adopt them wholesale (rebuild_query clears the query).
+                    current_query = next.query_pairs().into_owned().collect();
+                    page_url_base = next;
+                }
                 _ => break,
             }
         }
 
-        let url = rebuild_query(&base_url, &current_query, &auth.query)?;
+        let url = rebuild_query(&page_url_base, &current_query, &auth.query)?;
 
         // Rate-limit gate BEFORE every HTTP page — siblings in a batch
         // fan-out compete for the same bucket.
         super::api_call_ratelimit::acquire_slot(plugin_slug, config_id).await;
 
-        let resp = send_with_retry(
+        let (resp, link_header) = send_with_retry(
             method.clone(),
             &url,
             auth,
@@ -1105,11 +1120,18 @@ async fn walk_pages(
             if matches!(pagination, PaginationSpec::None | PaginationSpec::Auto { .. }) {
                 return Ok((resp, false));
             }
-            items_key = detect_items_key(&resp);
+            bare_array = resp.is_array();
+            if !bare_array {
+                items_key = detect_items_key(&resp);
+            }
             first_response = Some(resp.clone());
         }
 
-        if let Some(key) = items_key.as_ref() {
+        if bare_array {
+            if let Value::Array(page_items) = resp.clone() {
+                accumulated_items.extend(page_items);
+            }
+        } else if let Some(key) = items_key.as_ref() {
             let page_items = extract_array_at(&resp, key);
             accumulated_items.extend(page_items);
         }
@@ -1134,6 +1156,29 @@ async fn walk_pages(
                 if !has_more { break; }
                 next_page_num += 1;
             }
+            PaginationSpec::LinkHeader { .. } => {
+                // Resolve against the CURRENT page URL (relative links are
+                // RFC-legal), then enforce SAME ORIGIN as the plugin's base:
+                // the next request re-sends the plugin's auth, so following a
+                // cross-origin `rel="next"` from a compromised/misbehaving
+                // server would exfiltrate the credentials to that host.
+                let next = link_header.as_deref().and_then(parse_link_next)
+                    .and_then(|u| page_url_base.join(&u).ok());
+                let Some(next) = next else { break };
+                let same_origin = next.scheme() == base_url.scheme()
+                    && next.host() == base_url.host()
+                    && next.port_or_known_default() == base_url.port_or_known_default();
+                if !same_origin {
+                    tracing::warn!(
+                        target: "kronn::invariant",
+                        plugin = %plugin_slug, config = %config_id,
+                        next = %redact_url_query(&next), base = %redact_url_query(&base_url),
+                        "Link rel=next points OFF-ORIGIN — refusing to follow (auth would leak to that host)"
+                    );
+                    break;
+                }
+                next_link = Some(next);
+            }
             _ => break,
         }
 
@@ -1154,7 +1199,9 @@ async fn walk_pages(
     // accumulator. Keeps the rest of the body (counters, metadata) intact
     // so callers reading `total` / pagination cursors still see them.
     let mut final_resp = first_response.unwrap_or(Value::Null);
-    if let (Some(key), true) = (items_key.as_deref(), !accumulated_items.is_empty()) {
+    if bare_array {
+        final_resp = Value::Array(accumulated_items);
+    } else if let (Some(key), true) = (items_key.as_deref(), !accumulated_items.is_empty()) {
         if let Value::Object(map) = &mut final_resp {
             map.insert(key.to_string(), Value::Array(accumulated_items));
         }
@@ -1212,6 +1259,21 @@ fn jsonpath_first_bool(value: &Value, path: &str) -> Option<bool> {
 /// Re-builds a `Url` with a fresh query string. Used by the paginated
 /// walker to inject updated `startAt` / `cursor` / `page` params on each
 /// loop iteration without re-parsing the base URL.
+/// Extract the `rel="next"` target from a raw `Link` header
+/// (`<https://api.github.com/…?page=2>; rel="next", <…>; rel="last"`).
+fn parse_link_next(link: &str) -> Option<String> {
+    for part in link.split(',') {
+        let Some((target, params)) = part.split_once(';') else { continue };
+        if params.split(';').any(|p| {
+            let p = p.trim();
+            p == "rel=\"next\"" || p == "rel=next"
+        }) {
+            return Some(target.trim().trim_start_matches('<').trim_end_matches('>').to_string());
+        }
+    }
+    None
+}
+
 fn rebuild_query(
     base: &Url,
     step_query: &HashMap<String, String>,
@@ -1239,6 +1301,8 @@ fn rebuild_query(
 /// Send with exponential backoff on 5xx + 429. 4xx is a *client* error
 /// and retrying never helps — we fail fast and surface the status + body
 /// excerpt so the user can fix their params.
+/// Returns the parsed body plus the raw `Link` response header (C2 — the
+/// only continuation signal GitHub-style list APIs give is in the headers).
 async fn send_with_retry(
     method: Method,
     url: &Url,
@@ -1247,7 +1311,7 @@ async fn send_with_retry(
     body: Option<&Value>,
     timeout: Duration,
     max_retries: u8,
-) -> Result<Value, String> {
+) -> Result<(Value, Option<String>), String> {
     // 0.8.2 — Explicit User-Agent. GitHub REQUIRES one (returns 403
     // "Request forbidden by administrative rules" without it — see
     // https://docs.github.com/en/rest/overview/resources-in-the-rest-api#user-agent-required).
@@ -1305,9 +1369,16 @@ async fn send_with_retry(
 
         let status = response.status();
         if status.is_success() {
-            return response.json::<Value>().await.map_err(|e| {
-                format!("Response JSON parse failed ({}): {e}", status.as_u16())
-            });
+            let link = response
+                .headers()
+                .get(reqwest::header::LINK)
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+            return response
+                .json::<Value>()
+                .await
+                .map(|v| (v, link))
+                .map_err(|e| format!("Response JSON parse failed ({}): {e}", status.as_u16()));
         }
 
         // Non-success. Retry only on 5xx + 429, never 4xx.
@@ -2335,6 +2406,161 @@ mod tests {
         // All 5 keys merged from the 3 pages — the user's
         // `$.issues[*].key` extract sees the concatenated array.
         assert_eq!(envelope["data"], json!(["K-1", "K-2", "K-3", "K-4", "K-5"]));
+    }
+
+    #[test]
+    fn parse_link_next_extracts_the_next_rel() {
+        // GitHub's real shape: several rels, next not necessarily first.
+        let link = r#"<https://api.github.com/repos/o/r/pulls/1/reviews?page=3>; rel="prev", <https://api.github.com/repos/o/r/pulls/1/reviews?page=5>; rel="next", <https://api.github.com/repos/o/r/pulls/1/reviews?page=9>; rel="last""#;
+        assert_eq!(
+            parse_link_next(link).as_deref(),
+            Some("https://api.github.com/repos/o/r/pulls/1/reviews?page=5"),
+        );
+        // Last page: no rel="next" at all.
+        assert_eq!(parse_link_next(r#"<https://x/?page=1>; rel="first""#), None);
+        // Unquoted rel param (RFC-legal) + garbage segments are tolerated.
+        assert_eq!(parse_link_next("garbage, <https://x/?page=2>; rel=next").as_deref(), Some("https://x/?page=2"));
+        assert_eq!(parse_link_next(""), None);
+    }
+
+    #[tokio::test]
+    async fn walk_pages_link_header_merges_bare_array_pages() {
+        // GitHub-style: bare top-level array + Link header continuation.
+        // The exact TD-20260630 case — reviews past page 1 were invisible.
+        let server = MockServer::start().await;
+        let next1 = format!("<{}/reviews?page=2&per_page=2>; rel=\"next\", <{0}/reviews?page=3&per_page=2>; rel=\"last\"", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/reviews"))
+            .and(query_param("per_page", "2"))
+            .and(wiremock::matchers::query_param_is_missing("page"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("Link", next1.as_str())
+                .set_body_json(json!([{ "id": 1 }, { "id": 2 }])))
+            .mount(&server)
+            .await;
+        let next2 = format!("<{}/reviews?page=3&per_page=2>; rel=\"next\"", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/reviews"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("Link", next2.as_str())
+                .set_body_json(json!([{ "id": 3 }, { "id": 4 }])))
+            .mount(&server)
+            .await;
+        // Terminal page: NO Link header at all.
+        Mock::given(method("GET"))
+            .and(path("/reviews"))
+            .and(query_param("page", "3"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{ "id": 5 }])))
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/reviews")]);
+        let mut step = mk_step("/reviews");
+        step.api_pagination = Some(PaginationSpec::LinkHeader {
+            page_size_param: Some("per_page".into()),
+            page_size: Some(2),
+            max_pages: Some(10),
+        });
+        step.api_extract = Some(ExtractSpec {
+            path: "$[*].id".into(),
+            fallback: None,
+            fail_on_empty: false,
+        });
+
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success,
+            "link-header walk failed: {}", outcome.result.output);
+        let envelope = extract_envelope(&outcome.result.output);
+        assert_eq!(envelope["data"], json!([1, 2, 3, 4, 5]),
+            "all three bare-array pages merged in order");
+        assert!(!outcome.result.output.contains("PAGINATION_TRUNCATED"));
+    }
+
+    #[tokio::test]
+    async fn walk_pages_link_header_refuses_cross_origin_next() {
+        // Codex review (C2): a compromised server advertising an off-origin
+        // rel="next" must NOT receive a follow-up request — the walker
+        // re-sends the plugin's auth, so following would leak credentials.
+        let api = MockServer::start().await;
+        let attacker = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/steal"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .expect(0) // the whole point: zero requests reach the attacker
+            .mount(&attacker).await;
+        let evil_next = format!("<{}/steal?page=2>; rel=\"next\"", attacker.uri());
+        Mock::given(method("GET")).and(path("/items"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("Link", evil_next.as_str())
+                .set_body_json(json!([{ "id": 1 }])))
+            .expect(1)
+            .mount(&api).await;
+
+        let plugin = mk_plugin(&api.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/items")]);
+        let mut step = mk_step("/items");
+        step.api_pagination = Some(PaginationSpec::LinkHeader {
+            page_size_param: None, page_size: None, max_pages: Some(10),
+        });
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "{}", outcome.result.output);
+        let envelope = extract_envelope(&outcome.result.output);
+        assert_eq!(envelope["data"], json!([{ "id": 1 }]), "page 1 kept, walk stopped at the boundary");
+        // MockServer::expect(0) on the attacker asserts on drop.
+    }
+
+    #[tokio::test]
+    async fn walk_pages_link_header_single_page_and_cap() {
+        let server = MockServer::start().await;
+        // /single: no Link header → exactly one page, no walking.
+        Mock::given(method("GET"))
+            .and(path("/single"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([{ "id": 1 }])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // /loop: every page advertises a next → the cap must stop the walk
+        // and surface PAGINATION_TRUNCATED.
+        let next = format!("<{}/loop?page=2>; rel=\"next\"", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/loop"))
+            .respond_with(ResponseTemplate::new(200)
+                .insert_header("Link", next.as_str())
+                .set_body_json(json!([{ "id": 9 }])))
+            .mount(&server)
+            .await;
+
+        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/single"), mk_endpoint("GET", "/loop")]);
+
+        let mut step = mk_step("/single");
+        step.api_pagination = Some(PaginationSpec::LinkHeader {
+            page_size_param: None, page_size: None, max_pages: Some(10),
+        });
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "{}", outcome.result.output);
+        let envelope = extract_envelope(&outcome.result.output);
+        assert_eq!(envelope["data"], json!([{ "id": 1 }]), "bare array preserved as-is");
+
+        let mut step = mk_step("/loop");
+        step.api_pagination = Some(PaginationSpec::LinkHeader {
+            page_size_param: None, page_size: None, max_pages: Some(3),
+        });
+        let outcome = execute_api_call_step_core(
+            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        ).await;
+        assert_eq!(outcome.result.status, RunStatus::Success, "{}", outcome.result.output);
+        assert!(outcome.result.output.contains("PAGINATION_TRUNCATED"),
+            "cap hit with a next still advertised must surface the truncation signal");
     }
 
     #[tokio::test]

@@ -251,7 +251,12 @@ pub async fn execute_run(
     // instead of creating a new one — both because it already holds
     // the artifacts the operator just inspected, and because creating
     // a second worktree on the same branch would fail.
-    let is_resume = !run.step_results.is_empty();
+    // `workspace_path` is only ever set by a PRIOR execute_run (fresh runs
+    // arrive with None), so its presence also marks a resume — covers a run
+    // interrupted during its FIRST step (no result persisted yet) and a gate
+    // RequestChanges that truncates back to step 0: both must re-attach the
+    // preserved worktree, not create a second one.
+    let is_resume = !run.step_results.is_empty() || run.workspace_path.is_some();
 
     // Create or attach workspace (if we have a project path)
     let workspace = if !project_path.is_empty() {
@@ -2114,6 +2119,83 @@ pub async fn resume_run(
     execute_run(state, workflow, run, tokens_config, agents_config, events_tx, None, None).await
 }
 
+/// A2 — validate + atomically claim an `Interrupted` run for manual resume.
+///
+/// Fast (no execution) so the API endpoint can await it BEFORE answering:
+/// exactly one of two racing "Reprendre" clicks wins the
+/// `Interrupted → Running` claim, the loser gets an error. Refusals:
+///   - not `Interrupted` (Cancelled/Failed stay sticky — restart those fresh)
+///   - a child (`subworkflow`) or `batch` run — resume the parent instead;
+///     batch fan-out has its own machinery
+///   - the preserved worktree is gone: resuming would silently fall back to
+///     the MAIN checkout (execute_run's legacy resume fallback), which is
+///     exactly the require_isolation hazard — refuse instead
+pub async fn claim_interrupted_run(state: &AppState, run: &WorkflowRun) -> Result<()> {
+    use anyhow::anyhow;
+    if run.status != RunStatus::Interrupted {
+        return Err(anyhow!(
+            "Run {} is {:?} — only Interrupted runs can be resumed",
+            run.id, run.status
+        ));
+    }
+    if run.run_type == "subworkflow" || run.parent_run_id.is_some() {
+        return Err(anyhow!(
+            "Run {} is a sub-workflow child — resume its parent run instead (the foreach re-runs only the missing items)",
+            run.id
+        ));
+    }
+    if run.run_type == "batch" {
+        return Err(anyhow!(
+            "Run {} is a batch fan-out — batch runs cannot be resumed, re-trigger the workflow",
+            run.id
+        ));
+    }
+    if let Some(ws) = run.workspace_path.as_deref() {
+        if !std::path::Path::new(ws).exists() {
+            return Err(anyhow!(
+                "Worktree `{}` no longer exists — refusing to resume in the main checkout. Re-trigger the workflow for a fresh run.",
+                ws
+            ));
+        }
+    }
+    let run_id = run.id.clone();
+    let claimed = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::claim_run_status(
+                conn, &run_id, &RunStatus::Interrupted, &RunStatus::Running,
+            )
+        })
+        .await?;
+    if !claimed {
+        return Err(anyhow!(
+            "Run {} was just claimed by another caller — resume ignored (no double-resume)",
+            run.id
+        ));
+    }
+    Ok(())
+}
+
+/// A2 — continue an `Interrupted` run the caller just claimed via
+/// [`claim_interrupted_run`]. Everything resume-specific already lives in
+/// [`execute_run`]: `is_resume` detection re-attaches the preserved worktree,
+/// the cursor restarts at the step AFTER the last completed result (the
+/// interrupted step re-runs from its start — its foreach items dedupe via the
+/// done-set/git-ledger reconciliation), and prior step outputs + `run.state`
+/// are replayed into the template ctx.
+pub async fn resume_interrupted_run(
+    state: AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+    tokens_config: &TokensConfig,
+    agents_config: &AgentsConfig,
+    events_tx: Option<EventSender>,
+) -> Result<()> {
+    run.status = RunStatus::Running;
+    run.finished_at = None;
+    execute_run(state, workflow, run, tokens_config, agents_config, events_tx, None, None).await
+}
+
 /// Append a `> Décision: <verdict>` (and optional comment) footer to a
 /// gate StepResult's output. Keeps the rendered gate message intact so
 /// the operator's decision is visible alongside the original prompt
@@ -3241,6 +3323,187 @@ mod tests {
             .unwrap()
             .expect("run row exists");
         assert_eq!(persisted.status, RunStatus::Failed, "failure persisted to DB");
+    }
+
+    // ─── A2 — manual resume of Interrupted runs (acceptance tests) ──────
+
+    async fn insert_wf_and_run(
+        state: &crate::AppState,
+        wf: &Workflow,
+        run: &WorkflowRun,
+    ) {
+        let wf_db = wf.clone();
+        let run_db = run.clone();
+        state.db.with_conn(move |conn| {
+            crate::db::workflows::insert_workflow(conn, &wf_db)?;
+            crate::db::workflows::insert_run(conn, &run_db)?;
+            Ok(())
+        }).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn double_resume_wins_exactly_one_claim() {
+        let (state, _tokens, _agents) = test_state_and_configs();
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-claim".into();
+        let mut run = pending_run("run-claim", "wf-claim");
+        run.status = RunStatus::Interrupted;
+        insert_wf_and_run(&state, &wf, &run).await;
+
+        // Both callers hold the same (stale) Interrupted snapshot — the
+        // double-click case. Validation passes for both; the atomic claim
+        // decides.
+        let first = claim_interrupted_run(&state, &run).await;
+        let second = claim_interrupted_run(&state, &run).await;
+        assert!(first.is_ok(), "first caller wins the claim: {first:?}");
+        let err = second.expect_err("second caller must lose").to_string();
+        assert!(err.contains("another caller"), "loser gets the no-double-resume error, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn cancelled_and_failed_stay_sticky_on_resume() {
+        let (state, _tokens, _agents) = test_state_and_configs();
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-sticky".into();
+        for (id, status) in [("run-cancelled", RunStatus::Cancelled), ("run-failed", RunStatus::Failed)] {
+            let mut run = pending_run(id, "wf-sticky");
+            run.status = status;
+            let run_db = run.clone();
+            let wf_db = wf.clone();
+            state.db.with_conn(move |conn| {
+                let _ = crate::db::workflows::insert_workflow(conn, &wf_db);
+                crate::db::workflows::insert_run(conn, &run_db)
+            }).await.unwrap();
+
+            let err = claim_interrupted_run(&state, &run).await
+                .expect_err("non-Interrupted runs are not resumable").to_string();
+            assert!(err.contains("only Interrupted"), "{err}");
+
+            // Belt-and-braces at the DB layer too: even a caller that skips
+            // validation can't flip a terminal row.
+            let rid = id.to_string();
+            let claimed = state.db.with_conn(move |conn| {
+                crate::db::workflows::claim_run_status(conn, &rid, &RunStatus::Interrupted, &RunStatus::Running)
+            }).await.unwrap();
+            assert!(!claimed, "{id} must not be claimable Interrupted→Running");
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_refuses_children_batches_and_gone_worktrees() {
+        let (state, _tokens, _agents) = test_state_and_configs();
+
+        let mut child = pending_run("run-child", "wf-x");
+        child.status = RunStatus::Interrupted;
+        child.run_type = "subworkflow".into();
+        child.parent_run_id = Some("run-parent".into());
+        let err = claim_interrupted_run(&state, &child).await.unwrap_err().to_string();
+        assert!(err.contains("parent"), "children resume through the parent: {err}");
+
+        let mut batch = pending_run("run-batch", "wf-x");
+        batch.status = RunStatus::Interrupted;
+        batch.run_type = "batch".into();
+        let err = claim_interrupted_run(&state, &batch).await.unwrap_err().to_string();
+        assert!(err.contains("batch"), "{err}");
+
+        let mut gone = pending_run("run-gone-ws", "wf-x");
+        gone.status = RunStatus::Interrupted;
+        gone.workspace_path = Some("/nonexistent/kronn-worktree-a2".into());
+        let err = claim_interrupted_run(&state, &gone).await.unwrap_err().to_string();
+        assert!(err.contains("main checkout"), "a gone worktree must refuse, not fall back: {err}");
+    }
+
+    #[tokio::test]
+    async fn resume_during_first_step_reattaches_the_preserved_worktree() {
+        // Codex A2 finding: a run interrupted DURING its first step has
+        // step_results=[] — is_resume keyed on results alone took the
+        // Workspace::create path and abandoned the preserved worktree.
+        let (state, tokens, agents) = test_state_and_configs();
+
+        let repo = tempfile::TempDir::new().unwrap();
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.email=t@t", "-c", "user.name=t"])
+                .args(args).current_dir(repo.path()).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.path().join("README.md"), "x").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "init"]);
+
+        let project: crate::models::Project = serde_json::from_value(serde_json::json!({
+            "id": "proj-resume", "name": "p",
+            "path": repo.path().to_string_lossy(),
+            "repo_url": null, "token_override": null, "ai_config": {"detected": false, "configs": []},
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "updated_at": chrono::Utc::now().to_rfc3339(),
+        })).unwrap();
+        state.db.with_conn(move |c| crate::db::projects::insert_project(c, &project))
+            .await.unwrap();
+
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-first-step".into();
+        wf.project_id = Some("proj-resume".into());
+        wf.steps = vec![json_data_step("only", serde_json::json!({ "n": 1 }))];
+
+        // The preserved worktree: exists on disk, holds pre-crash work.
+        let preserved = tempfile::TempDir::new().unwrap();
+        let preserved_path = preserved.path().to_string_lossy().to_string();
+
+        let mut run = pending_run("run-first-step", "wf-first-step");
+        run.status = RunStatus::Interrupted;
+        run.workspace_path = Some(preserved_path.clone());
+        insert_wf_and_run(&state, &wf, &run).await;
+
+        claim_interrupted_run(&state, &run).await.expect("claim");
+        resume_interrupted_run(state.clone(), &wf, &mut run, &tokens, &agents, None)
+            .await
+            .expect("resume must not error");
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.step_results.len(), 1, "the first step re-ran");
+        assert_eq!(
+            run.workspace_path.as_deref(), Some(preserved_path.as_str()),
+            "resume must ATTACH the preserved worktree, not create a second one"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_continues_from_the_step_after_the_last_completed_one() {
+        let (state, tokens, agents) = test_state_and_configs();
+
+        let mut wf = make_workflow_with_artifacts(Default::default());
+        wf.id = "wf-resume".into();
+        wf.steps = vec![
+            json_data_step("first", serde_json::json!({ "phase": "one" })),
+            json_data_step("second", serde_json::json!({ "phase": "two" })),
+        ];
+
+        // The crash snapshot: step `first` completed + persisted, the process
+        // died during `second`, the boot reconcile flipped the row.
+        let mut run = pending_run("run-resume", "wf-resume");
+        run.status = RunStatus::Interrupted;
+        run.step_results.push(fake_result("first"));
+        run.state.insert("survivor".into(), "kept".into());
+        insert_wf_and_run(&state, &wf, &run).await;
+
+        claim_interrupted_run(&state, &run).await.expect("claim");
+        resume_interrupted_run(state.clone(), &wf, &mut run, &tokens, &agents, None)
+            .await
+            .expect("resume must not error");
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.step_results.len(), 2, "only `second` re-ran — `first` was NOT re-executed");
+        assert_eq!(run.step_results[0].step_name, "first");
+        assert_eq!(run.step_results[1].step_name, "second");
+        assert_eq!(run.state.get("survivor").map(String::as_str), Some("kept"), "durable state survives the resume");
+
+        let persisted = state.db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-resume"))
+            .await.unwrap().expect("row");
+        assert_eq!(persisted.status, RunStatus::Success);
+        assert!(persisted.finished_at.is_some(), "terminal write re-stamps finished_at");
     }
 }
 

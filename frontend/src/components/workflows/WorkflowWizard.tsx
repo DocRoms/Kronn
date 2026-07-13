@@ -95,6 +95,7 @@ export function buildBlankStep(
 ): WorkflowStep {
   const step: WorkflowStep = {
     name: `step-${existingCount + 1}`,
+    step_type: { type: 'Agent' },
     agent: 'ClaudeCode',
     prompt_template: '',
     mode: { type: 'Normal' },
