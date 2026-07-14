@@ -3688,6 +3688,24 @@ class AuditToolsTests(unittest.TestCase):
 
     # ── audit_prepare ────────────────────────────────────────────────
 
+    def test_terminal_entries_are_purged_after_their_ttl(self):
+        # PR C — a long-lived bridge must not accumulate dead entries; the
+        # freshest terminal memory survives until the TTL.
+        import time as _time
+        with self.mod._AUDIT_LOCK:
+            self.mod._AUDIT_STREAMS["p-old"] = {
+                "state": "done",
+                "_ended_monotonic": _time.monotonic() - self.mod._AUDIT_TERMINAL_TTL_SECONDS - 10,
+            }
+            self.mod._AUDIT_STREAMS["p-fresh"] = {
+                "state": "error", "_ended_monotonic": _time.monotonic() - 60,
+            }
+            self.mod._AUDIT_STREAMS["p-live"] = {"state": "running"}
+        self.mod._audit_purge_terminal_entries()
+        self.assertNotIn("p-old", self.mod._AUDIT_STREAMS, "expired terminal purged")
+        self.assertIn("p-fresh", self.mod._AUDIT_STREAMS, "fresh terminal kept (bridge memory)")
+        self.assertIn("p-live", self.mod._AUDIT_STREAMS, "live entry never purged")
+
     def test_audit_prepare_preserves_the_three_top_level_keys(self):
         info = {"files": [], "todos": [{"t": 1}], "tech_debt_items": []}
         with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": info}):
