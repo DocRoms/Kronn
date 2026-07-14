@@ -644,6 +644,83 @@ fn strip_fenced_code(text: &str) -> String {
     out
 }
 
+/// Lines with more backtick runs than this keep their spans (degraded =
+/// pre-quick-win behaviour) — bounds the pairing work on adversarial input.
+const MAX_BACKTICK_RUNS_PER_LINE: usize = 64;
+
+/// Strip `inline code` spans — a marker QUOTED in backticks is the agent
+/// talking ABOUT the `[src:]` syntax, not citing (pre-tag quick win: this
+/// false-positived 4× in one live session as "fabricated"). Strictly
+/// lexical, per line (markdown inline code doesn't survive a newline): a
+/// span opens with a run of N backticks and closes at the next run of
+/// exactly N (so `` `a` `` and ``` ``a`` ``` both work); an unclosed run is
+/// kept verbatim — backticks in plain prose never eat the rest of the line.
+/// Runs are pre-scanned once per line and their count is capped, so a long
+/// hostile line can't turn the pairing into a CPU hotspot (Copilot review).
+fn strip_inline_code(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        // Fast path — the overwhelmingly common case.
+        if !line.contains('`') {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        let chars: Vec<char> = line.chars().collect();
+        // One pass: every backtick run as (start, len).
+        let mut runs: Vec<(usize, usize)> = Vec::new();
+        let mut k = 0usize;
+        while k < chars.len() {
+            if chars[k] == '`' {
+                let start = k;
+                while k < chars.len() && chars[k] == '`' {
+                    k += 1;
+                }
+                runs.push((start, k - start));
+            } else {
+                k += 1;
+            }
+        }
+        if runs.len() > MAX_BACKTICK_RUNS_PER_LINE {
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        // Pair each opener with the next run of EXACTLY its length; runs
+        // consumed inside a span are never reconsidered as openers.
+        let mut drop_ranges: Vec<(usize, usize)> = Vec::new(); // [start, end)
+        let mut ri = 0usize;
+        while ri < runs.len() {
+            let (start, n) = runs[ri];
+            match (ri + 1..runs.len()).find(|&j| runs[j].1 == n) {
+                Some(rj) => {
+                    let (cstart, clen) = runs[rj];
+                    drop_ranges.push((start, cstart + clen));
+                    ri = rj + 1;
+                }
+                None => ri += 1, // unclosed — kept verbatim
+            }
+        }
+        let mut i = 0usize;
+        let mut di = 0usize;
+        while i < chars.len() {
+            if di < drop_ranges.len() && i == drop_ranges[di].0 {
+                // A single space where the span was — the surrounding prose
+                // must never weld into a NEW `[src:` across the boundary
+                // (Copilot: "[s" + span + "rc: …]" would mint a citation).
+                out.push(' ');
+                i = drop_ranges[di].1;
+                di += 1;
+                continue;
+            }
+            out.push(chars[i]);
+            i += 1;
+        }
+        out.push('\n');
+    }
+    out
+}
+
 /// Split into candidate sentences on `.`, `!`, `?` and newlines. Char-based so
 /// it's UTF-8 safe (French accents, emoji). A `.`/`!`/`?` is only a boundary
 /// when it's followed by whitespace or end-of-text — so file paths (`retry.rs`),
@@ -771,10 +848,12 @@ const MAX_SOURCES_VERIFIED: usize = 50;
 const LINE_COUNT_SIZE_CAP_BYTES: u64 = 2 * 1024 * 1024;
 
 /// Extract every `[src: …]` marker from the text, skipping fenced code blocks
-/// (example code shouldn't be verified). Returns the inner content (after
-/// `src:`), trimmed. Bracket-balanced so `[src: a[0]]` reads `a[0]`.
+/// AND inline-backtick spans (example/quoted syntax shouldn't be verified),
+/// and dropping EMPTY markers — a bare `[src:]` in prose is a mention of the
+/// grammar, not a citation. Returns the inner content (after `src:`),
+/// trimmed. Bracket-balanced so `[src: a[0]]` reads `a[0]`.
 pub fn extract_source_markers(text: &str) -> Vec<String> {
-    let prose = strip_fenced_code(text);
+    let prose = strip_inline_code(&strip_fenced_code(text));
     let chars: Vec<char> = prose.chars().collect();
     let lower: Vec<char> = prose.to_ascii_lowercase().chars().collect();
     let needle: Vec<char> = "[src:".chars().collect();
@@ -786,6 +865,7 @@ pub fn extract_source_markers(text: &str) -> Vec<String> {
             let mut depth = 1i32;
             let mut j = i + needle.len();
             let mut buf = String::new();
+            let mut closed = false;
             while j < chars.len() {
                 match chars[j] {
                     '[' => {
@@ -795,6 +875,7 @@ pub fn extract_source_markers(text: &str) -> Vec<String> {
                     ']' => {
                         depth -= 1;
                         if depth == 0 {
+                            closed = true;
                             break;
                         }
                         buf.push(']');
@@ -803,7 +884,15 @@ pub fn extract_source_markers(text: &str) -> Vec<String> {
                 }
                 j += 1;
             }
-            out.push(buf.trim().to_string());
+            // Only a CLOSED marker is a citation — partially-typed prose
+            // (`[src: foo.rs:1` at end of text) must not reach verification
+            // (Copilot review on PR 119).
+            if closed {
+                let inner = buf.trim();
+                if !inner.is_empty() {
+                    out.push(inner.to_string());
+                }
+            }
             i = j + 1;
         } else {
             i += 1;
@@ -1963,6 +2052,76 @@ mod tests {
     #[test]
     fn extract_empty_when_none() {
         assert!(extract_source_markers("no markers here at all").is_empty());
+    }
+
+    // ── Pre-tag quick win — literal-mention false positives ──────────
+    // Live incident (2026-07-14 room, 4×): TALKING about the `[src:]`
+    // grammar in backticks was linted as a fabricated citation.
+
+    #[test]
+    fn extract_ignores_a_syntax_mention_in_backticks() {
+        let txt = "la citation `[src:]` est obligatoire dans la doc.";
+        assert!(extract_source_markers(txt).is_empty(), "quoted syntax is a mention, not a citation");
+    }
+
+    #[test]
+    fn extract_ignores_a_full_quoted_marker_in_inline_code() {
+        // Codex non-regression ask: literal text that LOOKS like a
+        // provenance, quoted in inline code — must extract nothing.
+        let txt = "utilise `[src: file: main.rs:10]` pour citer une ligne.";
+        assert!(extract_source_markers(txt).is_empty());
+        let double = "ou ``[src: url: https://x.com]`` en double backticks.";
+        assert!(extract_source_markers(double).is_empty());
+    }
+
+    #[test]
+    fn extract_drops_an_empty_marker_in_prose() {
+        assert!(extract_source_markers("un [src:] nu est une mention de grammaire.").is_empty());
+        assert!(extract_source_markers("avec espaces [src:   ] aussi.").is_empty());
+    }
+
+    #[test]
+    fn extract_keeps_the_real_marker_next_to_a_quoted_mention() {
+        let txt = "La grammaire `[src:]` s'applique ici [src: foo.rs:1].";
+        assert_eq!(extract_source_markers(txt), vec!["foo.rs:1"]);
+    }
+
+    #[test]
+    fn extract_survives_an_unclosed_backtick() {
+        // A lone backtick in prose must not swallow the rest of the line.
+        let txt = "un ` isolé puis une vraie citation [src: real.rs:2] ensuite.";
+        assert_eq!(extract_source_markers(txt), vec!["real.rs:2"]);
+    }
+
+    #[test]
+    fn extract_drops_an_unclosed_marker() {
+        // Copilot (PR 119): partially-typed prose must not become a
+        // citation — no closing `]` means no marker.
+        assert!(extract_source_markers("truncated at end [src: foo.rs:1").is_empty());
+        let mixed = "closed [src: a.rs:1] then truncated [src: b.rs:9";
+        assert_eq!(extract_source_markers(mixed), vec!["a.rs:1"]);
+    }
+
+    #[test]
+    fn extract_does_not_weld_prose_across_a_dropped_span() {
+        // Copilot (PR 119 round 3): "[s" + `span` + "rc: …]" must not
+        // concatenate into a fresh "[src:" once the span is removed — the
+        // span leaves a space behind.
+        let txt = "des crochets [s`et du code`rc: foo.rs:1] ne fusionnent pas.";
+        assert!(extract_source_markers(txt).is_empty());
+        let with_real = "idem [s`x`rc: nope] mais [src: ok.rs:4] reste.";
+        assert_eq!(extract_source_markers(with_real), vec!["ok.rs:4"]);
+    }
+
+    #[test]
+    fn extract_is_bounded_on_a_backtick_heavy_line() {
+        // Copilot (PR 119): > MAX_BACKTICK_RUNS_PER_LINE runs on one line
+        // skips span-stripping (degraded = pre-quick-win behaviour) instead
+        // of pairing runs — the call stays cheap and markers outside spans
+        // still extract.
+        let noise = "` x ".repeat(100); // 100 unmatched single-backtick runs
+        let txt = format!("{noise} et [src: real.rs:3] à la fin.");
+        assert_eq!(extract_source_markers(&txt), vec!["real.rs:3"]);
     }
 
     // ── Niveau 1 — line-spec parsing ──────────────────────────────────

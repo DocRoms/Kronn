@@ -1,12 +1,15 @@
 //! Adversarial QA — DIMENSION "malformed_markers".
 //!
 //! Hammers the `[src: …]` extraction + verification path with malformed,
-//! degenerate, nested, multiplexed, fenced and over-cap markers. The contract:
+//! degenerate, nested, multiplexed, fenced and over-cap markers. The contract
+//! (tightened by the 0.8.11 pre-tag quick win — literal-mention false positives):
 //!
 //!  - extraction is bracket-balanced (`[src: a[0]]` → `a[0]`),
-//!  - fenced ```code``` markers are SKIPPED,
-//!  - empty / whitespace-only refs → `EmptyRef` (fabricated),
-//!  - an unclosed `[src: …` (no `]`) is read to end-of-text (best effort), no panic,
+//!  - fenced ```code``` markers AND `inline code` markers are SKIPPED,
+//!  - empty / whitespace-only markers are DROPPED (grammar mentions, not
+//!    citations) — a typed-but-empty ref (`[src: file:]`) still verifies
+//!    as `EmptyRef`,
+//!  - an unclosed `[src: …` (no `]`) is DROPPED (partially-typed prose), no panic,
 //!  - the verified-source list is capped (`MAX_SOURCES_VERIFIED = 50`),
 //!  - NO INPUT EVER PANICS,
 //!  - extraction/analysis is DETERMINISTIC.
@@ -48,98 +51,82 @@ fn cleanup(d: &Path) {
     let _ = std::fs::remove_dir_all(d);
 }
 
-// ── 1. Empty marker `[src:]` → one source, EmptyRef (fabricated) ───────────
+// ── 1. Empty marker `[src:]` → DROPPED (grammar mention, not a citation) ───
 
 #[test]
-fn empty_marker_extracts_one_and_is_empty_ref() {
+fn empty_marker_is_dropped_as_a_grammar_mention() {
+    // 0.8.11 quick win: a bare `[src:]` in prose is the agent talking ABOUT
+    // the grammar — it used to surface as EmptyRef/fabricated (4× live).
     let txt = "The default is X [src:].";
-    let markers = extract_source_markers(txt);
-    assert_eq!(
-        markers,
-        vec![String::new()],
-        "an empty [src:] must still extract exactly one (empty) marker"
-    );
-
-    let root = temp_project();
-    let report = analyze(txt, Some(&root));
-    // The empty marker classifies as a File with no reference → EmptyRef.
-    assert_eq!(report.sources.len(), 1, "exactly one source surfaced");
-    assert_eq!(
-        report.sources[0].status,
-        SourceStatus::EmptyRef,
-        "empty ref must be EmptyRef (fabricated), not Verified/Unchecked"
-    );
-    assert_eq!(
-        report.fabricated_count, 1,
-        "EmptyRef counts as fabricated (RED)"
-    );
-    cleanup(&root);
-}
-
-// ── 2. Whitespace-only marker `[src:   ]` → EmptyRef ───────────────────────
-
-#[test]
-fn whitespace_only_marker_is_empty_ref() {
-    let txt = "Trust me [src:    \t  ].";
-    let markers = extract_source_markers(txt);
-    assert_eq!(
-        markers,
-        vec![String::new()],
-        "whitespace-only inner content must trim to the empty string"
-    );
-
-    let root = temp_project();
-    let report = analyze(txt, Some(&root));
-    assert_eq!(report.sources.len(), 1);
-    assert_eq!(
-        report.sources[0].status,
-        SourceStatus::EmptyRef,
-        "whitespace-only ref must be EmptyRef"
-    );
-    assert_eq!(report.fabricated_count, 1);
-    cleanup(&root);
-}
-
-// ── 3. Unclosed marker `[src: file: x` (no `]`) → read to EOF, no panic ────
-
-#[test]
-fn unclosed_marker_reads_to_end_no_panic() {
-    let txt = "It lives in [src: file: src/foo.rs:1 and then we never close it";
-    let markers = extract_source_markers(txt);
-    // The extractor reads until ']' or end-of-text; with no ']' it consumes the
-    // remainder. It must NOT panic and must yield exactly one marker.
-    assert_eq!(markers.len(), 1, "unclosed marker yields one best-effort marker");
     assert!(
-        markers[0].starts_with("file: src/foo.rs:1"),
-        "unclosed marker captured the trailing text: got {:?}",
-        markers[0]
+        extract_source_markers(txt).is_empty(),
+        "an empty [src:] is a mention, not a citation"
+    );
+
+    let root = temp_project();
+    let report = analyze(txt, Some(&root));
+    assert_eq!(report.sources.len(), 0, "no source surfaced");
+    assert_eq!(report.fabricated_count, 0, "no fabrication from a mention");
+    // The EmptyRef verdict still exists for TYPED empty refs reaching
+    // verification directly.
+    assert_eq!(
+        verify_source_marker("file:", Some(&root)).status,
+        SourceStatus::EmptyRef,
+    );
+    cleanup(&root);
+}
+
+// ── 2. Whitespace-only marker `[src:   ]` → DROPPED like the empty one ─────
+
+#[test]
+fn whitespace_only_marker_is_dropped() {
+    let txt = "Trust me [src:    \t  ].";
+    assert!(
+        extract_source_markers(txt).is_empty(),
+        "whitespace-only inner content trims to empty → dropped"
+    );
+
+    let root = temp_project();
+    let report = analyze(txt, Some(&root));
+    assert_eq!(report.sources.len(), 0);
+    assert_eq!(report.fabricated_count, 0);
+    cleanup(&root);
+}
+
+// ── 3. Unclosed marker `[src: file: x` (no `]`) → DROPPED, no panic ────────
+
+#[test]
+fn unclosed_marker_is_dropped_no_panic() {
+    // 0.8.11 quick win (Copilot): partially-typed prose must not become a
+    // citation — only a marker with its closing `]` is extracted.
+    let txt = "It lives in [src: file: src/foo.rs:1 and then we never close it";
+    assert!(
+        extract_source_markers(txt).is_empty(),
+        "unclosed marker must not reach verification"
     );
 
     // Whole-pipeline must not panic on the unclosed input either.
     let root = temp_project();
     let report = analyze(txt, Some(&root));
-    assert!(report.sources.len() <= 1, "no more than the single marker");
+    assert_eq!(report.sources.len(), 0, "nothing to verify");
     cleanup(&root);
 }
 
-// ── 4. Truly unclosed empty `[src:` at the very end → no panic, empty ref ──
+// ── 4. Truly unclosed empty `[src:` at the very end → no panic, dropped ────
 
 #[test]
 fn dangling_open_marker_at_eof_no_panic() {
     let txt = "trailing open bracket [src:";
-    let markers = extract_source_markers(txt);
-    // `[src:` with nothing after → reads zero chars to EOF → empty marker.
-    assert_eq!(
-        markers,
-        vec![String::new()],
-        "dangling [src: with no body extracts a single empty marker"
+    assert!(
+        extract_source_markers(txt).is_empty(),
+        "dangling [src: with no body extracts nothing"
     );
-    // Must not panic when verified.
-    let check = verify_source_marker(&markers[0], None::<&Path>);
+    // The EmptyRef contract itself is untouched for direct verification.
+    let check = verify_source_marker("", None::<&Path>);
     assert_eq!(
         check.status,
         SourceStatus::EmptyRef,
-        "dangling empty marker verifies as EmptyRef even with no root"
+        "an empty ref still verifies as EmptyRef even with no root"
     );
 }
 
@@ -222,22 +209,26 @@ fn marker_inside_fenced_block_is_skipped() {
     cleanup(&root);
 }
 
-// ── 9. Marker inside `inline code` → single backticks are NOT a fence ──────
+// ── 9. Marker inside `inline code` → SKIPPED (0.8.11 quick win) ────────────
 
 #[test]
-fn marker_inside_inline_code_is_still_extracted() {
-    // `strip_fenced_code` only strips triple-backtick FENCES (line-level). A
-    // single-backtick inline span is NOT a fence, so the marker is extracted.
+fn marker_inside_inline_code_is_skipped() {
+    // A marker quoted in backticks is the agent showing the syntax, not
+    // citing — it false-positived as "fabricated" 4× in one live session.
     let txt = "Use this `[src: file: src/foo.rs:1]` syntax.";
-    let markers = extract_source_markers(txt);
-    assert_eq!(
-        markers,
-        vec!["file: src/foo.rs:1"],
-        "an inline-code single-backtick marker is NOT skipped (only fences are)"
+    assert!(
+        extract_source_markers(txt).is_empty(),
+        "an inline-code marker is a quoted example, never extracted"
     );
 
     let root = temp_project();
     let report = analyze(txt, Some(&root));
+    assert_eq!(report.sources.len(), 0);
+    assert_eq!(report.fabricated_count, 0);
+
+    // The same marker OUTSIDE backticks still extracts and verifies.
+    let real = "Use this [src: file: src/foo.rs:1] citation.";
+    let report = analyze(real, Some(&root));
     assert_eq!(report.sources.len(), 1);
     assert_eq!(report.sources[0].status, SourceStatus::Verified);
     cleanup(&root);

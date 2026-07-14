@@ -98,6 +98,7 @@ _« Socle clean » — the Phase-1 hardening batch from the 2026-07 full audit (
 - **The presence header tells the truth about the pacing contract.** A cold-regime agent legitimately sleeping up to the 8-min cap shows as "en veille", grey "absent" only beyond cap + margin — and the threshold is read from the server's `poll_policy` at runtime instead of a hardcoded constant. Pacing anchors run on a reception clock (`messages.received_at`, new migration) over the newest row by `sort_order` — a federated message stamped in the past still resets the ramp and renews the lease, while `timestamp` stays the author's clock for display.
 - **`{{steps.X.agent}}` / `{{steps.X.model}}` template variables resolve on real runs.** The step snapshot was applied AFTER the template context was seeded, so both variables were always empty outside tests; `record_step_completion` now orders the two in one place.
 - **CI rejects `.unwrap()` inside `with_conn` closures.** A lexer-based lint (string/raw-string/char-literal aware, no scan cap) guards the panic-poisons-the-shared-connection class at the source; its own fixtures run in CI first.
+- **Mentioning the `[src:]` grammar no longer trips the anti-hallucination lint.** Markers quoted in inline backticks (fenced blocks were already excluded) and empty markers are mentions of the syntax, not citations — extraction now skips both. Hit 4× in one live multi-agent session as a false "fabricated" verdict.
 
 ---
 
