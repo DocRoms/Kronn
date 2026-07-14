@@ -141,6 +141,10 @@ TOOLS = [
             "⚠ THIS IS HOW YOU TALK TO OTHER AGENTS IN A MULTI-AGENT "
             "ROOM (after `disc_join`). Replying only in your own "
             "terminal is INVISIBLE to peers. \n\n"
+            "⚠ `content` is a MESSAGE for your peers — NEVER pass a tool "
+            "name as content (e.g. posting the literal text "
+            "'disc_wait_for_peer' instead of CALLING that tool: to wait, "
+            "invoke disc_wait_for_peer; to speak, append prose).\n\n"
             "TWO USAGE MODES :\n"
             "  • SIMPLE (recommended for live chat) — pass just "
             "`content` : `disc_append({content: \"Hi, I'm Codex. "
@@ -4137,6 +4141,38 @@ _AUDIT_LOCK = threading.Lock()
 _AUDIT_STREAMS = {}
 _AUDIT_STREAM_MAX_SECONDS = 2 * 60 * 60  # hard bound on one stream read
 _AUDIT_START_WAIT_SECONDS = 5
+# Terminal entries older than this are purged (PR C — a long-lived bridge
+# session auditing many projects must not accumulate dead entries).
+_AUDIT_TERMINAL_TTL_SECONDS = 24 * 60 * 60
+_AUDIT_TERMINAL_STATES = frozenset({
+    "done", "error", "cancelled", "launch_timeout",
+    "bridge_timeout", "stream_error", "stream_closed",
+})
+
+
+def _audit_purge_terminal_entries():
+    """Drop terminal entries past their TTL. Called under no lock by the
+    tools' entry points — takes _AUDIT_LOCK itself. The freshest terminal
+    entry per project survives until the TTL so audit_status keeps its
+    bridge-side memory of the last outcome."""
+    now = time.monotonic()  # clock-jump-safe — this is a TTL, not a date
+    with _AUDIT_LOCK:
+        stale = []
+        for project_id, e in _AUDIT_STREAMS.items():
+            if e.get("state") not in _AUDIT_TERMINAL_STATES:
+                continue
+            # Terminal entries created OUTSIDE the reader thread (e.g. an
+            # open failure before any thread starts) never got the stamp —
+            # a `now` default would make their age 0 forever and they'd
+            # never purge. Self-heal: stamp at first observation, so the
+            # TTL counts from here.
+            if "_ended_monotonic" not in e:
+                e["_ended_monotonic"] = now
+                continue
+            if now - e["_ended_monotonic"] > _AUDIT_TERMINAL_TTL_SECONDS:
+                stale.append(project_id)
+        for project_id in stale:
+            del _AUDIT_STREAMS[project_id]
 
 
 def _audit_entry_public(entry):
@@ -4231,6 +4267,7 @@ def _audit_stream_reader(entry):
             pass
         with _AUDIT_LOCK:
             entry["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            entry["_ended_monotonic"] = time.monotonic()  # purge TTL anchor (PR C)
             if entry["state"] in ("launching", "running"):
                 # Server closed the stream without a terminal event (e.g.
                 # backend restart) — distinct from done AND from error.
@@ -4260,6 +4297,7 @@ def call_audit_prepare(args):
 
 
 def call_audit_launch(args):
+    _audit_purge_terminal_entries()
     project_id = (args.get("project_id") or "").strip()
     mode = (args.get("mode") or "").strip()
     if not project_id:
@@ -4365,6 +4403,7 @@ def call_audit_launch(args):
 
 
 def call_audit_status(args):
+    _audit_purge_terminal_entries()
     project_id = (args.get("project_id") or "").strip()
     if not project_id:
         raise RuntimeError("audit_status: project_id is required")
