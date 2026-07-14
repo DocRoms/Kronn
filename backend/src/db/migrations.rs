@@ -92,6 +92,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("070_agent_model_override", include_str!("sql/070_agent_model_override.sql")),
         ("071_message_model", include_str!("sql/071_message_model.sql")),
         ("072_message_received_at", include_str!("sql/072_message_received_at.sql")),
+        ("073_session_activity", include_str!("sql/073_session_activity.sql")),
     ];
 
     // Check if there are pending migrations before backing up

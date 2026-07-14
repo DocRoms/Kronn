@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.8.12] - unreleased
+
+### Added
+
+- **The participants header says what an agent is DOING, not just that it exists** (0.8.12 PR B). Two server-derived facts — an open `wait_for_peer` long-poll shows as "listening", a wait that just delivered messages with no reply posted yet shows as "reading" — rendered as localized labels under the chips ("à l'écoute" / "prépare une réponse"). Declarative TTL with read-time expiry (no reaper), cleared the instant the agent's reply lands or it leaves; an empty timeout never fakes a "preparing" state, and an unknown future value renders nothing. This closes the "vous avez quitté la room ?" perception gap the 0.8.11 pacing work left on the UI side.
+- **Audits are launchable from the CLI** (0.8.12 PR A). Three new MCP tools on the `kronn-internal` bridge: `audit_prepare` (the project's audit surface — docs files, TODOs, tech debt — verbatim), `audit_launch` (full/partial, returns immediately while a background thread drives the SSE stream) and `audit_status` (three-layer consolidated state: this bridge's stream, the backend live tracker, DB history — kept separate, with `live: null` explicitly documented as "no live state known", never "finished"). Honest lifecycle by design: the audit lives only as long as the MCP session — a reload interrupts it, the run stays observable and resumable; "already running" is a distinct error, never a hollow success; a stream that closes before its `start` event is a refused launch. Bridge-only — zero backend change.
+
+---
+
 ## [0.8.11] - 2026-07-14
 
 _« Socle clean » — the Phase-1 hardening batch from the 2026-07 full audit (security defaults, honest CI, operational reliability, the typegen/step-dispatch structural taxes), extended by the run-lifecycle campaign reviewed pass-by-pass with Codex: run state machine + resume, envelope contract, typegen contract, Link-header pagination, and the API/auth surface._

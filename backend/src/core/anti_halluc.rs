@@ -1654,6 +1654,7 @@ mod tests {
         }
     }
 
+    #[serial_test::serial] // mutates the process-global anti-halluc mode
     #[test]
     fn preamble_gating_follows_global_mode() {
         set_mode("off");
@@ -2644,6 +2645,7 @@ mod tests {
     // ── 0.8.8 — finalize_lint_report (the extracted finalize seam) ────
     // ONE sequential test: `set_mode` mutates a process-global, so splitting
     // these into parallel tests would race (the known "mode-drift" risk).
+    #[serial_test::serial] // mutates the process-global anti-halluc mode
     #[test]
     fn finalize_lint_report_behavior() {
         let root = temp_project();
@@ -3867,6 +3869,7 @@ mod tests {
         }
 
         // ONE sequential test for the mode-global drift caveat.
+        #[serial_test::serial] // mutates the process-global anti-halluc mode
         #[test]
         fn finalize_mode_off_then_warn_sequential() {
             let root = temp_project();
@@ -4143,6 +4146,7 @@ mod tests {
             std::fs::remove_dir_all(&root).ok();
         }
 
+        #[serial_test::serial] // mutates the process-global anti-halluc mode
         #[test]
         fn no_signal_finalize_returns_none() {
             // The has_signal gate in finalize_lint_report drops a no-signal

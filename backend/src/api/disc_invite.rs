@@ -402,6 +402,8 @@ pub async fn peer_leave(
                 return Ok(PeerLeaveResponse { left: false });
             };
             db::discussion_sessions::mark_session_left(conn, s.id)?;
+            // 0.8.12 PR B — a departed agent keeps no activity placeholder.
+            db::discussion_sessions::clear_session_activity(conn, &s.disc_id, &agent_type, s.session_id.as_deref())?;
             Ok(PeerLeaveResponse { left: true })
         })
         .await;
@@ -429,6 +431,11 @@ pub struct WaitForPeerQuery {
     /// messages trigger the wake.
     #[serde(default)]
     pub exclude_agent_type: Option<String>,
+    /// 0.8.12 PR B — the caller's session id, so the activity placeholder
+    /// is scoped to THIS session's row. Without it (older bridges) the
+    /// activity falls back to agent_type granularity.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -502,6 +509,12 @@ pub(crate) async fn pacing_for_disc(
 const WAIT_POLL_INTERVAL_MS: u64 = 1000;
 const WAIT_TIMEOUT_DEFAULT_SECS: u64 = 60;
 const WAIT_TIMEOUT_MAX_SECS: u64 = 90;
+/// 0.8.12 PR B — "listening" outlives the requested wait by this margin,
+/// then expires on its own (read-side expiry, no reaper).
+const ACTIVITY_LISTENING_MARGIN_SECS: i64 = 30;
+/// "reading" = delivered-but-not-replied. Short by design: past this the
+/// placeholder would be a guess, and guesses are what phase 1 forbids.
+const ACTIVITY_READING_TTL_SECS: i64 = 120;
 
 /// `GET /api/discussions/:id/wait`
 ///
@@ -535,17 +548,28 @@ pub async fn wait_for_peer(
     // entering the wait is proof it's alive. Bump last_seen at the START
     // (not after the long-poll) so a crashed agent's session goes stale
     // promptly. Best-effort: a DB hiccup here must not block the wait.
+    //
+    // 0.8.12 PR B — presence phase 1: an open wait IS the "listening"
+    // fact. TTL = requested timeout + margin, so a crashed agent's
+    // placeholder dies on its own (expiry read-side, no reaper).
+    let session_id = q.session_id;
     if let Some(ref agent_type) = exclude {
         let disc_id_touch = disc_id.clone();
         let agent_touch = agent_type.clone();
+        let sess_touch = session_id.clone();
+        let listening_ttl = timeout_secs as i64 + ACTIVITY_LISTENING_MARGIN_SECS;
         if let Err(e) = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::touch_session_by_agent(conn, &disc_id_touch, &agent_touch)
+                crate::db::discussion_sessions::touch_session_by_agent(conn, &disc_id_touch, &agent_touch)?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn, &disc_id_touch, &agent_touch, sess_touch.as_deref(),
+                    "listening", listening_ttl,
+                )
             })
             .await
         {
-            tracing::warn!("wait_for_peer: failed to bump session heartbeat: {e}");
+            tracing::warn!("wait_for_peer: failed to bump heartbeat / set listening activity: {e}");
         }
     }
 
@@ -599,6 +623,28 @@ pub async fn wait_for_peer(
 
         if !messages.is_empty() {
             let latest_sort_order = messages.iter().map(|m| m.sort_order).max().unwrap_or(since);
+            // 0.8.12 PR B — messages DELIVERED and no reply posted yet:
+            // that's the "reading" fact (the window the human perceives
+            // as "buggé/très long"). Short TTL; disc_append clears it the
+            // instant the reply lands. An EMPTY timeout never sets this
+            // (guard from the design debate: no fake "preparing" states).
+            if let Some(ref agent_type) = exclude {
+                let disc_id_act = disc_id.clone();
+                let agent_act = agent_type.clone();
+                let sess_act = session_id.clone();
+                if let Err(e) = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussion_sessions::set_session_activity(
+                            conn, &disc_id_act, &agent_act, sess_act.as_deref(),
+                            "reading", ACTIVITY_READING_TTL_SECS,
+                        )
+                    })
+                    .await
+                {
+                    tracing::warn!("wait_for_peer: failed to set reading activity: {e}");
+                }
+            }
             let pacing = pacing_for_disc(&state, &disc_id).await;
             return Json(ApiResponse::ok(WaitForPeerResponse {
                 timed_out: false,
@@ -1424,6 +1470,7 @@ mod tests {
                 since_sort_order: Some(0),
                 timeout_secs: Some(3),
                 exclude_agent_type: Some("Codex".into()),
+                session_id: None,
             }),
         )
         .await;
@@ -1448,6 +1495,7 @@ mod tests {
                 since_sort_order: Some(1),
                 timeout_secs: Some(3),
                 exclude_agent_type: Some("ClaudeCode".into()),
+                session_id: None,
             }),
         )
         .await;
@@ -1631,6 +1679,7 @@ mod tests {
                 since_sort_order: Some(0),
                 timeout_secs: Some(5),
                 exclude_agent_type: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1673,6 +1722,7 @@ mod tests {
                 // advances automatically with `start_paused = true`.
                 timeout_secs: Some(2),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: None,
             }),
         )
         .await;
@@ -1693,6 +1743,7 @@ mod tests {
                 since_sort_order: Some(0),
                 timeout_secs: Some(2),
                 exclude_agent_type: None,
+                session_id: None,
             }),
         )
         .await;
@@ -1700,6 +1751,107 @@ mod tests {
         assert!(data.timed_out);
         assert_eq!(data.messages.len(), 0);
         assert_eq!(data.latest_sort_order, 0);
+    }
+
+    // ─── 0.8.12 PR B — presence phase 1 (server-derived activity) ────
+
+    async fn activity_of(state: &AppState, disc_id: &str, agent: &str) -> Option<String> {
+        let did = disc_id.to_string();
+        let ag = agent.to_string();
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussion_sessions::list_sessions(conn, &did, false))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.agent_type == ag)
+            .and_then(|s| s.activity)
+    }
+
+    #[tokio::test]
+    async fn wait_entry_sets_listening_and_empty_timeout_never_sets_reading() {
+        let state = make_state_with_disc("d-act-1").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(conn, "d-act-1", "ClaudeCode", "s-act")
+                    .map(|_| ())
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state.clone()),
+            Path("d-act-1".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        assert!(resp.0.data.unwrap().timed_out);
+        // The wait opened → "listening" was set, its TTL outlives the 1s
+        // timeout by the margin. An EMPTY timeout must never say "reading".
+        assert_eq!(
+            activity_of(&state, "d-act-1", "ClaudeCode").await.as_deref(),
+            Some("listening"),
+            "empty timeout keeps listening (never a fake 'reading')",
+        );
+    }
+
+    // The real disc_append→clear path is regression-tested in
+    // disc_source.rs (`append_clears_the_activity_placeholder`); here we
+    // only assert the DB-level clear this handler module relies on.
+    #[tokio::test]
+    async fn wait_delivery_flips_to_reading_and_clear_removes_it() {
+        let state = make_state_with_disc("d-act-2").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(conn, "d-act-2", "ClaudeCode", "s-act2")
+                    .map(|_| ())?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, agent_type, timestamp, sort_order)
+                     VALUES ('m-peer', 'd-act-2', 'Agent', 'peer msg', 'Codex', ?1, 5)",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = wait_for_peer(
+            State(state.clone()),
+            Path("d-act-2".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(5),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: None,
+            }),
+        )
+        .await;
+        let data = resp.0.data.unwrap();
+        assert!(!data.timed_out && data.messages.len() == 1);
+        assert_eq!(
+            activity_of(&state, "d-act-2", "ClaudeCode").await.as_deref(),
+            Some("reading"),
+            "a delivering wait flips the placeholder to reading",
+        );
+
+        // The agent replies → placeholder vanishes with the message.
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::clear_session_activity(conn, "d-act-2", "ClaudeCode", None)
+            })
+            .await
+            .unwrap();
+        assert!(activity_of(&state, "d-act-2", "ClaudeCode").await.is_none());
     }
 
     #[test]

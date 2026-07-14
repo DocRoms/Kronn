@@ -16,6 +16,15 @@
 //      (defensive — older callers compile fine without it)
 
 import { describe, it, expect, vi } from 'vitest';
+
+// The sidebar fires a real `projectsApi.discSources()` on mount — unmocked,
+// happy-dom performs an actual fetch (ECONNREFUSED in CI) whose late catch
+// races the worker teardown (EnvironmentTeardownError). Same shared mock as
+// the grouping/sourceBadge suites.
+vi.mock('../../lib/api', async () => {
+  const { buildApiMock } = await import('../../test/apiMock');
+  return buildApiMock();
+});
 import { render, fireEvent, screen } from '@testing-library/react';
 import { DiscussionSidebar } from '../DiscussionSidebar';
 import type { Discussion } from '../../types/generated';

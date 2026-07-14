@@ -27,7 +27,7 @@ For other distros, see the [official Docker docs](https://docs.docker.com/engine
 ### 2. Run Kronn
 
 ```bash
-git clone https://github.com/DocRoms/kronn.git
+git clone --branch 0.8.11 --depth 1 https://github.com/DocRoms/kronn.git   # latest stable release
 cd kronn
 ./kronn start
 # Open http://localhost:3140
@@ -154,7 +154,7 @@ sudo apt-get install -y nodejs
 ```bash
 # Clone inside WSL (not on /mnt/c/ — performance is much better on the Linux filesystem)
 cd ~
-git clone https://github.com/DocRoms/kronn.git
+git clone --branch 0.8.11 --depth 1 https://github.com/DocRoms/kronn.git   # latest stable release
 cd kronn
 ./kronn start
 # Open http://localhost:3140 in your Windows browser
@@ -198,8 +198,11 @@ This Kiro behaviour is macOS-only; Linux and Windows (WSL2) are unaffected.
 
 ```bash
 cd kronn
-git pull
+git fetch --tags
+git checkout 0.8.11   # the newest tag from the Releases page
 ./kronn restart
 ```
+
+> Running from `main` (development)? `git pull` instead — but expect unreleased code.
 
 This rebuilds containers and applies any new changes.

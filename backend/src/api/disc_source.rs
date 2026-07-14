@@ -361,11 +361,23 @@ pub async fn disc_append(
                                 conn,
                                 &did_touch,
                                 &agent_type,
+                            )?;
+                            // 0.8.12 PR B — the agent just replied: the
+                            // listening/reading placeholder vanishes the
+                            // instant its message lands.
+                            // No session id on this path — broad clear is
+                            // the safe direction (a sibling's label returns
+                            // at its next wait).
+                            crate::db::discussion_sessions::clear_session_activity(
+                                conn,
+                                &did_touch,
+                                &agent_type,
+                                None,
                             )
                         })
                         .await
                     {
-                        tracing::warn!("disc_append: failed to bump session heartbeat: {e}");
+                        tracing::warn!("disc_append: failed to bump heartbeat / clear activity: {e}");
                     }
                 }
             }
@@ -686,6 +698,39 @@ mod tests {
             Json(DiscAppendRequest { disc_id: "d-lint".into(), messages: msgs }),
         ).await;
         resp.0.data.expect("append succeeds")
+    }
+
+    #[tokio::test]
+    #[serial] // global anti-halluc mode cell
+    async fn append_clears_the_activity_placeholder() {
+        // 0.8.12 PR B (Copilot review): the REAL disc_append path must
+        // clear the presence placeholder of the posting agent — the
+        // "prépare une réponse" label vanishes the instant the reply lands.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(conn, "d-lint", "Codex", "s-x")
+                    .map(|_| ())?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn, "d-lint", "Codex", None, "reading", 300,
+                )
+            })
+            .await
+            .unwrap();
+
+        append(&state, vec![agent_msg("s-act", "voilà ma réponse")]).await;
+
+        let activity = state
+            .db
+            .with_conn(|conn| crate::db::discussion_sessions::list_sessions(conn, "d-lint", false))
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.agent_type == "Codex")
+            .and_then(|s| s.activity);
+        assert!(activity.is_none(), "disc_append must clear the poster's activity");
     }
 
     #[tokio::test]

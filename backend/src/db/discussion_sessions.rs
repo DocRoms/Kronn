@@ -45,6 +45,11 @@ pub struct DiscussionSession {
     /// (working)" vs "away" — instead of a binary present/absent that makes a
     /// quietly-working peer look like a dead room. `None` for rows predating 064.
     pub last_seen: Option<String>,
+    /// 0.8.12 PR B — server-derived activity placeholder: `"listening"`
+    /// (open wait long-poll) or `"reading"` (messages delivered, no reply
+    /// yet). Expiry is applied at read time — an expired activity is None
+    /// here, callers never see a stale placeholder.
+    pub activity: Option<String>,
 }
 
 /// Metadata returned by `create_invite_token`. The plain `token` field
@@ -145,12 +150,12 @@ pub fn list_sessions(
     include_left: bool,
 ) -> Result<Vec<DiscussionSession>> {
     let sql = if include_left {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at
            FROM discussion_sessions
           WHERE disc_id = ?1
           ORDER BY joined_at ASC"
     } else {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at
            FROM discussion_sessions
           WHERE disc_id = ?1 AND status != 'left'
           ORDER BY joined_at ASC"
@@ -168,6 +173,7 @@ pub fn list_sessions(
                 joined_at: r.get(6)?,
                 left_at: r.get(7)?,
                 last_seen: r.get(8)?,
+                activity: activity_of_row(r.get(9)?, r.get(10)?),
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -185,7 +191,7 @@ pub fn find_active_session(
 ) -> Result<Option<DiscussionSession>> {
     let row = conn
         .query_row(
-            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen
+            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at
                FROM discussion_sessions
               WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'
               LIMIT 1",
@@ -201,6 +207,7 @@ pub fn find_active_session(
                     joined_at: r.get(6)?,
                     left_at: r.get(7)?,
                     last_seen: r.get(8)?,
+                    activity: activity_of_row(r.get(9)?, r.get(10)?),
                 })
             },
         )
@@ -256,6 +263,67 @@ pub fn touch_session_by_agent(conn: &Connection, disc_id: &str, agent_type: &str
         params![disc_id, agent_type, now],
     )?;
     Ok(())
+}
+
+/// 0.8.12 PR B — presence phase 1. Set the server-derived activity of an
+/// agent's active session: `"listening"` (an open wait_for_peer) or
+/// `"reading"` (a wait just delivered messages, no reply posted yet).
+/// The TTL is declarative — readers treat an expired activity as absent
+/// (`activity_of_row`), so nothing ever needs reaping.
+///
+/// `session_id` scopes the write to ONE session row (Copilot review: two
+/// concurrent sessions of the same agent type — multi-machine — must not
+/// inherit each other's placeholder). `None` = agent_type granularity,
+/// the compat path for older bridges that don't send their session id.
+pub fn set_session_activity(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: Option<&str>,
+    activity: &str,
+    ttl_secs: i64,
+) -> Result<()> {
+    let expires = (Utc::now() + chrono::Duration::seconds(ttl_secs)).to_rfc3339();
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET activity = ?3, activity_expires_at = ?4
+          WHERE disc_id = ?1 AND agent_type = ?2 AND status = 'active'
+            AND (?5 IS NULL OR session_id = ?5)",
+        params![disc_id, agent_type, activity, expires, session_id],
+    )?;
+    Ok(())
+}
+
+/// Clear the activity — the agent replied (`disc_append`) or left: the
+/// placeholder must vanish the instant its cause disappears. Same
+/// session scoping as the setter; a broad clear (None) is the SAFE
+/// direction on paths that can't know the session (a sibling session's
+/// label reappears at its next wait ≤90s).
+pub fn clear_session_activity(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: Option<&str>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET activity = NULL, activity_expires_at = NULL
+          WHERE disc_id = ?1 AND agent_type = ?2
+            AND (?3 IS NULL OR session_id = ?3)",
+        params![disc_id, agent_type, session_id],
+    )?;
+    Ok(())
+}
+
+/// Expiry evaluated at READ time: an activity past its TTL reads as None —
+/// a crashed agent's "listening" dies on its own, no background job.
+/// Real DateTime comparison (Copilot review: lexicographic RFC3339 breaks
+/// on format drift); an unparseable timestamp reads as EXPIRED.
+fn activity_of_row(activity: Option<String>, expires_at: Option<String>) -> Option<String> {
+    let act = activity?;
+    let exp = expires_at?;
+    let exp_dt = chrono::DateTime::parse_from_rfc3339(&exp).ok()?.with_timezone(&Utc);
+    (exp_dt > Utc::now()).then_some(act)
 }
 
 /// Count LIVE responders = MCP-joined agents currently `status='active'`
@@ -717,6 +785,74 @@ mod tests {
         let after = list_sessions(&conn, "d1", false).unwrap();
         let s = after.iter().find(|s| s.session_id.as_deref() == Some("sess-1")).unwrap();
         assert!(s.last_seen.is_some(), "heartbeat must surface in list_sessions");
+    }
+
+    #[test]
+    fn session_activity_is_set_cleared_and_expires_at_read_time() {
+        // 0.8.12 PR B — the activity placeholder lifecycle.
+        let conn = setup_db();
+        join_disc_session(&conn, "d1", "ClaudeCode", "sess-1").unwrap();
+
+        // No activity until a wait opens.
+        let s = &list_sessions(&conn, "d1", false).unwrap()[0];
+        assert!(s.activity.is_none());
+
+        // "listening" with a live TTL surfaces.
+        set_session_activity(&conn, "d1", "ClaudeCode", None, "listening", 60).unwrap();
+        let s = &list_sessions(&conn, "d1", false).unwrap()[0];
+        assert_eq!(s.activity.as_deref(), Some("listening"));
+
+        // clear (disc_append / disc_leave) removes it instantly.
+        clear_session_activity(&conn, "d1", "ClaudeCode", None).unwrap();
+        let s = &list_sessions(&conn, "d1", false).unwrap()[0];
+        assert!(s.activity.is_none(), "cleared activity must vanish");
+
+        // An EXPIRED activity reads as None — read-side expiry, no reaper.
+        set_session_activity(&conn, "d1", "ClaudeCode", None, "reading", -1).unwrap();
+        let s = &list_sessions(&conn, "d1", false).unwrap()[0];
+        assert!(s.activity.is_none(), "expired activity must read as None");
+    }
+
+    #[test]
+    fn session_activity_is_scoped_to_one_session_of_the_agent_type() {
+        // Copilot round 9: two concurrent sessions of the SAME agent type
+        // (multi-machine) must not inherit each other's placeholder.
+        let conn = setup_db();
+        join_disc_session(&conn, "d1", "ClaudeCode", "sess-mac").unwrap();
+        conn.execute(
+            "INSERT INTO discussion_sessions
+                (disc_id, agent_type, session_id, role, status, joined_at)
+             VALUES ('d1', 'ClaudeCode', 'sess-wsl', 'peer', 'active', datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        set_session_activity(&conn, "d1", "ClaudeCode", Some("sess-mac"), "listening", 60).unwrap();
+        let rows = list_sessions(&conn, "d1", false).unwrap();
+        let mac = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-mac")).unwrap();
+        let wsl = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-wsl")).unwrap();
+        assert_eq!(mac.activity.as_deref(), Some("listening"));
+        assert!(wsl.activity.is_none(), "the sibling session must not inherit the placeholder");
+
+        // Scoped clear removes only the targeted session's activity.
+        set_session_activity(&conn, "d1", "ClaudeCode", Some("sess-wsl"), "reading", 60).unwrap();
+        clear_session_activity(&conn, "d1", "ClaudeCode", Some("sess-mac")).unwrap();
+        let rows = list_sessions(&conn, "d1", false).unwrap();
+        let mac = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-mac")).unwrap();
+        let wsl = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-wsl")).unwrap();
+        assert!(mac.activity.is_none());
+        assert_eq!(wsl.activity.as_deref(), Some("reading"), "scoped clear spares the sibling");
+    }
+
+    #[test]
+    fn session_activity_only_touches_active_sessions() {
+        let conn = setup_db();
+        let pk = create_session(&conn, "d1", "Codex", Some("sess-c"), "peer").unwrap();
+        set_session_status(&conn, pk, "paused").unwrap();
+        set_session_activity(&conn, "d1", "Codex", None, "listening", 60).unwrap();
+        let all = list_sessions(&conn, "d1", false).unwrap();
+        let s = all.iter().find(|s| s.session_id.as_deref() == Some("sess-c")).unwrap();
+        assert!(s.activity.is_none(), "a paused session is not a live listener");
     }
 
     #[test]

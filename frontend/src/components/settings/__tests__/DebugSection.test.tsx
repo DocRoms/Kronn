@@ -228,7 +228,14 @@ describe('DebugSection — actions', () => {
     renderCard();
     await waitFor(() => expect(debugApi.getLogs).toHaveBeenCalledTimes(1));
 
-    const refreshBtn = screen.getByText(/settings\.debugLogsRefresh/);
+    // The button is disabled while `loading` — under a slow CI the first
+    // fetch can still be in flight here, so a blind click lands on a
+    // disabled button and the second call never happens (flake seen on
+    // the 0.8.12 train). Wait for it to be clickable first.
+    const refreshBtn = screen
+      .getByText(/settings\.debugLogsRefresh/)
+      .closest('button') as HTMLButtonElement;
+    await waitFor(() => expect(refreshBtn.disabled).toBe(false));
     await act(async () => { fireEvent.click(refreshBtn); });
 
     await waitFor(() => expect(debugApi.getLogs).toHaveBeenCalledTimes(2));

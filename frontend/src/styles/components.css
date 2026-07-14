@@ -339,6 +339,15 @@ select.input option {
   opacity: 0.6;
 }
 
+/* 0.8.12 PR B — server-derived activity placeholder ("à l'écoute" /
+   "prépare une réponse"). Italic + secondary so it reads as a state,
+   never as a message. */
+.disc-participant-activity {
+  font-style: italic;
+  font-size: 0.9em;
+  color: var(--kr-text-secondary);
+}
+
 .disc-participants-invite-btn {
   display: inline-flex;
   align-items: center;

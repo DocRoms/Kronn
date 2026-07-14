@@ -134,6 +134,38 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
   });
 });
 
+describe('activity placeholder — presence phase 1 (0.8.12 PR B)', () => {
+  it('renders the i18n label for a live activity and nothing when absent', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', activity: 'listening' },
+      { id: 2, agent_type: 'Codex', session_id: 'sB', role: 'peer', status: 'active', activity: 'reading' },
+      { id: 3, agent_type: 'GeminiCli', session_id: 'sC', role: 'peer', status: 'active', activity: null },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-act" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const labels = Array.from(document.querySelectorAll('.disc-participant-activity'));
+    expect(labels.length, 'only live activities render').toBe(2);
+    expect(labels[0].textContent).toBe('disc.activityListening');
+    expect(labels[1].textContent).toBe('disc.activityReading');
+  });
+
+  it('never renders a raw token for an unknown future activity value', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', activity: 'compiling' },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-unk" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(document.querySelector('.disc-participant-activity')).toBeNull();
+    expect(document.body.textContent).not.toContain('compiling');
+  });
+});
+
 describe('freshnessOf — presence thresholds aligned with PollBackoffPolicy (stab-3)', () => {
   // Timestamps are built relative to Date.now() so the assertions pin the
   // BOUNDARIES (2 min fresh/idle, awayAfterMs idle/away), not wall-clock.

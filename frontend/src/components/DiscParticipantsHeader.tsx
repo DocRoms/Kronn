@@ -39,7 +39,18 @@ interface ParticipantRow {
   role: string;
   status: string;
   last_seen?: string | null;
+  /// 0.8.12 PR B — server-derived: 'listening' (open wait long-poll) or
+  /// 'reading' (messages delivered, no reply yet). Expiry is applied
+  /// server-side at read time — a value here is always current.
+  activity?: string | null;
 }
+
+// Activity → i18n key. Unknown values render nothing (forward-compat:
+// a future backend state never shows a raw token to the user).
+const ACTIVITY_LABEL_KEY: Partial<Record<string, string>> = {
+  listening: 'disc.activityListening',
+  reading: 'disc.activityReading',
+};
 
 // Presence thresholds live in `lib/discPresence.ts` (pure, unit-tested);
 // the away cap follows the server's poll_policy fetched from the disc meta.
@@ -159,6 +170,7 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
       )}
       {participants.map(p => {
         const f = freshnessOf(p.last_seen, awayAfterMs);
+        const activityKey = p.activity ? ACTIVITY_LABEL_KEY[p.activity] : undefined;
         return (
           <span
             key={p.id}
@@ -174,6 +186,11 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
             />
             <span aria-hidden>{iconFor(p.agent_type)}</span>
             <span>{p.agent_type}</span>
+            {activityKey && (
+              <span className="disc-participant-activity" data-activity={p.activity}>
+                {t(activityKey)}
+              </span>
+            )}
           </span>
         );
       })}
