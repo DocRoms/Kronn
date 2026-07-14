@@ -29,14 +29,14 @@ mod tests {
     fn isolate_config_dir() {
         // Called ONLY by the #[serial] tests whose handlers SAVE config —
         // a global call from test_state() would mutate KRONN_DATA_DIR from
-        // 80 non-serial tests and race the serialized env family. Once-guarded
-        // so repeated calls never re-mutate the env mid-run (Copilot, PR 116).
-        static INIT: std::sync::Once = std::sync::Once::new();
-        INIT.call_once(|| {
-            let dir = std::env::temp_dir().join(format!("kronn-libtest-cfg-{}", std::process::id()));
-            std::fs::create_dir_all(&dir).ok();
-            std::env::set_var("KRONN_DATA_DIR", &dir);
-        });
+        // 80 non-serial tests and race the serialized env family. Re-set on
+        // EVERY call (same stable path, so repeats are idempotent): the
+        // config.rs #[serial] env tests legitimately remove_var at their
+        // end, and a Once guard left later callers with no dir at all —
+        // the write-guard panic fired on whichever test ran after them.
+        let dir = std::env::temp_dir().join(format!("kronn-libtest-cfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok();
+        std::env::set_var("KRONN_DATA_DIR", &dir);
     }
 
     fn test_state() -> AppState {

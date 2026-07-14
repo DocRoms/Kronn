@@ -34,6 +34,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -1750,6 +1751,100 @@ TOOLS = [
             "required": ["claim", "kind", "evidence"],
         },
     },
+    {
+        "name": "audit_prepare",
+        "description": (
+            "0.8.12 — Read a project's audit surface BEFORE launching: the "
+            "docs/ files with their filled/unfilled status, the open TODOs "
+            "and the tech-debt items. Returns the backend's AuditInfo "
+            "verbatim (`files`, `todos`, `tech_debt_items`). Use it to "
+            "brief yourself, pick between full/partial, and know what to "
+            "validate once the audit completes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Kronn project id."},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "audit_launch",
+        "description": (
+            "0.8.12 — Launch a project audit (mode `full` or `partial`) and "
+            "return IMMEDIATELY with a correlation (project_id, mode, "
+            "started_at). The audit is driven by an SSE stream this bridge "
+            "keeps reading in a background thread.\n\n"
+            "⚠️ LIFECYCLE — NOT a detached execution: the audit lives only "
+            "as long as THIS MCP session lives. Reloading the MCP or "
+            "closing the CLI interrupts the audit mid-flight. Never assume "
+            "it survived a reload — call `audit_status` to observe the "
+            "truth, and relaunch consciously (an Interrupted run is "
+            "resumable). One audit per project at a time: launching while "
+            "one runs is an ERROR, not a silent no-op.\n\n"
+            "`full` creates a validation discussion at the end "
+            "(discussion_id in audit_status once done); `partial` does NOT "
+            "(discussion_id stays null) and requires `steps` (1-based "
+            "indices of the analysis steps to re-run)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Kronn project id."},
+                "mode": {
+                    "type": "string",
+                    "enum": ["full", "partial"],
+                    "description": "full = whole pipeline + validation discussion; partial = selected steps only.",
+                },
+                "steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "integer", "minimum": 1},
+                    "description": "REQUIRED for partial: 1-based step indices to re-run. Ignored for full.",
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "Agent that runs the audit steps (default: this bridge's agent type).",
+                },
+            },
+            "required": ["project_id", "mode"],
+            # partial ⇒ steps required — the contract states what the
+            # implementation enforces (schema-aware MCP clients validate
+            # client-side instead of discovering it via a RuntimeError).
+            "allOf": [
+                {
+                    "if": {"properties": {"mode": {"const": "partial"}}},
+                    "then": {"required": ["steps"]},
+                }
+            ],
+        },
+    },
+    {
+        "name": "audit_status",
+        "description": (
+            "0.8.12 — Consolidated audit state for a project, three layers "
+            "kept SEPARATE (never merged):\n"
+            "· `bridge_stream` — what THIS bridge's reader thread saw "
+            "(running / done / error / launch_timeout / bridge_timeout / "
+            "stream_closed, plus discussion_id + audit_run_id once done);\n"
+            "· `live` — the backend's in-memory progress tracker. "
+            "⚠️ `live: null` means 'no LIVE state known' — NOT 'finished': "
+            "a backend restart wipes the tracker while an agent may still "
+            "be working;\n"
+            "· `latest` / `resumable` — DB history, fetched when `live` is "
+            "null: the last completed run (with run_id) and the last "
+            "Interrupted-but-resumable run. Statuses are exposed verbatim "
+            "(Running/Completed/Interrupted/Failed)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Kronn project id."},
+            },
+            "required": ["project_id"],
+        },
+    },
 ]
 
 
@@ -2476,6 +2571,10 @@ def call_disc_wait_for_peer(args):
     exclude = _agent_type_for_session()
     if exclude and exclude != "Unknown":
         params["exclude_agent_type"] = exclude
+    # Presence phase 1 — identify THIS session so the activity placeholder
+    # (listening/reading) lands on OUR row only, never on a concurrent
+    # session of the same agent type (multi-machine setups).
+    params["session_id"] = _session_id_for_caller()
     qs = urllib.parse.urlencode(params)
     sep = "?" if qs else ""
     # Transport-level retry (bounded): a backend restart mid-poll must not
@@ -4021,7 +4120,285 @@ def call_workflow_step_schema(_args):
     }
 
 
+# ─── Audit tools (0.8.12 PR A) ─────────────────────────────────────────────
+#
+# The backend audit endpoints are SSE-DRIVEN: the audit only advances while
+# a client reads the stream (there is no detached server-side spawn). The
+# bridge therefore consumes the stream in a daemon thread and the launch
+# tool returns immediately with a correlation — the documented trade-off is
+# that the audit dies with this bridge process (MCP reload = interruption;
+# the run is then observable via audit_status and resumable).
+
+_AUDIT_LOCK = threading.Lock()
+# project_id -> mutable entry shared between the launcher and its reader
+# thread. Public keys are returned by audit_status; keys prefixed `_` are
+# internal (response object, start event). All state transitions happen
+# under _AUDIT_LOCK.
+_AUDIT_STREAMS = {}
+_AUDIT_STREAM_MAX_SECONDS = 2 * 60 * 60  # hard bound on one stream read
+_AUDIT_START_WAIT_SECONDS = 5
+
+
+def _audit_entry_public(entry):
+    return {k: v for k, v in entry.items() if not k.startswith("_")}
+
+
+def _audit_handle_event(entry, event_name, payload_raw):
+    """Update the shared entry from one SSE event. Payloads are parsed
+    leniently — event shapes vary between modes (e.g. the legacy start
+    event has no started_at) and must never kill the reader."""
+    try:
+        payload = json.loads(payload_raw) if payload_raw else {}
+    except ValueError:
+        payload = {"raw": payload_raw[:200]}
+    with _AUDIT_LOCK:
+        entry["events_seen"] = entry.get("events_seen", 0) + 1
+        if event_name == "start":
+            entry["state"] = "running"
+            entry["_saw_start"] = True
+            entry["total_steps"] = payload.get("total_steps")
+            # started_at may be absent on some modes — keep the local one.
+            if payload.get("started_at"):
+                entry["started_at"] = payload["started_at"]
+            entry["_start_evt"].set()
+        elif event_name == "error":
+            entry["state"] = "error"
+            entry["error"] = (payload.get("error") or payload_raw)[:500]
+            entry["_start_evt"].set()
+        elif event_name in ("step_done", "step_error", "step_start"):
+            entry["last_step_event"] = {"event": event_name, **{
+                k: payload.get(k) for k in ("step", "label", "error") if k in payload
+            }}
+            if event_name == "step_error":
+                entry["last_error"] = str(payload.get("error"))[:300]
+        elif event_name == "cancelled":
+            entry["state"] = "cancelled"
+        elif event_name == "done":
+            entry["state"] = "done"
+            # `full` yields a validation discussion; `partial`/legacy do
+            # NOT — expose an explicit null either way (never absent).
+            entry["discussion_id"] = payload.get("discussion_id")
+            entry["audit_run_id"] = payload.get("audit_run_id")
+            entry["done_status"] = payload.get("status")
+
+
+def _audit_stream_reader(entry):
+    """Daemon thread: consume the SSE stream until done/error/EOF, the 2h
+    hard bound, or an explicit close from the launcher. Every exit path
+    leaves a terminal state and closes the response — no silent death."""
+    resp = entry["_resp"]
+    event_name = None
+
+    # The 2h bound must hold even on a stream that goes IDLE — `for raw in
+    # resp` blocks between bytes, so an in-loop clock check alone would
+    # never fire (Copilot review). The watchdog force-closes the response,
+    # which unblocks the read; the state is sealed BEFORE the close so the
+    # finally below can't misread it as a server-side stream_closed.
+    def _watchdog_close():
+        with _AUDIT_LOCK:
+            if entry["state"] in ("launching", "running"):
+                entry["state"] = "bridge_timeout"
+                entry["error"] = f"stream exceeded the {_AUDIT_STREAM_MAX_SECONDS}s bridge bound"
+        try:
+            resp.close()
+        except Exception:
+            pass
+
+    watchdog = threading.Timer(_AUDIT_STREAM_MAX_SECONDS, _watchdog_close)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        for raw in resp:
+            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line.startswith("event:"):
+                event_name = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                _audit_handle_event(entry, event_name, line[len("data:"):].strip())
+                with _AUDIT_LOCK:
+                    if entry["state"] in ("done", "error", "cancelled"):
+                        break
+    except Exception as e:  # noqa: BLE001 — reader must never die silently
+        with _AUDIT_LOCK:
+            if entry["state"] in ("launching", "running"):
+                entry["state"] = "stream_error"
+                entry["error"] = str(e)[:300]
+        sys.stderr.write(f"[kronn-internal] audit stream reader error: {e}\n")
+    finally:
+        watchdog.cancel()
+        try:
+            resp.close()
+        except Exception:
+            pass
+        with _AUDIT_LOCK:
+            entry["ended_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            if entry["state"] in ("launching", "running"):
+                # Server closed the stream without a terminal event (e.g.
+                # backend restart) — distinct from done AND from error.
+                entry["state"] = "stream_closed"
+            entry["_start_evt"].set()  # never leave the launcher hanging
+
+
+def _audit_open_sse(path, body):
+    """Open the SSE POST. No read timeout: audits legitimately stream for
+    20-40 min — the 2h bound and the launcher's close() do the policing."""
+    url = f"{_backend_url()}{path}"
+    req = urllib.request.Request(url, method="POST", data=json.dumps(body).encode())
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Accept", "text/event-stream")
+    token = os.environ.get("KRONN_AUTH_TOKEN")
+    if token:
+        req.add_header("Authorization", f"Bearer {token}")
+    return urllib.request.urlopen(req, timeout=None)  # noqa: S310
+
+
+def call_audit_prepare(args):
+    project_id = (args.get("project_id") or "").strip()
+    if not project_id:
+        raise RuntimeError("audit_prepare: project_id is required")
+    # AuditInfo verbatim — files/todos/tech_debt_items, no reshaping.
+    return _unwrap(_http("GET", f"/api/projects/{project_id}/audit-info"))
+
+
+def call_audit_launch(args):
+    project_id = (args.get("project_id") or "").strip()
+    mode = (args.get("mode") or "").strip()
+    if not project_id:
+        raise RuntimeError("audit_launch: project_id is required")
+    if mode not in ("full", "partial"):
+        raise RuntimeError("audit_launch: mode must be 'full' or 'partial'")
+    steps = args.get("steps")
+    if mode == "partial":
+        if not isinstance(steps, list) or not steps or not all(
+            isinstance(s, int) and s >= 1 for s in steps
+        ):
+            raise RuntimeError(
+                "audit_launch: partial mode requires a non-empty `steps` list "
+                "of 1-based integers — refused before any backend call"
+            )
+    # Blank/whitespace agent falls back like an absent one — never forward
+    # an empty attribution to the backend.
+    agent = (args.get("agent") or "").strip() or _agent_type_for_session()
+
+    started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    # check-then-launch is atomic under the lock: two local calls can't
+    # both open a stream and race the backend's own concurrency refusal.
+    with _AUDIT_LOCK:
+        existing = _AUDIT_STREAMS.get(project_id)
+        if existing and existing["state"] in ("launching", "running"):
+            raise RuntimeError(
+                f"audit_launch: an audit for {project_id} is already being "
+                "driven by THIS bridge — one at a time. audit_status to watch it."
+            )
+        entry = {
+            "project_id": project_id,
+            "mode": mode,
+            "state": "launching",
+            "started_at": started_at,
+            "events_seen": 0,
+            "_start_evt": threading.Event(),
+        }
+        _AUDIT_STREAMS[project_id] = entry
+
+    if mode == "full":
+        path = f"/api/projects/{project_id}/full-audit"
+        body = {"agent": agent}
+    else:
+        path = f"/api/projects/{project_id}/partial-audit"
+        body = {"agent": agent, "steps": steps}
+
+    try:
+        resp = _audit_open_sse(path, body)
+    except Exception as e:
+        with _AUDIT_LOCK:
+            entry["state"] = "error"
+            entry["error"] = str(e)[:300]
+        raise RuntimeError(f"audit_launch: could not open the audit stream: {e}")
+
+    # Under the lock like every other entry mutation — audit_status
+    # iterates this dict under _AUDIT_LOCK and a bare assignment here
+    # could race it (dict resize during iteration).
+    with _AUDIT_LOCK:
+        entry["_resp"] = resp
+    threading.Thread(
+        target=_audit_stream_reader, args=(entry,),
+        name=f"audit-sse-{project_id[:8]}", daemon=True,
+    ).start()
+
+    # Wait ONLY for the launch verdict: `start` or an early error event.
+    if not entry["_start_evt"].wait(_AUDIT_START_WAIT_SECONDS):
+        with _AUDIT_LOCK:
+            entry["state"] = "launch_timeout"
+            entry["error"] = f"no start/error event within {_AUDIT_START_WAIT_SECONDS}s"
+        try:
+            resp.close()  # unblocks the reader; its finally seals the entry
+        except Exception:
+            pass
+        raise RuntimeError(
+            "audit_launch: the backend sent no start/error event within "
+            f"{_AUDIT_START_WAIT_SECONDS}s — launch NOT confirmed, stream closed. "
+            "Check audit_status / backend logs before retrying."
+        )
+    with _AUDIT_LOCK:
+        if entry["state"] == "error":
+            raise RuntimeError(f"audit_launch refused: {entry.get('error')}")
+        if not entry.get("_saw_start"):
+            # The event fired without a start (stream ended / early close):
+            # launch NOT confirmed — never a hollow `launched`.
+            raise RuntimeError(
+                "audit_launch: the stream closed before any start event — "
+                f"launch NOT confirmed (state: {entry['state']}). Check "
+                "audit_status / backend logs before retrying."
+            )
+        return {
+            "launched": True,
+            "project_id": project_id,
+            "mode": mode,
+            "started_at": entry.get("started_at", started_at),
+            "total_steps": entry.get("total_steps"),
+            "lifecycle_warning": (
+                "This audit lives only as long as THIS MCP session: a reload "
+                "or CLI exit interrupts it mid-flight. The run_id and (full "
+                "mode) discussion_id become available via audit_status once "
+                "done; an interrupted run shows under audit_status.resumable."
+            ),
+        }
+
+
+def call_audit_status(args):
+    project_id = (args.get("project_id") or "").strip()
+    if not project_id:
+        raise RuntimeError("audit_status: project_id is required")
+    with _AUDIT_LOCK:
+        entry = _AUDIT_STREAMS.get(project_id)
+        bridge_stream = _audit_entry_public(entry) if entry else None
+
+    live = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-status"))
+    out = {
+        "bridge_stream": bridge_stream,
+        "live": live,
+        "latest": None,
+        "resumable": None,
+        "note": None,
+    }
+    if live is None:
+        # `live: null` = no LIVE state known — NOT "finished". Fall back to
+        # DB history so the caller can tell done/interrupted/never-ran apart.
+        out["latest"] = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-latest"))
+        out["resumable"] = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-resumable"))
+        out["note"] = (
+            "live=null means the backend tracker has no LIVE entry (idle OR "
+            "tracker wiped by a backend restart) — it never means 'completed'. "
+            "`latest` is the last terminal run from the DB, `resumable` the "
+            "last Interrupted-but-resumable one."
+        )
+    return out
+
+
 DISPATCH = {
+    # 0.8.12 PR A — audit surface
+    "audit_prepare": call_audit_prepare,
+    "audit_launch": call_audit_launch,
+    "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
     "disc_summarize": call_disc_summarize,

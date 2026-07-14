@@ -19,6 +19,7 @@ import type {
   LinkMcpConfigRequest,
   Discussion,
   DiscussionMeta,
+  DiscussionSession,
   CreateDiscussionRequest,
   SendMessageRequest,
   OrchestrationRequest,
@@ -1073,7 +1074,7 @@ export const discussions = {
    *  Powers the header chips + `[+ Inviter]` button. `left` sessions
    *  are excluded server-side (audit history only). */
   participants: (id: string) =>
-    api<Array<{ id: number; disc_id: string; agent_type: string; session_id: string | null; role: string; status: string; joined_at: string; left_at: string | null; last_seen: string | null }>>('GET', `/discussions/${id}/participants`),
+    api<DiscussionSession[]>('GET', `/discussions/${id}/participants`),
   /** 0.8.6 phase 2 — mint a one-shot invite token bound to this disc.
    *  Returns the PLAIN token (only place it ever appears outside the
    *  agent's tool-call wire) + the human-readable instruction the

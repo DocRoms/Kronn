@@ -27,7 +27,7 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.8.11.** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.8.12 (en développement — dernière release stable : 0.8.11).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
 ## Sommaire
@@ -93,7 +93,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone https://github.com/DocRoms/Kronn.git
+git clone --branch 0.8.11 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140

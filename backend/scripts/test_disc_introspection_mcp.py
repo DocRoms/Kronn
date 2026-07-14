@@ -3636,5 +3636,202 @@ class HttpAuthHeaderTests(unittest.TestCase):
         self.assertEqual(req.get_header("Authorization"), "Bearer tok2")
 
 
+class AuditToolsTests(unittest.TestCase):
+    """0.8.12 PR A — audit_prepare / audit_launch / audit_status.
+
+    The audit endpoints are SSE-driven; these tests exercise the bridge
+    side only (state machine, lifecycle, error surfacing) against fake
+    streams — never a real backend, never a 20-min wait.
+    """
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._AUDIT_STREAMS.clear()
+
+    # ── fake SSE plumbing ────────────────────────────────────────────
+
+    class _FakeSse:
+        """Iterable of pre-encoded SSE lines + a close() flag. An entry of
+        `Exception` in `lines` is RAISED at that point (mid-stream cut)."""
+
+        def __init__(self, lines):
+            self._lines = list(lines)
+            self.closed = False
+
+        def __iter__(self):
+            for item in self._lines:
+                if isinstance(item, Exception):
+                    raise item
+                yield item
+
+        def close(self):
+            self.closed = True
+
+    @staticmethod
+    def _sse(event, payload):
+        import json as _json
+        return [
+            f"event: {event}\n".encode(),
+            f"data: {_json.dumps(payload)}\n".encode(),
+            b"\n",
+        ]
+
+    def _wait_state(self, project_id, states, timeout=3.0):
+        import time as _time
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            entry = self.mod._AUDIT_STREAMS.get(project_id)
+            if entry and entry["state"] in states:
+                return entry
+            _time.sleep(0.01)
+        self.fail(f"entry never reached {states}: {self.mod._AUDIT_STREAMS.get(project_id)}")
+
+    # ── audit_prepare ────────────────────────────────────────────────
+
+    def test_audit_prepare_preserves_the_three_top_level_keys(self):
+        info = {"files": [], "todos": [{"t": 1}], "tech_debt_items": []}
+        with mock.patch.object(self.mod, "_http", return_value={"success": True, "data": info}):
+            out = self.mod.call_audit_prepare({"project_id": "p1"})
+        self.assertEqual(out, info, "AuditInfo must round-trip verbatim")
+
+    # ── audit_status ─────────────────────────────────────────────────
+
+    def test_audit_status_null_live_falls_back_to_db_and_says_so(self):
+        # live=null must NEVER read as "finished" — the tool falls back to
+        # latest/resumable and states the ambiguity explicitly.
+        def fake_http(method, path, body=None):
+            if path.endswith("/audit-status"):
+                return {"success": True, "data": None}
+            if path.endswith("/audit-latest"):
+                return {"success": True, "data": {"run_id": "r-1", "status": "Completed"}}
+            if path.endswith("/audit-resumable"):
+                return {"success": True, "data": None}
+            raise AssertionError(f"unexpected path {path}")
+
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            out = self.mod.call_audit_status({"project_id": "p1"})
+        self.assertIsNone(out["live"])
+        self.assertIsNone(out["bridge_stream"], "no local stream ever opened")
+        self.assertEqual(out["latest"]["run_id"], "r-1")
+        self.assertIn("never means 'completed'", out["note"])
+
+    # ── audit_launch ─────────────────────────────────────────────────
+
+    def test_partial_with_empty_steps_is_refused_before_any_http(self):
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               side_effect=AssertionError("must not be called")):
+            for bad in ([], None, [0], ["2"]):
+                with self.assertRaises(RuntimeError):
+                    self.mod.call_audit_launch(
+                        {"project_id": "p1", "mode": "partial", "steps": bad})
+
+    def test_blank_agent_falls_back_to_the_session_agent_type(self):
+        # Copilot round 5: a whitespace `agent` must behave like an absent
+        # one — the body sent to the backend carries the session's type.
+        captured = {}
+
+        def fake_open(path, body):
+            captured["body"] = body
+            return self._FakeSse(self._sse("start", {"total_steps": 10}))
+
+        with mock.patch.object(self.mod, "_audit_open_sse", side_effect=fake_open), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"):
+            self.mod.call_audit_launch({"project_id": "p1", "mode": "full", "agent": "   "})
+        self.assertEqual(captured["body"]["agent"], "ClaudeCode")
+
+    def test_launch_returns_fast_on_the_start_event(self):
+        import time as _time
+        stream = self._FakeSse(self._sse("start", {"total_steps": 10,
+                                                   "started_at": "2026-07-14T13:30:00Z"}))
+        t0 = _time.time()
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            out = self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertLess(_time.time() - t0, 4.0, "launch must not block on the audit")
+        self.assertTrue(out["launched"])
+        self.assertEqual(out["total_steps"], 10)
+        self.assertIn("reload", out["lifecycle_warning"])
+
+    def test_backend_early_error_surfaces_as_a_distinct_mcp_error(self):
+        # The "already running" refusal arrives as an SSE error event — it
+        # must raise, never return a hollow `launched`.
+        stream = self._FakeSse(self._sse("error", {
+            "error": "Audit already running for this project"}))
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertIn("already running", str(ctx.exception))
+
+    def test_second_local_launch_is_refused_while_one_runs(self):
+        with self.mod._AUDIT_LOCK:
+            self.mod._AUDIT_STREAMS["p1"] = {"project_id": "p1", "state": "running"}
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               side_effect=AssertionError("must not be called")):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertIn("already", str(ctx.exception))
+
+    def test_reader_captures_discussion_and_run_id_from_done(self):
+        lines = (self._sse("start", {"total_steps": 10})
+                 + self._sse("done", {"status": "complete",
+                                      "discussion_id": "d-val",
+                                      "audit_run_id": "run-42"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        entry = self._wait_state("p1", {"done"})
+        self.assertEqual(entry["discussion_id"], "d-val")
+        self.assertEqual(entry["audit_run_id"], "run-42")
+
+    def test_partial_done_without_discussion_id_is_an_explicit_null(self):
+        lines = (self._sse("start", {"total_steps": 3})
+                 + self._sse("done", {"status": "complete", "total_steps": 3}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [1, 2, 3]})
+        entry = self._wait_state("p1", {"done"})
+        self.assertIn("discussion_id", entry)
+        self.assertIsNone(entry["discussion_id"])
+
+    def test_mid_stream_cut_leaves_an_observable_state_no_silent_death(self):
+        lines = self._sse("start", {"total_steps": 10}) + [ConnectionError("cut")]
+        stream = self._FakeSse(lines)
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            out = self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertTrue(out["launched"])
+        entry = self._wait_state("p1", {"stream_error"})
+        self.assertIn("cut", entry["error"])
+        # The error state is set in the except block, the close happens in
+        # the finally right after — poll briefly instead of racing it.
+        import time as _time
+        deadline = _time.time() + 3
+        while not stream.closed and _time.time() < deadline:
+            _time.sleep(0.01)
+        self.assertTrue(stream.closed, "the finally must close the response")
+        # And audit_status keeps the three layers separate.
+        def fake_http(method, path, body=None):
+            if path.endswith("/audit-status"):
+                return {"success": True, "data": None}
+            return {"success": True, "data": None}
+        with mock.patch.object(self.mod, "_http", side_effect=fake_http):
+            status = self.mod.call_audit_status({"project_id": "p1"})
+        self.assertEqual(status["bridge_stream"]["state"], "stream_error")
+        self.assertIsNone(status["live"])
+
+    def test_no_start_event_is_a_launch_error_not_an_ambiguous_launched(self):
+        # A stream that ends with no event at all: the launcher must raise
+        # (Codex round: no hollow `launched`) — EOF seals the entry, so the
+        # wait returns quickly via the reader's finally.
+        stream = self._FakeSse([])
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertTrue(
+            "launch NOT confirmed" in str(ctx.exception)
+            or "stream" in str(ctx.exception),
+            f"got: {ctx.exception}",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

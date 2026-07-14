@@ -1284,7 +1284,14 @@ export type DiscussionSession = { id: number, disc_id: string, agent_type: strin
  * (working)" vs "away" — instead of a binary present/absent that makes a
  * quietly-working peer look like a dead room. `None` for rows predating 064.
  */
-last_seen: string | null, };
+last_seen: string | null,
+/**
+ * 0.8.12 PR B — server-derived activity placeholder: `"listening"`
+ * (open wait long-poll) or `"reading"` (messages delivered, no reply
+ * yet). Expiry is applied at read time — an expired activity is None
+ * here, callers never see a stale placeholder.
+ */
+activity: string | null, };
 
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
