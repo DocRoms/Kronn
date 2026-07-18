@@ -94,6 +94,7 @@ pub async fn disc_create(
     let disc_id = Uuid::new_v4().to_string();
     let agent = req.agent.clone();
     let disc = Discussion {
+        awaiting_agent: false,
         id: disc_id.clone(),
         project_id: req.project_id.clone(),
         title: req.title.clone(),

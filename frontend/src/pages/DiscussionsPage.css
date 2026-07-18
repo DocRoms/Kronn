@@ -595,6 +595,18 @@
   border-color: rgba(var(--kr-error-rgb), 0.6);
 }
 
+/* Queued batch child (throttled, not yet running): a static hourglass,
+   deliberately NOT the active spinner — running always wins over queued.
+   An emoji, not a dot: a finished disc shows nothing, so waiting must be
+   unmistakable from done at a glance. */
+.disc-item-queued {
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  opacity: 0.85;
+  flex-shrink: 0;
+}
+
 /* Relative time in the sidebar meta row — slightly dimmer so it doesn't
    compete with the message count, and italic to read as metadata. */
 .disc-item-relative-time {

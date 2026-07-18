@@ -16,6 +16,7 @@ mod tests {
     fn make_discussion(id: &str) -> Discussion {
         let now = Utc::now();
         Discussion {
+            awaiting_agent: false,
             id: id.into(),
             project_id: None,
             title: format!("Discussion {}", id),
@@ -961,5 +962,71 @@ mod tests {
         assert_eq!(user_anchor.to_rfc3339(), user_received);
         let any_anchor = last_message_at(&conn, "d-roles").unwrap().unwrap();
         assert!(any_anchor > user_anchor, "any-role anchor follows the newest (Agent) row");
+    }
+
+    // ── reconcile_awaiting_agents (boot recovery of owed runs) ──
+
+    #[test]
+    fn reconcile_marks_a_queued_owed_disc_and_clears_the_flag() {
+        // A batch child (or a human msg) that was owed an agent which never
+        // started: last message is the User prompt, no partial. Reconcile
+        // appends an interrupted notice, clears the flag, returns the id.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-owed")).unwrap();
+        insert_message(&conn, "d-owed", &make_message("u1", MessageRole::User, None)).unwrap();
+        set_awaiting_agent(&conn, "d-owed", true).unwrap();
+
+        let marked = reconcile_awaiting_agents(&conn).unwrap();
+        assert_eq!(marked, vec!["d-owed".to_string()]);
+        // A notice was appended → the disc now has 2 messages, last is Agent.
+        let disc = get_discussion(&conn, "d-owed").unwrap().unwrap();
+        assert_eq!(disc.messages.len(), 2);
+        assert!(matches!(disc.messages[1].role, MessageRole::Agent));
+        // Flag cleared → a second reconcile is a no-op.
+        assert!(reconcile_awaiting_agents(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_skips_a_disc_already_answered() {
+        // Flag left set but the agent DID answer (last message is Agent):
+        // no notice, no re-flag, just housekeeping-clear the stale flag.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-done")).unwrap();
+        insert_message(&conn, "d-done", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(&conn, "d-done", &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        set_awaiting_agent(&conn, "d-done", true).unwrap();
+
+        let marked = reconcile_awaiting_agents(&conn).unwrap();
+        assert!(marked.is_empty(), "an answered disc must not be marked interrupted");
+        let disc = get_discussion(&conn, "d-done").unwrap().unwrap();
+        assert_eq!(disc.messages.len(), 2, "no notice appended");
+        // Stale flag cleared so it won't be re-scanned next boot.
+        assert!(reconcile_awaiting_agents(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reconcile_leaves_a_disc_with_a_live_partial_to_partial_recovery() {
+        // awaiting=1 AND a partial checkpoint present → excluded by the WHERE
+        // (recover_partial_responses owns it). Flag + partial untouched here.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-partial")).unwrap();
+        insert_message(&conn, "d-partial", &make_message("u1", MessageRole::User, None)).unwrap();
+        set_awaiting_agent(&conn, "d-partial", true).unwrap();
+        set_partial_response(&conn, "d-partial", Some("half a reply")).unwrap();
+
+        let marked = reconcile_awaiting_agents(&conn).unwrap();
+        assert!(marked.is_empty(), "a disc with a live partial is left to partial recovery");
+        // The partial is still there for recover_partial_responses to convert.
+        let disc = get_discussion(&conn, "d-partial").unwrap().unwrap();
+        assert_eq!(disc.messages.len(), 1, "no notice, no conversion — recovery owns it");
+    }
+
+    #[test]
+    fn reconcile_ignores_unflagged_discs() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-plain")).unwrap();
+        insert_message(&conn, "d-plain", &make_message("u1", MessageRole::User, None)).unwrap();
+        // No set_awaiting_agent → flag stays 0 (default).
+        assert!(reconcile_awaiting_agents(&conn).unwrap().is_empty());
     }
 }

@@ -166,6 +166,17 @@ pub enum WsMessage {
         /// Id of the child discussion whose agent run is starting.
         discussion_id: String,
     },
+    /// A batch child is CREATED but not yet running (throttled by
+    /// the batch semaphore, waiting its turn). Emitted up-front for every
+    /// child so the sidebar can show a distinct "en file" state instead of
+    /// the same spinner as a truly-running child (the old behaviour lit all
+    /// N as "started" at once — 23 identical loaders for a 23-item batch).
+    /// Cleared/replaced by `BatchRunChildStarted` when the agent actually
+    /// begins, then `BatchRunProgress`/`Finished` on completion.
+    BatchRunChildQueued {
+        run_id: String,
+        discussion_id: String,
+    },
     /// 0.8.2 — Linear workflow run state change. Fires on each step
     /// transition (StepStart, StepDone) AND every status flip (Running
     /// → WaitingApproval, → Success, → Failed, → Cancelled). Open
@@ -190,6 +201,15 @@ pub enum WsMessage {
     /// the user so they don't resend their prompt on top of a silently
     /// recovered conversation.
     PartialResponseRecovered {
+        discussion_ids: Vec<String>,
+    },
+    /// Broadcast once at backend boot when `reconcile_awaiting_agents`
+    /// found discussions that were owed an agent run which never started before
+    /// a restart (queued batch child, or an auto-reply never spawned). Each id
+    /// got an "interrupted" notice message — NOT a re-spawn (an interruption
+    /// may be deliberate). The frontend refetches those discs + toasts the user
+    /// so they can relaunch if they want.
+    AgentRunsInterrupted {
         discussion_ids: Vec<String>,
     },
 }
@@ -322,5 +342,25 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn batch_run_child_queued_and_agent_runs_interrupted_serialize_snake_case() {
+        // The frontend matches these exact snake_case tags.
+        let q = serde_json::to_value(WsMessage::BatchRunChildQueued {
+            run_id: "r".into(), discussion_id: "d".into(),
+        }).unwrap();
+        assert_eq!(q["type"], "batch_run_child_queued");
+        assert_eq!(q["discussion_id"], "d");
+
+        let i = serde_json::to_value(WsMessage::AgentRunsInterrupted {
+            discussion_ids: vec!["d1".into(), "d2".into()],
+        }).unwrap();
+        assert_eq!(i["type"], "agent_runs_interrupted");
+        assert_eq!(i["discussion_ids"][1], "d2");
+
+        // Neither is peer-relayable (local UI signals).
+        assert!(!WsMessage::BatchRunChildQueued { run_id: "r".into(), discussion_id: "d".into() }.is_peer_relayable());
+        assert!(!WsMessage::AgentRunsInterrupted { discussion_ids: vec![] }.is_peer_relayable());
     }
 }

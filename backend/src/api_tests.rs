@@ -578,6 +578,7 @@ mod tests {
         state.db.with_conn(|conn| {
             let now = chrono::Utc::now();
             let disc = crate::models::Discussion {
+                awaiting_agent: false,
                 id: "disc-1".into(),
                 project_id: None,
                 title: "Original Title".into(),
@@ -717,6 +718,7 @@ mod tests {
         state.db.with_conn(|conn| {
             let now = chrono::Utc::now();
             let disc = crate::models::Discussion {
+                awaiting_agent: false,
                 id: "disc-del".into(),
                 project_id: None,
                 title: "To Delete".into(),
@@ -951,6 +953,7 @@ mod tests {
             move |conn| {
                 let now = chrono::Utc::now();
                 let disc = crate::models::Discussion {
+                    awaiting_agent: false,
                     id: id.clone(),
                     project_id: None,
                     title,
@@ -1705,6 +1708,7 @@ mod tests {
         state.db.with_conn(|conn| {
             let now = chrono::Utc::now();
             let disc = crate::models::Discussion {
+                awaiting_agent: false,
                 id: "disc-pin".into(),
                 project_id: None,
                 title: "Validation audit AI".into(),

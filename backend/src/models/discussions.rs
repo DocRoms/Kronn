@@ -88,6 +88,11 @@ pub struct Discussion {
     /// Null for manual discussions created outside of a batch workflow.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
+    /// The disc is owed an agent run that hasn't produced a durable trace yet
+    /// (queued batch child, or a reply in flight). DB-backed so the sidebar's
+    /// "en file" state survives navigation, reloads and missed WS frames.
+    #[serde(default)]
+    pub awaiting_agent: bool,
     /// Test mode — branch the main repo was on before the user entered test
     /// mode. `Some` means the user is actively testing this discussion's
     /// branch in their main repo; `None` means normal worktree operation.

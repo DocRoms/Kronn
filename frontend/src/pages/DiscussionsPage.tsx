@@ -73,6 +73,8 @@ export interface DiscussionsPageProps {
   // Lifted streaming state (lives in Dashboard, survives page changes)
   sendingMap: Record<string, boolean>;
   setSendingMap: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
+  queuedMap: Record<string, boolean>;
+  setQueuedMap: React.Dispatch<React.SetStateAction<Record<string, boolean>>>;
   sendingStartMap: Record<string, number>;
   setSendingStartMap: React.Dispatch<React.SetStateAction<Record<string, number>>>;
   streamingMap: Record<string, string>;
@@ -143,6 +145,8 @@ export function DiscussionsPage({
   toast,
   sendingMap,
   setSendingMap,
+  queuedMap,
+  setQueuedMap,
   sendingStartMap,
   setSendingStartMap,
   streamingMap,
@@ -508,6 +512,7 @@ export function DiscussionsPage({
       // (no SSE consumer → cleanupStream never runs), so the WS event is the
       // only signal we get that the agent actually finished.
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      setQueuedMap(prev => ({ ...prev, [msg.discussion_id]: false }));
       // Invariant: sending=false ⟺ no live controller. If this disc's run had
       // been started via SSE (controller set) but ends via this WS event, an
       // orphaned controller would keep the send re-entry guard armed forever —
@@ -529,7 +534,18 @@ export function DiscussionsPage({
     // it, sendingMap[child] stays unset and an in-flight child shows no spinner
     // (sidebar pill + open chat view). The progress/finished events below clear
     // it. refetchDiscussions() so a child created mid-batch shows up in the list.
+    // A batch child is created but throttled (waiting its turn). Mark it
+    // "queued" (not "running") so the sidebar shows a distinct state instead
+    // of the same spinner as an actually-running child. NO refetch here: these
+    // frames arrive N-at-once for a big batch (the children already exist in
+    // DB by then) and N back-to-back refetches would burst the API — the
+    // started/progress/finished handlers keep the list current.
+    if (msg.type === 'batch_run_child_queued') {
+      setQueuedMap(prev => ({ ...prev, [msg.discussion_id]: true }));
+    }
     if (msg.type === 'batch_run_child_started') {
+      // Real start: leaves the queue, becomes running.
+      setQueuedMap(prev => ({ ...prev, [msg.discussion_id]: false }));
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: true }));
       refetchDiscussions();
     }
@@ -538,6 +554,7 @@ export function DiscussionsPage({
     if (msg.type === 'batch_run_progress') {
       refetchDiscussions();
       setSendingMap(prev => ({ ...prev, [msg.discussion_id]: false }));
+      setQueuedMap(prev => ({ ...prev, [msg.discussion_id]: false }));
       delete abortControllers.current[msg.discussion_id]; // keep sending⟺controller invariant
       reloadDiscussion(msg.discussion_id);
     }
@@ -557,11 +574,30 @@ export function DiscussionsPage({
       }
       toast(t('disc.partialRecoveredToast', msg.discussion_ids.length), 'info');
     }
+    // Backend boot found agent runs that were OWED but never started (queued
+    // batch children, or auto-replies not yet spawned) — marked interrupted,
+    // NOT re-spawned. Same cleanup as partial recovery: drop the stale loader,
+    // refresh, and tell the user so they can relaunch if they want.
+    if (msg.type === 'agent_runs_interrupted') {
+      refetchDiscussions();
+      // One update per map, not per id — a large interrupted batch shouldn't
+      // queue 2×N state updates.
+      const cleared = Object.fromEntries(msg.discussion_ids.map(id => [id, false] as const));
+      setSendingMap(prev => ({ ...prev, ...cleared }));
+      // A browser left open across the restart still holds the queued
+      // indicator for these ids — clear it too or it sticks forever.
+      setQueuedMap(prev => ({ ...prev, ...cleared }));
+      for (const id of msg.discussion_ids) {
+        delete abortControllers.current[id];
+        reloadDiscussion(id);
+      }
+      toast(t('disc.agentRunsInterruptedToast', msg.discussion_ids.length), 'info');
+    }
   // NOTE: reloadDiscussion is defined later in the component and referenced
   // here only inside the callback body (closure). Do NOT add it to the dep
   // array — it would be in the temporal dead zone at this point in render
   // and throw a ReferenceError.
-  }, [contactsList, activeDiscussionId, refetchDiscussions, setSendingMap, toast, t]);
+  }, [contactsList, activeDiscussionId, refetchDiscussions, setSendingMap, setQueuedMap, toast, t]);
 
   // Reliable presence SNAPSHOT. The `presence` WS events above are edge-triggered
   // (fired only when a peer connects/disconnects), so a frontend that subscribed
@@ -1705,6 +1741,7 @@ export function DiscussionsPage({
           projects={projects}
           activeId={activeDiscussionId}
           sendingMap={sendingMap}
+          queuedMap={queuedMap}
           lastSeenMsgCount={lastSeenMsgCount}
           onMarkAllRead={markAllDiscussionsSeen}
           contacts={contactsList}

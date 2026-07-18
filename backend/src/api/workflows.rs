@@ -2009,16 +2009,17 @@ pub async fn cancel_run(
         }
     };
 
-    // 2. Find child batches via parent_run_id and cascade to their disc agents.
-    //    One DB call to get all child batches of this run, then another to get
-    //    each batch's child discussions. For each disc, trigger its cancel
-    //    token if one is registered (i.e. agent still running).
+    // 2. Cascade to child disc agents. Covers BOTH shapes: a linear run whose
+    //    child batches carry parent_run_id = run_id, and a batch run cancelled
+    //    directly (its discs carry workflow_run_id = run_id — same predicate
+    //    delete_batch_run uses). For each disc, trigger its cancel token if one
+    //    is registered (i.e. agent still running).
     let run_id_for_db = run_id.clone();
     let child_disc_ids: Vec<String> = match state.db.with_conn(move |conn| {
         let mut stmt = conn.prepare(
             "SELECT d.id FROM discussions d \
              JOIN workflow_runs wr ON d.workflow_run_id = wr.id \
-             WHERE wr.parent_run_id = ?1"
+             WHERE wr.parent_run_id = ?1 OR d.workflow_run_id = ?1"
         )?;
         let ids: Vec<String> = stmt
             .query_map(rusqlite::params![&run_id_for_db], |row| row.get::<_, String>(0))?
@@ -2030,6 +2031,7 @@ pub async fn cancel_run(
         Err(e) => return Json(ApiResponse::err(format!("DB error finding child discs: {}", e))),
     };
 
+    let mut never_started: Vec<String> = Vec::new();
     let child_discs_cancelled = {
         let mut map = match state.cancel_registry.lock() {
             Ok(m) => m,
@@ -2040,10 +2042,32 @@ pub async fn cancel_run(
             if let Some(token) = map.remove(disc_id) {
                 token.cancel();
                 n += 1;
+            } else {
+                never_started.push(disc_id.clone());
             }
         }
         n
     };
+
+    // Children with NO live token never spawned an agent (or already
+    // finished, where clearing is a no-op): drop their awaiting_agent marker,
+    // or the boot reconcile would flag this deliberate cancel as an
+    // interruption. Running children keep the flag — their own cancelled
+    // path persists the ⏹️ footer and clears it, which stays crash-safe.
+    // A child that still spawns after this clear re-sets the marker itself
+    // at spawn, so the race is self-correcting. Best-effort.
+    if !never_started.is_empty() {
+        let ids = never_started;
+        let _ = state.db.with_conn(move |conn| {
+            for id in &ids {
+                // No `?`: one failed clear must not skip the remaining ids.
+                if let Err(e) = crate::db::discussions::set_awaiting_agent(conn, id, false) {
+                    tracing::warn!("cancel_run: failed to clear awaiting_agent for {}: {}", id, e);
+                }
+            }
+            Ok(())
+        }).await;
+    }
 
     // 3. Force-mark this run AND any Running child batch runs as Cancelled in
     //    the DB. The token cancel (step 1) is best-effort — when it fires
@@ -2340,6 +2364,55 @@ pub async fn delete_batch_run(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
 ) -> Json<ApiResponse<DeletedBatchResponse>> {
+    // Cancel BEFORE deleting, or the batch's child agents keep
+    // running, write into rows that no longer exist (FOREIGN KEY constraint
+    // failed) and hold their semaphore permits. Same sequence as `cancel_run`:
+    // trigger the disc-keyed tokens of the children + the run's own token,
+    // then let the DB delete proceed. Best-effort: a registry hiccup must not
+    // block the delete. A child's own agent-task finally path handles the rest.
+    let run_id_for_discs = run_id.clone();
+    let child_disc_ids: Vec<String> = match state.db.with_conn(move |conn| {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM discussions WHERE workflow_run_id = ?1",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![&run_id_for_discs], |row| row.get::<_, String>(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok(ids)
+    }).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                "delete_batch_run {}: failed to load child discussions for pre-cancel: {}",
+                run_id, e
+            );
+            Vec::new()
+        }
+    };
+
+    if let Ok(mut map) = state.cancel_registry.lock() {
+        let mut cancelled = 0u32;
+        if let Some(token) = map.remove(&run_id) {
+            token.cancel();
+            cancelled += 1;
+        }
+        for disc_id in &child_disc_ids {
+            if let Some(token) = map.remove(disc_id) {
+                token.cancel();
+                cancelled += 1;
+            }
+        }
+        if cancelled > 0 {
+            tracing::info!(
+                "delete_batch_run {}: cancelled {} live token(s) before delete",
+                run_id, cancelled,
+            );
+        }
+    } else {
+        tracing::warn!("delete_batch_run {}: cancel registry poisoned — deleting without cancel", run_id);
+    }
+
     let run_id_for_db = run_id.clone();
     match state.db.with_conn(move |conn| {
         crate::db::workflows::delete_batch_run_with_discussions(conn, &run_id_for_db)
@@ -3109,6 +3182,121 @@ pub async fn test_api_call(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── Delete cancels live child agents ──────────────────
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    async fn state_with_batch(run_id: &str, disc_ids: &[&str]) -> AppState {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let run_id = run_id.to_string();
+        let disc_ids: Vec<String> = disc_ids.iter().map(|s| s.to_string()).collect();
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                 VALUES ('wf-t2', 'T2', '{}', '[]', ?1, ?1)",
+                rusqlite::params![now],
+            )?;
+            conn.execute(
+                "INSERT INTO workflow_runs (id, workflow_id, run_type, status, started_at, batch_total)
+                 VALUES (?1, 'wf-t2', 'batch', 'Running', ?2, ?3)",
+                rusqlite::params![run_id, now, disc_ids.len() as i64],
+            )?;
+            for did in &disc_ids {
+                conn.execute(
+                    "INSERT INTO discussions (id, title, workflow_run_id, created_at, updated_at, message_count, workspace_mode)
+                     VALUES (?1, 'child', ?2, ?3, ?3, 0, 'Direct')",
+                    rusqlite::params![did, run_id, now],
+                )?;
+            }
+            Ok(())
+        }).await.unwrap();
+        let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
+        AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    #[tokio::test]
+    async fn delete_batch_run_cancels_the_run_and_child_tokens() {
+        let state = state_with_batch("run-b", &["d-a", "d-b"]).await;
+        // Register live tokens like a running batch would: the run itself +
+        // each child disc's agent.
+        let (t_run, t_a, t_b);
+        {
+            let mut map = state.cancel_registry.lock().unwrap();
+            t_run = tokio_util::sync::CancellationToken::new();
+            t_a = tokio_util::sync::CancellationToken::new();
+            t_b = tokio_util::sync::CancellationToken::new();
+            map.insert("run-b".into(), t_run.clone());
+            map.insert("d-a".into(), t_a.clone());
+            map.insert("d-b".into(), t_b.clone());
+        }
+
+        let resp = delete_batch_run(State(state.clone()), Path("run-b".to_string())).await;
+        assert!(resp.0.success, "delete must succeed: {:?}", resp.0.error);
+        assert_eq!(resp.0.data.unwrap().discussions_deleted, 2);
+
+        // Every token fired (agents told to stop) and left the registry.
+        assert!(t_run.is_cancelled(), "the run's own token must be cancelled");
+        assert!(t_a.is_cancelled() && t_b.is_cancelled(), "child disc tokens must be cancelled");
+        let map = state.cancel_registry.lock().unwrap();
+        assert!(map.is_empty(), "cancelled tokens must be removed from the registry");
+    }
+
+    /// Cancelling a batch run directly must (a) cascade to its
+    /// own children (workflow_run_id = run_id, not just parent_run_id) and
+    /// (b) clear awaiting_agent on children that never spawned, or the boot
+    /// reconcile mislabels a deliberate cancel as an interruption. A RUNNING
+    /// child keeps its flag: its own cancelled path persists the ⏹️ footer
+    /// and clears it (crash-safe).
+    #[tokio::test]
+    async fn cancel_run_clears_awaiting_marker_on_unstarted_children() {
+        let state = state_with_batch("run-c", &["d-running", "d-queued"]).await;
+        state.db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE discussions SET awaiting_agent = 1 WHERE id IN ('d-running', 'd-queued')",
+                [],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        // Only d-running has a live agent; d-queued sat in the batch queue.
+        let t_child;
+        {
+            let mut map = state.cancel_registry.lock().unwrap();
+            t_child = tokio_util::sync::CancellationToken::new();
+            map.insert("d-running".into(), t_child.clone());
+        }
+
+        let resp = cancel_run(
+            State(state.clone()),
+            Path(("wf-t2".to_string(), "run-c".to_string())),
+        ).await;
+        assert!(resp.0.success, "cancel must succeed: {:?}", resp.0.error);
+        let data = resp.0.data.unwrap();
+        assert!(data.run_cancelled, "the Running row must be force-marked Cancelled");
+        assert_eq!(data.child_discs_cancelled, 1, "only the live child token fires");
+        assert!(t_child.is_cancelled());
+
+        let flags: Vec<(String, i64)> = state.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, awaiting_agent FROM discussions ORDER BY id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+            Ok(rows.filter_map(|r| r.ok()).collect())
+        }).await.unwrap();
+        assert!(flags.contains(&("d-queued".to_string(), 0)), "unstarted child cleared: {flags:?}");
+        assert!(flags.contains(&("d-running".to_string(), 1)), "running child keeps its flag: {flags:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_batch_run_is_fine_when_no_agent_is_live() {
+        // A batch whose agents already finished: no tokens registered, delete
+        // must still succeed cleanly (no panic, no false cancel).
+        let state = state_with_batch("run-idle", &["d-x"]).await;
+        let resp = delete_batch_run(State(state), Path("run-idle".to_string())).await;
+        assert!(resp.0.success);
+        assert_eq!(resp.0.data.unwrap().discussions_deleted, 1);
+    }
 
     // ── validate_sub_workflow_graph (2026-06-11 Phase 1) ──
     fn subwf_step(name: &str, target: &str) -> WorkflowStep {

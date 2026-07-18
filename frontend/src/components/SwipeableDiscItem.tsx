@@ -25,6 +25,11 @@ export interface SwipeableDiscItemProps {
   isActive: boolean;
   lastSeenCount: number;
   isSending: boolean;
+  /** The disc's agent is CREATED but throttled (waiting its turn in a
+   *  batch). Shows a dimmed "en file" dot instead of the active spinner, so
+   *  a big batch doesn't render N identical running spinners. Ignored when
+   *  `isSending` (running wins over queued). */
+  isQueued?: boolean;
   onSelect: (discId: string, msgCount: number) => void;
   onArchive: (discId: string) => void;
   onDelete: (discId: string) => void;
@@ -47,7 +52,7 @@ export interface SwipeableDiscItemProps {
 }
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
-  disc, isActive, lastSeenCount, isSending, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
+  disc, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
   sourceAgent, sourceDiverged,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
@@ -184,6 +189,18 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
             )}
           </div>
           <div className="disc-item-meta">
+            {/* Queued (throttled, not yet running): a static hourglass,
+                NOT the active spinner. Running always wins over queued. */}
+            {!isSending && isQueued && (
+              <span
+                className="disc-item-queued"
+                role="img"
+                title={t('disc.queued')}
+                aria-label={t('disc.queued')}
+              >
+                ⏳
+              </span>
+            )}
             {isSending && <Loader2 size={8} style={{ animation: 'spin 1s linear infinite', color: 'var(--kr-accent-ink)' }} />}
             {isSending && onStop && (
               <button

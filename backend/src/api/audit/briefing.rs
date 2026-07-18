@@ -108,6 +108,7 @@ pub async fn start_briefing(
     };
 
     let discussion = Discussion {
+        awaiting_agent: false,
         id: discussion_id.clone(),
         project_id: Some(project.id.clone()),
         title,

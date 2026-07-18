@@ -91,6 +91,10 @@ export function Dashboard({ onReset }: DashboardProps) {
 
   // ─── Lifted discussion streaming state (survives page changes) ──────────
   const [sendingMap, setSendingMap] = useState<Record<string, boolean>>({});
+  // Batch children created but not yet running (throttled by the batch
+  // semaphore). Distinct from sendingMap ("agent actually running") so the
+  // sidebar shows "en file" vs "en cours" instead of N identical spinners.
+  const [queuedMap, setQueuedMap] = useState<Record<string, boolean>>({});
   const [sendingStartMap, setSendingStartMap] = useState<Record<string, number>>({});
   const [streamingMap, setStreamingMap] = useState<Record<string, string>>({});
   // 2026-06-24 — server-side truth of which discs have an in-flight agent run
@@ -1355,6 +1359,8 @@ export function Dashboard({ onReset }: DashboardProps) {
             toast={toast}
             sendingMap={sendingMap}
             setSendingMap={setSendingMap}
+            queuedMap={queuedMap}
+            setQueuedMap={setQueuedMap}
             sendingStartMap={sendingStartMap}
             setSendingStartMap={setSendingStartMap}
             streamingMap={streamingMap}

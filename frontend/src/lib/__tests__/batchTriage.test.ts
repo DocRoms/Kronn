@@ -21,6 +21,7 @@ const baseDiscussion: Discussion = {
   workspace_mode: 'Direct',
   created_at: '2026-06-01T10:00:00Z',
   updated_at: '2026-06-01T10:00:00Z',
+  awaiting_agent: false,
 };
 
 // The triage QP emits Markdown (verdict-first), NOT JSON. These fixtures mirror

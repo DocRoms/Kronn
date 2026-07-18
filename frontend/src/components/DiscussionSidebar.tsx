@@ -16,6 +16,9 @@ export interface DiscussionSidebarProps {
   projects: Project[];
   activeId: string | null;
   sendingMap: Record<string, boolean>;
+  /** Batch children created but not yet running (throttled). Rendered
+   *  as a distinct "en file" state vs the active "en cours" spinner. */
+  queuedMap?: Record<string, boolean>;
   lastSeenMsgCount: Record<string, number>;
   contacts: Contact[];
   contactsOnline: Record<string, boolean>;
@@ -104,6 +107,7 @@ export function DiscussionSidebar({
   projects,
   activeId,
   sendingMap,
+  queuedMap = {},
   lastSeenMsgCount,
   contacts,
   contactsOnline,
@@ -223,6 +227,21 @@ export function DiscussionSidebar({
       if (!bind || bind.source_agent !== sourceFilter) return false;
     }
     return true;
+  };
+
+  // Waiting for an agent slot. `queuedMap` is the fast path (live WS frame);
+  // `awaiting_agent` is the DB truth serialized with the list — it covers
+  // frames missed because the page wasn't mounted when the batch launched,
+  // reloads, and WS reconnects. Running always wins over queued.
+  const isQueuedDisc = (d: Discussion): boolean =>
+    !sendingMap[d.id] && (!!queuedMap[d.id] || d.awaiting_agent);
+
+  // Live discussions first: an active agent (spinner) is what the user is
+  // waiting on — don't let it drown mid-list. Running > queued > rest,
+  // most-recent inside each band.
+  const byLiveThenRecent = (a: Discussion, b: Discussion): number => {
+    const rank = (d: Discussion) => (sendingMap[d.id] ? 0 : isQueuedDisc(d) ? 1 : 2);
+    return rank(a) - rank(b) || b.updated_at.localeCompare(a.updated_at);
   };
 
   // ─── Derived data ─────────────────────────────────────────────────────
@@ -556,13 +575,14 @@ export function DiscussionSidebar({
                 <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
                 <span className="disc-group-count">{pinned.length}</span>
               </div>
-              {pinned.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+              {pinned.sort(byLiveThenRecent).map(disc => (
                 <SwipeableDiscItem
                   key={`pin-${disc.id}`}
                   disc={disc}
                   isActive={disc.id === activeId}
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   isSending={!!sendingMap[disc.id]}
+                  isQueued={isQueuedDisc(disc)}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onDelete={onDelete}
@@ -599,13 +619,14 @@ export function DiscussionSidebar({
                   <span className="disc-group-unseen">{unseenByGroup.get('__global__')}</span>
                 )}
               </button>
-              {!isCollapsed && globalDiscs.sort((a, b) => b.updated_at.localeCompare(a.updated_at)).map(disc => (
+              {!isCollapsed && globalDiscs.sort(byLiveThenRecent).map(disc => (
                 <SwipeableDiscItem
                   key={disc.id}
                   disc={disc}
                   isActive={disc.id === activeId}
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   isSending={!!sendingMap[disc.id]}
+                  isQueued={isQueuedDisc(disc)}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onDelete={onDelete}
@@ -712,12 +733,26 @@ export function DiscussionSidebar({
                           .map(([runId, discs]) => {
                             const anySending = discs.some(d => !!sendingMap[d.id]);
                             const total = discs.length;
-                            // "Done" = not in sendingMap AND has at least 2 messages (user + agent reply).
-                            // This is a rough live heuristic; the real authority is workflow_runs in DB.
-                            const done = discs.filter(d => !sendingMap[d.id] && d.message_count >= 2).length;
-                            return { runId, discs, anySending, total, done };
+                            // "Done" = not running AND not queued AND has at least 2 messages
+                            // (user + agent reply). Excluding queuedMap matters on a batch
+                            // retry over EXISTING discs (>=2 messages already): a throttled
+                            // child would otherwise count as done and the pill jumps ahead.
+                            // Rough live heuristic; the real authority is workflow_runs in DB.
+                            const done = discs.filter(d => !sendingMap[d.id] && !isQueuedDisc(d) && d.message_count >= 2).length;
+                            // Children created but not yet running (throttled). Lets the
+                            // group show "n en file" distinctly from "en cours".
+                            const running = discs.filter(d => !!sendingMap[d.id]).length;
+                            const queued = discs.filter(isQueuedDisc).length;
+                            return { runId, discs, anySending, total, done, running, queued };
                           })
-                          .sort((a, b) => b.discs[0].updated_at.localeCompare(a.discs[0].updated_at));
+                          .sort((a, b) => {
+                            // Batches with live children surface first, same
+                            // logic as byLiveThenRecent at the disc level.
+                            const rank = (g: { anySending: boolean; queued: number }) =>
+                              g.anySending ? 0 : g.queued > 0 ? 1 : 2;
+                            return rank(a) - rank(b)
+                              || b.discs[0].updated_at.localeCompare(a.discs[0].updated_at);
+                          });
                         return (
                           <>
                             {/* Batch groups first — dépliables, collapsed by default */}
@@ -759,8 +794,13 @@ export function DiscussionSidebar({
                                 try { return new Date(batchStartIso).toLocaleString(lang); }
                                 catch { return batchStartIso; }
                               })();
-                              const statusPill = bg.anySending
+                              // While active, split "en cours" from "en file"
+                              // so a big batch reads honestly (e.g. "⏳ 3/23 · 5▶ · 15⏸")
+                              // instead of 23 identical spinners.
+                              const statusPill = (bg.anySending || bg.queued > 0)
                                 ? `⏳ ${bg.done}/${bg.total}`
+                                  + (bg.running > 0 ? ` · ${bg.running}▶` : '')
+                                  + (bg.queued > 0 ? ` · ${bg.queued}⏸` : '')
                                 : bg.done === bg.total
                                   ? `✓ ${bg.total}/${bg.total}`
                                   : `${bg.done}/${bg.total}`;
@@ -785,7 +825,7 @@ export function DiscussionSidebar({
                                           · {batchWhen}
                                         </span>
                                       )}
-                                      <span className="disc-group-count" data-batch-status={bg.anySending ? 'running' : 'done'}>
+                                      <span className="disc-group-count" data-batch-status={(bg.anySending || bg.queued > 0) ? 'running' : 'done'}>
                                         {statusPill}
                                       </span>
                                     </button>
@@ -864,13 +904,16 @@ export function DiscussionSidebar({
                                     // batch children read as "inside" the 📦 folder,
                                     // not as siblings of the loose discs below.
                                     <div className="disc-batch-children">
-                                      {bg.discs.map(disc => (
+                                      {/* Sorted copy — bg.discs order feeds the
+                                          folder label fallback, don't mutate. */}
+                                      {[...bg.discs].sort(byLiveThenRecent).map(disc => (
                                         <SwipeableDiscItem
                                           key={disc.id}
                                           disc={disc}
                                           isActive={disc.id === activeId}
                                           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                           isSending={!!sendingMap[disc.id]}
+                  isQueued={isQueuedDisc(disc)}
                                           onSelect={onSelect}
                                           onArchive={onArchive}
                                           onDelete={onDelete}
@@ -891,8 +934,11 @@ export function DiscussionSidebar({
                             {(() => {
                               const isExpanded = expandedProjects.has(proj.id);
                               const showAll = isExpanded || !!deferredSearch;
-                              const visibleLoose = showAll ? loose : loose.slice(0, PROJECT_LOOSE_LIMIT);
-                              const hiddenCount = loose.length - visibleLoose.length;
+                              // Live-first BEFORE the cap: a running disc must
+                              // never be hidden behind "afficher plus".
+                              const orderedLoose = [...loose].sort(byLiveThenRecent);
+                              const visibleLoose = showAll ? orderedLoose : orderedLoose.slice(0, PROJECT_LOOSE_LIMIT);
+                              const hiddenCount = orderedLoose.length - visibleLoose.length;
                               return (
                                 <>
                                   {visibleLoose.map(disc => (
@@ -902,6 +948,7 @@ export function DiscussionSidebar({
                                       isActive={disc.id === activeId}
                                       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                       isSending={!!sendingMap[disc.id]}
+                  isQueued={isQueuedDisc(disc)}
                                       onSelect={onSelect}
                                       onArchive={onArchive}
                                       onDelete={onDelete}
@@ -968,6 +1015,7 @@ export function DiscussionSidebar({
                 isActive={disc.id === activeId}
                 lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                 isSending={!!sendingMap[disc.id]}
+                  isQueued={isQueuedDisc(disc)}
                 onSelect={onSelect}
                 onArchive={onUnarchive}
                 onDelete={onDelete}

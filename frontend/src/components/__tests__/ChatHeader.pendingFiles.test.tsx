@@ -38,6 +38,7 @@ function makeDiscussion(overrides: Partial<Discussion> = {}): Discussion {
     workspace_path: '/tmp/worktree',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
+    awaiting_agent: false,
     ...overrides,
   };
 }

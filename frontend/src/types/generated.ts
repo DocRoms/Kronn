@@ -1175,6 +1175,12 @@ shared_with?: Array<string>,
  */
 workflow_run_id?: string | null,
 /**
+ * The disc is owed an agent run that hasn't produced a durable trace yet
+ * (queued batch child, or a reply in flight). DB-backed so the sidebar's
+ * "en file" state survives navigation, reloads and missed WS frames.
+ */
+awaiting_agent: boolean,
+/**
  * Test mode — branch the main repo was on before the user entered test
  * mode. `Some` means the user is actively testing this discussion's
  * branch in their main repo; `None` means normal worktree operation.
@@ -3582,7 +3588,7 @@ discussion_id: string, batch_total: number, batch_completed: number, batch_faile
 /**
  * Id of the child discussion whose agent run is starting.
  */
-discussion_id: string, } | { "type": "workflow_run_updated", run_id: string, workflow_id: string, status: string,
+discussion_id: string, } | { "type": "batch_run_child_queued", run_id: string, discussion_id: string, } | { "type": "workflow_run_updated", run_id: string, workflow_id: string, status: string,
 /**
  * Index of the currently-running (or just-completed) step. -1 when
  * the run starts and no step is in flight yet.
@@ -3591,4 +3597,4 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, };
+current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, };

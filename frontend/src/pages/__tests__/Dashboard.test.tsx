@@ -99,6 +99,7 @@ const makeDiscussion = (id: string, msgCount: number): Discussion => ({
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+  awaiting_agent: false,
 });
 
 const makeProject = (id: string, name: string, org?: string): Project => ({

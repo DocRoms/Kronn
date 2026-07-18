@@ -22,6 +22,7 @@ function disc(overrides: Partial<Discussion> = {}): Discussion {
     worktree_branch: 'kronn/switch-theme',
     test_mode_restore_branch: 'main',
     created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+    awaiting_agent: false,
     ...overrides,
   };
 }
