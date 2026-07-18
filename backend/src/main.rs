@@ -299,6 +299,34 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Partial-response recovery failed: {}", e),
     }
 
+    // Boot reconcile n°3, AFTER partial recovery. Catches the work
+    // the other two reconciles miss: an agent run that was OWED (a queued batch
+    // child, or a human message whose auto-reply never spawned) and was
+    // orphaned by the restart before producing any durable trace. It marks
+    // them interrupted (a notice message) — it NEVER re-spawns, because an
+    // interruption may be deliberate (the user shut the machine). Runs after
+    // recovery so a disc whose partial was just turned into an Agent message is
+    // correctly seen as answered and skipped.
+    let awaiting = state.db.with_conn(|conn| {
+        kronn::db::discussions::reconcile_awaiting_agents(conn)
+    }).await;
+    match awaiting {
+        Ok(ids) if !ids.is_empty() => {
+            tracing::warn!(
+                "Awaiting-agent reconcile: {} discussion(s) were owed an agent run that never \
+                 started before the restart — marked interrupted (not re-spawned)",
+                ids.len()
+            );
+            let _ = state.ws_broadcast.send(
+                kronn::models::WsMessage::AgentRunsInterrupted {
+                    discussion_ids: ids,
+                }
+            );
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("Awaiting-agent reconcile failed: {}", e),
+    }
+
     // 0.8.11 (B7) — opt-in run retention. Only when the operator set
     // `run_retention_days > 0`; parent runs referenced by a retained child are
     // preserved by the query. Default 0 = keep all history (no surprise loss).

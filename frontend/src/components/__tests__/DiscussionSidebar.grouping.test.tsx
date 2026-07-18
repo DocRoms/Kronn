@@ -73,6 +73,7 @@ const mkDisc = (over: Partial<Discussion> & { id: string }): Discussion => ({
   workspace_mode: 'Direct',
   created_at: '2026-05-15T10:00:00Z',
   updated_at: '2026-05-15T10:00:00Z',
+  awaiting_agent: false,
   ...over,
 });
 
@@ -593,5 +594,42 @@ describe('DiscussionSidebar — empty + archives', () => {
       expect(screen.getByText('Archived thread')).toBeInTheDocument();
     });
     expect(archHeader).toHaveAttribute('aria-expanded', 'true');
+  });
+});
+
+describe('DiscussionSidebar — queued (awaiting_agent) indicator', () => {
+  // The hourglass must come from the DB field too, NOT only from the live
+  // batch_run_child_queued WS frame: that frame is lost when the page isn't
+  // mounted at batch-launch time (or on reload / WS reconnect), and every
+  // waiting disc rendered as if it were done.
+  it('shows the hourglass from disc.awaiting_agent alone (no WS queuedMap)', async () => {
+    const discussions = [
+      mkDisc({ id: 'q1', project_id: null, title: 'Waiting child', awaiting_agent: true }),
+    ];
+
+    render(<DiscussionSidebar {...baseProps} discussions={discussions} queuedMap={{}} />);
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    const dot = document.querySelector('.disc-item-queued');
+    expect(dot).not.toBeNull();
+    expect(dot!.textContent).toContain('⏳');
+  });
+
+  it('running wins over queued: no hourglass when sendingMap is set', async () => {
+    const discussions = [
+      mkDisc({ id: 'q2', project_id: null, title: 'Running child', awaiting_agent: true }),
+    ];
+
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        sendingMap={{ q2: true }}
+        queuedMap={{}}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+
+    expect(document.querySelector('.disc-item-queued')).toBeNull();
   });
 });

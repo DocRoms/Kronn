@@ -146,6 +146,51 @@ pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
     }
 }
 
+/// Bump a batch run's counters for a finished child — delivered OR failed
+/// to start — and broadcast the matching progress/finished WS event. Batch
+/// children run server-side with no SSE consumer: this event is the only
+/// thing that moves the sidebar pill and clears the child's indicator, so
+/// EVERY child outcome must route through here or the run sticks at n-1/N.
+async fn bump_batch_progress(state: &AppState, run_id: &str, disc_id: &str, child_succeeded: bool) {
+    let run_id_inner = run_id.to_string();
+    let batch_updated = state.db.with_conn(move |conn| {
+        crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
+    }).await;
+    match batch_updated {
+        Ok(Some(updated_run)) => {
+            let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
+            let event = if is_final {
+                WsMessage::BatchRunFinished {
+                    run_id: updated_run.id.clone(),
+                    discussion_id: disc_id.to_string(),
+                    batch_name: updated_run.batch_name.clone(),
+                    batch_total: updated_run.batch_total,
+                    batch_completed: updated_run.batch_completed,
+                    batch_failed: updated_run.batch_failed,
+                }
+            } else {
+                WsMessage::BatchRunProgress {
+                    run_id: updated_run.id.clone(),
+                    discussion_id: disc_id.to_string(),
+                    batch_total: updated_run.batch_total,
+                    batch_completed: updated_run.batch_completed,
+                    batch_failed: updated_run.batch_failed,
+                }
+            };
+            let _ = state.ws_broadcast.send(event);
+            if is_final {
+                tracing::info!(
+                    "Batch run {} finished: {}/{} ok, {} failed",
+                    updated_run.id, updated_run.batch_completed,
+                    updated_run.batch_total, updated_run.batch_failed
+                );
+            }
+        }
+        Ok(None) => {}
+        Err(e) => tracing::error!("Failed to update batch progress: {e}"),
+    }
+}
+
 /// Shared SSE stream builder.
 ///
 /// 0.8.6 phase 4 — visibility bumped to `pub(crate)` so the MCP-remote
@@ -205,19 +250,6 @@ pub(crate) async fn make_agent_stream(
     // broadcast a WS event when it finishes.
     let batch_run_id = disc.workflow_run_id.clone();
 
-    // ── Batch child START hook ──────────────────────────────────────────
-    // Symmetric to the BatchRunProgress/BatchRunFinished broadcast at the end
-    // of the stream. Batch children run server-side with no SSE consumer on
-    // the client, so without this the per-disc `sendingMap` is never set to
-    // `true` and an in-flight child shows no "agent working" spinner. Fire it
-    // the moment the run begins so any connected client flips the indicator on.
-    if let Some(ref run_id) = batch_run_id {
-        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
-            run_id: run_id.clone(),
-            discussion_id: discussion_id.clone(),
-        });
-    }
-
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
         state.db.with_conn(move |conn| {
@@ -263,6 +295,38 @@ pub(crate) async fn make_agent_stream(
                     } else {
                         format!("Failed to re-create worktree: {}", e)
                     };
+                    // Same terminal handling as the agent-start-failed arm.
+                    // A batch child is fire-and-forget (nobody reads this SSE
+                    // error): without persisting the error, clearing the
+                    // enqueue-time awaiting marker and bumping the batch
+                    // counters, the child looks dead, the run sticks at
+                    // n-1/N and the next boot mislabels a preflight error
+                    // as an interruption.
+                    let persisted_err = DiscussionMessage {
+                        model: None,
+                        lint_report: None,
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        content: format!("Erreur: {}", err_msg),
+                        agent_type: None,
+                        timestamp: Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None, cost_usd: None, author_pseudo: None,
+                        author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                    };
+                    let did = discussion_id.clone();
+                    if let Err(db_err) = state.db.with_conn(move |conn| {
+                        // Both ops even if the insert fails.
+                        let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_err);
+                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                        inserted.and(cleared)
+                    }).await {
+                        tracing::error!("Failed to persist re-lock preflight error: {db_err}");
+                    }
+                    if let Some(ref run_id) = batch_run_id {
+                        bump_batch_progress(&state, run_id, &discussion_id, false).await;
+                    }
                     let stream: SseStream = Box::pin(futures::stream::once(async move {
                         Ok::<_, Infallible>(
                             Event::default().event("error").data(
@@ -507,6 +571,23 @@ pub(crate) async fn make_agent_stream(
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<AgentStreamEvent>(64);
 
+    // An agent run WILL start past this point (every preflight
+    // early-return is above): mark the disc as owed a reply so a restart
+    // before the first durable trace is caught by the boot reconcile.
+    // Setting it here (not in the callers) means a failed preflight never
+    // leaves a stuck flag → no bogus interruption notice at the next boot.
+    // Batch children are additionally marked at create_batch_run (their
+    // pre-spawn queue lives in RAM); re-setting here is idempotent.
+    // Cleared on delivery/error by the task's terminal paths. Best-effort.
+    {
+        let did_mark = disc_id.clone();
+        if let Err(e) = state.db.with_conn(move |conn| {
+            crate::db::discussions::set_awaiting_agent(conn, &did_mark, true)
+        }).await {
+            tracing::warn!("make_agent_stream: failed to mark awaiting_agent for {}: {}", disc_id, e);
+        }
+    }
+
     // Register a cancellation token keyed by the disc id so the "⏹ Arrêter"
     // UI (POST /api/discussions/:id/stop) can trigger it. The CancelGuard
     // removes the entry from the registry when this task's scope exits —
@@ -530,6 +611,21 @@ pub(crate) async fn make_agent_stream(
                 return;
             }
         };
+
+        // ── Batch child START hook ──────────────────────────────────────
+        // Symmetric to the BatchRunProgress/BatchRunFinished broadcast at the
+        // end of the stream. Batch children run server-side with no SSE
+        // consumer, so this WS event is what flips the client's queued dot
+        // to the running spinner. It MUST fire here, after the global
+        // permit — broadcast at make_agent_stream entry, every spawned child
+        // showed "running" while still waiting for an agent slot, and a
+        // preflight failure left a spinner nothing would ever clear.
+        if let Some(ref run_id) = batch_run_id {
+            let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
+                run_id: run_id.clone(),
+                discussion_id: discussion_id.clone(),
+            });
+        }
 
         let _ = tx.send(AgentStreamEvent::Start).await;
         let _ = tx.send(AgentStreamEvent::Meta { auth_mode: auth_mode_str.clone() }).await;
@@ -1236,9 +1332,19 @@ pub(crate) async fn make_agent_stream(
                 // Clear the in-flight checkpoint — the final message is now in
                 // `messages`, so partial_response would be redundant + would
                 // double up at the next backend boot if we left it dangling.
+                // Same call also clears the awaiting_agent marker: the agent
+                // delivered, this disc is no longer "owed a run". Keeping the
+                // flag to 0 ONLY on delivery (not at task-start) means an
+                // interruption mid-run stays flagged and the boot reconcile
+                // catches it — no blind window.
                 let did_clear = disc_id.clone();
                 let _ = state.db.with_conn(move |conn| {
-                    crate::db::discussions::set_partial_response(conn, &did_clear, None)
+                    // Attempt both clears even if the first fails — a `?` here
+                    // would leave the awaiting marker stale on a partial-clear
+                    // error and trigger needless boot reconcile work.
+                    let partial = crate::db::discussions::set_partial_response(conn, &did_clear, None);
+                    let awaiting = crate::db::discussions::set_awaiting_agent(conn, &did_clear, false);
+                    partial.and(awaiting)
                 }).await;
 
                 // ── 0.8.4 (#329 / F9) Auto-archive on validation complete ──
@@ -1287,49 +1393,11 @@ pub(crate) async fn make_agent_stream(
                 // If this disc was spawned by a batch workflow run, bump
                 // its counters. Broadcast a progress or finished event so
                 // the sidebar pill + any open batch monitor updates live.
+                // Empty-but-clean-exit children are NOT successes (Codex
+                // silent-exit bug). Computed above, before `full_response`
+                // was moved into the persisted message.
                 if let Some(ref run_id) = batch_run_id {
-                    let run_id_inner = run_id.clone();
-                    // Empty-but-clean-exit children are NOT successes (Codex
-                    // silent-exit bug). Computed above, before `full_response`
-                    // was moved into the persisted message.
-                    let child_succeeded = child_run_was_success;
-                    let ws_tx = state.ws_broadcast.clone();
-                    let batch_updated = state.db.with_conn(move |conn| {
-                        crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
-                    }).await;
-                    match batch_updated {
-                        Ok(Some(updated_run)) => {
-                            let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
-                            let event = if is_final {
-                                WsMessage::BatchRunFinished {
-                                    run_id: updated_run.id.clone(),
-                                    discussion_id: disc_id.clone(),
-                                    batch_name: updated_run.batch_name.clone(),
-                                    batch_total: updated_run.batch_total,
-                                    batch_completed: updated_run.batch_completed,
-                                    batch_failed: updated_run.batch_failed,
-                                }
-                            } else {
-                                WsMessage::BatchRunProgress {
-                                    run_id: updated_run.id.clone(),
-                                    discussion_id: disc_id.clone(),
-                                    batch_total: updated_run.batch_total,
-                                    batch_completed: updated_run.batch_completed,
-                                    batch_failed: updated_run.batch_failed,
-                                }
-                            };
-                            let _ = ws_tx.send(event);
-                            if is_final {
-                                tracing::info!(
-                                    "Batch run {} finished: {}/{} ok, {} failed",
-                                    updated_run.id, updated_run.batch_completed,
-                                    updated_run.batch_total, updated_run.batch_failed
-                                );
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => tracing::error!("Failed to update batch progress: {e}"),
-                    }
+                    bump_batch_progress(&state, run_id, &disc_id, child_run_was_success).await;
                 }
 
                 // Detect KRONN:BRIEFING_COMPLETE marker
@@ -1399,12 +1467,27 @@ pub(crate) async fn make_agent_stream(
                 let did = disc_id.clone();
                 let err_msg_fed = err_msg.clone();
                 if let Err(db_err) = state.db.with_conn(move |conn| {
-                    crate::db::discussions::insert_message(conn, &did, &err_msg)
+                    // The agent was handled (it failed to start), so it's
+                    // no longer "owed a run": clear the marker so the boot
+                    // reconcile doesn't later flag this as interrupted. Both
+                    // ops run even if the insert fails — a `?` would leave the
+                    // marker stale exactly when the run never started.
+                    let inserted = crate::db::discussions::insert_message(conn, &did, &err_msg);
+                    let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                    inserted.and(cleared)
                 }).await {
                     tracing::error!("Failed to save agent error message: {db_err}");
                 }
                 // F1 — let the peer see the turn failed instead of silence.
                 crate::api::federation::federate_message(&state, &disc_id, &err_msg_fed).await;
+
+                // A batch child that never started still counts as done
+                // (failed). Without this bump the run sticks at n-1/N: no
+                // Finished event, wait_for_completion hangs to its timeout
+                // and the child's sidebar indicator never clears.
+                if let Some(ref run_id) = batch_run_id {
+                    bump_batch_progress(&state, run_id, &disc_id, false).await;
+                }
 
                 let err = serde_json::json!({ "error": e });
                 let _ = tx.send(AgentStreamEvent::Error { data: err }).await;

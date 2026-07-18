@@ -68,6 +68,7 @@ describe('regression tests', () => {
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        awaiting_agent: false,
       };
       // message_count must be used for display, not messages.length
       expect(listDisc.message_count).toBe(5);
@@ -95,6 +96,7 @@ describe('regression tests', () => {
         workspace_mode: 'Direct',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
+        awaiting_agent: false,
       };
       const lastSeenCount = 2;
       const unseen = (disc.non_system_message_count ?? disc.messages.length) - lastSeenCount;

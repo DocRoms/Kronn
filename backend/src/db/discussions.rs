@@ -65,6 +65,97 @@ pub fn set_partial_response(conn: &Connection, disc_id: &str, partial: Option<&s
 ///
 /// Companion to the orphan workflow_runs scan in main.rs — together they
 /// guarantee no fake-Running state survives a crash.
+/// Mark/unmark a discussion as owing an agent run. Set at
+/// enqueue (batch child creation, human message that will auto-reply);
+/// cleared when the agent delivers. See `reconcile_awaiting_agents`.
+pub fn set_awaiting_agent(conn: &Connection, disc_id: &str, awaiting: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE discussions SET awaiting_agent = ?2 WHERE id = ?1",
+        rusqlite::params![disc_id, awaiting as i64],
+    )?;
+    Ok(())
+}
+
+/// Boot reconcile n°3. Finds discussions that were owed an agent
+/// run which never produced any durable trace (queued batch child, or an
+/// auto-reply never spawned) and were orphaned by a restart. Must run AFTER
+/// `recover_partial_responses` (which converts in-flight partials into Agent
+/// messages) so a disc that WAS streaming is already "answered" and skipped
+/// here. Appends an interruption notice, then clears the flag — it NEVER
+/// re-spawns (an interruption may be deliberate: the user shut the machine).
+/// If the notice insert fails the flag is kept so the next boot retries
+/// (retry can't duplicate: nothing was persisted). Returns the disc ids
+/// marked, for a boot broadcast/toast.
+pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
+    // Candidates: flagged, and no partial left to recover. The last-message
+    // check below is the precise guard (skip anything already answered).
+    let candidates: Vec<String> = {
+        let mut stmt = conn.prepare(
+            "SELECT id FROM discussions \
+             WHERE awaiting_agent = 1 AND partial_response IS NULL",
+        )?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    const FOOTER: &str = "⏸️ **Réponse interrompue** — le backend a redémarré avant qu'une \
+        réponse de l'agent soit enregistrée pour cette discussion (interruption possiblement \
+        volontaire). Relancez si besoin.";
+
+    let mut marked = Vec::with_capacity(candidates.len());
+    for disc_id in candidates {
+        // Defensive: only act if the last message is still a User prompt with
+        // no Agent answer after it. Anything else (already answered, or a
+        // partial just recovered into an Agent message) → just clear the flag.
+        let last_role: Option<String> = conn
+            .query_row(
+                "SELECT role FROM messages WHERE discussion_id = ?1 \
+                 ORDER BY sort_order DESC LIMIT 1",
+                rusqlite::params![&disc_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let owed = matches!(last_role.as_deref(), Some("User"));
+        if owed {
+            let msg = DiscussionMessage {
+                model: None,
+                lint_report: None,
+                id: uuid::Uuid::new_v4().to_string(),
+                role: MessageRole::Agent,
+                content: FOOTER.to_string(),
+                agent_type: None,
+                timestamp: Utc::now(),
+                tokens_used: 0,
+                auth_mode: None,
+                model_tier: None,
+                cost_usd: None,
+                author_pseudo: None,
+                author_avatar_email: None,
+                source_msg_id: None,
+                duration_ms: None,
+            };
+            // If the notice can't be persisted, KEEP awaiting_agent=1 so the
+            // next boot retries: no notice landed, so retrying can't duplicate
+            // one, whereas clearing here loses the user's only signal forever.
+            // Worst case of a persistent failure is one warn line per boot —
+            // observable, unlike a silently dropped owed-run marker.
+            if let Err(e) = insert_message(conn, &disc_id, &msg) {
+                tracing::warn!("reconcile_awaiting_agents: failed to append notice for {}: {}", disc_id, e);
+                continue;
+            }
+            marked.push(disc_id.clone());
+        }
+        if let Err(e) = set_awaiting_agent(conn, &disc_id, false) {
+            tracing::warn!("reconcile_awaiting_agents: failed to clear flag for {}: {}", disc_id, e);
+        }
+    }
+    Ok(marked)
+}
+
 pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
     let triples: Vec<(String, String, Option<String>)> = {
         let mut stmt = conn.prepare(
@@ -161,7 +252,8 @@ const DISC_SELECT_COLS: &str = "d.id, d.project_id, d.title, d.agent, d.language
                 d.source_agent, d.source_session_id, d.imported_at, d.diverged_at,
                 d.model,
                 (SELECT COUNT(*) FROM messages m
-                   WHERE m.discussion_id = d.id AND m.role != 'System') AS non_system_count";
+                   WHERE m.discussion_id = d.id AND m.role != 'System') AS non_system_count,
+                d.awaiting_agent";
 
 /// Map one `discussions` row (selected via [`DISC_SELECT_COLS`]) into a
 /// [`Discussion`] without its messages (those are loaded separately).
@@ -201,6 +293,7 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         shared_id: row.get::<_, Option<String>>(20).unwrap_or(None),
         shared_with: serde_json::from_str(&row.get::<_, String>(21).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
         workflow_run_id: row.get::<_, Option<String>>(22).unwrap_or(None),
+        awaiting_agent: row.get::<_, i32>(34).unwrap_or(0) != 0,
         test_mode_restore_branch: row.get::<_, Option<String>>(24).unwrap_or(None),
         test_mode_stash_ref: row.get::<_, Option<String>>(25).unwrap_or(None),
         summary_strategy: parse_summary_strategy(row.get::<_, String>(26).unwrap_or_else(|_| "Auto".into()).as_str()),
@@ -285,7 +378,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
                 test_mode_restore_branch, test_mode_stash_ref,
                 summary_strategy, introspection_call_count,
                 source_agent, source_session_id, imported_at, diverged_at,
-                model
+                model, awaiting_agent
          FROM discussions WHERE id = ?1"
     )?;
 
@@ -321,6 +414,7 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
             shared_id: row.get::<_, Option<String>>(19).unwrap_or(None),
             shared_with: serde_json::from_str(&row.get::<_, String>(20).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
             workflow_run_id: row.get::<_, Option<String>>(21).unwrap_or(None),
+            awaiting_agent: row.get::<_, i32>(32).unwrap_or(0) != 0,
             test_mode_restore_branch: row.get::<_, Option<String>>(23).unwrap_or(None),
             test_mode_stash_ref: row.get::<_, Option<String>>(24).unwrap_or(None),
             summary_strategy: parse_summary_strategy(row.get::<_, String>(25).unwrap_or_else(|_| "Auto".into()).as_str()),
@@ -401,6 +495,7 @@ pub fn ensure_mirror_by_shared_id(
     }
     let now = Utc::now();
     let disc = Discussion {
+        awaiting_agent: false,
         id: uuid::Uuid::new_v4().to_string(),
         project_id: None,
         title: format!("{title} (shared by {from_pseudo})"),

@@ -138,6 +138,8 @@ const wrap = async (ui: React.ReactElement) => {
 const liftedProps = () => ({
   sendingMap: {},
   setSendingMap: vi.fn(),
+  queuedMap: {},
+  setQueuedMap: vi.fn(),
   sendingStartMap: {},
   setSendingStartMap: vi.fn(),
   streamingMap: {},
@@ -165,6 +167,7 @@ const makeListDiscussion = (id: string, msgCount: number): Discussion => ({
   workspace_mode: 'Direct',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+  awaiting_agent: false,
 });
 
 describe('DiscussionsPage', () => {
@@ -369,8 +372,15 @@ describe('DiscussionsPage', () => {
     vi.mocked(discussionsApi.get).mockResolvedValue(makeListDiscussion('d1', 2));
 
     const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let firedRecovered = false;
     vi.mocked(useWebSocket).mockImplementation((onMessage) => {
-      setTimeout(() => onMessage({ type: 'partial_response_recovered', discussion_ids: ['d1'] }), 10);
+      // Fire-once: this mock runs on EVERY render — an unguarded setTimeout
+      // per render leaks a late timer into the NEXT test (cleared mocks →
+      // undefined.then crash, seen as a Vitest unhandled error).
+      if (!firedRecovered) {
+        firedRecovered = true;
+        setTimeout(() => onMessage({ type: 'partial_response_recovered', discussion_ids: ['d1'] }), 10);
+      }
       return { connected: true };
     });
 
@@ -391,6 +401,96 @@ describe('DiscussionsPage', () => {
     await act(async () => { await new Promise(r => setTimeout(r, 100)); });
 
     expect(lifted.abortControllers.current.d1).toBeUndefined();
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+  });
+
+  it('marks a child queued on batch_run_child_queued WITHOUT refetching the list', async () => {
+    // These frames arrive N-at-once for a big batch; a refetch per frame
+    // would burst N requests. The handler must only flip queuedMap.
+    const lifted = liftedProps();
+    const refetch = vi.fn();
+
+    // Defensive: a stray late timer from a prior test may call reloadDiscussion
+    // during this test — give it a working mock instead of undefined.then.
+    vi.mocked(discussionsApi.get).mockResolvedValue(makeListDiscussion('d1', 2));
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let firedQueued = false;
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      if (!firedQueued) {
+        firedQueued = true;
+        setTimeout(() => onMessage({ type: 'batch_run_child_queued', run_id: 'r1', discussion_id: 'd1' }), 10);
+      }
+      return { connected: true };
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={refetch}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...lifted}
+      />
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+
+    // queuedMap flipped for d1 (functional updater called with prev state)…
+    expect(lifted.setQueuedMap).toHaveBeenCalled();
+    const updater = lifted.setQueuedMap.mock.calls[0][0];
+    expect(updater({})).toEqual({ d1: true });
+    // …and NOT a single list refetch from this frame.
+    expect(refetch).not.toHaveBeenCalled();
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
+  });
+
+  it('clears sending AND queued state on agent_runs_interrupted', async () => {
+    // A browser left open across a backend restart must drop BOTH
+    // indicators for the interrupted discs, or the queued dot sticks forever.
+    const controller = new AbortController();
+    const lifted = liftedProps();
+    lifted.abortControllers = { current: { d1: controller } };
+    vi.mocked(discussionsApi.get).mockResolvedValue(makeListDiscussion('d1', 2));
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let firedInterrupted = false;
+    vi.mocked(useWebSocket).mockImplementation((onMessage) => {
+      if (!firedInterrupted) {
+        firedInterrupted = true;
+        setTimeout(() => onMessage({ type: 'agent_runs_interrupted', discussion_ids: ['d1'] }), 10);
+      }
+      return { connected: true };
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        {...lifted}
+      />
+    );
+    await act(async () => { await new Promise(r => setTimeout(r, 100)); });
+
+    // Both maps cleared for d1 (functional updaters), controller dropped, user toasted.
+    const sendingUpdater = lifted.setSendingMap.mock.calls.at(-1)![0];
+    expect(sendingUpdater({ d1: true })).toEqual({ d1: false });
+    const queuedUpdater = lifted.setQueuedMap.mock.calls.at(-1)![0];
+    expect(queuedUpdater({ d1: true })).toEqual({ d1: false });
+    expect(lifted.abortControllers.current.d1).toBeUndefined();
+    // The component runs the real fr i18n — assert on the translated copy.
+    expect(toastFn).toHaveBeenCalledWith(expect.stringContaining("en attente d'agent interrompue"), 'info');
     vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
   });
 
@@ -1718,6 +1818,7 @@ describe('DiscussionsPage', () => {
     workspace_mode: 'Direct',
     created_at: '2026-01-01T00:00:00Z',
     updated_at: '2026-01-01T00:00:00Z',
+    awaiting_agent: false,
   });
 
   const renderWithDisc = async (proj: Project, disc: Discussion, onNavigateSpy = vi.fn()) => {

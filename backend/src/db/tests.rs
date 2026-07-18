@@ -176,6 +176,7 @@ fn sample_project(id: &str, name: &str) -> Project {
 fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
     let now = Utc::now();
     Discussion {
+        awaiting_agent: false,
         id: id.into(),
         project_id: project_id.map(|s| s.into()),
         title: "Test Discussion".into(),
@@ -2550,6 +2551,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
     // Create a discussion with a user message
     let now = chrono::Utc::now();
     let disc = Discussion {
+        awaiting_agent: false,
         id: "disc-pr-1".into(),
         project_id: None,
         title: "Test".into(),
@@ -2636,6 +2638,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
     let conn = test_db();
     let now = chrono::Utc::now();
     let disc = Discussion {
+        awaiting_agent: false,
         id: "disc-ts".into(), project_id: None, title: "X".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
@@ -2686,6 +2689,7 @@ fn has_pending_partial_returns_true_when_set() {
     let conn = test_db();
     let now = chrono::Utc::now();
     let disc = Discussion {
+        awaiting_agent: false,
         id: "disc-pending".into(), project_id: None, title: "X".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
@@ -2712,6 +2716,7 @@ fn partial_response_clear_with_none_wipes_column() {
     let conn = test_db();
     let now = chrono::Utc::now();
     let disc = Discussion {
+        awaiting_agent: false,
         id: "disc-clear".into(), project_id: None, title: "X".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
@@ -3696,6 +3701,7 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
     // and 1 launch on v2 (tokens 800, duration 3000).
     let seed_disc = |disc_id: &str, v: u32, agent_tokens: u64, agent_dur: u64| {
         let d = Discussion {
+            awaiting_agent: false,
             id: disc_id.into(), project_id: None, title: format!("Disc {}", disc_id),
             agent: AgentType::ClaudeCode, language: "fr".into(),
             participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
@@ -3839,6 +3845,7 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
 
     // Seed a discussion stamped with v1 (the version we'll delete).
     let d = Discussion {
+        awaiting_agent: false,
         id: "d-orphan".into(), project_id: None, title: "T".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
@@ -3891,6 +3898,7 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
     let d = Discussion {
+        awaiting_agent: false,
         id: "d-multi".into(), project_id: None, title: "T".into(),
         agent: AgentType::ClaudeCode, language: "fr".into(),
         participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
@@ -4012,6 +4020,7 @@ fn cross_agent_db_round_trip_all_types() {
         let disc_id = format!("cross-{:?}", agent_type);
         let now = chrono::Utc::now();
         let disc = Discussion {
+            awaiting_agent: false,
             id: disc_id.clone(),
             project_id: None,
             title: format!("Test {:?}", agent_type),

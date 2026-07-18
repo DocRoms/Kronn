@@ -195,6 +195,10 @@ pub async fn send_message(
         return Sse::new(stream);
     }
 
+    // The awaiting_agent marker is set INSIDE make_agent_stream,
+    // after its preflight early-returns (marking here left the flag
+    // stuck when a preflight failed, and a later boot appended a bogus
+    // interruption notice).
     make_agent_stream(state, id, target).await
 }
 
@@ -203,6 +207,9 @@ pub async fn run_agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Sse<SseStream> {
+    // The awaiting_agent marker is set inside make_agent_stream (after
+    // preflights) so a forced run that fails preflight never leaves a stuck
+    // flag. See send_message above.
     make_agent_stream(state, id, None).await
 }
 
@@ -384,5 +391,117 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(live, 0, "paused agent is not a live responder → Kronn would still answer");
+    }
+
+    /// A run that dies in make_agent_stream's
+    /// preflight (here: Isolated disc whose worktree re-lock fails because
+    /// the project path isn't a git repo) must NOT leave awaiting_agent=1,
+    /// or the next boot reconcile appends a bogus interruption notice.
+    /// The marker is set after every preflight early-return, so this path
+    /// never touches it.
+    #[tokio::test]
+    async fn run_agent_preflight_failure_leaves_no_awaiting_marker() {
+        let disc = "d-relock-fail";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE discussions SET workspace_mode = 'Isolated',
+                            workspace_path = NULL, worktree_branch = 'kronn/test-relock'
+                     WHERE id = ?1",
+                    rusqlite::params![disc],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = run_agent(State(state.clone()), Path(disc.to_string())).await;
+        let body = sse_body_to_string(resp).await;
+        assert!(body.contains("error"), "re-lock preflight must fail, got: {body}");
+
+        let awaiting: i64 = state
+            .db
+            .with_conn(move |conn| {
+                Ok(conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = ?1",
+                    rusqlite::params![disc],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(awaiting, 0, "failed preflight must not leave the disc marked as owed a run");
+    }
+
+    /// A BATCH child is pre-marked awaiting_agent=1 at enqueue
+    /// (create_batch_run) and its SSE stream has no consumer. A preflight
+    /// failure must behave like the agent-start-failed arm: persist the
+    /// error in the thread, clear the marker (no bogus boot notice) and
+    /// bump the batch counters (no run stuck at n-1/N).
+    #[tokio::test]
+    async fn batch_child_preflight_failure_persists_error_and_settles_the_batch() {
+        let disc = "d-batch-relock";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
+                     VALUES ('wf-r12', 'r12', '{}', '[]', ?1, ?1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO workflow_runs (id, workflow_id, run_type, status, started_at, batch_total)
+                     VALUES ('run-r12', 'wf-r12', 'batch', 'Running', ?1, 1)",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "UPDATE discussions SET workflow_run_id = 'run-r12', awaiting_agent = 1,
+                            workspace_mode = 'Isolated', workspace_path = NULL,
+                            worktree_branch = 'kronn/test-relock'
+                     WHERE id = ?1",
+                    rusqlite::params![disc],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let resp = run_agent(State(state.clone()), Path(disc.to_string())).await;
+        let body = sse_body_to_string(resp).await;
+        assert!(body.contains("error"), "re-lock preflight must fail, got: {body}");
+
+        let (awaiting, batch_failed): (i64, i64) = state
+            .db
+            .with_conn(move |conn| {
+                let awaiting = conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = ?1",
+                    rusqlite::params![disc],
+                    |r| r.get(0),
+                )?;
+                let failed = conn.query_row(
+                    "SELECT batch_failed FROM workflow_runs WHERE id = 'run-r12'",
+                    [],
+                    |r| r.get(0),
+                )?;
+                Ok((awaiting, failed))
+            })
+            .await
+            .unwrap();
+        assert_eq!(awaiting, 0, "enqueue-time marker must be cleared on preflight failure");
+        assert_eq!(batch_failed, 1, "the child must count as failed so the batch can finish");
+
+        let msgs = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, disc))
+            .await
+            .unwrap();
+        assert!(
+            msgs.iter().any(|m| m.role == MessageRole::System && m.content.starts_with("Erreur:")),
+            "the preflight error must be persisted in the thread (fire-and-forget child)"
+        );
     }
 }

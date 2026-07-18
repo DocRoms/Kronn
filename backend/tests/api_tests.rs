@@ -3908,6 +3908,7 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
     // Create a discussion with a shared_id
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
+        awaiting_agent: false,
         id: "disc-chat-test".into(),
         project_id: None,
         title: "Shared Chat".into(),
@@ -4278,6 +4279,7 @@ async fn ws_chat_message_idempotent() {
     // Create a shared discussion
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
+        awaiting_agent: false,
         id: "disc-idempotent".into(),
         project_id: None,
         title: "Idempotent Test".into(),
@@ -5237,6 +5239,7 @@ async fn insert_test_mode_discussion(
 ) {
     let now = chrono::Utc::now();
     let disc = kronn::models::Discussion {
+        awaiting_agent: false,
         id: id.into(),
         project_id: None,
         title: "TestMode disc".into(),
@@ -6773,6 +6776,7 @@ mod cold_api_handlers_tests {
 
         let disc_id = format!("disc-{}", uuid::Uuid::new_v4());
         let disc = kronn::models::Discussion {
+            awaiting_agent: false,
             id: disc_id.clone(),
             project_id: Some(project_id),
             title: "Disc on test repo".into(),

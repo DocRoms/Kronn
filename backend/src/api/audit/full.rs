@@ -1185,6 +1185,7 @@ pub async fn full_audit(
             "Validation audit AI".to_string()
         };
         let discussion = Discussion {
+            awaiting_agent: false,
             id: discussion_id.clone(),
             project_id: Some(project_id.clone()),
             title: disc_title,

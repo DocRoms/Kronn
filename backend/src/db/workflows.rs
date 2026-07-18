@@ -482,6 +482,7 @@ pub fn create_batch_run(
         // to the QP's default agent when None.
         let effective_agent = item.agent_override.clone().unwrap_or_else(|| qp.agent.clone());
         let discussion = Discussion {
+            awaiting_agent: false,
             id: disc_id,
             project_id: effective_project_id.clone(),
             title: item.title.clone(),
@@ -542,6 +543,11 @@ pub fn create_batch_run(
         for (disc, msg) in &discussions {
             crate::db::discussions::insert_discussion(conn, disc)?;
             crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            // Every batch child is owed an agent run. Mark it so a
+            // restart before the agent starts (queued, or the HTTP path's
+            // front-driven /run) is caught by the boot reconcile instead of
+            // leaving a dead discussion. Cleared when the agent delivers.
+            crate::db::discussions::set_awaiting_agent(conn, &disc.id, true)?;
             // Stamp the QP lineage. Skipped when the QP has no version
             // snapshot — the column simply stays NULL and the metrics
             // aggregator excludes the row.

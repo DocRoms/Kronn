@@ -200,16 +200,16 @@ pub async fn execute_batch_quick_prompt_step(
         step.name, outcome.run_id, outcome.batch_total, parent_run_id
     );
 
-    // ── Pending spinner for EVERY child, up front ───────────────────────
+    // ── Queued state for EVERY child, up front ─────────────────────
     // The semaphore below throttles agents, so most children sit QUEUED
-    // (created but not yet streaming) for a while. The per-stream
-    // `BatchRunChildStarted` (discussions/streaming.rs) only fires when a
-    // child's agent actually begins — so a queued child would show NO
-    // "agent working" spinner and look crashed in the sidebar + chat view.
-    // Broadcast the start signal for all children NOW; each is cleared by
-    // its own BatchRunProgress / BatchRunFinished event on completion.
+    // (created but not yet streaming) for a while. Broadcast a QUEUED signal
+    // for all children NOW so none looks crashed — but a distinct one from
+    // "started", so the sidebar can show "en file (n/N)" vs "en cours"
+    // instead of N identical spinners. Each child's real
+    // `BatchRunChildStarted` (streaming.rs, when its agent actually begins)
+    // flips it to running; `BatchRunProgress`/`Finished` clear it.
     for disc_id in &outcome.discussion_ids {
-        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
+        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildQueued {
             run_id: outcome.run_id.clone(),
             discussion_id: disc_id.clone(),
         });

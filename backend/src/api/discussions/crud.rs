@@ -129,6 +129,7 @@ pub async fn create(
     let base_branch = req.base_branch;
 
     let discussion = Discussion {
+        awaiting_agent: false,
         id: Uuid::new_v4().to_string(),
         project_id: req.project_id,
         title: req.title,
@@ -350,6 +351,20 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
+    // Cancel a live agent on this disc BEFORE deleting it, or
+    // the running agent finishes writing into a row that no longer exists
+    // (FOREIGN KEY constraint failed) and keeps its semaphore permit. The
+    // token is disc-keyed in the registry (streaming.rs); its agent-task
+    // finally path saves the partial + releases the permit. Best-effort.
+    if let Ok(mut map) = state.cancel_registry.lock() {
+        if let Some(token) = map.remove(&id) {
+            token.cancel();
+            tracing::info!("delete discussion {}: cancelled live agent before delete", id);
+        }
+    } else {
+        tracing::warn!("delete discussion {}: cancel registry poisoned — deleting without cancel", id);
+    }
+
     // Fetch discussion to check for worktree before deleting
     let disc = state.db.with_conn({
         let did = id.clone();
@@ -461,5 +476,52 @@ pub async fn edit_last_user_message(
     match state.db.with_conn(move |conn| crate::db::discussions::edit_last_user_message(conn, &id, &content)).await {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    async fn state_with_disc(disc_id: &str) -> AppState {
+        let db = Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
+        let disc_id = disc_id.to_string();
+        db.with_conn(move |conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at, message_count, workspace_mode)
+                 VALUES (?1, 'T2 disc', ?2, ?2, 0, 'Direct')",
+                rusqlite::params![disc_id, now],
+            )?;
+            Ok(())
+        }).await.unwrap();
+        let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
+        AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
+    }
+
+    #[tokio::test]
+    async fn delete_discussion_cancels_a_live_agent_before_deleting() {
+        // Deleting a disc with a running agent must fire its
+        // disc-keyed token first, or the agent writes into a deleted row.
+        let state = state_with_disc("d-live").await;
+        let token = tokio_util::sync::CancellationToken::new();
+        state.cancel_registry.lock().unwrap().insert("d-live".into(), token.clone());
+
+        let resp = delete(State(state.clone()), Path("d-live".to_string())).await;
+        assert!(resp.0.success, "delete must succeed: {:?}", resp.0.error);
+        assert!(token.is_cancelled(), "the disc's agent token must be cancelled");
+        assert!(
+            state.cancel_registry.lock().unwrap().is_empty(),
+            "the cancelled token must be removed from the registry",
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_discussion_without_a_live_agent_succeeds() {
+        let state = state_with_disc("d-idle").await;
+        let resp = delete(State(state), Path("d-idle".to_string())).await;
+        assert!(resp.0.success);
     }
 }

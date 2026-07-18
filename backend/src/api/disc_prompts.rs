@@ -595,6 +595,7 @@ mod tests {
 
     fn disc_with_messages(messages: Vec<DiscussionMessage>, language: &str) -> Discussion {
         Discussion {
+            awaiting_agent: false,
             id: "d-test".into(),
             project_id: None,
             title: "Test discussion".into(),
