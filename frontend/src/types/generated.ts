@@ -2931,7 +2931,11 @@ exec_allowlist?: Array<string> | null,
  * Replace launch-time variables entirely when present. `Some([])`
  * to clear, omit to keep existing.
  */
-variables?: Array<PromptVariable> | null, enabled?: boolean | null, };
+variables?: Array<PromptVariable> | null, enabled?: boolean | null,
+/**
+ * Pin/unpin as favorite; omit to leave untouched.
+ */
+pinned?: boolean | null, };
 
 /**
  * Response after uploading a context file.
@@ -3077,7 +3081,12 @@ exec_allowlist?: Array<string>,
  * (issue.* / cron payload). Required variables fail launch when
  * the value is empty.
  */
-variables?: Array<PromptVariable>, enabled: boolean, created_at: string, updated_at: string, };
+variables?: Array<PromptVariable>, enabled: boolean,
+/**
+ * User-pinned / favorite workflow — surfaces first in the Workflows
+ * page list, same affordance as `Discussion::pinned`.
+ */
+pinned: boolean, created_at: string, updated_at: string, };
 
 export type WorkflowAction = { "type": "CreatePr", title_template: string, body_template: string, branch_template: string, } | { "type": "CommentIssue", body_template: string, } | { "type": "UpdateTrackerStatus", status: string, } | { "type": "CreateIssue", title_template: string, body_template: string, };
 
@@ -3525,7 +3534,11 @@ export type WorkflowSummary = { id: string, name: string, project_id: string | n
  * AI-generated workflow that still needs wiring, without fetching its
  * full step list. 0 = ready to run.
  */
-misconfigured_step_count: number, enabled: boolean, last_run: WorkflowRunSummary | null, created_at: string, };
+misconfigured_step_count: number, enabled: boolean,
+/**
+ * User-pinned / favorite — the list surfaces pinned workflows first.
+ */
+pinned: boolean, last_run: WorkflowRunSummary | null, created_at: string, };
 
 export type WorkflowTrigger = { "type": "Cron", schedule: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" };
 

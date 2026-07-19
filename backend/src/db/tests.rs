@@ -1349,6 +1349,7 @@ fn mcp_config_hash_changes_on_args_override() {
 fn sample_workflow(id: &str) -> Workflow {
     let now = Utc::now();
     Workflow {
+        pinned: false,
         id: id.into(),
         name: "Test Workflow".into(),
         project_id: None,
@@ -1474,6 +1475,19 @@ fn workflows_delete() {
 
     let workflows = crate::db::workflows::list_workflows(&conn).unwrap();
     assert!(workflows.is_empty());
+}
+
+#[test]
+fn workflows_pinned_roundtrip() {
+    let conn = test_db();
+    let mut wf = sample_workflow("w1");
+    crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
+    assert!(!crate::db::workflows::get_workflow(&conn, "w1").unwrap().unwrap().pinned);
+
+    wf.pinned = true;
+    crate::db::workflows::update_workflow(&conn, &wf).unwrap();
+    assert!(crate::db::workflows::get_workflow(&conn, "w1").unwrap().unwrap().pinned);
+    assert!(crate::db::workflows::list_workflows(&conn).unwrap()[0].pinned);
 }
 
 // ─── Workflow Runs ───────────────────────────────────────────────────────
@@ -2979,6 +2993,7 @@ fn workflow_multi_step_roundtrip() {
     let conn = test_db();
     let now = Utc::now();
     let wf = Workflow {
+        pinned: false,
         id: "wm1".into(),
         name: "Multi-step".into(),
         project_id: None,

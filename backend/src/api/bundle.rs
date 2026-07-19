@@ -233,6 +233,7 @@ pub async fn create_bundle(
     // canonical shape.
     let wf_id = Uuid::new_v4().to_string();
     let wf_to_insert = Workflow {
+        pinned: false,
         id: wf_id.clone(),
         name: req.workflow.name.clone(),
         project_id: req.workflow.project_id.clone(),
@@ -280,6 +281,7 @@ pub async fn create_bundle(
             ))),
         };
         prepared_children.push(Workflow {
+            pinned: false,
             id: real_id,
             name: creq.name.clone(),
             project_id: creq.project_id.clone().or_else(|| parent_project_id.clone()),

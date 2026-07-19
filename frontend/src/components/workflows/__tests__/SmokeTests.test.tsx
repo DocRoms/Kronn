@@ -99,6 +99,7 @@ describe('Workflow smoke tests', () => {
       workspace_config: null,
       concurrency_limit: null,
       enabled: true,
+      pinned: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -181,6 +182,7 @@ describe('Workflow smoke tests', () => {
       workspace_config: null,
       concurrency_limit: null,
       enabled: true,
+      pinned: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };
@@ -266,6 +268,7 @@ describe('Workflow smoke tests', () => {
       workspace_config: null,
       concurrency_limit: null,
       enabled: true,
+      pinned: false,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
     };

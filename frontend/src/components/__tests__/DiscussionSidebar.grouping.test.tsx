@@ -246,7 +246,7 @@ describe('DiscussionSidebar — pinned / favorites section', () => {
     // pinned disc also renders in its project/global group via a `pin-<id>`
     // vs plain key, so a global getByText would match twice — we query
     // within the favorites container instead.
-    const favSection = favHeader.closest('.disc-group-header')!.parentElement as HTMLElement;
+    const favSection = favHeader.closest('.disc-group-btn')!.parentElement as HTMLElement;
     const newer = within(favSection).getByText('Pinned newer');
     const older = within(favSection).getByText('Pinned older');
     expect(newer).toBeInTheDocument();
@@ -260,6 +260,35 @@ describe('DiscussionSidebar — pinned / favorites section', () => {
     render(<DiscussionSidebar {...baseProps} discussions={discussions} />);
     await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
     expect(screen.queryByText('disc.favorites')).toBeNull();
+  });
+
+  it('favorites section is collapsible like any other group', async () => {
+    const onToggleGroup = vi.fn();
+    const discussions = [
+      mkDisc({ id: 'p1', project_id: null, pinned: true, pin_first_message: false, title: 'Pinned thread' }),
+    ];
+
+    // Expanded by default: header click reports the toggle upward.
+    const { unmount } = render(
+      <DiscussionSidebar {...baseProps} discussions={discussions} onToggleGroup={onToggleGroup} />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+    fireEvent.click(screen.getByText('disc.favorites'));
+    expect(onToggleGroup).toHaveBeenCalledWith('__favorites__');
+    unmount();
+
+    // Collapsed: header stays, pinned item hidden inside Favorites (it
+    // still renders once in its own group below — hence queryAllByText).
+    render(
+      <DiscussionSidebar
+        {...baseProps}
+        discussions={discussions}
+        collapsedGroups={new Set(['__favorites__'])}
+      />
+    );
+    await waitFor(() => expect(projectsApi.discSources).toHaveBeenCalled());
+    expect(screen.getByText('disc.favorites')).toBeInTheDocument();
+    expect(screen.queryAllByText('Pinned thread')).toHaveLength(1);
   });
 });
 

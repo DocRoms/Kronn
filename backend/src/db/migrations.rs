@@ -94,6 +94,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("072_message_received_at", include_str!("sql/072_message_received_at.sql")),
         ("073_session_activity", include_str!("sql/073_session_activity.sql")),
         ("074_disc_awaiting_agent", include_str!("sql/074_disc_awaiting_agent.sql")),
+        ("075_workflows_pinned", include_str!("sql/075_workflows_pinned.sql")),
     ];
 
     // Check if there are pending migrations before backing up

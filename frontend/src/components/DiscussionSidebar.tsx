@@ -561,21 +561,29 @@ export function DiscussionSidebar({
           ))}
         </div>
 
-        {/* Pinned / Favorites — always at the top, cross-project, never collapsed.
-            During an active search/source filter, only matching favorites show
-            (and the section hides entirely if none match) — otherwise every
-            pinned disc stayed visible and buried the actual search results. */}
+        {/* Pinned / Favorites — always at the top, cross-project, collapsible
+            like every other group (search bypasses the collapse). During an
+            active search/source filter, only matching favorites show (and the
+            section hides entirely if none match) — otherwise every pinned
+            disc stayed visible and buried the actual search results. */}
         {(() => {
           const pinned = discussions.filter(d => d.pinned && !d.archived && matchesFilters(d));
           if (pinned.length === 0) return null;
+          const isCollapsed = collapsedGroups.has('__favorites__') && !deferredSearch;
           return (
             <div>
-              <div className="disc-group-header" data-no-border="true">
+              <button
+                className="disc-group-btn"
+                data-no-border="true"
+                onClick={() => onToggleGroup('__favorites__')}
+                aria-expanded={!isCollapsed}
+              >
+                <ChevronRight size={10} className="disc-chevron" data-expanded={!isCollapsed} />
                 <Star size={10} style={{ color: 'var(--kr-warning)' }} />
                 <span style={{ fontWeight: 600, fontSize: 'var(--kr-fs-sm)' }}>{t('disc.favorites')}</span>
                 <span className="disc-group-count">{pinned.length}</span>
-              </div>
-              {pinned.sort(byLiveThenRecent).map(disc => (
+              </button>
+              {!isCollapsed && pinned.sort(byLiveThenRecent).map(disc => (
                 <SwipeableDiscItem
                   key={`pin-${disc.id}`}
                   disc={disc}

@@ -74,6 +74,10 @@ pub struct Workflow {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<PromptVariable>,
     pub enabled: bool,
+    /// User-pinned / favorite workflow — surfaces first in the Workflows
+    /// page list, same affordance as `Discussion::pinned`.
+    #[serde(default)]
+    pub pinned: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -1263,6 +1267,9 @@ pub struct UpdateWorkflowRequest {
     #[serde(default)]
     pub variables: Option<Vec<PromptVariable>>,
     pub enabled: Option<bool>,
+    /// Pin/unpin as favorite; omit to leave untouched.
+    #[serde(default)]
+    pub pinned: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1280,6 +1287,9 @@ pub struct WorkflowSummary {
     /// full step list. 0 = ready to run.
     pub misconfigured_step_count: u32,
     pub enabled: bool,
+    /// User-pinned / favorite — the list surfaces pinned workflows first.
+    #[serde(default)]
+    pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
     pub created_at: DateTime<Utc>,
 }

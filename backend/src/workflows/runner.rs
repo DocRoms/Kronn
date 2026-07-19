@@ -3084,6 +3084,7 @@ mod tests {
 
     fn make_workflow_with_artifacts(artifacts: ::std::collections::HashMap<String, ArtifactSpec>) -> Workflow {
         Workflow {
+            pinned: false,
             id: "test".into(),
             name: "test".into(),
             project_id: None,

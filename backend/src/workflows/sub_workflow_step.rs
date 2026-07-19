@@ -745,6 +745,7 @@ mod tests {
 
         // Child workflow: one deterministic JsonData step — no LLM, no project.
         let child_wf = crate::models::Workflow {
+            pinned: false,
             id: "child-wf".into(),
             name: "child".into(),
             project_id: None,

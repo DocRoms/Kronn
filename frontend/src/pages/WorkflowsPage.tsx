@@ -14,7 +14,7 @@ import type { ApiPluginOption } from '../components/workflows/ApiCallStepCard';
 import {
   Plus, Trash2, Play, Loader2, ChevronLeft, ChevronRight, ChevronDown,
   Clock, GitBranch, Zap, Eye, Layers, X, Square,
-  ToggleLeft, ToggleRight,
+  ToggleLeft, ToggleRight, Star,
   Upload, Download, AlertTriangle,
 } from 'lucide-react';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -314,10 +314,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         noProject.push(wf);
       }
     }
-    // The "no project" bucket renders FIRST and shares the discussions
-    // sidebar wording (`disc.general` → "Général" / "General"). Before
-    // this it was last + labelled "Sans projet", which made the two
-    // panels feel like different products to the user.
+    // Group order mirrors the discussions sidebar: Favorites first
+    // (cross-project, collapsible), then the "no project" bucket (shares
+    // the `disc.general` wording — it used to be last + labelled "Sans
+    // projet", which made the two panels feel like different products),
+    // then one group per project. Pinned workflows also stay in their
+    // project group (disc behaviour; React keys are scoped per group).
+    const pinned = workflows.filter(wf => wf.pinned);
+    if (pinned.length > 0) {
+      groups.push({ key: '__favorites__', label: t('disc.favorites'), workflows: pinned });
+    }
     if (noProject.length > 0) {
       groups.push({ key: '__global__', label: t('disc.general'), workflows: noProject });
     }
@@ -568,14 +574,24 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     });
   };
 
-  const handleToggle = async (wf: WorkflowSummary) => {
+  // Race-free guard, cf launchingRef — a double-click inside the in-flight
+  // window fires duplicate updates computed from the same stale summary.
+  // Shared by both card toggles (enabled + pinned), keyed per workflow.
+  const toggleInFlightRef = useRef<Set<string>>(new Set());
+  const toggleWorkflowField = async (wf: WorkflowSummary, patch: { enabled?: boolean; pinned?: boolean }) => {
+    if (toggleInFlightRef.current.has(wf.id)) return;
+    toggleInFlightRef.current.add(wf.id);
     try {
-      await workflowsApi.update(wf.id, { enabled: !wf.enabled });
+      await workflowsApi.update(wf.id, patch);
       refetch();
     } catch (e) {
       console.warn('Workflow action failed:', e);
+    } finally {
+      toggleInFlightRef.current.delete(wf.id);
     }
   };
+  const handleToggle = (wf: WorkflowSummary) => toggleWorkflowField(wf, { enabled: !wf.enabled });
+  const handleTogglePin = (wf: WorkflowSummary) => toggleWorkflowField(wf, { pinned: !wf.pinned });
 
   // Inline Stop on a workflow card. Silent refresh — the card's last_run
   // status will flip to Cancelled at the next refetch tick.
@@ -1229,6 +1245,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   aria-expanded={!collapsedGroups[group.key]}
                 >
                   {collapsedGroups[group.key] ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
+                  {group.key === '__favorites__' && (
+                    <Star size={11} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
+                  )}
                   <span className="flex-1">{group.label}</span>
                   <span className="text-xs text-secondary">{group.workflows.length}</span>
                 </button>
@@ -1264,6 +1283,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         />
                       )}
                       <span className="font-semibold text-md flex-1">{wf.name}</span>
+                      <button
+                        className="wf-icon-btn"
+                        style={{ color: wf.pinned ? 'var(--kr-accent)' : 'var(--kr-text-dim)' }}
+                        onClick={(e) => { e.stopPropagation(); handleTogglePin(wf); }}
+                        title={wf.pinned ? t('wf.unpin') : t('wf.pin')}
+                        aria-pressed={wf.pinned}
+                        aria-label={wf.pinned ? t('wf.unpin') : t('wf.pin')}
+                      >
+                        <Star size={14} fill={wf.pinned ? 'currentColor' : 'none'} />
+                      </button>
                       <button
                         className="wf-icon-btn"
                         style={{ color: wf.enabled ? 'var(--kr-success)' : 'var(--kr-text-dim)' }}
@@ -1417,6 +1446,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                 onNavigateToWorkflow={(wfId) => openDetail(wfId)}
                 onNavigateToRun={(wfId, runId) => openDetail(wfId, runId)}
                 focusRunId={focusRunId}
+                toast={toastProp}
                 onToggleEnabled={async (enabled) => {
                   // 0.8.11 UX — one-click enable from the detail (a disabled
                   // workflow's launch button is inert; see WorkflowDetail).
