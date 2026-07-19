@@ -168,6 +168,8 @@ export interface WorkflowDetailProps {
   onToggleEnabled?: (enabled: boolean) => void;
   /** #11 — a run id to auto-expand + scroll into view once loaded. */
   focusRunId?: string | null;
+  /** Feedback for the copy-id pill; the copy still works without it. */
+  toast?: (msg: string, type?: 'success' | 'error' | 'info') => void;
   /** 0.7.0 UX pass — export the workflow as a JSON file. The handler
    *  is wired in the parent page (it has the api binding + toast). */
   onExport?: () => void;
@@ -1159,7 +1161,7 @@ function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug;
   }
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled }: WorkflowDetailProps) {
+export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   // Run-list control bar (#2): status filter + free-text search + fold past N.
@@ -1360,7 +1362,27 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
   return (
     <div className="wf-detail-panel">
       <div className="flex-row gap-6 mb-8">
-        <h2 className="text-lg font-bold flex-1" style={{ margin: 0 }}>{workflow.name}</h2>
+        <h2 className="text-lg font-bold" style={{ margin: 0 }}>{workflow.name}</h2>
+        {/* Short workflow-id pill — same affordance as the disc-id pill:
+            click copies the full id for pasting into a disc, a CLI or a
+            linked issue (the title alone is ambiguous across variants). */}
+        <button
+          type="button"
+          className="wf-id-pill"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(workflow.id);
+              toast?.(t('disc.idCopied'), 'success');
+            } catch {
+              toast?.(t('disc.idCopyFailed'), 'error');
+            }
+          }}
+          title={t('disc.idPillTooltip', workflow.id)}
+          aria-label={t('disc.idPillTooltip', workflow.id)}
+        >
+          #{workflow.id.slice(0, 8)}
+        </button>
+        <span className="flex-1" />
         <button className="wf-small-btn" onClick={onEdit}>
           <Settings size={10} /> {t('wf.edit')}
         </button>

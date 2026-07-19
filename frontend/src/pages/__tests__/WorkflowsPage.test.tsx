@@ -213,6 +213,7 @@ describe('WorkflowsPage', () => {
       workspace_config: null,
       concurrency_limit: null,
       enabled: true,
+      pinned: false,
       created_at: '2026-01-01T00:00:00Z',
       updated_at: '2026-01-01T00:00:00Z',
     };
@@ -226,6 +227,7 @@ describe('WorkflowsPage', () => {
       step_count: 2,
       misconfigured_step_count: 0,
       enabled: true,
+      pinned: false,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
     }];
@@ -262,6 +264,46 @@ describe('WorkflowsPage', () => {
     expect(screen.getByDisplayValue('fix')).toBeDefined();
     expect(screen.getByDisplayValue('Analyse this bug')).toBeDefined();
     expect(screen.getByDisplayValue('Fix: {{previous_step.output}}')).toBeDefined();
+  });
+
+  it('pinned workflows surface in a cross-project Favoris group (and stay in their project group)', async () => {
+    const base = {
+      project_id: 'p1', project_name: 'Proj', trigger_type: 'manual',
+      step_count: 1, misconfigured_step_count: 0, enabled: true,
+      last_run: null, created_at: '2026-01-01T00:00:00Z',
+    };
+    mockWorkflowsApi.list.mockResolvedValue([
+      { ...base, id: 'wf-pin', name: 'Pinned WF', pinned: true },
+      { ...base, id: 'wf-reg', name: 'Regular WF', pinned: false },
+    ]);
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    // Favorites group header renders, the pinned card appears BOTH there
+    // and in its project group (disc-sidebar mirror); the regular one once.
+    expect(screen.getByText('Favoris')).toBeInTheDocument();
+    expect(screen.getAllByText('Pinned WF')).toHaveLength(2);
+    expect(screen.getAllByText('Regular WF')).toHaveLength(1);
+  });
+
+  it('the star toggle pins a workflow through the partial update', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([{
+      id: 'wf-reg', name: 'Regular WF', project_id: null, project_name: null,
+      trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
+      enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z',
+    }]);
+    mockWorkflowsApi.update.mockResolvedValue({});
+
+    await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
+    );
+
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText('Épingler en favori'));
+    });
+    expect(mockWorkflowsApi.update).toHaveBeenCalledWith('wf-reg', { pinned: true });
   });
 
   it('shows a "needs config" badge on the card when misconfigured_step_count > 0', async () => {
@@ -462,6 +504,7 @@ describe('WorkflowsPage', () => {
       step_count: 1,
       misconfigured_step_count: 0,
       enabled: true,
+      pinned: false,
       last_run: {
         id: 'run-abc',
         status: 'Running',
@@ -480,6 +523,7 @@ describe('WorkflowsPage', () => {
       step_count: 1,
       misconfigured_step_count: 0,
       enabled: true,
+      pinned: false,
       last_run: {
         id: 'run-xyz',
         status: 'Success',
@@ -516,6 +560,7 @@ describe('WorkflowsPage', () => {
       step_count: 1,
       misconfigured_step_count: 0,
       enabled: true,
+      pinned: false,
       last_run: {
         id: 'run-abc',
         status: 'Running',
@@ -557,6 +602,7 @@ describe('WorkflowsPage', () => {
       step_count: 1,
       misconfigured_step_count: 0,
       enabled: true,
+      pinned: false,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
     };
@@ -611,7 +657,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   const labSummary = (over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
     id: 'wf-lab', name: 'PR Review LAB', project_id: null, project_name: null,
     trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
-    enabled: true, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
+    enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
   });
 
   it('Lancer sur un WF à variables ouvre la popup, bloque les requis vides, puis déclenche avec les valeurs', async () => {

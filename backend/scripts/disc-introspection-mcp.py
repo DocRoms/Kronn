@@ -426,7 +426,10 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "disc_id": {"type": "string"},
+                "disc_id": {"type": "string", "description": (
+                    "Discussion id. The user can copy it from the UI: the "
+                    "#-prefixed pill in the chat header (click = full UUID)."
+                )},
                 "from": {"type": "integer", "description": "Inclusive start (0-based). Default 0."},
                 "to": {"type": "integer", "description": "Exclusive end. Default total length."},
             },
@@ -805,7 +808,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "workflow_id": {"type": "string", "description": "Workflow id (from `workflow_list`)."},
+                "workflow_id": {"type": "string", "description": "Workflow id (from `workflow_list`, or the user can copy it from the #-prefixed pill in the workflow detail header)."},
             },
             "required": ["workflow_id"],
         },

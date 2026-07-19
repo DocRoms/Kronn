@@ -8010,6 +8010,7 @@ mod cold_api_handlers_tests {
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-disabled-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            pinned: false,
             id: workflow_id.clone(),
             name: "DisabledWF".into(),
             project_id: None,
@@ -8056,6 +8057,7 @@ mod cold_api_handlers_tests {
         let now = chrono::Utc::now();
         let workflow_id = format!("wf-vars-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            pinned: false,
             id: workflow_id.clone(),
             name: "VarsWF".into(),
             project_id: None,
@@ -8424,6 +8426,7 @@ mod cold_api_handlers_tests {
         // Seed workflow first to satisfy FK on workflow_runs.workflow_id.
         let workflow_id = format!("wf-{}", uuid::Uuid::new_v4());
         let wf = kronn::models::Workflow {
+            pinned: false,
             id: workflow_id.clone(),
             name: "TestWF".into(),
             project_id: None,

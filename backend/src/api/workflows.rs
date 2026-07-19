@@ -697,6 +697,7 @@ pub async fn list(
                 step_count: wf.steps.len() as u32,
                 misconfigured_step_count: count_misconfigured_steps(&wf.steps),
                 enabled: wf.enabled,
+                pinned: wf.pinned,
                 last_run,
                 created_at: wf.created_at,
             }
@@ -786,6 +787,7 @@ pub async fn create(
 
     let now = Utc::now();
     let wf = Workflow {
+        pinned: false,
         id: Uuid::new_v4().to_string(),
         name: req.name,
         project_id: req.project_id,
@@ -1002,6 +1004,7 @@ pub async fn update(
         exec_allowlist: req.exec_allowlist.unwrap_or(existing.exec_allowlist),
         variables: req.variables.unwrap_or(existing.variables),
         enabled: req.enabled.unwrap_or(existing.enabled),
+        pinned: req.pinned.unwrap_or(existing.pinned),
         created_at: existing.created_at,
         updated_at: Utc::now(),
     };
@@ -3820,6 +3823,7 @@ mod tests {
 
     fn mk_workflow_for_export(name: &str) -> Workflow {
         Workflow {
+            pinned: false,
             id: "src-id-original".into(),
             name: name.into(),
             project_id: Some("src-project".into()),

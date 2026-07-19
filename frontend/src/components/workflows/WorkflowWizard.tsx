@@ -3859,7 +3859,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
       })()}
 
       {/* Navigation */}
-      <div className="flex-between mt-9">
+      <div className="wf-wizard-nav flex-between mt-9">
         <button className="wf-cancel-btn" onClick={wizardStep === 0 ? onCancel : () => setWizardStep(wizardStep - 1)}>
           {wizardStep === 0 ? t('common.cancel') : t('wiz.previous')}
         </button>

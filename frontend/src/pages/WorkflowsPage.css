@@ -608,6 +608,33 @@
   font-family: inherit;
 }
 
+/* Copyable workflow-id pill — twin of .disc-id-pill (duplicated here:
+   DiscussionsPage.css isn't guaranteed loaded on this page). */
+.wf-id-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--kr-font-mono, ui-monospace, monospace);
+  font-weight: 500;
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-ghost);
+  border: 1px solid var(--kr-border-ghost);
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.wf-id-pill:hover {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+.wf-id-pill:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
 /* ── Wizard card ───────────────────────────────────────── */
 .wf-wizard-card {
   max-width: 560px;
@@ -616,6 +643,34 @@
   border-radius: var(--kr-r-2xl);
   background: var(--kr-bg-subtle);
   border: 1px solid var(--kr-border-light);
+}
+
+/* Sticky wizard footer: a 20-step workflow must not require scrolling to
+   the bottom just to save a title rename. Sticks to the scroller's bottom
+   edge; opaque card background + top border so steps scroll beneath it.
+   Negative margins bleed over the card padding so the bar spans its full
+   width and keeps the card's bottom rounding. */
+.wf-wizard-nav {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  /* Frosted glass: --kr-bg-subtle alone is a near-transparent tint (the card
+     look comes from the page behind) and steps scrolling beneath a fully
+     see-through bar read as a rendering glitch. A ~78% surface + blur keeps
+     the buttons readable while hinting at the content below. The plain
+     background-color is the no-color-mix fallback: an unsupported function
+     drops the whole shorthand, which would leave the bar transparent. */
+  background-color: var(--kr-bg-surface);
+  background: linear-gradient(var(--kr-bg-subtle), var(--kr-bg-subtle)),
+              color-mix(in srgb, var(--kr-bg-surface) 78%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-top: 1px solid var(--kr-border-light);
+  margin-left: calc(-1 * var(--kr-sp-10));
+  margin-right: calc(-1 * var(--kr-sp-10));
+  margin-bottom: calc(-1 * var(--kr-sp-10));
+  padding: var(--kr-sp-4) var(--kr-sp-10);
+  border-radius: 0 0 var(--kr-r-2xl) var(--kr-r-2xl);
 }
 
 /* ── Wizard progress bar ───────────────────────────────── */

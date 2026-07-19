@@ -35,6 +35,7 @@ const runningWf = (over: Partial<WorkflowSummary> & { runId?: string }): Workflo
   step_count: 2,
   misconfigured_step_count: 0,
   enabled: true,
+  pinned: false,
   last_run: {
     id: over.runId ?? 'run-1',
     status: 'Running',
@@ -54,6 +55,7 @@ const idleWf = (id: string): WorkflowSummary => ({
   step_count: 1,
   misconfigured_step_count: 0,
   enabled: true,
+  pinned: false,
   last_run: {
     id: `run-${id}`,
     status: 'Success',

@@ -108,7 +108,8 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables
+                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
+                pinned
          FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC"
     )?;
 
@@ -124,7 +125,8 @@ pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, project_id, trigger_json, steps_json, actions_json,
                 safety_json, workspace_config_json, concurrency_limit, enabled,
-                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables
+                created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
+                pinned
          FROM workflows WHERE id = ?1"
     )?;
 
@@ -573,8 +575,8 @@ pub fn create_batch_run(
 pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
     conn.execute(
         "INSERT INTO workflows (id, name, project_id, trigger_json, steps_json, actions_json,
-         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+         safety_json, workspace_config_json, concurrency_limit, enabled, created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables, pinned)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             wf.id,
             wf.name,
@@ -597,6 +599,7 @@ pub fn insert_workflow(conn: &Connection, wf: &Workflow) -> Result<()> {
             // `WHERE variables IS NOT NULL` lists only workflows that
             // actually need a launch dialog.
             if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
+            wf.pinned as i32,
         ],
     )?;
     Ok(())
@@ -610,7 +613,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
         "UPDATE workflows SET name = ?2, project_id = ?3, trigger_json = ?4, steps_json = ?5,
          actions_json = ?6, safety_json = ?7, workspace_config_json = ?8,
          concurrency_limit = ?9, enabled = ?10, updated_at = ?11, guards = ?12, artifacts = ?13,
-         on_failure = ?14, exec_allowlist = ?15, variables = ?16
+         on_failure = ?14, exec_allowlist = ?15, variables = ?16, pinned = ?17
          WHERE id = ?1",
         params![
             wf.id,
@@ -629,6 +632,7 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
             if wf.on_failure.is_empty() { None } else { Some(serde_json::to_string(&wf.on_failure)?) },
             if wf.exec_allowlist.is_empty() { None } else { Some(serde_json::to_string(&wf.exec_allowlist)?) },
             if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
+            wf.pinned as i32,
         ],
     )?;
     Ok(n > 0)
@@ -1248,6 +1252,7 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
             .and_then(|s| serde_json::from_str::<Vec<PromptVariable>>(s).ok())
             .unwrap_or_default(),
         enabled: row.get::<_, i32>(9).unwrap_or(1) != 0,
+        pinned: row.get::<_, i32>(17).unwrap_or(0) != 0,
         created_at: parse_dt(row.get::<_, String>(10).unwrap_or_default()),
         updated_at: parse_dt(row.get::<_, String>(11).unwrap_or_default()),
     }
