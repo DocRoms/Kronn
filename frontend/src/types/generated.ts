@@ -378,20 +378,21 @@ export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, 
 /**
  * 0.8.2 — Specialized audit types ("Design C").
  *
- * `Full` runs the canonical 9-step pipeline. The other variants run
- * a focused subset that only re-audits one dimension. They share the
+ * `Full` exposes the canonical 9-step foundation; a launched Full audit
+ * appends 7 focused dimensions for a 16-step chain. The other variants run
+ * one focused dimension. They share the
  * reconciliation + audit_runs row machinery; only the step list differs.
  *
  * `Custom` is the escape hatch: the caller supplies a free-form prompt
  * (single step). All variants are wired through `kind_to_steps()` in
  * `api::audit`.
  */
-export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "Custom";
+export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Custom";
 
 /**
  * Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
  *
- * Produced by the three SSE streams (`run_audit`, `partial_audit`, `full_audit`)
+ * Produced by the SSE streams (`full_audit`, `partial_audit`)
  * which write into `AppState.audit_tracker.progress` as they advance. The UI
  * polls this endpoint to "resume" the progress bar when the user navigates
  * away and comes back — no need to restart the audit since the server-side
@@ -403,7 +404,7 @@ export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance"
  */
 export type AuditProgress = { project_id: string,
 /**
- * `"installing"` during template install, `"auditing"` during the 9-step
+ * `"installing"` during template install, `"auditing"` during the dynamic chain
  * loop, `"validating"` during phase 3 (validation discussion creation),
  * `"done"` briefly before the tracker clears the entry.
  */
@@ -414,7 +415,7 @@ phase: string, step_index: number, total_steps: number,
  */
 current_file?: string | null, started_at: string,
 /**
- * `"full"` for the 9-step audit, `"partial"` for drift-triggered
+ * `"full"` for the chained audit, `"partial"` for drift-triggered
  * sub-audits, `"full_audit"` for the end-to-end variant. Kept as a
  * string so future audit kinds don't force a schema migration.
  */
@@ -435,12 +436,12 @@ step_tokens?: number | null, total_tokens_so_far?: number | null, current_tool?:
  * `🔧 Write (14)`) so the user has a "still alive" signal even
  * when the token chip is frozen (heavy step writing many TD
  * files without intermediate `Usage` blocks — the symptom that
- * confused the user during the 8-min Step 9 of the Full audit).
+ * confused the user during the 8-min Step 8 of the Full audit).
  */
 current_tool_call_count?: number | null, };
 
 /**
- * Recommendation emitted by the Step 9 cluster detector. Lives in
+ * Recommendation emitted by the completion-time cluster detector. Lives in
  * `AuditRun.recommendations_json` as a JSON-encoded list.
  */
 export type AuditRecommendation = {
@@ -481,21 +482,32 @@ kind: string, agent_type: string, started_at: string, ended_at?: string | null, 
 /**
  * `Running` while in flight; `Completed` / `Failed` / `Cancelled` /
  * `Interrupted` once terminal. `Interrupted` (0.8.3 #311) means
- * the SSE stream ended before reaching step 10 *without* an
+ * the SSE stream ended before the executed chain completed, without an
  * explicit cancel — typically a rate-limit, claude crash, or
  * network blip. The frontend treats `Interrupted` specifically:
- * it shows a "Reprendre Step N/10" button (where N is
- * `last_completed_step + 1`) instead of a fresh "Lancer".
+ * it shows a dynamic resume button for `last_completed_step + 1`
+ * instead of a fresh "Lancer".
  */
 status: string,
 /**
  * 0.8.3 (#311) — last successfully completed step (1-based,
- * matches `ANALYSIS_STEPS` indexing). 0 = no step done yet.
- * 10 = full pipeline ran to end. Set on every `step_done` where
- * `validate_and_repair_step_output` returns success=true. Drives
+ * matches the executed step-chain indexing). 0 = no step done yet.
+ * A chained Full currently completes at 16. Set on every `step_done` where
+ * `validate_step_output` returns success=true. Drives
  * the resume mechanism: on resume we start at `this + 1`.
  */
-last_completed_step: number, td_critical: number, td_high: number, td_medium: number, td_low: number, td_total: number, td_resolved_since_last: number, td_new_since_last: number, td_carried_over: number,
+last_completed_step: number,
+/**
+ * 076 — durable link to the validation discussion created in the SAME
+ * transaction as the Completed status. The validate endpoint trusts
+ * only this, never title/date heuristics.
+ */
+validation_discussion_id?: string | null,
+/**
+ * 076 — structured per-step outcomes (requested/succeeded/unchanged)
+ * for partial runs; provenance for the drift oracle.
+ */
+step_outcomes_json?: string | null, td_critical: number, td_high: number, td_medium: number, td_low: number, td_total: number, td_resolved_since_last: number, td_new_since_last: number, td_carried_over: number,
 /**
  * 0-100 health score computed by `compute_health_score` at the
  * moment of completion. `None` while `status == Running`.
@@ -508,7 +520,7 @@ health_score?: number | null,
 report_path?: string | null,
 /**
  * Raw JSON string of `Vec<AuditRecommendation>`, populated by the
- * cluster detector in Step 9 (Full audits only). Kept as String
+ * completion-time cluster detector (Full audits only). Kept as String
  * in the model to avoid forcing schema migrations on every
  * recommendation-shape tweak.
  */
@@ -1497,12 +1509,14 @@ kind?: AuditKind | null,
  */
 custom_prompt?: string | null,
 /**
- * 0.8.3 (#311) — resume an interrupted run: skip steps 1..=N
- * and start at step N+1. Read from `audit_runs.last_completed_step`
- * by the frontend before POSTing. None / 0 / >= 10 means start
- * fresh from step 1.
+ * Resume an interrupted run. The server loads this `audit_runs` row,
+ * verifies it belongs to the project and is `Interrupted`, then derives
+ * BOTH the kind and the checkpoint (`last_completed_step`) from the row
+ * — `kind`/`custom_prompt` above are ignored when this is set. This
+ * makes resume impossible to misuse: no client-supplied step count to
+ * oversize, and no way to graft a checkpoint onto the wrong pipeline.
  */
-resume_from?: number | null, };
+resume_run_id?: string | null, };
 
 /**
  * A continual-learning candidate (table `learnings`).
@@ -3610,4 +3624,4 @@ step_index: number, total_steps: number,
 /**
  * Step name at `step_index`, or null when between steps.
  */
-current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, };
+current_step: string | null, } | { "type": "partial_response_recovered", discussion_ids: Array<string>, } | { "type": "agent_runs_interrupted", discussion_ids: Array<string>, } | { "type": "audit_finished", project_id: string, status: string, last_completed_step: number, total_steps: number, warned_steps: Array<number>, discussion_id: string | null, };

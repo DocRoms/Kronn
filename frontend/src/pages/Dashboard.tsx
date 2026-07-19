@@ -8,6 +8,7 @@ import { useT } from '../lib/I18nContext';
 import { unseenBasis } from '../components/SwipeableDiscItem';
 import { detectStaleStreams } from '../lib/stream-watchdog';
 import { useIsMobile } from '../hooks/useMediaQuery';
+import { useWebSocket } from '../hooks/useWebSocket';
 import { isUsable } from '../lib/constants';
 import { hydrateTtsVoicesFromBackend } from '../lib/tts-models';
 import { userError } from '../lib/userError';
@@ -268,6 +269,33 @@ export function Dashboard({ onReset }: DashboardProps) {
   // audit is live, slow poll (10 s on projets page, 60 s elsewhere)
   // when idle. Drives the Projets nav badge + ActiveAuditsPopover.
   const [activeAudits, setActiveAudits] = useState<AuditProgress[]>([]);
+  const projects = useMemo(() => projectList ?? [], [projectList]);
+
+  // Audit completion notification — page-independent. The audit may have
+  // been launched from any page or from the MCP bridge; without this the
+  // UI goes quiet at the end and "finished clean" is indistinguishable
+  // from "finished, needs attention" (warned step → validation skipped).
+  // Adds a second loopback socket while a child page holds its own —
+  // accepted until WS is centralized behind a single provider.
+  useWebSocket((msg) => {
+    if (msg.type !== 'audit_finished') return;
+    const projName = projects.find(pr => pr.id === msg.project_id)?.name ?? msg.project_id.slice(0, 8);
+    if (msg.status === 'complete') {
+      toast(t('audit.finishedToast', projName), 'success');
+    } else {
+      // Stream-end interruptions have no warned step — show where it
+      // stopped instead of an unactionable '?'.
+      const warned = msg.warned_steps.length > 0
+        ? msg.warned_steps.join(', ')
+        : `${msg.last_completed_step}/${msg.total_steps}`;
+      toast(t('audit.finishedWarnToast', projName, warned), 'warning');
+    }
+    refetch();
+    // The completed audit just created a validation discussion (and its
+    // agent is already running) — without this the sidebar doesn't know
+    // the disc exists and opening it from the card shows an empty thread.
+    refetchDiscussions();
+  });
   const [activeAuditsPopoverOpen, setActiveAuditsPopoverOpen] = useState(false);
 
   useEffect(() => {
@@ -295,8 +323,6 @@ export function Dashboard({ onReset }: DashboardProps) {
       document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [page, activeAudits.length]);
-
-  const projects = projectList ?? [];
 
   // ─── Drift detection fetch ──────────
   useEffect(() => {
@@ -1220,6 +1246,7 @@ export function Dashboard({ onReset }: DashboardProps) {
           )}
           <ProjectList
             projects={projects}
+            activeAudits={activeAudits}
             discussions={allDiscussions}
             discussionsByProject={discussionsByProject}
             driftByProject={driftByProject}

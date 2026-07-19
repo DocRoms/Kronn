@@ -11,7 +11,7 @@ use crate::core::scanner;
 use crate::models::*;
 
 /// 0.8.7 — Short pointer line injected at the top of every prompt that can
-/// mutate a `docs/` file outside the audit's 9-step pipeline (validation,
+/// mutate a `docs/` file outside the launched audit chain (validation,
 /// briefing). Replaces the previous 3-language doctrine block (~150 words ×
 /// 3 langs) — the canonical anti-hallu protocol now lives in the project's
 /// `docs/AGENTS.md` § Anti-Hallucination Protocol section (written by audit
@@ -28,6 +28,14 @@ fn anti_halluc_doc_writer_block(language: &str) -> &'static str {
 /// Compute audit info (files + TODOs) from the filesystem.
 /// Path-agnostic — walks `docs/` post-pivot or `ai/` legacy via
 /// `detect_docs_dir`.
+/// A REAL todo marker, not the template's own instructions about markers:
+/// docs templates quote `<!-- TODO: ask user -->` inside backticks to teach
+/// the grammar, and those lines polluted every fresh project's todo list.
+pub(super) fn line_has_real_todo_marker(line: &str) -> bool {
+    line.match_indices("<!-- TODO")
+        .any(|(i, _)| !line[..i].ends_with('`'))
+}
+
 pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     let project_path = scanner::resolve_host_path(project_path_str);
     let docs_dir = scanner::detect_docs_dir(&project_path);
@@ -57,7 +65,7 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
             });
 
             for (line_num, line) in content.lines().enumerate() {
-                if line.contains("<!-- TODO") {
+                if line_has_real_todo_marker(line) {
                     todos.push(AuditTodo {
                         file: rel_str.clone(),
                         line: (line_num + 1) as u32,
@@ -107,6 +115,98 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     AuditInfo { files, todos, tech_debt_items }
 }
 
+/// Validation prompt for a PARTIAL refresh (Codex A5 v3): the writable
+/// surface is an EXPLICIT allowlist — the refreshed section files plus the
+/// exact TD detail files of `run_td_ids` (nothing else in docs/, ever).
+/// The TD-review phase disappears entirely when no TD was touched. The
+/// project stays `Audited` until this discussion ends on the terminal
+/// signal and the user validates, exactly like a full run. Fully
+/// localized (fr/en/es) — protocol included, not just the header.
+pub(crate) fn build_partial_validation_prompt(
+    refreshed_files: &[String],
+    run_td_ids: &[String],
+    language: &str,
+) -> String {
+    let mut allowlist: Vec<String> = refreshed_files.to_vec();
+    allowlist.extend(run_td_ids.iter().map(|id| format!("docs/tech-debt/{id}.md")));
+    let allow = allowlist.join("`, `");
+    let has_tds = !run_td_ids.is_empty();
+
+    match language {
+        "en" => {
+            let mut s = format!(
+                "Validate the PARTIAL refresh that just ran. WRITABLE SURFACE (exhaustive allowlist): `{allow}`. Touch NOTHING else — no source code, no other docs/ file, no other TD detail. End with the exact phrase \"KRONN:VALIDATION_COMPLETE\" on its own line once everything below is done.\n\n",
+            );
+            s.push_str(&run_scope_block(run_td_ids, "en"));
+            s.push_str("## Phase 1 — Markers\nRun `grep -rn 'TODO: '` limited to the allowlisted files: resolve every marker (direct user question, a Glob/Read verification, or an explicit `unknown`), update the file and REMOVE the marker.\n\n");
+            if has_tds {
+                s.push_str("## Phase 2 — Refreshed TD review (BULK-FIRST)\nIn ONE message: a `| # | ID | Severity | Area | Title | Status | Effort |` table of the in-scope TDs only, then offer (a) confirm all (b) reject all (c) discuss selected — unselected TDs KEEP their current status, silence never confirms. Apply the answer in each detail file's `audit_history`.\n\n");
+            } else {
+                s.push_str("No TD was touched by this refresh — there is NO TD-review phase; do not open any TD file.\n\n");
+            }
+            s.push_str("## Output\nOnce everything above is done, emit the exact phrase: \"KRONN:VALIDATION_COMPLETE\" on its own line. Never before.");
+            s
+        }
+        "es" => {
+            let mut s = format!(
+                "Valida el refresh PARCIAL que acaba de ejecutarse. SUPERFICIE EDITABLE (allowlist exhaustiva): `{allow}`. NO toques nada mas — ni codigo fuente, ni otros archivos docs/, ni otros detalles TD. Termina con la frase exacta \"KRONN:VALIDATION_COMPLETE\" en su propia linea.\n\n",
+            );
+            s.push_str(&run_scope_block(run_td_ids, "es"));
+            s.push_str("## Fase 1 — Marcadores\nEjecuta `grep -rn 'TODO: '` limitado a los archivos del allowlist: resuelve cada marcador (pregunta directa, verificacion Glob/Read, o `unknown` explicito), actualiza el archivo y RETIRA el marcador.\n\n");
+            if has_tds {
+                s.push_str("## Fase 2 — Revision de TDs (BULK-FIRST)\nEn UN mensaje: tabla `| # | ID | Severidad | Area | Titulo | Estado | Esfuerzo |` de los TDs del scope, luego ofrece (a) confirmar todo (b) rechazar todo (c) detallar algunos — los no listados CONSERVAN su estado, el silencio nunca confirma. Aplica la respuesta en el `audit_history` de cada detalle.\n\n");
+            } else {
+                s.push_str("Ningun TD fue tocado por este refresh — NO hay fase de revision de TDs; no abras ningun archivo TD.\n\n");
+            }
+            s.push_str("## Salida\nUna vez todo terminado, emite la frase exacta: \"KRONN:VALIDATION_COMPLETE\" en su propia linea. Nunca antes.");
+            s
+        }
+        _ => {
+            let mut s = format!(
+                "Valide le refresh PARTIEL qui vient de tourner. SURFACE MODIFIABLE (allowlist exhaustive) : `{allow}`. Ne touche à RIEN d'autre — ni code source, ni autre fichier docs/, ni autre détail TD. Termine par la phrase exacte \"KRONN:VALIDATION_COMPLETE\" sur sa propre ligne.\n\n",
+            );
+            s.push_str(&run_scope_block(run_td_ids, "fr"));
+            s.push_str("## Phase 1 — Marqueurs\nLance `grep -rn 'TODO: '` limité aux fichiers de l'allowlist : résous chaque marqueur (question directe, vérification Glob/Read, ou `unknown` explicite), mets à jour le fichier et RETIRE le marqueur.\n\n");
+            if has_tds {
+                s.push_str("## Phase 2 — Revue des TDs rafraîchis (BULK-FIRST)\nEn UN message : tableau `| # | ID | Sévérité | Domaine | Titre | Statut | Effort |` des TDs du scope uniquement, puis propose (a) tout valider (b) tout rejeter (c) détailler certains — les non listés GARDENT leur statut, le silence ne confirme jamais. Applique la réponse dans l'`audit_history` de chaque détail.\n\n");
+            } else {
+                s.push_str("Aucun TD touché par ce refresh — il n'y a PAS de phase de revue TD ; n'ouvre aucun fichier TD.\n\n");
+            }
+            s.push_str("## Sortie\nUne fois tout traité, émets la phrase exacte : \"KRONN:VALIDATION_COMPLETE\" sur sa propre ligne. Jamais avant.");
+            s
+        }
+    }
+}
+
+/// Scope block injected into the validation prompts: the exact TD ids the
+/// finished run created or re-emitted. Without it the validation phase read
+/// EVERY `TD-*.md` on disk and could re-validate (or alter) findings that
+/// belong to previous audits. Localized and phase-agnostic — the callers
+/// number their own phases.
+pub(crate) fn run_scope_block(run_td_ids: &[String], language: &str) -> String {
+    if run_td_ids.is_empty() {
+        return String::new();
+    }
+    let ids = run_td_ids.join(", ");
+    match language {
+        "en" => format!(
+            "## SCOPE — this run's TDs ONLY\n\
+             This run created or re-emitted exactly these TDs: {ids}.\n\
+             The TD review covers ONLY them — never re-read, re-validate or modify any other `docs/tech-debt/TD-*.md`: they belong to previous audits already settled by their own validation discussions.\n\n",
+        ),
+        "es" => format!(
+            "## SCOPE — SOLO los TDs de ESTE run\n\
+             Este run creo o re-emitio exactamente estos TDs: {ids}.\n\
+             La revision cubre SOLO estos — nunca releas, revalides o modifiques ningun otro `docs/tech-debt/TD-*.md`: pertenecen a auditorias anteriores ya cerradas por su propia discusion de validacion.\n\n",
+        ),
+        _ => format!(
+            "## SCOPE — TDs de CE run uniquement\n\
+             Ce run a créé ou ré-émis exactement ces TDs : {ids}.\n\
+             La revue des TDs porte UNIQUEMENT sur eux — ne relis, ne revalide et ne modifie AUCUN autre `docs/tech-debt/TD-*.md` : ils appartiennent à des audits précédents déjà validés par leur propre discussion.\n\n",
+        ),
+    }
+}
+
 /// 0.8.4 (#287) — sub-audit validation prompt. Shorter than the Full
 /// version: a sub-audit only writes ONE index file + a handful of TD
 /// detail files, so Phase 1 (autonomous doc fix-up across 10 files)
@@ -122,6 +222,7 @@ pub(crate) fn build_sub_audit_validation_prompt(
     kind: crate::models::AuditKind,
     language: &str,
     has_issue_tracker_mcp: bool,
+    run_td_ids: &[String],
 ) -> String {
     use crate::models::AuditKind;
     let (kind_label, index_file) = match kind {
@@ -132,6 +233,7 @@ pub(crate) fn build_sub_audit_validation_prompt(
         AuditKind::Rgaa          => ("RGAA 4.1",      "docs/inconsistencies-rgaa.md"),
         AuditKind::Database      => ("base de données", "docs/inconsistencies-database.md"),
         AuditKind::ApiDesign     => ("design d'API",  "docs/inconsistencies-api.md"),
+        AuditKind::CodeQuality   => ("qualité de code", "docs/inconsistencies-code-quality.md"),
         // Defensive: Full + Drift + Custom should never reach this path
         // (gated by `kind.is_sub_audit()` in `full_audit`). Keep a sane
         // fallback so a future variant added without updating this match
@@ -167,6 +269,7 @@ pub(crate) fn build_sub_audit_validation_prompt(
     };
 
     let mut s = header;
+    s.push_str(&run_scope_block(run_td_ids, language));
     s.push_str(&format!(
         "## Périmètre\n\
          - Fichier d'index : `{}`\n\
@@ -194,14 +297,14 @@ pub(crate) fn build_sub_audit_validation_prompt(
          En UN seul message :\n\
          1. Lis `{}` ET chaque détail TD créé par ce run.\n\
          2. Présente un **tableau markdown compact** :\n\
-            `| ID | Sévérité | Domaine | Titre | Statut | Effort |`\n\
-            Une ligne par TD. Tronque le titre à ~50 chars si nécessaire.\n\
+            `| # | ID | Sévérité | Domaine | Titre | Statut | Effort |`\n\
+            Une ligne par TD, numérotée 1..N — l'utilisateur répond par numéro. Tronque le titre à ~50 chars si nécessaire.\n\
          3. Demande à l'utilisateur :\n\
             > « Voici les N TDs identifiés par le sous-audit {}. Tu peux :\n\
             > (a) **Tout valider** → tous deviennent `Confirmed by user` ;\n\
             > (b) **Tout rejeter** → tous deviennent `Rejected` (le prochain audit ne les recréera pas) ;\n\
-            > (c) **Détailler certains** → liste les IDs à discuter. Les TDs non listés en (c) seront `Confirmed by user` par défaut. »\n\
-         4. Applique la réponse en mettant à jour le champ `audit_history` de chaque détail TD.\n",
+            > (c) **Détailler certains** → liste les numéros ou IDs à discuter (ex: `3, 7`). Les TDs non listés **gardent leur statut actuel** — rien n'est confirmé implicitement, le silence ne vaut jamais validation. »\n\
+         4. Applique la réponse en mettant à jour le champ `audit_history` de chaque détail TD. Ne marque JAMAIS un TD `Confirmed by user` sans un (a) explicite ou une confirmation explicite de ce TD en (c).\n",
         index_file, kind_label,
     ));
     if has_issue_tracker_mcp {
@@ -242,11 +345,11 @@ pub(crate) fn build_sub_audit_validation_prompt(
 
 /// Build the validation discussion prompt with file/TODO/tech-debt enrichment.
 /// The prompt follows a strict 4-phase protocol to ensure thorough validation.
-pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_mcp: bool) -> String {
+pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_mcp: bool, run_td_ids: &[String]) -> String {
     let base = match language {
         "en" => {
             let mut s = String::from(concat!(
-                "Validate the AI context (ai/ folder). Follow this 4-phase protocol. ",
+                "You are running the VALIDATION of the AI context (docs/ folder — legacy ai/ on old projects): the FINAL phase of the audit pipeline — every analysis step (foundation + chained sub-audits) is ALREADY done. Follow this 4-phase protocol and always announce your progress as \"Phase X/4 of the validation\" (never \"of the audit\" — users read that as the audit restarting). ",
                 "Do NOT emit KRONN:VALIDATION_COMPLETE until ALL phases are done.\n\n",
                 "**CRITICAL RULE: You are a DOCUMENTATION auditor, not a code fixer. ",
                 "NEVER modify source code, Makefile, configs, or any file outside `docs/`. ",
@@ -268,19 +371,19 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "Instead, in ONE message:\n",
                 "1. Read `docs/inconsistencies-tech-debt.md` AND every `docs/tech-debt/TD-*.md` (excluding README/TEMPLATE).\n",
                 "2. Present a **compact markdown table** of ALL findings:\n",
-                "   `| ID | Severity | Area | Title | Status | Effort |`\n",
-                "   `| -- | -------- | ---- | ----- | ------ | ------ |`\n",
-                "   One row per TD. Truncate Title to ~50 chars if needed. Use the existing Status from the detail file.\n",
+                "   `| # | ID | Severity | Area | Title | Status | Effort |`\n",
+                "   `| - | -- | -------- | ---- | ----- | ------ | ------ |`\n",
+                "   One row per TD, numbered 1..N — users answer by number. Truncate Title to ~50 chars if needed. Use the existing Status from the detail file.\n",
                 "3. Ask the user **one question**:\n",
                 "   > « Voici les N TDs identifiés. Tu peux :\n",
                 "   > (a) **Tout valider** → tous deviennent `Confirmed by user` ;\n",
                 "   > (b) **Tout rejeter** → tous deviennent `Rejected` (le prochain audit ne les recréera pas) ;\n",
-                "   > (c) **Détailler certains** → liste les IDs à discuter (ex: `TD-20260515-foo, TD-20260515-bar`).\n",
-                "   > Les TDs non listés en (c) seront automatiquement marqués `Confirmed by user`. »\n",
+                "   > (c) **Détailler certains** → liste les numéros ou IDs à discuter (ex: `3, 7` ou `TD-20260515-foo`).\n",
+                "   > Les TDs non listés gardent leur statut actuel — rien n'est confirmé implicitement. »\n",
                 "4. Apply the answer:\n",
                 "   - (a) → update the `audit_history` of every TD detail file with `status: Confirmed by user` (today's date). No 1-by-1 questions.\n",
                 "   - (b) → update every TD's `status: Rejected` AND remove its row from the index table. The next audit's anti-repetition pass will skip them.\n",
-                "   - (c) → for EACH selected ID: read the detail file, verify against source, ask the user (severity / priority / ticket?). For every OTHER TD not selected, default to `Confirmed by user`.\n",
+                "   - (c) → for EACH selected ID: read the detail file, verify against source, ask the user (severity / priority / ticket?). Every OTHER TD keeps its current status — NEVER mark a TD `Confirmed by user` on silence; only an explicit (a) or an explicit per-TD confirmation may.\n",
                 "5. If a ticket tracker MCP is available AND the user picked (a) or (c)-selected TDs, offer to create tickets for the High/Critical entries in ONE batch question, not per-TD.\n",
             ));
             if has_issue_tracker_mcp {
@@ -308,7 +411,7 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
         },
         "es" => {
             let mut s = String::from(concat!(
-                "Valida el contexto AI (carpeta ai/). Sigue este protocolo de 4 fases. ",
+                "Estas ejecutando la VALIDACION del contexto AI (carpeta docs/ — legacy ai/): la fase FINAL del pipeline — todas las etapas de analisis (fundacion + sub-auditorias encadenadas) YA terminaron. Sigue este protocolo de 4 fases y anuncia siempre \"Fase X/4 de la validacion\" (nunca \"de la auditoria\"). ",
                 "NO emitas KRONN:VALIDATION_COMPLETE hasta completar TODAS las fases.\n\n",
                 "**REGLA CRITICA: Eres un auditor de DOCUMENTACION, no un corrector de codigo. ",
                 "NUNCA modifiques codigo fuente, Makefile, configs, ni ningun archivo fuera de `docs/`. ",
@@ -330,19 +433,19 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "En UN SOLO mensaje:\n",
                 "1. Lee `docs/inconsistencies-tech-debt.md` Y todos los `docs/tech-debt/TD-*.md` (excluyendo README/TEMPLATE).\n",
                 "2. Presenta una **tabla markdown compacta** de TODOS los hallazgos:\n",
-                "   `| ID | Severity | Area | Title | Status | Effort |`\n",
-                "   `| -- | -------- | ---- | ----- | ------ | ------ |`\n",
-                "   Una fila por TD. Trunca Title a ~50 chars si hace falta.\n",
+                "   `| # | ID | Severity | Area | Title | Status | Effort |`\n",
+                "   `| - | -- | -------- | ---- | ----- | ------ | ------ |`\n",
+                "   Una fila por TD, numerada 1..N — el usuario responde por numero. Trunca Title a ~50 chars si hace falta.\n",
                 "3. Haz **una sola pregunta**:\n",
                 "   > « Aqui los N TDs identificados. Puedes :\n",
                 "   > (a) **Validar todo** → todos pasan a `Confirmed by user` ;\n",
                 "   > (b) **Rechazar todo** → todos pasan a `Rejected` (la proxima auditoria no los recreara) ;\n",
-                "   > (c) **Detallar algunos** → lista los IDs a discutir (ej: `TD-20260515-foo, TD-20260515-bar`).\n",
-                "   > Los TDs no listados en (c) seran marcados automaticamente `Confirmed by user`. »\n",
+                "   > (c) **Detallar algunos** → lista los numeros o IDs a discutir (ej: `3, 7` o `TD-20260515-foo`).\n",
+                "   > Los TDs no listados conservan su estado actual — nada se confirma implicitamente. »\n",
                 "4. Aplica la respuesta:\n",
                 "   - (a) → actualiza `audit_history` de cada TD con `status: Confirmed by user` (fecha de hoy). Sin preguntas 1-por-1.\n",
                 "   - (b) → cada TD `status: Rejected` Y elimina su fila del indice. El anti-repetition pass de la proxima auditoria los saltara.\n",
-                "   - (c) → para CADA ID seleccionado: lee, verifica, pregunta detalles. Los OTROS TDs no seleccionados pasan a `Confirmed by user` por defecto.\n",
+                "   - (c) → para CADA ID seleccionado: lee, verifica, pregunta detalles. Los OTROS TDs conservan su estado — NUNCA marques `Confirmed by user` por silencio; solo un (a) explicito o una confirmacion explicita por TD.\n",
                 "5. Si MCP issue tracker disponible Y user eligio (a) o (c)-seleccionados, ofrece crear tickets para los High/Critical en UN solo batch, no por TD.\n",
             ));
             if has_issue_tracker_mcp {
@@ -369,7 +472,7 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
         },
         _ => {
             let mut s = String::from(concat!(
-                "Valide le contexte AI (dossier ai/). Suis ce protocole en 4 phases. ",
+                "Tu conduis la VALIDATION du contexte AI (dossier docs/ — legacy ai/ sur les vieux projets) : la phase FINALE du pipeline — toutes les etapes d'analyse (fondation + sous-audits chaines) sont DEJA terminees. Suis ce protocole en 4 phases et annonce toujours \"Phase X/4 de la validation\" (jamais \"de l'audit\" — l'utilisateur croit que l'audit redemarre). ",
                 "NE PAS emettre KRONN:VALIDATION_COMPLETE avant la fin des 4 phases.\n\n",
                 "**REGLE CRITIQUE : Tu es un auditeur de DOCUMENTATION, pas un correcteur de code. ",
                 "NE MODIFIE JAMAIS le code source, Makefile, configs, ou tout fichier hors de `docs/`. ",
@@ -391,19 +494,19 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "En UN SEUL message :\n",
                 "1. Lis `docs/inconsistencies-tech-debt.md` ET tous les `docs/tech-debt/TD-*.md` (hors README/TEMPLATE).\n",
                 "2. Presente une **table markdown compacte** de TOUS les findings :\n",
-                "   `| ID | Severity | Area | Title | Status | Effort |`\n",
-                "   `| -- | -------- | ---- | ----- | ------ | ------ |`\n",
-                "   Une ligne par TD. Tronque Title a ~50 chars si necessaire.\n",
+                "   `| # | ID | Severity | Area | Title | Status | Effort |`\n",
+                "   `| - | -- | -------- | ---- | ----- | ------ | ------ |`\n",
+                "   Une ligne par TD, numerotee 1..N — l'utilisateur repond par numero. Tronque Title a ~50 chars si necessaire.\n",
                 "3. Pose **une seule question** :\n",
                 "   > « Voici les N TDs identifies. Tu peux :\n",
                 "   > (a) **Tout valider** → tous passent en `Confirmed by user` ;\n",
                 "   > (b) **Tout rejeter** → tous passent en `Rejected` (le prochain audit ne les recreera pas) ;\n",
-                "   > (c) **Detailler certains** → liste les IDs a discuter (ex: `TD-20260515-foo, TD-20260515-bar`).\n",
-                "   > Les TDs non listes en (c) seront automatiquement marques `Confirmed by user`. »\n",
+                "   > (c) **Detailler certains** → liste les numeros ou IDs a discuter (ex: `3, 7` ou `TD-20260515-foo`).\n",
+                "   > Les TDs non listes gardent leur statut actuel — rien n'est confirme implicitement. »\n",
                 "4. Applique la reponse :\n",
                 "   - (a) → mets a jour `audit_history` de chaque TD avec `status: Confirmed by user` (date du jour). Pas de questions 1-par-1.\n",
                 "   - (b) → chaque TD `status: Rejected` ET retire sa ligne de l'index. L'anti-repetition pass du prochain audit les sautera.\n",
-                "   - (c) → pour CHAQUE ID selectionne : lis, verifie, demande les details. Les AUTRES TDs non selectionnes passent en `Confirmed by user` par defaut.\n",
+                "   - (c) → pour CHAQUE ID selectionne : lis, verifie, demande les details. Les AUTRES TDs gardent leur statut — ne marque JAMAIS `Confirmed by user` sur silence ; seul un (a) explicite ou une confirmation explicite par TD le permet.\n",
                 "5. Si MCP issue tracker dispo ET user a choisi (a) ou (c)-selectionnes, propose de creer les tickets pour les High/Critical en UN seul batch, pas par TD.\n",
             ));
             if has_issue_tracker_mcp {
@@ -432,11 +535,14 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
 
     // 0.8.7 anti-hallu: prepend the doc-writer discipline reminder so
     // Phase 1 (auto-fix) and Phase 4 (challenge doc) which both mutate
-    // `docs/` files inherit the same sourcing protocol the 9-step audit
+    // `docs/` files inherit the same sourcing protocol the assembled audit
     // gets via `PROMPT_PREAMBLE`. Without this, the validation pass was
     // structurally outside the anti-hallucination scope.
     let mut prompt = String::with_capacity(base.len() + 512);
     prompt.push_str(anti_halluc_doc_writer_block(language));
+    // Run scope FIRST: Phase 3 must only review the TDs this run touched,
+    // never re-open findings settled by previous validation discussions.
+    prompt.push_str(&run_scope_block(run_td_ids, language));
     prompt.push_str(&base);
 
     // Summary counts only — the agent has filesystem access to read the actual files
@@ -832,6 +938,24 @@ fn build_briefing_legacy_prompt(language: &str) -> String {
 #[cfg(test)]
 mod compute_audit_info_tests {
     use super::*;
+
+    #[test]
+    fn real_todo_markers_counted_template_instructions_ignored() {
+        // Raw marker in content → real.
+        assert!(line_has_real_todo_marker("Deploy target unknown <!-- TODO: ask user -->"));
+        // The template QUOTES the marker inside backticks to teach the
+        // grammar — those lines polluted every fresh project's todo list.
+        assert!(!line_has_real_todo_marker(
+            "Terms marked `<!-- TODO: ask user -->` need human confirmation."
+        ));
+        assert!(!line_has_real_todo_marker(
+            "> - Do NOT invent information — mark unknowns with `<!-- TODO: verify -->`"
+        ));
+        // Mixed: a real marker after a backticked mention still counts.
+        assert!(line_has_real_todo_marker(
+            "see `<!-- TODO: verify -->` <!-- TODO: ask user -->"
+        ));
+    }
     use std::fs;
     use tempfile::tempdir;
 

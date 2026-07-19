@@ -50,58 +50,54 @@ beforeEach(() => { vi.resetModules(); });
 afterEach(() => { vi.restoreAllMocks(); });
 
 // ════════════════════════════════════════════════════════════════════════════
-// projects.auditStream
+// projects.partialAuditStream — carries the generic SSE dispatch coverage
+// (HTTP error, double-done, abort-as-done) since the legacy auditStream /
+// POST /ai-audit pair was removed with its lease-bypassing backend route.
 // ════════════════════════════════════════════════════════════════════════════
-describe('projects.auditStream', () => {
-  it('dispatches step_start / chunk / step_done / done to the right handlers', async () => {
-    mockStreamingFetch([
-      sse('step_start', { step: 1, total: 10, file: 'docs/AGENTS.md' }),
-      sse('chunk', { text: 'analysing', step: 1 }),
-      sse('step_done', { step: 1, success: true }),
-      sse('done', {}),
-    ]);
-    const { projects } = await import('../api');
-    const h = {
-      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(),
-      onDone: vi.fn(), onError: vi.fn(),
-    };
-    await projects.auditStream('p-1', {} as never, h);
-    expect(h.onStepStart).toHaveBeenCalledWith(1, 10, 'docs/AGENTS.md');
-    expect(h.onChunk).toHaveBeenCalledWith('analysing', 1);
-    expect(h.onStepDone).toHaveBeenCalledWith(1, true);
-    expect(h.onDone).toHaveBeenCalledTimes(1);
-    expect(h.onError).not.toHaveBeenCalled();
-  });
+describe('projects.partialAuditStream', () => {
+  const REQ = { agent: 'ClaudeCode', steps: [1] } as never;
 
-  it('routes step_error and error events to onError', async () => {
+  it('step_error is NON-terminal (onStepError), event:error is terminal (onError, onDone sealed)', async () => {
     mockStreamingFetch([
-      sse('step_error', { error: 'step 3 blew up' }),
+      sse('step_error', { error: 'step 3 blew up', step: 3 }),
       sse('error', { error: 'fatal' }),
     ]);
     const { projects } = await import('../api');
     const onError = vi.fn();
-    await projects.auditStream('p-1', {} as never, {
-      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone: vi.fn(), onError,
+    const onStepError = vi.fn();
+    const onDone = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onStepError, onDone, onError,
     });
-    expect(onError).toHaveBeenCalledWith('step 3 blew up');
+    expect(onStepError).toHaveBeenCalledWith('step 3 blew up', 3);
+    expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith('fatal');
+    expect(onDone).not.toHaveBeenCalled();
   });
 
-  it('surfaces an HTTP error as onError("HTTP <status>")', async () => {
+  it('surfaces an HTTP error as a single terminal onError — onDone never fires', async () => {
     mockStreamingFetch([], 500);
     const { projects } = await import('../api');
     const onError = vi.fn();
-    await projects.auditStream('p-1', {} as never, {
-      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone: vi.fn(), onError,
+    const onDone = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
     });
+    expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith('HTTP 500');
+    expect(onDone).not.toHaveBeenCalled();
   });
 
+  // Satisfies every matrix-v2 invariant for REQ (steps: [1]).
+  const START_OK = { total_steps: 1, requested_steps: [1] };
+  const DONE_OK = { status: 'complete', succeeded_steps: [1], unchanged_steps: [], failed_steps: [],
+                    discussion_id: 'd-ok', audit_run_id: 'r-ok' };
+
   it('calls onDone exactly once even if a done event precedes stream close', async () => {
-    mockStreamingFetch([sse('done', {}), sse('done', {})]);
+    mockStreamingFetch([sse('start', START_OK), sse('done', DONE_OK), sse('done', DONE_OK)]);
     const { projects } = await import('../api');
     const onDone = vi.fn();
-    await projects.auditStream('p-1', {} as never, {
+    await projects.partialAuditStream('p-1', REQ, {
       onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError: vi.fn(),
     });
     expect(onDone).toHaveBeenCalledTimes(1);
@@ -112,23 +108,82 @@ describe('projects.auditStream', () => {
     const { projects } = await import('../api');
     const onDone = vi.fn();
     const onError = vi.fn();
-    await projects.auditStream('p-1', {} as never, {
+    const controller = new AbortController();
+    controller.abort();
+    await projects.partialAuditStream('p-1', REQ, {
       onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
-    });
+    }, controller.signal);
     expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledWith(undefined);
     expect(onError).not.toHaveBeenCalled();
   });
-});
 
-// ════════════════════════════════════════════════════════════════════════════
-// projects.partialAuditStream (same dispatch table, different endpoint)
-// ════════════════════════════════════════════════════════════════════════════
-describe('projects.partialAuditStream', () => {
+  it('an EOF without any terminal event is a terminal failure, never a clean done', async () => {
+    // A backend crash / proxy cut after start must not bypass the terminal
+    // seal by simply closing the socket (the MCP bridge distinguishes
+    // stream_closed the same way).
+    mockStreamingFetch([sse('start', START_OK)]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('closed before a terminal event'));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('dispatches validation_created and the done payload (A5 scoped validation)', async () => {
+    mockStreamingFetch([
+      sse('start', { total_steps: 1, requested_steps: [1] }),
+      sse('step_start', { step: 3, progress: 1, total: 1, file: 'x' }),
+      sse('step_done', { step: 3, success: true }),
+      sse('validation_created', { discussion_id: 'd-scoped' }),
+      sse('done', { status: 'complete', discussion_id: 'd-scoped', audit_run_id: 'run-9',
+                    succeeded_steps: [1], unchanged_steps: [], failed_steps: [] }),
+    ]);
+    const { projects } = await import('../api');
+    const onValidationCreated = vi.fn();
+    const onDone = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(),
+      onValidationCreated, onDone, onError: vi.fn(),
+    });
+    expect(onValidationCreated).toHaveBeenCalledWith('d-scoped');
+    expect(onDone).toHaveBeenCalledWith({
+      status: 'complete', discussionId: 'd-scoped', auditRunId: 'run-9',
+      succeededSteps: [1], unchangedSteps: [], failedSteps: [],
+    });
+  });
+
+  it('an interrupted done carries its status, null ids and the partition', async () => {
+    mockStreamingFetch([
+      sse('start', { total_steps: 2, requested_steps: [3, 8] }),
+      sse('step_unchanged', { step: 3, file: 'docs/repo-map.md' }),
+      sse('done', { status: 'interrupted', succeeded_steps: [], unchanged_steps: [3], failed_steps: [8],
+                    audit_run_id: 'r-int' }),
+    ]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onStepUnchanged = vi.fn();
+    await projects.partialAuditStream('p-1', { agent: 'ClaudeCode', steps: [3, 8] } as never, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onStepUnchanged, onDone, onError: vi.fn(),
+    });
+    expect(onStepUnchanged).toHaveBeenCalledWith(3, 'docs/repo-map.md');
+    expect(onDone).toHaveBeenCalledWith({
+      status: 'interrupted', discussionId: null, auditRunId: 'r-int',
+      succeededSteps: [], unchangedSteps: [3], failedSteps: [8],
+    });
+  });
+
   it('POSTs to /partial-audit and dispatches events', async () => {
     mockStreamingFetch([
+      sse('start', { total_steps: 1, requested_steps: [4] }),
       sse('step_start', { step: 4, total: 4, file: 'x' }),
       sse('step_done', { step: 4, success: false }),
-      sse('done', {}),
+      sse('done', { status: 'interrupted', succeeded_steps: [], unchanged_steps: [], failed_steps: [4],
+                    audit_run_id: 'r-4' }),
     ]);
     const { projects } = await import('../api');
     const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
@@ -138,6 +193,191 @@ describe('projects.partialAuditStream', () => {
     expect(h.onStepStart).toHaveBeenCalledWith(4, 4, 'x');
     expect(h.onStepDone).toHaveBeenCalledWith(4, false);
     expect(h.onDone).toHaveBeenCalledTimes(1);
+  });
+
+  /** A refused done payload: onError exactly once, onDone NEVER — the error
+   *  callback owns the closure, a second callback would double the toasts. */
+  async function expectRefused(payload: unknown, errorMatch: string) {
+    mockStreamingFetch([sse('start', START_OK), sse('done', payload)]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining(errorMatch));
+    expect(onDone).not.toHaveBeenCalled();
+  }
+
+  it('an empty done payload is refused — onError once, onDone never', async () => {
+    await expectRefused({}, 'Malformed audit done event');
+  });
+
+  it('an unknown done status is refused, not coerced to complete', async () => {
+    await expectRefused(
+      { status: 'accepted', succeeded_steps: [1], unchanged_steps: [], failed_steps: [] },
+      'Malformed audit done event',
+    );
+  });
+
+  it('a malformed step list is refused even with a valid status', async () => {
+    await expectRefused(
+      { status: 'complete', succeeded_steps: 'all', unchanged_steps: [], failed_steps: [] },
+      'succeededSteps',
+    );
+  });
+
+  it('a done without audit_run_id is refused whatever the status', async () => {
+    await expectRefused(
+      { status: 'interrupted', succeeded_steps: [], unchanged_steps: [], failed_steps: [1] },
+      'missing audit_run_id',
+    );
+    await expectRefused(
+      { status: 'no_change', succeeded_steps: [], unchanged_steps: [1], failed_steps: [] },
+      'missing audit_run_id',
+    );
+  });
+
+  it('overlapping step lists are refused', async () => {
+    await expectRefused(
+      { status: 'complete', succeeded_steps: [1], unchanged_steps: [1], failed_steps: [],
+        discussion_id: 'd', audit_run_id: 'r' },
+      'overlap',
+    );
+  });
+
+  it('a partition that misses a requested step is refused', async () => {
+    await expectRefused(
+      { status: 'no_change', succeeded_steps: [], unchanged_steps: [], failed_steps: [] },
+      'partition',
+    );
+  });
+
+  it('complete without a validation discussion is refused, never a silent success', async () => {
+    await expectRefused(
+      { status: 'complete', succeeded_steps: [1], unchanged_steps: [], failed_steps: [],
+        audit_run_id: 'r-1' },
+      'validation discussion',
+    );
+  });
+
+  it('interrupted carrying a discussion is refused', async () => {
+    await expectRefused(
+      { status: 'interrupted', succeeded_steps: [], unchanged_steps: [], failed_steps: [1],
+        discussion_id: 'd-forged', audit_run_id: 'r-1' },
+      'cannot carry a discussion',
+    );
+  });
+
+  it('a baseline reorder is legitimate: the done partition follows the CANONICAL start list', async () => {
+    // The request names pre-reorder step 3; the backend re-routes it (by
+    // ai_file) to slot 4 and says so in `start.requested_steps` — the done
+    // partition [4] must be accepted even though req.steps was [3].
+    mockStreamingFetch([
+      sse('start', { total_steps: 1, requested_steps: [4] }),
+      sse('done', { status: 'complete', succeeded_steps: [4], unchanged_steps: [], failed_steps: [],
+                    discussion_id: 'd-reroute', audit_run_id: 'r-reroute' }),
+    ]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', { agent: 'ClaudeCode', steps: [3] } as never, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'complete', succeededSteps: [4],
+    }));
+  });
+
+  it('after a reorder, a done partition over the ORIGINAL request numbers is refused', async () => {
+    mockStreamingFetch([
+      sse('start', { total_steps: 1, requested_steps: [4] }),
+      sse('done', { status: 'complete', succeeded_steps: [3], unchanged_steps: [], failed_steps: [],
+                    discussion_id: 'd', audit_run_id: 'r' }),
+    ]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', { agent: 'ClaudeCode', steps: [3] } as never, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
+    });
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('partition'));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('a done before any start is refused — no canonical list to validate against', async () => {
+    mockStreamingFetch([sse('done', DONE_OK)]);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onDone, onError,
+    });
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('done before start'));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('a mid-run spawn failure flows step_error → step_done → done interrupted, no terminal onError', async () => {
+    mockStreamingFetch([
+      sse('start', START_OK),
+      sse('step_error', { error: 'spawn failed', step: 1 }),
+      sse('step_done', { step: 1, success: false, outcome: 'failed', file: 'docs/x.md' }),
+      sse('done', { status: 'interrupted', succeeded_steps: [], unchanged_steps: [], failed_steps: [1],
+                    audit_run_id: 'r-1' }),
+    ]);
+    const { projects } = await import('../api');
+    const onStepError = vi.fn();
+    const onStepDone = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone, onStepError, onDone, onError,
+    });
+    expect(onStepError).toHaveBeenCalledWith('spawn failed', 1);
+    expect(onStepDone).toHaveBeenCalledWith(1, false);
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ status: 'interrupted' }));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a mid-run stamp warning is non-terminal: the step still closes and done stays complete', async () => {
+    mockStreamingFetch([
+      sse('start', START_OK),
+      sse('warning', { message: 'Step 1 (docs/x.md): audit-date stamp failed: disk full' }),
+      sse('step_done', { step: 1, success: true, outcome: 'succeeded', file: 'docs/x.md' }),
+      sse('done', DONE_OK),
+    ]);
+    const { projects } = await import('../api');
+    const onWarning = vi.fn();
+    const onStepDone = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone, onWarning, onDone, onError,
+    });
+    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('stamp failed'));
+    expect(onStepDone).toHaveBeenCalledWith(1, true);
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ status: 'complete' }));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a post-commit baseline warning is non-terminal: onWarning then done complete', async () => {
+    mockStreamingFetch([
+      sse('start', START_OK),
+      sse('warning', { message: 'Baseline write failed: disk full' }),
+      sse('done', DONE_OK),
+    ]);
+    const { projects } = await import('../api');
+    const onWarning = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.partialAuditStream('p-1', REQ, {
+      onStepStart: vi.fn(), onChunk: vi.fn(), onStepDone: vi.fn(), onWarning, onDone, onError,
+    });
+    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('Baseline write failed'));
+    expect(onDone).toHaveBeenCalledWith(expect.objectContaining({ status: 'complete' }));
+    expect(onError).not.toHaveBeenCalled();
   });
 });
 

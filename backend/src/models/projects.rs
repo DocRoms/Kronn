@@ -153,7 +153,7 @@ pub enum AiAuditStatus {
 
 /// Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
 ///
-/// Produced by the three SSE streams (`run_audit`, `partial_audit`, `full_audit`)
+/// Produced by the SSE streams (`full_audit`, `partial_audit`)
 /// which write into `AppState.audit_tracker.progress` as they advance. The UI
 /// polls this endpoint to "resume" the progress bar when the user navigates
 /// away and comes back — no need to restart the audit since the server-side
@@ -166,7 +166,7 @@ pub enum AiAuditStatus {
 #[ts(export)]
 pub struct AuditProgress {
     pub project_id: String,
-    /// `"installing"` during template install, `"auditing"` during the 9-step
+    /// `"installing"` during template install, `"auditing"` during the dynamic chain
     /// loop, `"validating"` during phase 3 (validation discussion creation),
     /// `"done"` briefly before the tracker clears the entry.
     pub phase: String,
@@ -177,7 +177,7 @@ pub struct AuditProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_file: Option<String>,
     pub started_at: DateTime<Utc>,
-    /// `"full"` for the 9-step audit, `"partial"` for drift-triggered
+    /// `"full"` for the chained audit, `"partial"` for drift-triggered
     /// sub-audits, `"full_audit"` for the end-to-end variant. Kept as a
     /// string so future audit kinds don't force a schema migration.
     pub kind: String,
@@ -199,7 +199,7 @@ pub struct AuditProgress {
     /// `🔧 Write (14)`) so the user has a "still alive" signal even
     /// when the token chip is frozen (heavy step writing many TD
     /// files without intermediate `Usage` blocks — the symptom that
-    /// confused the user during the 8-min Step 9 of the Full audit).
+    /// confused the user during the 8-min Step 8 of the Full audit).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_tool_call_count: Option<u32>,
 }
@@ -232,19 +232,28 @@ pub struct AuditRun {
     pub duration_ms: Option<u32>,
     /// `Running` while in flight; `Completed` / `Failed` / `Cancelled` /
     /// `Interrupted` once terminal. `Interrupted` (0.8.3 #311) means
-    /// the SSE stream ended before reaching step 10 *without* an
+    /// the SSE stream ended before the executed chain completed, without an
     /// explicit cancel — typically a rate-limit, claude crash, or
     /// network blip. The frontend treats `Interrupted` specifically:
-    /// it shows a "Reprendre Step N/10" button (where N is
-    /// `last_completed_step + 1`) instead of a fresh "Lancer".
+    /// it shows a dynamic resume button for `last_completed_step + 1`
+    /// instead of a fresh "Lancer".
     pub status: String,
     /// 0.8.3 (#311) — last successfully completed step (1-based,
-    /// matches `ANALYSIS_STEPS` indexing). 0 = no step done yet.
-    /// 10 = full pipeline ran to end. Set on every `step_done` where
-    /// `validate_and_repair_step_output` returns success=true. Drives
+    /// matches the executed step-chain indexing). 0 = no step done yet.
+    /// A chained Full currently completes at 16. Set on every `step_done` where
+    /// `validate_step_output` returns success=true. Drives
     /// the resume mechanism: on resume we start at `this + 1`.
     #[serde(default)]
     pub last_completed_step: u32,
+    /// 076 — durable link to the validation discussion created in the SAME
+    /// transaction as the Completed status. The validate endpoint trusts
+    /// only this, never title/date heuristics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub validation_discussion_id: Option<String>,
+    /// 076 — structured per-step outcomes (requested/succeeded/unchanged)
+    /// for partial runs; provenance for the drift oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_outcomes_json: Option<String>,
     #[serde(default)]
     pub td_critical: u32,
     #[serde(default)]
@@ -270,7 +279,7 @@ pub struct AuditRun {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_path: Option<String>,
     /// Raw JSON string of `Vec<AuditRecommendation>`, populated by the
-    /// cluster detector in Step 9 (Full audits only). Kept as String
+    /// completion-time cluster detector (Full audits only). Kept as String
     /// in the model to avoid forcing schema migrations on every
     /// recommendation-shape tweak.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -313,7 +322,7 @@ pub struct AuditRunStep {
     pub step_repaired_from_template: bool,
 }
 
-/// Recommendation emitted by the Step 9 cluster detector. Lives in
+/// Recommendation emitted by the completion-time cluster detector. Lives in
 /// `AuditRun.recommendations_json` as a JSON-encoded list.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -341,6 +350,33 @@ pub fn compute_health_score(critical: u32, high: u32, medium: u32, low: u32) -> 
         - (medium   as f64 *  1.5)
         - (low      as f64 *  0.3);
     raw.clamp(0.0, 100.0) as u8
+}
+
+#[cfg(test)]
+mod audit_kind_label_tests {
+    use super::AuditKind;
+
+    #[test]
+    fn from_label_is_the_exact_inverse_of_as_label() {
+        // Resume-by-run-id recovers the kind from the persisted label, so
+        // the round-trip must be lossless for every variant. A drift here
+        // would resume the wrong pipeline.
+        for k in [
+            AuditKind::Full, AuditKind::Drift, AuditKind::Security,
+            AuditKind::Docker, AuditKind::Performance, AuditKind::Accessibility,
+            AuditKind::Rgaa, AuditKind::Database, AuditKind::ApiDesign,
+            AuditKind::CodeQuality, AuditKind::Custom,
+        ] {
+            assert_eq!(AuditKind::from_label(k.as_label()), Some(k), "{k:?} round-trip");
+        }
+    }
+
+    #[test]
+    fn from_label_rejects_unknown_labels() {
+        assert_eq!(AuditKind::from_label("Nonsense"), None);
+        assert_eq!(AuditKind::from_label(""), None);
+        assert_eq!(AuditKind::from_label("full"), None, "case-sensitive on purpose");
+    }
 }
 
 #[cfg(test)]
@@ -385,8 +421,9 @@ mod health_score_tests {
 
 /// 0.8.2 — Specialized audit types ("Design C").
 ///
-/// `Full` runs the canonical 9-step pipeline. The other variants run
-/// a focused subset that only re-audits one dimension. They share the
+/// `Full` exposes the canonical 9-step foundation; a launched Full audit
+/// appends 7 focused dimensions for a 16-step chain. The other variants run
+/// one focused dimension. They share the
 /// reconciliation + audit_runs row machinery; only the step list differs.
 ///
 /// `Custom` is the escape hatch: the caller supplies a free-form prompt
@@ -410,6 +447,11 @@ pub enum AuditKind {
     Rgaa,
     Database,
     ApiDesign,
+    /// 0.8.13 — code quality & maintainability: templates (Twig/JSX/HTML),
+    /// styles (CSS architecture), backend-language smells, perf/eco hygiene.
+    /// Born from the DOCROMS_WEB dogfooding: a Full audit surfaces docs &
+    /// infra debt but never code-quality findings.
+    CodeQuality,
     Custom,
 }
 
@@ -427,7 +469,29 @@ impl AuditKind {
             AuditKind::Rgaa          => "Rgaa",
             AuditKind::Database      => "Database",
             AuditKind::ApiDesign     => "ApiDesign",
+            AuditKind::CodeQuality   => "CodeQuality",
             AuditKind::Custom        => "Custom",
+        }
+    }
+
+    /// Inverse of [`as_label`]. Used to recover the kind of a persisted
+    /// `audit_runs` row when resuming by `resume_run_id`. Unknown labels
+    /// return `None` (never silently fall back to `Full`, which would run
+    /// the wrong pipeline on a resume).
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            "Full"          => Some(AuditKind::Full),
+            "Drift"         => Some(AuditKind::Drift),
+            "Security"      => Some(AuditKind::Security),
+            "Docker"        => Some(AuditKind::Docker),
+            "Performance"   => Some(AuditKind::Performance),
+            "Accessibility" => Some(AuditKind::Accessibility),
+            "Rgaa"          => Some(AuditKind::Rgaa),
+            "Database"      => Some(AuditKind::Database),
+            "ApiDesign"     => Some(AuditKind::ApiDesign),
+            "CodeQuality"   => Some(AuditKind::CodeQuality),
+            "Custom"        => Some(AuditKind::Custom),
+            _               => None,
         }
     }
 
@@ -451,6 +515,7 @@ impl AuditKind {
             AuditKind::Rgaa          => "RGAA 4.1",
             AuditKind::Database      => "Base de données",
             AuditKind::ApiDesign     => "Design d'API",
+            AuditKind::CodeQuality   => "Qualité de code",
             AuditKind::Custom        => "Custom",
         }
     }
@@ -470,6 +535,7 @@ impl AuditKind {
                 | AuditKind::Rgaa
                 | AuditKind::Database
                 | AuditKind::ApiDesign
+                | AuditKind::CodeQuality
         )
     }
 
@@ -494,12 +560,14 @@ pub struct LaunchAuditRequest {
     /// `kind == AuditKind::Custom`. Ignored otherwise.
     #[serde(default)]
     pub custom_prompt: Option<String>,
-    /// 0.8.3 (#311) — resume an interrupted run: skip steps 1..=N
-    /// and start at step N+1. Read from `audit_runs.last_completed_step`
-    /// by the frontend before POSTing. None / 0 / >= 10 means start
-    /// fresh from step 1.
+    /// Resume an interrupted run. The server loads this `audit_runs` row,
+    /// verifies it belongs to the project and is `Interrupted`, then derives
+    /// BOTH the kind and the checkpoint (`last_completed_step`) from the row
+    /// — `kind`/`custom_prompt` above are ignored when this is set. This
+    /// makes resume impossible to misuse: no client-supplied step count to
+    /// oversize, and no way to graft a checkpoint onto the wrong pipeline.
     #[serde(default)]
-    pub resume_from: Option<u32>,
+    pub resume_run_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, TS)]

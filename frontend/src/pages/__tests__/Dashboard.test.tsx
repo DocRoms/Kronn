@@ -2,6 +2,12 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
+// Dashboard now opens its own WS (audit_finished toast) — never a real
+// socket in tests.
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: vi.fn(() => ({ connected: false })),
+}));
+
 // Mock ALL API modules used by Dashboard and its children
 vi.mock('../../lib/api', () => ({
   projects: {
@@ -331,3 +337,46 @@ describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
     expect(urlInput).toBeTruthy();
   });
 });
+
+describe('Dashboard — audit_finished toast (0.8.13)', () => {
+  // The WS hook is module-mocked; capture the handler Dashboard registers
+  // so tests can inject audit_finished frames directly.
+  const fireWs = async (msg: unknown) => {
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    const handler = vi.mocked(useWebSocket).mock.calls.at(-1)?.[0];
+    expect(handler, 'Dashboard must register a WS handler').toBeTruthy();
+    await act(async () => { handler!(msg as never); });
+  };
+
+  it('complete audit → success toast with the project name', async () => {
+    await wrap(<Dashboard onReset={vi.fn()} />);
+    await fireWs({
+      type: 'audit_finished', project_id: 'p-x', status: 'complete',
+      last_completed_step: 16, total_steps: 16, warned_steps: [], discussion_id: 'd1',
+    });
+    // Real fr i18n: the success copy mentions the validation discussion.
+    expect(await screen.findByText(/Audit terminé —/)).toBeTruthy();
+  });
+
+  it('interrupted with no warned step → warning toast falls back to position, never "?"', async () => {
+    await wrap(<Dashboard onReset={vi.fn()} />);
+    await fireWs({
+      type: 'audit_finished', project_id: 'p-x', status: 'interrupted',
+      last_completed_step: 12, total_steps: 16, warned_steps: [], discussion_id: null,
+    });
+    const toast = await screen.findByText(/Audit terminé avec avertissements/);
+    expect(toast.textContent).toContain('12/16');
+    expect(toast.textContent).not.toContain('?');
+  });
+
+  it('interrupted with warned steps → warning toast lists them', async () => {
+    await wrap(<Dashboard onReset={vi.fn()} />);
+    await fireWs({
+      type: 'audit_finished', project_id: 'p-x', status: 'interrupted',
+      last_completed_step: 16, total_steps: 16, warned_steps: [6, 8], discussion_id: null,
+    });
+    const toast = await screen.findByText(/Audit terminé avec avertissements/);
+    expect(toast.textContent).toContain('6, 8');
+  });
+});
+

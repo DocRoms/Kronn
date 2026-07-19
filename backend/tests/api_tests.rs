@@ -6979,6 +6979,40 @@ mod cold_api_handlers_tests {
         project_id
     }
 
+    /// Satisfy the durable validation gate: the latest run must be Completed,
+    /// linked to its own validation discussion, and finished by the agent's
+    /// terminal signal. A docs entry alone no longer earns validation.
+    async fn seed_completed_validation(state: &AppState, project_id: &str) {
+        let run_id = format!("audit-run-{}", uuid::Uuid::new_v4());
+        let disc_id = format!("validation-disc-{}", uuid::Uuid::new_v4());
+        let message_id = format!("validation-msg-{}", uuid::Uuid::new_v4());
+        let pid = project_id.to_string();
+        state.db.with_conn(move |conn| {
+            let now = chrono::Utc::now();
+            kronn::db::audit_runs::insert_running(
+                conn, &run_id, &pid, "Full", "ClaudeCode", now,
+            )?;
+            kronn::db::audit_runs::complete(
+                conn, &run_id, now, "Completed",
+                0, 0, 0, 0, 0, 0, 0, 100, None, None,
+            )?;
+            conn.execute(
+                "INSERT INTO discussions
+                 (id, project_id, title, agent, language, created_at, updated_at)
+                 VALUES (?1, ?2, 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now'), datetime('now'))",
+                rusqlite::params![disc_id, pid],
+            )?;
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, tokens_used)
+                 VALUES (?1, ?2, 'Agent', 'Validation terminée.\nKRONN:VALIDATION_COMPLETE', datetime('now'), 0)",
+                rusqlite::params![message_id, disc_id],
+            )?;
+            kronn::db::audit_runs::set_validation_discussion(conn, &run_id, &disc_id)?;
+            Ok(())
+        }).await.unwrap();
+    }
+
     #[tokio::test]
     async fn project_git_status_real_repo_returns_envelope() {
         let (_dir, repo) = seed_repo("proj-status");
@@ -7482,6 +7516,7 @@ mod cold_api_handlers_tests {
         let (_dir, repo) = seed_repo("validate-no-agents");
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
+        seed_completed_validation(&state, &pid).await;
         let app = build_router_with_auth(state, false);
 
         let (st, json) = post_json(
@@ -7491,19 +7526,20 @@ mod cold_api_handlers_tests {
         assert_eq!(st, StatusCode::OK);
         assert_eq!(json["success"], serde_json::Value::Bool(false));
         let err = json["error"].as_str().unwrap_or("");
-        assert!(err.contains("AGENTS.md") || err.contains("audit"),
-            "expected actionable AGENTS.md / audit error, got {err}");
+        assert!(err.contains("AGENTS.md"),
+            "expected the completed validation gate to reach the missing-docs check, got {err}");
     }
 
     #[tokio::test]
-    async fn validate_audit_succeeds_with_agents_md_and_writes_kronn_state() {
-        // Project with docs/AGENTS.md → validation must succeed AND
-        // create docs/.kronn.json with validated_at populated.
+    async fn validate_audit_succeeds_after_completed_linked_validation() {
+        // A completed run with its terminally-signalled linked discussion
+        // must validate and create docs/.kronn.json.
         let (_dir, repo) = seed_repo("validate-ok");
         std::fs::create_dir_all(repo.join("docs")).unwrap();
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
+        seed_completed_validation(&state, &pid).await;
         let app = build_router_with_auth(state, false);
 
         let (st, json) = post_json(
@@ -7528,21 +7564,24 @@ mod cold_api_handlers_tests {
         std::fs::write(repo.join("docs/AGENTS.md"), "# AGENTS\n").unwrap();
         let state = test_state();
         let pid = seed_project_with_repo(&state, &repo).await;
+        seed_completed_validation(&state, &pid).await;
 
         // First call.
-        let _ = post_json(
+        let (_, first_response) = post_json(
             build_router_with_auth(state.clone(), false),
             &format!("/api/projects/{}/validate-audit", pid),
             serde_json::json!({}),
         ).await;
+        assert_eq!(first_response["success"], serde_json::Value::Bool(true));
         let first = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // Second call (could be hours / days later).
-        let _ = post_json(
+        let (_, second_response) = post_json(
             build_router_with_auth(state, false),
             &format!("/api/projects/{}/validate-audit", pid),
             serde_json::json!({}),
         ).await;
+        assert_eq!(second_response["success"], serde_json::Value::Bool(true));
         let second = std::fs::read_to_string(repo.join("docs/.kronn.json")).unwrap();
 
         // The validated_at line must be unchanged (both runs happen on

@@ -212,6 +212,19 @@ pub enum WsMessage {
     AgentRunsInterrupted {
         discussion_ids: Vec<String>,
     },
+    /// Broadcast when an audit pipeline reaches its end, whatever the
+    /// outcome. The audit may have been launched from another page or from
+    /// the MCP bridge — without this the UI goes quiet and the user can't
+    /// tell "finished clean" from "finished, needs attention". `status`
+    /// mirrors the DB row: `complete` or `interrupted` (warned steps listed).
+    AuditFinished {
+        project_id: String,
+        status: String,
+        last_completed_step: u32,
+        total_steps: u32,
+        warned_steps: Vec<u32>,
+        discussion_id: Option<String>,
+    },
 }
 
 impl WsMessage {
@@ -362,5 +375,25 @@ mod tests {
         // Neither is peer-relayable (local UI signals).
         assert!(!WsMessage::BatchRunChildQueued { run_id: "r".into(), discussion_id: "d".into() }.is_peer_relayable());
         assert!(!WsMessage::AgentRunsInterrupted { discussion_ids: vec![] }.is_peer_relayable());
+        assert!(!WsMessage::AuditFinished {
+            project_id: "p".into(), status: "interrupted".into(),
+            last_completed_step: 9, total_steps: 9, warned_steps: vec![1],
+            discussion_id: None,
+        }.is_peer_relayable());
+    }
+
+    #[test]
+    fn audit_finished_serializes_snake_case() {
+        let v = serde_json::to_value(WsMessage::AuditFinished {
+            project_id: "p1".into(),
+            status: "complete".into(),
+            last_completed_step: 9,
+            total_steps: 9,
+            warned_steps: vec![],
+            discussion_id: Some("d1".into()),
+        }).unwrap();
+        assert_eq!(v["type"], "audit_finished");
+        assert_eq!(v["project_id"], "p1");
+        assert_eq!(v["status"], "complete");
     }
 }

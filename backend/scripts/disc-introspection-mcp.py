@@ -44,7 +44,42 @@ import uuid
 
 # ─── Tool catalogue ────────────────────────────────────────────────────────
 
+# Loaded-vs-on-disk staleness capture: the MCP client spawns this script at
+# session start and never reloads it — a release can leave every live session
+# running an outdated bridge with no visible signal (tools missing, stale
+# descriptions). bridge_info compares these against the file's current mtime.
+_BRIDGE_LOADED_AT = time.time()
+try:
+    _BRIDGE_SCRIPT_MTIME_AT_LOAD = os.path.getmtime(__file__)
+except OSError:
+    _BRIDGE_SCRIPT_MTIME_AT_LOAD = 0.0
+
 TOOLS = [
+    {
+        "name": "kronn_intro",
+        "description": (
+            "0.8.13 — A 60-second guided tour of what the user can do with "
+            "Kronn from this CLI (discussions, workflows, quick prompts, "
+            "audits, API broker) with 3 starter examples. Call it when the "
+            "session instructions flag a FIRST CONTACT (then present the "
+            "guide conversationally, in the user's language), or anytime "
+            "the user asks what Kronn can do. Calling it marks onboarding "
+            "done for this client."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "bridge_info",
+        "description": (
+            "0.8.13 — Health/staleness check of THIS bridge process: script "
+            "path, when it was loaded, and whether the on-disk script is "
+            "NEWER than the loaded copy (`stale: true`). Call it when a tool "
+            "you expect is missing or behaves oddly after a Kronn release. "
+            "If stale, ask the user to reconnect the MCP — BEFORE launching "
+            "anything session-bound (an audit dies with this session)."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     {
         "name": "disc_meta",
         "description": (
@@ -1764,9 +1799,29 @@ TOOLS = [
             "0.8.12 — Read a project's audit surface BEFORE launching: the "
             "docs/ files with their filled/unfilled status, the open TODOs "
             "and the tech-debt items. Returns the backend's AuditInfo "
-            "verbatim (`files`, `todos`, `tech_debt_items`). Use it to "
+            "verbatim (`files`, `todos`, `tech_debt_items`) plus the "
+            "project's `audit_status`. Empty arrays do NOT mean 'clean': "
+            "when `audit_status` is `NoTemplate` there is simply nothing "
+            "to audit yet — call `audit_install_template` first. Use it to "
             "brief yourself, pick between full/partial, and know what to "
             "validate once the audit completes."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "project_id": {"type": "string", "description": "Kronn project id."},
+            },
+            "required": ["project_id"],
+        },
+    },
+    {
+        "name": "audit_install_template",
+        "description": (
+            "0.8.13 — Step 0 of the audit pipeline (template → audit → "
+            "validation): install the docs/ template into a `NoTemplate` "
+            "project so `audit_launch` has a surface to fill. Idempotent "
+            "and non-destructive (never overwrites existing docs). Returns "
+            "the project's new `audit_status`."
         ),
         "inputSchema": {
             "type": "object",
@@ -1787,13 +1842,21 @@ TOOLS = [
             "as long as THIS MCP session lives. Reloading the MCP or "
             "closing the CLI interrupts the audit mid-flight. Never assume "
             "it survived a reload — call `audit_status` to observe the "
-            "truth, and relaunch consciously (an Interrupted run is "
-            "resumable). One audit per project at a time: launching while "
+            "truth, and relaunch consciously (an Interrupted FULL/specialized "
+            "run is resumable via resume_run_id; an interrupted PARTIAL is "
+            "not — relaunch it on its still-stale scope). One audit per "
+            "project at a time: launching while "
             "one runs is an ERROR, not a silent no-op.\n\n"
-            "`full` creates a validation discussion at the end "
-            "(discussion_id in audit_status once done); `partial` does NOT "
-            "(discussion_id stays null) and requires `steps` (1-based "
-            "indices of the analysis steps to re-run)."
+            "`full` creates a validation discussion at the end, and so does a "
+            "FULLY-successful `partial` (scoped to the refreshed sections) "
+            "— discussion_id lands in audit_status once done, null when the "
+            "run was interrupted. `partial` requires `steps` (1-based "
+            "indices of the analysis steps to re-run).\n\n"
+            "BRIEFING: the audit quality depends on user context (goals, "
+            "known pain points). `audit_prepare` reports whether a briefing "
+            "exists (`briefing.present`); when it doesn't, consider running "
+            "the project briefing in the UI first — the launch response "
+            "carries the same warning."
         ),
         "inputSchema": {
             "type": "object",
@@ -1802,13 +1865,23 @@ TOOLS = [
                 "mode": {
                     "type": "string",
                     "enum": ["full", "partial"],
-                    "description": "full = whole pipeline + validation discussion; partial = selected steps only.",
+                    "description": "full = whole pipeline + validation discussion; partial = selected steps only (a fully-successful partial ALSO creates a validation discussion scoped to the refreshed sections and gets its own audit_runs row).",
                 },
                 "steps": {
                     "type": "array",
                     "minItems": 1,
                     "items": {"type": "integer", "minimum": 1},
                     "description": "REQUIRED for partial: 1-based step indices to re-run. Ignored for full.",
+                },
+                "resume_run_id": {
+                    "type": "string",
+                    "description": (
+                        "full mode only: resume an Interrupted run by its id "
+                        "(see audit_status.resumable.id). The backend derives "
+                        "the kind AND the checkpoint from that run — you cannot "
+                        "oversize a step count or resume the wrong pipeline. "
+                        "Omit to start fresh."
+                    ),
                 },
                 "agent": {
                     "type": "string",
@@ -1834,7 +1907,8 @@ TOOLS = [
             "kept SEPARATE (never merged):\n"
             "· `bridge_stream` — what THIS bridge's reader thread saw "
             "(running / done / error / launch_timeout / bridge_timeout / "
-            "stream_closed, plus discussion_id + audit_run_id once done);\n"
+            "stream_closed / protocol_error, plus discussion_id + "
+            "audit_run_id once done);\n"
             "· `live` — the backend's in-memory progress tracker. "
             "⚠️ `live: null` means 'no LIVE state known' — NOT 'finished': "
             "a backend restart wipes the tracker while an agent may still "
@@ -4149,7 +4223,7 @@ _AUDIT_START_WAIT_SECONDS = 5
 _AUDIT_TERMINAL_TTL_SECONDS = 24 * 60 * 60
 _AUDIT_TERMINAL_STATES = frozenset({
     "done", "error", "cancelled", "launch_timeout",
-    "bridge_timeout", "stream_error", "stream_closed",
+    "bridge_timeout", "stream_error", "stream_closed", "protocol_error",
 })
 
 
@@ -4192,10 +4266,25 @@ def _audit_handle_event(entry, event_name, payload_raw):
         payload = {"raw": payload_raw[:200]}
     with _AUDIT_LOCK:
         entry["events_seen"] = entry.get("events_seen", 0) + 1
-        if event_name == "start":
+        if event_name == "accepted":
+            # Launch confirmation emitted BEFORE Phase 1 (template install /
+            # migration), which can outlast the start-wait on a fresh project.
+            # Confirming here means a slow install no longer trips the launch
+            # timeout and interrupts a healthy audit (Codex #7). `start` still
+            # follows with the step count.
+            entry["state"] = "running"
+            entry["_saw_accepted"] = True
+            if payload.get("audit_run_id"):
+                entry["audit_run_id"] = payload["audit_run_id"]
+            entry["_start_evt"].set()
+        elif event_name == "start":
             entry["state"] = "running"
             entry["_saw_start"] = True
             entry["total_steps"] = payload.get("total_steps")
+            # Partial: canonical (resolved) steps — the done partition is
+            # defined over this list, not over the raw request.
+            if payload.get("requested_steps") is not None:
+                entry["requested_steps"] = payload["requested_steps"]
             # started_at may be absent on some modes — keep the local one.
             if payload.get("started_at"):
                 entry["started_at"] = payload["started_at"]
@@ -4204,21 +4293,88 @@ def _audit_handle_event(entry, event_name, payload_raw):
             entry["state"] = "error"
             entry["error"] = (payload.get("error") or payload_raw)[:500]
             entry["_start_evt"].set()
-        elif event_name in ("step_done", "step_error", "step_start"):
+        elif event_name in ("step_done", "step_error", "step_start", "step_unchanged"):
             entry["last_step_event"] = {"event": event_name, **{
-                k: payload.get(k) for k in ("step", "label", "error") if k in payload
+                k: payload.get(k)
+                for k in ("step", "label", "file", "outcome", "error")
+                if k in payload
             }}
             if event_name == "step_error":
                 entry["last_error"] = str(payload.get("error"))[:300]
+        elif event_name == "warning":
+            # Non-terminal (e.g. post-commit baseline write failure) — the
+            # stream still ends with a coherent done.
+            entry["last_warning"] = str(payload.get("message"))[:300]
         elif event_name == "cancelled":
             entry["state"] = "cancelled"
         elif event_name == "done":
+            # Partial: same minimal contract as the UI validator (matrix
+            # v2) — an MCP client must never see a terminal `done` the UI
+            # would refuse as malformed.
+            if entry.get("mode") == "partial":
+                reason = _partial_done_violation(entry, payload)
+                if reason is not None:
+                    entry["state"] = "protocol_error"
+                    entry["error"] = f"malformed done event: {reason}"
+                    return
             entry["state"] = "done"
-            # `full` yields a validation discussion; `partial`/legacy do
-            # NOT — expose an explicit null either way (never absent).
+            # Matrix v2 partition — exposed so audit_status can explain a
+            # `no_change`/`interrupted` refresh without re-reading the DB.
+            for k in ("succeeded_steps", "unchanged_steps", "failed_steps"):
+                if k in payload:
+                    entry[k] = payload[k]
+            # `full` AND a fully-successful `partial` yield a validation
+            # discussion (partial: scoped to the refreshed sections, since
+            # the A5 hardening); an interrupted run does not — expose an
+            # explicit null either way (never absent).
             entry["discussion_id"] = payload.get("discussion_id")
             entry["audit_run_id"] = payload.get("audit_run_id")
             entry["done_status"] = payload.get("status")
+
+
+def _partial_done_violation(entry, payload):
+    """Mirror of the frontend's `parsePartialDone` (api.streaming.test.ts
+    fixtures are the shared matrix): returns a reason string when the
+    terminal payload violates the matrix-v2 contract, else None."""
+    status = payload.get("status")
+    if status not in ("complete", "interrupted", "no_change"):
+        return f"unknown status {status!r}"
+    run_id = payload.get("audit_run_id")
+    if not isinstance(run_id, str) or not run_id:
+        return "missing audit_run_id"
+    # `type(x) is int` and not isinstance: Python bools ARE ints
+    # (True == 1) and would forge a valid-looking partition the frontend
+    # refuses.
+    def _is_step_list(v):
+        return isinstance(v, list) and all(type(x) is int and x > 0 for x in v)
+    lists = {}
+    for k in ("succeeded_steps", "unchanged_steps", "failed_steps"):
+        v = payload.get(k)
+        if not _is_step_list(v):
+            return f"{k} is not a step list"
+        lists[k] = v
+    flat = lists["succeeded_steps"] + lists["unchanged_steps"] + lists["failed_steps"]
+    if len(set(flat)) != len(flat):
+        return "step lists overlap"
+    requested = entry.get("requested_steps")
+    if not _is_step_list(requested):
+        return "no canonical requested_steps (done before start?)"
+    if set(flat) != set(requested) or len(flat) != len(requested):
+        return "step lists do not partition the requested steps"
+    disc = payload.get("discussion_id")
+    if status == "complete":
+        if not lists["succeeded_steps"] or lists["failed_steps"]:
+            return "complete requires succeeded steps and no failures"
+        if not isinstance(disc, str) or not disc:
+            return "complete requires a validation discussion"
+    elif disc:
+        return f"{status} cannot carry a discussion"
+    if status == "interrupted" and not lists["failed_steps"]:
+        return "interrupted requires failed steps"
+    if status == "no_change" and (lists["succeeded_steps"] or lists["failed_steps"]
+                                  or not lists["unchanged_steps"]):
+        return "no_change requires an all-unchanged partition"
+    return None
 
 
 def _audit_stream_reader(entry):
@@ -4254,7 +4410,7 @@ def _audit_stream_reader(entry):
             elif line.startswith("data:"):
                 _audit_handle_event(entry, event_name, line[len("data:"):].strip())
                 with _AUDIT_LOCK:
-                    if entry["state"] in ("done", "error", "cancelled"):
+                    if entry["state"] in ("done", "error", "cancelled", "protocol_error"):
                         break
     except Exception as e:  # noqa: BLE001 — reader must never die silently
         with _AUDIT_LOCK:
@@ -4291,12 +4447,161 @@ def _audit_open_sse(path, body):
     return urllib.request.urlopen(req, timeout=None)  # noqa: S310
 
 
+def _briefing_state(project: dict) -> dict:
+    """Filesystem check (same host as the backend): does the project carry a
+    pre-audit briefing? Its absence measurably degrades the audit (user-known
+    pain points never reach the steps — observed live on docroms-web)."""
+    path = (project or {}).get("path") or ""
+    for candidate in ("docs/briefing.md", "ai/briefing.md"):
+        full = os.path.join(path, candidate)
+        if path and os.path.isfile(full):
+            return {"present": True, "path": candidate}
+    return {
+        "present": False,
+        "hint": (
+            "No pre-audit briefing found — the audit will run without user "
+            "context (goals, known pain points). Consider running the "
+            "project briefing in the Kronn UI first."
+        ),
+    }
+
+
 def call_audit_prepare(args):
     project_id = (args.get("project_id") or "").strip()
     if not project_id:
         raise RuntimeError("audit_prepare: project_id is required")
     # AuditInfo verbatim — files/todos/tech_debt_items, no reshaping.
-    return _unwrap(_http("GET", f"/api/projects/{project_id}/audit-info"))
+    info = _unwrap(_http("GET", f"/api/projects/{project_id}/audit-info"))
+    # An empty surface is ambiguous: pristine project OR template never
+    # installed. Surface the project's audit_status so the agent can tell,
+    # and say explicitly what to do when the answer is "no template".
+    try:
+        project = _unwrap(_http("GET", f"/api/projects/{project_id}"))
+        status = project.get("audit_status") if isinstance(project, dict) else None
+        if status is not None:
+            info["audit_status"] = status
+            info["briefing"] = _briefing_state(project)
+            if status == "NoTemplate":
+                info["hint"] = (
+                    "The docs template is NOT installed — files/todos are empty "
+                    "because there is nothing to audit yet, not because the "
+                    "project is clean. Call `audit_install_template` first."
+                )
+    except Exception:
+        pass  # best-effort enrichment; the verbatim AuditInfo still stands
+    return info
+
+
+_ONBOARD_MARKER = os.path.expanduser("~/.config/kronn/mcp-onboarded.json")
+
+
+def _onboarding_done_for(client: str) -> bool:
+    try:
+        with open(_ONBOARD_MARKER) as f:
+            return client in json.load(f)
+    except Exception:
+        return False
+
+
+def _mark_onboarded(client: str) -> None:
+    data = {}
+    try:
+        with open(_ONBOARD_MARKER) as f:
+            data = json.load(f)
+    except Exception:
+        pass
+    data[client] = time.strftime("%Y-%m-%d")
+    os.makedirs(os.path.dirname(_ONBOARD_MARKER), exist_ok=True)
+    with open(_ONBOARD_MARKER, "w") as f:
+        json.dump(data, f)
+
+
+def call_kronn_intro(_args):
+    client = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
+    _mark_onboarded(client)
+    return {
+        "guide": (
+            "# Kronn en 2 minutes — ce que tu peux faire d'ici, sans quitter ton terminal\n\n"
+            "Kronn est ton orchestrateur d'agents AI self-hosted : il garde la mémoire, "
+            "les pipelines et les credentials — et moi (ton CLI) je peux tout piloter.\n\n"
+            "## 💬 Discussions sauvegardées — ta mémoire partagée\n"
+            "Chaque conversation vit dans Kronn, cherchable et rechargeable par N'IMPORTE quel agent.\n"
+            "→ 'Retrouve ce qu'on a décidé sur l'auth le mois dernier' (disc_search + disc_load_other)\n"
+            "→ 'Crée une disc pour ce sujet et notes-y nos conclusions' (disc_create + disc_append)\n\n"
+            "## 🤝 Mode join — plusieurs CLI agents dans la MÊME conversation\n"
+            "Ton Claude Code, un Codex, un Gemini : tous peuvent rejoindre la même room et se répondre "
+            "(même depuis deux machines différentes).\n"
+            "→ 'Rejoins la disc X et attends les messages' (disc_join + disc_wait_for_peer)\n"
+            "→ 'Invite Codex sur cette discussion pour un second avis' (disc_invite_peer)\n\n"
+            "## ⚡ Quick Prompts — tes prompts transformés en produits réutilisables\n"
+            "Un QP = un template avec variables, versionné, lançable à l'unité, en batch sur N tickets, "
+            "ou sur PLUSIEURS AGENTS EN PARALLÈLE (mode compare : le même prompt sur Claude + GPT + "
+            "Gemini, une discussion par agent, tu compares).\n"
+            "→ 'Lance le QP triage sur les tickets EW-1 à EW-20' (qp_batch_run)\n"
+            "→ Et ils S'AMÉLIORENT : quand une session aboutit à un meilleur prompt, je peux proposer "
+            "la mise à jour du QP — toi tu valides.\n\n"
+            "## 🔀 Workflows — des pipelines multi-étapes que tu crées en discutant\n"
+            "Agents, appels API, conditions, boucles, gates d'approbation humaine, batchs — jusqu'à 20 steps.\n"
+            "→ 'Crée un workflow : récupère les PRs ouvertes, review chacune, poste un résumé' "
+            "(workflow_create_draft — je connais le schéma canonique des 9 types de steps)\n"
+            "→ 'Lance le PR-review sur la 123' (workflow_trigger) · 'Qu'est-ce qui tourne ?' (workflow_active_runs)\n\n"
+            "## 🌐 N'importe quelle API configurée — SANS toucher un secret\n"
+            "Jira, Chartbeat, Cloudflare, GitHub… Kronn détient les credentials côté serveur et signe "
+            "les appels pour moi.\n"
+            "→ 'Combien de tickets ouverts sur le projet EW ?' (mcp_list → api_call, auth injectée)\n"
+            "→ Un appel que tu referas ? Je le sauvegarde en Quick API rejouable (qa_create_draft).\n\n"
+            "## 🧠 La désagentification (LE concept clé pour bien commencer)\n"
+            "Un agent LLM qui fait un appel HTTP brûle des tokens pour RIEN : la requête est "
+            "déterministe. Kronn exécute donc les steps mécaniques (API, extraction JSON, notifications) "
+            "en Rust pur — ZÉRO token — et réserve les agents aux steps qui demandent du raisonnement. "
+            "Même pipeline, ~5x moins cher, débogable step par step. Le réflexe à prendre : "
+            "'ce step a-t-il besoin de réfléchir ?' Sinon → ApiCall/Exec/JSON, pas un agent.\n\n"
+            "## 🔍 Audits — rends n'importe quel repo AI-ready\n"
+            "16 étapes chaînées : docs complètes (architecture, conventions, glossaire…) puis sécurité, "
+            "docker, perf, a11y, database, API, qualité de code — chaque dimension passe ou dit "
+            "'non applicable'. À la fin : une discussion de validation où TU confirmes la dette "
+            "trouvée. Ensuite, n'importe quel agent (même sans Kronn) comprend le projet en lisant docs/.\n"
+            "→ 'Prépare l'audit de <projet>' (audit_prepare) puis 'lance-le' (audit_launch)\n\n"
+            "## 🚀 Cinq trucs à essayer maintenant\n"
+            "1. 'Qu'est-ce qui tourne en ce moment ?'\n"
+            "2. 'Liste mes Quick Prompts et explique-moi le plus utilisé'\n"
+            "3. 'Résume la dernière discussion sur <projet>'\n"
+            "4. 'Crée un petit workflow qui checke <API> chaque matin et me notifie'\n"
+            "5. 'Prépare l'audit de <projet> et dis-moi ce qui manque'\n\n"
+            "**Envie de creuser un domaine ?** Demande — je détaille avec des exemples réels de TON instance.\n\n"
+            "⚠️ **Secrets & credentials** : configuration UNIQUEMENT dans l'UI (Config → Tokens / "
+            "Plugins) — jamais dans ce chat, jamais en clair. L'UI sert aussi pour le visuel (rooms, "
+            "batchs, validation d'audit) : ouvre l'app Kronn (ou le serveur de dev http://localhost:5173 "
+            "si tu lances Kronn depuis les sources)."
+        ),
+        "onboarding_marked_done_for": client,
+    }
+
+
+def call_bridge_info(_args):
+    try:
+        mtime_now = os.path.getmtime(__file__)
+    except OSError:
+        mtime_now = 0.0
+    return {
+        "script_path": os.path.abspath(__file__),
+        "loaded_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_LOADED_AT)),
+        "script_mtime_at_load": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(_BRIDGE_SCRIPT_MTIME_AT_LOAD)),
+        "script_mtime_now": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(mtime_now)),
+        "stale": mtime_now > _BRIDGE_SCRIPT_MTIME_AT_LOAD + 1.0,
+        "hint": (
+            "stale=true: the on-disk bridge is newer than this process — ask "
+            "the user to reconnect the MCP before launching session-bound work."
+        ),
+    }
+
+
+def call_audit_install_template(args):
+    project_id = (args.get("project_id") or "").strip()
+    if not project_id:
+        raise RuntimeError("audit_install_template: project_id is required")
+    status = _unwrap(_http("POST", f"/api/projects/{project_id}/install-template"))
+    return {"project_id": project_id, "audit_status": status}
 
 
 def call_audit_launch(args):
@@ -4316,6 +4621,13 @@ def call_audit_launch(args):
                 "audit_launch: partial mode requires a non-empty `steps` list "
                 "of 1-based integers — refused before any backend call"
             )
+    resume_run_id = args.get("resume_run_id")
+    if resume_run_id is not None and (not isinstance(resume_run_id, str) or not resume_run_id.strip()):
+        # Validated BEFORE the stream entry exists — a raise past that point
+        # would leave a phantom "launching" entry blocking future launches.
+        # The backend derives kind + checkpoint from the run id, so all the
+        # bridge must guarantee is a non-empty string.
+        raise RuntimeError("audit_launch: resume_run_id must be a non-empty string")
     # Blank/whitespace agent falls back like an absent one — never forward
     # an empty attribution to the backend.
     agent = (args.get("agent") or "").strip() or _agent_type_for_session()
@@ -4343,6 +4655,8 @@ def call_audit_launch(args):
     if mode == "full":
         path = f"/api/projects/{project_id}/full-audit"
         body = {"agent": agent}
+        if resume_run_id:
+            body["resume_run_id"] = resume_run_id.strip()
     else:
         path = f"/api/projects/{project_id}/partial-audit"
         body = {"agent": agent, "steps": steps}
@@ -4382,15 +4696,22 @@ def call_audit_launch(args):
     with _AUDIT_LOCK:
         if entry["state"] == "error":
             raise RuntimeError(f"audit_launch refused: {entry.get('error')}")
-        if not entry.get("_saw_start"):
-            # The event fired without a start (stream ended / early close):
-            # launch NOT confirmed — never a hollow `launched`.
+        if not (entry.get("_saw_accepted") or entry.get("_saw_start")):
+            # The event fired without an accepted/start (stream ended / early
+            # close): launch NOT confirmed — never a hollow `launched`.
             raise RuntimeError(
-                "audit_launch: the stream closed before any start event — "
-                f"launch NOT confirmed (state: {entry['state']}). Check "
+                "audit_launch: the stream closed before any accepted/start "
+                f"event — launch NOT confirmed (state: {entry['state']}). Check "
                 "audit_status / backend logs before retrying."
             )
-        return {
+        # Briefing presence — best-effort: a warning, never a blocker.
+    briefing = None
+    try:
+        project = _unwrap(_http("GET", f"/api/projects/{project_id}"))
+        briefing = _briefing_state(project if isinstance(project, dict) else {})
+    except Exception:
+        pass
+    out = {
             "launched": True,
             "project_id": project_id,
             "mode": mode,
@@ -4398,11 +4719,18 @@ def call_audit_launch(args):
             "total_steps": entry.get("total_steps"),
             "lifecycle_warning": (
                 "This audit lives only as long as THIS MCP session: a reload "
-                "or CLI exit interrupts it mid-flight. The run_id and (full "
-                "mode) discussion_id become available via audit_status once "
-                "done; an interrupted run shows under audit_status.resumable."
+                "or CLI exit interrupts it mid-flight. The run_id and the "
+                "validation discussion_id (full, and fully-successful "
+                "partial — scoped to the refreshed sections) become "
+                "available via audit_status once done. An interrupted full/"
+                "specialized run shows under audit_status.resumable; an "
+                "interrupted PARTIAL does not — relaunch it on its "
+                "still-stale scope."
             ),
         }
+    if briefing and not briefing.get("present"):
+        out["briefing_warning"] = briefing["hint"]
+    return out
 
 
 def call_audit_status(args):
@@ -4439,6 +4767,9 @@ def call_audit_status(args):
 DISPATCH = {
     # 0.8.12 PR A — audit surface
     "audit_prepare": call_audit_prepare,
+    "audit_install_template": call_audit_install_template,
+    "bridge_info": call_bridge_info,
+    "kronn_intro": call_kronn_intro,
     "audit_launch": call_audit_launch,
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
@@ -4579,6 +4910,17 @@ def _handle(req):
         if isinstance(client_info, dict):
             _CLIENT_INFO["name"] = client_info.get("name")
             _CLIENT_INFO["version"] = client_info.get("version")
+        client_name = (_CLIENT_INFO.get("name") or "unknown").strip() or "unknown"
+        first_contact = "" if _onboarding_done_for(client_name) else (
+            "🎉 **FIRST CONTACT** — this is the first Kronn session for this "
+            "CLI on this machine. Once the user's immediate request is "
+            "handled, offer ONCE, in the user's language: \"Je vois que "
+            "Kronn vient d'être connecté — veux-tu un tour rapide de ce que "
+            "je peux faire avec ?\" If they accept, call `kronn_intro` and "
+            "present its guide conversationally (do not paste it raw). "
+            "Accepted or declined, call `kronn_intro` afterwards anyway so "
+            "the offer is never repeated.\n\n"
+        )
         return {
             "jsonrpc": "2.0",
             "id": rid,
@@ -4594,7 +4936,7 @@ def _handle(req):
                 # `workflow_get`-only-saw-Agent-steps trap). Kept concise: a
                 # CLOSED map + pointers, not a manual (open catalogues stay
                 # behind on-demand tools like `mcp_list`).
-                "instructions": (
+                "instructions": first_contact + (
                     "You're connected to **Kronn** — it orchestrates agents, "
                     "discussions, multi-step workflows and external APIs, and "
                     "owns ALL credentials server-side (never paste secrets). "

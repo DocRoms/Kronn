@@ -3769,6 +3769,23 @@ class AuditToolsTests(unittest.TestCase):
         self.assertEqual(out["total_steps"], 10)
         self.assertIn("reload", out["lifecycle_warning"])
 
+    def test_accepted_event_confirms_launch_before_start(self):
+        # Codex #7 — `start` only fires after Phase 1 (template install /
+        # migration), which on a fresh project can outlast the 5s start-wait.
+        # The `accepted` event emitted BEFORE Phase 1 must confirm the launch
+        # on its own, so a slow install no longer trips the launch timeout and
+        # interrupts a healthy audit. total_steps is still absent here (that
+        # rides on the later `start`).
+        import time as _time
+        stream = self._FakeSse(self._sse("accepted",
+                                         {"audit_run_id": "run-acc", "kind": "Full"}))
+        t0 = _time.time()
+        with mock.patch.object(self.mod, "_audit_open_sse", return_value=stream):
+            out = self.mod.call_audit_launch({"project_id": "p1", "mode": "full"})
+        self.assertLess(_time.time() - t0, 4.0, "accepted must confirm without waiting on start")
+        self.assertTrue(out["launched"])
+        self.assertIsNone(out["total_steps"], "total_steps rides on the later start event")
+
     def test_backend_early_error_surfaces_as_a_distinct_mcp_error(self):
         # The "already running" refusal arrives as an SSE error event — it
         # must raise, never return a hollow `launched`.
@@ -3800,9 +3817,151 @@ class AuditToolsTests(unittest.TestCase):
         self.assertEqual(entry["discussion_id"], "d-val")
         self.assertEqual(entry["audit_run_id"], "run-42")
 
+    def test_partial_success_done_carries_discussion_and_run_id(self):
+        # A5 v3 contract change: a FULLY-successful partial creates a scoped
+        # validation discussion — the done event carries both ids and the
+        # bridge must expose them like it does for full.
+        lines = (self._sse("start", {"total_steps": 2, "requested_steps": [3, 8]})
+                 + self._sse("warning", {"message": "Baseline write failed: disk full"})
+                 + self._sse("done", {"status": "complete",
+                                      "succeeded_steps": [3, 8],
+                                      "unchanged_steps": [], "failed_steps": [],
+                                      "discussion_id": "d-partial-val",
+                                      "audit_run_id": "run-partial-7"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [3, 8]})
+        entry = self._wait_state("p1", {"done"})
+        self.assertEqual(entry["discussion_id"], "d-partial-val")
+        self.assertEqual(entry["audit_run_id"], "run-partial-7")
+        # The warning is non-terminal: captured, and the state is still done.
+        self.assertIn("Baseline write failed", entry["last_warning"])
+
+    def test_partial_no_change_done_carries_partition_and_status(self):
+        # Matrix v2: an all-unchanged refresh ends `no_change` with the
+        # exact requested partition — the bridge captures all of it.
+        lines = (self._sse("start", {"total_steps": 2, "requested_steps": [3, 8]})
+                 + self._sse("step_unchanged", {"step": 3, "file": "docs/repo-map.md"})
+                 + self._sse("done", {"status": "no_change",
+                                      "succeeded_steps": [],
+                                      "unchanged_steps": [3, 8],
+                                      "failed_steps": [],
+                                      "audit_run_id": "run-nc"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [3, 8]})
+        entry = self._wait_state("p1", {"done"})
+        self.assertEqual(entry["done_status"], "no_change")
+        self.assertEqual(entry["requested_steps"], [3, 8])
+        self.assertEqual(entry["unchanged_steps"], [3, 8])
+        self.assertEqual(entry["succeeded_steps"], [])
+        self.assertEqual(entry["failed_steps"], [])
+        self.assertIsNone(entry["discussion_id"])
+
+    def test_partial_bool_forged_step_lists_are_refused(self):
+        # Red-team (Codex msg 162): True == 1 in Python — a bool-forged
+        # partition must not pass a validator the frontend would refuse.
+        lines = (self._sse("start", {"total_steps": 1, "requested_steps": [1]})
+                 + self._sse("done", {"status": "complete",
+                                      "succeeded_steps": [True],
+                                      "unchanged_steps": [], "failed_steps": [],
+                                      "discussion_id": "d-x",
+                                      "audit_run_id": "run-x"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [1]})
+        entry = self._wait_state("p1", {"protocol_error"})
+        self.assertIn("not a step list", entry["error"])
+
+    def test_partial_non_string_discussion_id_is_refused(self):
+        lines = (self._sse("start", {"total_steps": 1, "requested_steps": [1]})
+                 + self._sse("done", {"status": "complete",
+                                      "succeeded_steps": [1],
+                                      "unchanged_steps": [], "failed_steps": [],
+                                      "discussion_id": 123,
+                                      "audit_run_id": "run-x"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [1]})
+        entry = self._wait_state("p1", {"protocol_error"})
+        self.assertIn("validation discussion", entry["error"])
+
+    def test_protocol_error_is_terminal_for_the_ttl_purge(self):
+        import time as _time
+        with self.mod._AUDIT_LOCK:
+            self.mod._AUDIT_STREAMS["p-proto"] = {
+                "project_id": "p-proto", "state": "protocol_error",
+                "_ended_monotonic": _time.monotonic() - self.mod._AUDIT_TERMINAL_TTL_SECONDS - 10,
+            }
+        self.mod._audit_purge_terminal_entries()
+        self.assertNotIn("p-proto", self.mod._AUDIT_STREAMS,
+                         "protocol_error must be purgeable like every terminal state")
+
+    def test_partial_malformed_done_is_a_protocol_error_never_done(self):
+        # Mirror of the frontend refusals (api.streaming.test.ts): a done
+        # the UI would reject as malformed must never read as a bridge
+        # terminal `done` — a `complete` without its validation discussion
+        # here (same matrix, same fixtures family).
+        lines = (self._sse("start", {"total_steps": 1, "requested_steps": [3]})
+                 + self._sse("done", {"status": "complete",
+                                      "succeeded_steps": [3],
+                                      "unchanged_steps": [], "failed_steps": [],
+                                      "audit_run_id": "run-x"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [3]})
+        entry = self._wait_state("p1", {"protocol_error"})
+        self.assertIn("malformed done event", entry["error"])
+        self.assertIn("validation discussion", entry["error"])
+        self.assertNotEqual(entry["state"], "done")
+
+    def test_partial_done_without_run_id_is_refused(self):
+        lines = (self._sse("start", {"total_steps": 1, "requested_steps": [3]})
+                 + self._sse("done", {"status": "no_change",
+                                      "succeeded_steps": [],
+                                      "unchanged_steps": [3], "failed_steps": []}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [3]})
+        entry = self._wait_state("p1", {"protocol_error"})
+        self.assertIn("missing audit_run_id", entry["error"])
+
+    def test_last_step_event_carries_file_and_outcome(self):
+        # Matrix v2: step_done carries an explicit outcome and a file — the
+        # bridge must surface both, or audit_status cannot explain WHICH
+        # section closed HOW without re-reading the stream.
+        lines = (self._sse("start", {"total_steps": 1, "requested_steps": [3]})
+                 + self._sse("step_done", {"step": 3, "label": "Repo map",
+                                           "file": "docs/repo-map.md",
+                                           "outcome": "unchanged"})
+                 + self._sse("done", {"status": "no_change",
+                                      "succeeded_steps": [],
+                                      "unchanged_steps": [3],
+                                      "failed_steps": [],
+                                      "audit_run_id": "run-nc2"}))
+        with mock.patch.object(self.mod, "_audit_open_sse",
+                               return_value=self._FakeSse(lines)):
+            self.mod.call_audit_launch(
+                {"project_id": "p1", "mode": "partial", "steps": [3]})
+        entry = self._wait_state("p1", {"done"})
+        evt = entry["last_step_event"]
+        self.assertEqual(evt["event"], "step_done")
+        self.assertEqual(evt["file"], "docs/repo-map.md")
+        self.assertEqual(evt["outcome"], "unchanged")
+
     def test_partial_done_without_discussion_id_is_an_explicit_null(self):
-        lines = (self._sse("start", {"total_steps": 3})
-                 + self._sse("done", {"status": "complete", "total_steps": 3}))
+        # An INTERRUPTED partial creates no discussion — the field is an
+        # explicit null, never absent, and done_status reflects the truth.
+        lines = (self._sse("start", {"total_steps": 3, "requested_steps": [1, 2, 3]})
+                 + self._sse("done", {"status": "interrupted",
+                                      "succeeded_steps": [1], "unchanged_steps": [2],
+                                      "failed_steps": [3], "audit_run_id": "run-int"}))
         with mock.patch.object(self.mod, "_audit_open_sse",
                                return_value=self._FakeSse(lines)):
             self.mod.call_audit_launch(
@@ -3810,6 +3969,7 @@ class AuditToolsTests(unittest.TestCase):
         entry = self._wait_state("p1", {"done"})
         self.assertIn("discussion_id", entry)
         self.assertIsNone(entry["discussion_id"])
+        self.assertEqual(entry["done_status"], "interrupted")
 
     def test_mid_stream_cut_leaves_an_observable_state_no_silent_death(self):
         lines = self._sse("start", {"total_steps": 10}) + [ConnectionError("cut")]
@@ -3849,6 +4009,102 @@ class AuditToolsTests(unittest.TestCase):
             or "stream" in str(ctx.exception),
             f"got: {ctx.exception}",
         )
+
+
+class AuditBridgeHardeningTests(unittest.TestCase):
+    """0.8.13 dogfooding fixes: bridge_info staleness, briefing signal,
+    install-template passthrough, resume_run_id validation placement."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_bridge_info_fresh_bridge_is_not_stale(self):
+        out = self.mod.call_bridge_info({})
+        self.assertFalse(out["stale"], "a just-loaded bridge must not read stale")
+        self.assertTrue(out["script_path"].endswith("disc-introspection-mcp.py"))
+
+    def test_bridge_info_detects_newer_script_on_disk(self):
+        self.mod._BRIDGE_SCRIPT_MTIME_AT_LOAD = 1.0  # loaded aeons ago
+        out = self.mod.call_bridge_info({})
+        self.assertTrue(out["stale"])
+        self.assertIn("reconnect", out["hint"])
+
+    def test_briefing_state_present_and_absent(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertFalse(self.mod._briefing_state({"path": tmp})["present"])
+            os.makedirs(os.path.join(tmp, "docs"), exist_ok=True)
+            with open(os.path.join(tmp, "docs", "briefing.md"), "w") as f:
+                f.write("# Briefing")
+            state = self.mod._briefing_state({"path": tmp})
+            self.assertTrue(state["present"])
+            self.assertEqual(state["path"], "docs/briefing.md")
+        self.assertFalse(self.mod._briefing_state({})["present"])
+
+    def test_audit_install_template_posts_and_wraps_status(self):
+        fake = mock.MagicMock(return_value={"success": True, "data": "TemplateInstalled"})
+        with mock.patch.object(self.mod, "_http", fake):
+            out = self.mod.call_audit_install_template({"project_id": "p1"})
+        fake.assert_called_once_with("POST", "/api/projects/p1/install-template")
+        self.assertEqual(out["audit_status"], "TemplateInstalled")
+
+    def test_audit_launch_rejects_bad_resume_run_id_before_any_state(self):
+        # The raise must happen BEFORE a stream entry exists — a phantom
+        # "launching" entry would block every future launch on the project.
+        # resume_run_id must be a non-empty string (the backend validates the
+        # row itself); ints, empties and blanks are refused here.
+        for bad in (16, -1, 3.5, "", "   "):
+            with self.assertRaises(RuntimeError):
+                self.mod.call_audit_launch({
+                    "project_id": "p-resume", "mode": "full", "resume_run_id": bad,
+                })
+        self.assertNotIn("p-resume", self.mod._AUDIT_STREAMS)
+
+    def test_audit_launch_forwards_resume_run_id_to_the_backend(self):
+        # A valid resume_run_id must survive validation and reach the launch
+        # body verbatim (trimmed) — the backend is authoritative for kind +
+        # checkpoint. The mocked opener proves the value got through.
+        boom = ConnectionError("sentinel — no backend in tests")
+        with mock.patch.object(self.mod, "_audit_open_sse", side_effect=boom) as opener:
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod.call_audit_launch({
+                    "project_id": "p-resume-run", "mode": "full", "resume_run_id": " run-xyz ",
+                })
+        self.assertIn("could not open the audit stream", str(ctx.exception))
+        self.assertNotIn("must be a non-empty string", str(ctx.exception))
+        self.assertEqual(opener.call_args.args[1], {"agent": mock.ANY, "resume_run_id": "run-xyz"})
+        self.mod._AUDIT_STREAMS.pop("p-resume-run", None)
+
+
+class OnboardingTests(unittest.TestCase):
+    """0.8.13 — first-contact onboarding: marker file + kronn_intro."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.mod._ONBOARD_MARKER = os.path.join(self.tmp.name, "onboarded.json")
+
+    def test_first_contact_then_marked_done(self):
+        self.assertFalse(self.mod._onboarding_done_for("ClaudeCode"))
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        out = self.mod.call_kronn_intro({})
+        self.assertIn("Kronn en 2 minutes", out["guide"])
+        # Les 7 domaines que le tour DOIT couvrir.
+        for domain in ("Discussions sauvegardées", "Mode join", "Quick Prompts",
+                       "Workflows", "API configurée", "désagentification", "Audits"):
+            self.assertIn(domain, out["guide"], f"tour incomplet: {domain} absent")
+        self.assertEqual(out["onboarding_marked_done_for"], "ClaudeCode")
+        self.assertTrue(self.mod._onboarding_done_for("ClaudeCode"))
+        # Un autre client garde SON premier contact.
+        self.assertFalse(self.mod._onboarding_done_for("Codex"))
+
+    def test_marker_file_corruption_is_first_contact(self):
+        os.makedirs(os.path.dirname(self.mod._ONBOARD_MARKER), exist_ok=True)
+        with open(self.mod._ONBOARD_MARKER, "w") as f:
+            f.write("not json")
+        self.assertFalse(self.mod._onboarding_done_for("ClaudeCode"))
 
 
 if __name__ == "__main__":

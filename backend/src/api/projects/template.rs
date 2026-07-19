@@ -62,8 +62,9 @@ pub async fn install_template(
         } else {
             project_path.join("docs")
         };
+        let mut created_files = Vec::new();
         if docs_template.is_dir() {
-            copy_dir_nondestructive(&docs_template, &docs_target)?;
+            created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
         }
         // 0.8.7 — copy the anti-hallu spec embedded in the binary into
         // the project's `docs/conventions/` so any agent running on this
@@ -72,43 +73,54 @@ pub async fn install_template(
         // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
         // is the explicit re-sync path).
         let conventions_dir = docs_target.join("conventions");
-        let _ = std::fs::create_dir_all(&conventions_dir);
         let spec_path = conventions_dir.join("agents-md-format-v1.md");
-        if !spec_path.exists() {
-            let _ = std::fs::write(
-                &spec_path,
-                crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
-            );
+        // no-follow primitive: a symlinked conventions/ (or dangling spec
+        // link) must never route this write outside the project.
+        if let Err(e) = crate::core::fs_guard::guarded_write_new(
+            &project_path, &spec_path, crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
+        ) {
+            tracing::warn!("anti-hallu spec not installed: {e}");
         }
-        ensure_agent_writable_subfolders(&docs_target)?;
-        // Human-friendly landing page for `docs/`. Idempotent.
-        let _ = crate::core::docs_migration::ensure_docs_index(&docs_target);
+        ensure_agent_writable_subfolders(&project_path, &docs_target);
+        // Human-friendly landing page for `docs/`. Idempotent, best-effort.
+        if let Err(e) = crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target) {
+            tracing::warn!("docs index not installed: {e}");
+        }
 
-        // Pre-fill template placeholders with filesystem-derived defaults
-        // (project name from dir, stack/test/lint cmds from package
-        // managers, language defaults to English). Idempotent — only
-        // replaces literal `{{TOKEN}}` substrings, never overwrites
-        // filled content. Without this pass, fresh installs ship with
-        // raw `{{PROJECT_NAME}}` cookie-cutter syntax visible to the
-        // user until the agent's bootstrap step 1 fires, which doesn't
-        // always happen on the first try.
-        let _ = crate::core::docs_migration::prefill_template_placeholders(&project_path);
-
-        for filename in &["CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules"] {
+        // The FULL redirector set — every agent-context file the templates
+        // ship (not just the 4 managed-block ones): a Gemini/Copilot user
+        // got no entry point at all before this.
+        for filename in &[
+            "CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules",
+            "AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md",
+        ] {
             let src = template_dir.join(filename);
             let dst = project_path.join(filename);
-            if src.exists() && !dst.exists() {
-                if let Err(e) = std::fs::copy(&src, &dst) {
-                    tracing::warn!("Failed to copy {}: {}", filename, e);
+            if src.exists() {
+                // no-follow: a symlinked .github/ (or dangling dst link)
+                // must never route the copy outside the project.
+                match crate::core::fs_guard::guarded_copy_new(&project_path, &src, &dst) {
+                    Ok(true) => created_files.push(dst),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("Failed to copy {}: {}", filename, e),
                 }
             }
         }
 
+        // Pre-fill template placeholders with filesystem-derived defaults —
+        // scoped EXCLUSIVELY to the files this very call created (ownership
+        // by construction, Codex A2): a pre-existing docs/ tree or root file
+        // is user content and is never walked.
+        let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+
         // Resolve the entry file via detect_docs_entry so this code path
         // works for fresh installs (docs/AGENTS.md), legacy projects
         // (ai/index.md), and projects on the `doc/` singular convention.
+        // The bootstrap prompt is only injected into an entry file THIS
+        // call created (Codex A2) — a pre-existing user AGENTS.md is not
+        // ours to rewrite, prompt block or not.
         let entry_file = crate::core::scanner::detect_docs_entry(&project_path);
-        if entry_file.exists() {
+        if entry_file.exists() && created_files.contains(&entry_file) {
             inject_bootstrap_prompt(&entry_file);
         }
 
@@ -141,7 +153,18 @@ pub(crate) fn resolve_templates_dir() -> std::path::PathBuf {
     if docker_path.exists() {
         return docker_path;
     }
-    // Local dev fallback: relative to binary
+    // Local dev: resolve relative to the BINARY, not the CWD — a backend
+    // started from anywhere else silently lost every template install.
+    // target/{debug,release}/kronn → repo root is two levels up.
+    if let Ok(exe) = std::env::current_exe() {
+        for ancestor in exe.ancestors().skip(1).take(4) {
+            let candidate = ancestor.join("templates");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+    }
+    // Last resort: CWD-relative (pre-existing behaviour).
     std::path::PathBuf::from("templates")
 }
 
@@ -153,11 +176,14 @@ pub(crate) fn resolve_templates_dir() -> std::path::PathBuf {
 /// architecture/operations/etc.). Agents write their RUNTIME-discovered
 /// facts to one of these targeted subfolders, keeping the curated areas
 /// pristine.
-pub(crate) fn ensure_agent_writable_subfolders(docs_dir: &std::path::Path) -> Result<(), String> {
+pub(crate) fn ensure_agent_writable_subfolders(
+    project_root: &std::path::Path,
+    docs_dir: &std::path::Path,
+) {
     if !docs_dir.exists() {
         // Caller already failed to create docs/ — nothing to do here, the
         // bootstrap is in a degraded state.
-        return Ok(());
+        return;
     }
     // The README copy below makes one point explicit: these folders
     // are EMPTY by default after the audit. The audit pipeline does
@@ -193,80 +219,80 @@ pub(crate) fn ensure_agent_writable_subfolders(docs_dir: &std::path::Path) -> Re
              One file per person if useful: `alice.md`, `bob.md`.\n",
         ),
     ];
+    // The trust root is the EXPLICIT project root, never inferred (same
+    // class as ensure_docs_index): the lstat walk never checks the root
+    // itself, so rooting at docs_dir would let a symlinked docs/ route
+    // these writes outside the project.
     for (name, readme) in SUBFOLDERS {
         let folder = docs_dir.join(name);
-        if !folder.exists() {
-            std::fs::create_dir_all(&folder)
-                .map_err(|e| format!("mkdir {}: {}", folder.display(), e))?;
+        // no-follow: a symlinked subfolder (conventions/gotchas/people →
+        // external dir) or dangling README link is skipped, never traversed.
+        if std::fs::symlink_metadata(&folder).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            tracing::warn!("{} is a symlink — skipping subfolder scaffold", folder.display());
+            continue;
         }
-        let readme_path = folder.join("README.md");
-        if !readme_path.exists() {
-            std::fs::write(&readme_path, readme)
-                .map_err(|e| format!("write {}: {}", readme_path.display(), e))?;
+        if let Err(e) = crate::core::fs_guard::guarded_write_new(
+            project_root, &folder.join("README.md"), readme.as_bytes(),
+        ) {
+            tracing::warn!("subfolder README not installed: {e}");
         }
     }
-    Ok(())
 }
 
-/// Recursively copy a directory, skipping files that already exist at
-/// the destination — EXCEPT when the destination file is corrupted
-/// (empty / truncated). Corruption almost always comes from a prior
-/// audit that failed mid-write (timeout, CLI crash, sandbox abort)
-/// and left a 0-byte file behind. Without this guard, the next audit
-/// has nothing to fill in for that step — Step 9 (`inconsistencies-
-/// tech-debt.md`) is the canonical victim because it's the longest
-/// step and most likely to hit a CLI timeout.
-///
-/// Threshold heuristic: if dest is smaller than 25% of source AND
-/// source is non-trivial (≥ 200 B), the dest is treated as corrupt
-/// and re-copied from the template. The user's own content is never
-/// at risk because the templates are static and the user's edits to
-/// any post-audit file are still ≥ 25% of the template size in any
-/// realistic scenario.
-pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Path) -> Result<(), String> {
+/// Recursively copy a directory, creating ONLY files that do not exist
+/// at the destination, and returning the exact list of paths created by
+/// THIS call — the only set downstream steps (placeholder prefill) are
+/// allowed to touch. Existing files are never inspected or rewritten:
+/// a 0-byte or placeholder-bearing destination is user state until a
+/// manifest proves otherwise (Codex A2).
+pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+    // The destination root itself must not be a symlink: `exists()` and
+    // `create_dir_all` follow links, so a symlinked docs/ would route the
+    // whole install into a directory outside the ownership boundary.
+    if let Ok(meta) = std::fs::symlink_metadata(dst) {
+        if meta.file_type().is_symlink() {
+            return Err(format!(
+                "{} is a symlink — refusing to install templates through it",
+                dst.display()
+            ));
+        }
+    }
     std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
 
     let entries = std::fs::read_dir(src)
         .map_err(|e| format!("read_dir {}: {}", src.display(), e))?;
 
+    let mut created = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|e| format!("entry: {}", e))?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
 
+        // lstat, not stat: a symlink destination (dir, file or DANGLING —
+        // where `exists()` reports false) is a pre-existing entry pointing
+        // wherever the user chose. Never recurse through it, never copy
+        // over it (Codex A2 symlink hardening).
+        let dst_lstat = std::fs::symlink_metadata(&dst_path);
+        if dst_lstat.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+            continue;
+        }
+
         if src_path.is_dir() {
-            copy_dir_nondestructive(&src_path, &dst_path)?;
-        } else if !dst_path.exists() || is_corrupted_template_file(&src_path, &dst_path) {
+            created.extend(copy_dir_nondestructive(&src_path, &dst_path)?);
+        } else if dst_lstat.is_err() {
+            // An existing destination is NEVER touched (Codex A2) — not
+            // even 0 B or placeholder-bearing: neither proves Kronn owns
+            // the current content, and recovery of a corrupt skeleton is
+            // an explicit operation, not an implicit side effect.
             std::fs::copy(&src_path, &dst_path)
                 .map_err(|e| format!("copy {} -> {}: {}", src_path.display(), dst_path.display(), e))?;
+            created.push(dst_path);
         }
     }
-    Ok(())
+    Ok(created)
 }
 
-/// Heuristic to detect a destination file that is the leftover of a
-/// failed prior audit (empty / truncated). The check is conservative:
-/// we only consider files where the template source is non-trivial
-/// (≥ 200 B) AND the dest is < 25% of source. Both conditions reduce
-/// the false-positive rate on legitimate short user files.
-fn is_corrupted_template_file(src: &std::path::Path, dst: &std::path::Path) -> bool {
-    let (Ok(src_meta), Ok(dst_meta)) = (std::fs::metadata(src), std::fs::metadata(dst)) else {
-        return false;
-    };
-    let src_size = src_meta.len();
-    let dst_size = dst_meta.len();
-    // Source must be a "real" template, not an empty placeholder we
-    // accidentally ship — otherwise the heuristic flags everything.
-    if src_size < 200 {
-        return false;
-    }
-    // Dest is corrupted if it's empty OR < 25% of source. The "< 25%"
-    // is generous: even a user who deleted half the template still
-    // has ≥ 50%. A user who keeps only the title (e.g. 30 B) is
-    // unusual — and re-copying the template is a safe operation
-    // since the user is presumably starting fresh anyway.
-    dst_size == 0 || dst_size * 4 < src_size
-}
+
 
 /// Inject the bootstrap prompt at the top of the project's docs entry
 /// file (`docs/AGENTS.md` post-pivot, legacy `ai/index.md`). Caller
@@ -356,7 +382,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
-        ensure_agent_writable_subfolders(&docs).unwrap();
+        ensure_agent_writable_subfolders(tmp.path(), &docs);
         for sub in &["conventions", "gotchas", "people"] {
             let path = docs.join(sub);
             assert!(path.is_dir(), "{} folder not created", sub);
@@ -375,7 +401,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
         std::fs::create_dir(&docs).unwrap();
-        ensure_agent_writable_subfolders(&docs).unwrap();
+        ensure_agent_writable_subfolders(tmp.path(), &docs);
         for sub in &["conventions", "gotchas", "people"] {
             let body = std::fs::read_to_string(docs.join(sub).join("README.md")).unwrap();
             assert!(
@@ -393,7 +419,7 @@ mod tests {
         std::fs::create_dir_all(docs.join("conventions")).unwrap();
         let custom = "# My custom conventions README\nSome content here.";
         std::fs::write(docs.join("conventions/README.md"), custom).unwrap();
-        ensure_agent_writable_subfolders(&docs).unwrap();
+        ensure_agent_writable_subfolders(tmp.path(), &docs);
         let after = std::fs::read_to_string(docs.join("conventions/README.md")).unwrap();
         assert_eq!(after, custom, "must not overwrite existing README");
     }
@@ -404,21 +430,48 @@ mod tests {
         // but we shouldn't crash here.
         let tmp = tempfile::TempDir::new().unwrap();
         let docs = tmp.path().join("does_not_exist");
-        assert!(ensure_agent_writable_subfolders(&docs).is_ok());
+        ensure_agent_writable_subfolders(tmp.path(), &docs);
         assert!(!docs.exists());
     }
 
-    // ─── copy_dir_nondestructive: corruption-repair regression suite
+    #[cfg(unix)]
+    #[test]
+    fn subfolder_scaffold_refuses_a_symlinked_docs_dir() {
+        // Copilot r4 — same class as ensure_docs_index: docs/ itself being
+        // a symlink must not route the scaffold READMEs outside the root.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let docs = project.join("docs");
+        std::os::unix::fs::symlink(&external, &docs).unwrap();
+
+        ensure_agent_writable_subfolders(&project, &docs);
+
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "no scaffold may land through a symlinked docs/"
+        );
+        assert!(
+            std::fs::symlink_metadata(&docs)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself stays intact"
+        );
+    }
+
+    // ─── copy_dir_nondestructive: non-overwrite / ownership-boundary suite
     //
-    // 0.8.3 user bug on DOCROMS_WEB: a prior audit failed mid-Step-9
-    // and left `inconsistencies-tech-debt.md` at 0 bytes. The next
-    // audit's `copy_dir_nondestructive` saw the file existed and
-    // skipped it — Step 9 then asked Claude to fill a totally blank
-    // file with no template to inherit, and produced nothing.
-    //
-    // The repair heuristic re-copies a dest file ONLY when the
-    // template src is ≥ 200 B AND dest is < 25% of src. These tests
-    // pin the threshold + the "don't touch healthy dest" promise.
+    // Codex A2 — `copy_dir_nondestructive` is CREATE-ONLY: it seeds files
+    // that don't exist and never touches an existing one, whatever its
+    // size or content. Neither 0 bytes nor {{UPPER_SNAKE}} placeholders
+    // prove Kronn ownership (both can be deliberate user state), so the
+    // historical "re-copy corrupt dest" heuristic was removed; a stub
+    // left by a crashed step is caught by the step VALIDATOR (which fails
+    // the step) — never silently rewritten here. These tests pin that
+    // ownership boundary.
 
     fn write(path: &std::path::Path, content: &str) {
         if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
@@ -449,31 +502,57 @@ mod tests {
     }
 
     #[test]
-    fn copy_nondestructive_repairs_empty_dest() {
-        // The exact DOCROMS_WEB scenario: prior audit left 0-byte file.
+    fn copy_nondestructive_leaves_an_existing_empty_file_intact() {
+        // Codex A2 — a 0-byte file is user STATE (maybe intentionally
+        // reserved), not proof of Kronn ownership: never re-seed it.
+        // Corrupt-skeleton recovery is a future explicit, manifest-backed
+        // operation.
         let tmp = tempfile::TempDir::new().unwrap();
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
         let template = "# Tech debt index\n".to_string() + &"placeholder ".repeat(50);
         write(&src.join("inconsistencies-tech-debt.md"), &template);
         write(&dst.join("inconsistencies-tech-debt.md"), "");
-        copy_dir_nondestructive(&src, &dst).unwrap();
+        let created = copy_dir_nondestructive(&src, &dst).unwrap();
         let after = std::fs::read_to_string(dst.join("inconsistencies-tech-debt.md")).unwrap();
-        assert_eq!(after, template, "0-byte dest must be repaired from template");
+        assert_eq!(after, "", "an existing 0-byte file stays byte-intact");
+        assert!(created.is_empty(), "nothing was created — the file existed");
     }
 
     #[test]
-    fn copy_nondestructive_repairs_truncated_dest() {
-        // Truncated mid-write (e.g. CLI crashed after writing the
-        // first line) — must also be treated as corrupt.
+    fn copy_nondestructive_leaves_intentional_placeholders_intact() {
+        // Codex A2 — {{UPPER_SNAKE}} does NOT prove Kronn ownership: a user
+        // template with intentional placeholders is indistinguishable from
+        // our skeleton by that signal, so it must stay byte-intact.
         let tmp = tempfile::TempDir::new().unwrap();
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
-        let template = "x".repeat(1000); // 1000 B
-        write(&src.join("a.md"), &template);
-        write(&dst.join("a.md"), "x"); // 1 B → < 25% of 1000
+        write(&src.join("a.md"), &"x".repeat(1000));
+        write(&dst.join("a.md"), "# User template\n| {{DECISION_1}} |");
+        let created = copy_dir_nondestructive(&src, &dst).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.md")).unwrap(),
+            "# User template\n| {{DECISION_1}} |",
+            "intentional user placeholders must survive byte-intact"
+        );
+        assert!(created.is_empty());
+    }
+
+    #[test]
+    fn copy_nondestructive_never_clobbers_a_short_user_file() {
+        // Codex A2 — the old <25% heuristic destroyed legitimately short
+        // user files. Without an ownership marker, the file is sacred.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("a.md"), &"x".repeat(1000));
+        write(&dst.join("a.md"), "# My own short glossary\nterm: def"); // user content, 3% of template
         copy_dir_nondestructive(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("a.md")).unwrap(), template);
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.md")).unwrap(),
+            "# My own short glossary\nterm: def",
+            "a short file without Kronn markers must stay byte-intact"
+        );
     }
 
     #[test]
@@ -506,16 +585,156 @@ mod tests {
     }
 
     #[test]
+    fn install_never_rewrites_a_preexisting_user_entry() {
+        // Codex A2 (pre-commit catch) — inject_bootstrap_prompt used to
+        // rewrite whatever entry file detect_docs_entry found, including a
+        // pre-existing user AGENTS.md. The install gate only injects into
+        // an entry THIS call created; this exercises that exact decision.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("AGENTS.md"), &"template ".repeat(50));
+        let user = "# My own agents file\nhands off\n";
+        write(&dst.join("AGENTS.md"), user);
+        let created = copy_dir_nondestructive(&src, &dst).unwrap();
+        let entry = dst.join("AGENTS.md");
+        if entry.exists() && created.contains(&entry) {
+            inject_bootstrap_prompt(&entry);
+        }
+        assert_eq!(std::fs::read_to_string(&entry).unwrap(), user,
+            "a pre-existing user entry file must stay byte-intact through install");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_orchestration_writes_zero_bytes_outside_a_boobytrapped_project() {
+        // Codex A2 end-to-end — the FULL install sequence (copy, anti-hallu
+        // spec, subfolder scaffolds, docs index, redirectors, prefill) runs
+        // against a project rigged with every known symlink trap. Nothing
+        // may land outside the project root and every link must survive.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let template_dir = tmp.path().join("templates");
+        write(&template_dir.join("docs/AGENTS.md"), &"template ".repeat(50));
+        write(&template_dir.join("docs/architecture/overview.md"), &"o".repeat(300));
+        write(&template_dir.join("CLAUDE.md"), &"redirect ".repeat(40));
+        write(&template_dir.join(".github/copilot-instructions.md"), &"copilot ".repeat(40));
+
+        let project = tmp.path().join("project");
+        let docs = project.join("docs");
+        std::fs::create_dir_all(&docs).unwrap();
+        // Trap 1: conventions/ symlinked outside.
+        std::os::unix::fs::symlink(&external, docs.join("conventions")).unwrap();
+        // Trap 2: gotchas/ symlinked outside (subfolder scaffold path).
+        std::os::unix::fs::symlink(&external, docs.join("gotchas")).unwrap();
+        // Trap 3: .github symlinked outside (redirector parent).
+        std::os::unix::fs::symlink(&external, project.join(".github")).unwrap();
+        // Trap 4: docs/index.md dangling symlink.
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), docs.join("index.md")).unwrap();
+        // Trap 5: .gitignore dangling symlink (append path).
+        std::os::unix::fs::symlink(tmp.path().join("nowhere-gi"), project.join(".gitignore")).unwrap();
+
+        // The exact install sequence, same order as the route.
+        let mut created = copy_dir_nondestructive(&template_dir.join("docs"), &docs).unwrap();
+        let _ = crate::core::fs_guard::guarded_write_new(
+            &project, &docs.join("conventions/agents-md-format-v1.md"),
+            crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
+        );
+        ensure_agent_writable_subfolders(&project, &docs);
+        let _ = crate::core::docs_migration::ensure_docs_index(&project, &docs);
+        for filename in &["CLAUDE.md", ".github/copilot-instructions.md"] {
+            let src = template_dir.join(filename);
+            let dst = project.join(filename);
+            if let Ok(true) = crate::core::fs_guard::guarded_copy_new(&project, &src, &dst) {
+                created.push(dst);
+            }
+        }
+        let _ = crate::core::docs_migration::prefill_files(&project, &created);
+        crate::core::mcp_scanner::ensure_gitignore_public(project.to_str().unwrap(), "docs/var/");
+
+        // ZERO bytes outside the root; every trap intact.
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none(),
+            "the external directory must stay empty");
+        assert!(!tmp.path().join("nowhere").exists(), "nothing written through the dangling link");
+        assert!(!tmp.path().join("nowhere-gi").exists(), "gitignore append refused through the link");
+        for trap in [docs.join("conventions"), docs.join("gotchas"), project.join(".github"), docs.join("index.md"), project.join(".gitignore")] {
+            assert!(std::fs::symlink_metadata(&trap).unwrap().file_type().is_symlink(),
+                "{} must survive as a symlink", trap.display());
+        }
+        // And the legitimate installs DID land inside the project.
+        assert!(docs.join("AGENTS.md").is_file());
+        assert!(docs.join("architecture/overview.md").is_file());
+        assert!(project.join("CLAUDE.md").is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_nondestructive_never_follows_a_symlinked_subdir() {
+        // Codex A2 symlink hardening — a destination subdir that is a
+        // symlink to an external directory must not be entered: the
+        // external target stays empty and nothing is reported created.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        write(&src.join("architecture/overview.md"), &"x".repeat(300));
+        std::fs::create_dir_all(&dst).unwrap();
+        std::os::unix::fs::symlink(&external, dst.join("architecture")).unwrap();
+        let created = copy_dir_nondestructive(&src, &dst).unwrap();
+        assert!(created.is_empty(), "nothing may be created through the link");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none(),
+            "the external target must stay empty");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_nondestructive_skips_a_dangling_symlink_file() {
+        // A dangling symlink reports exists()=false but IS a pre-existing
+        // user entry — copying would write through the link.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        write(&src.join("glossary.md"), &"x".repeat(300));
+        std::fs::create_dir_all(&dst).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("nowhere"), dst.join("glossary.md")).unwrap();
+        let created = copy_dir_nondestructive(&src, &dst).unwrap();
+        assert!(created.is_empty());
+        let meta = std::fs::symlink_metadata(dst.join("glossary.md")).unwrap();
+        assert!(meta.file_type().is_symlink(), "the dangling link must survive untouched");
+        assert!(!tmp.path().join("nowhere").exists(), "nothing written through the link");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_nondestructive_refuses_a_symlinked_destination_root() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        write(&src.join("a.md"), &"x".repeat(300));
+        let dst = tmp.path().join("docs");
+        std::os::unix::fs::symlink(&external, &dst).unwrap();
+        let err = copy_dir_nondestructive(&src, &dst).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+        assert!(std::fs::read_dir(&external).unwrap().next().is_none());
+    }
+
+    #[test]
     fn copy_nondestructive_recurses_into_subdirs() {
-        // Corruption in a nested file (e.g. docs/tech-debt/TD-…)
-        // must also be repaired by the recursive walk.
+        // A MISSING nested file is created by the recursive walk (and
+        // reported in the created list); an existing one stays intact.
         let tmp = tempfile::TempDir::new().unwrap();
         let src = tmp.path().join("src");
         let dst = tmp.path().join("dst");
         write(&src.join("tech-debt/TEMPLATE.md"), &"x".repeat(500));
-        write(&dst.join("tech-debt/TEMPLATE.md"), "");
-        copy_dir_nondestructive(&src, &dst).unwrap();
+        write(&src.join("tech-debt/README.md"), &"y".repeat(300));
+        write(&dst.join("tech-debt/README.md"), ""); // exists → untouched
+        let created = copy_dir_nondestructive(&src, &dst).unwrap();
         let after = std::fs::read_to_string(dst.join("tech-debt/TEMPLATE.md")).unwrap();
-        assert_eq!(after.len(), 500);
+        assert_eq!(after.len(), 500, "missing nested file gets created");
+        assert_eq!(created, vec![dst.join("tech-debt/TEMPLATE.md")]);
+        assert_eq!(std::fs::read_to_string(dst.join("tech-debt/README.md")).unwrap(), "");
     }
 }

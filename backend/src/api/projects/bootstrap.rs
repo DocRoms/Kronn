@@ -112,11 +112,15 @@ pub async fn bootstrap(
                 // when missing (idempotent), with a short README so a
                 // human poking around immediately understands what each
                 // folder is for.
-                ensure_agent_writable_subfolders(&docs_target)?;
+                ensure_agent_writable_subfolders(&project_path, &docs_target);
                 // Human-friendly landing page. AGENTS.md targets LLMs;
                 // index.md is what a human sees when they open `docs/`
                 // on GitHub. Idempotent — only writes when absent.
-                let _ = crate::core::docs_migration::ensure_docs_index(&docs_target);
+                if let Err(e) =
+                    crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
+                {
+                    tracing::warn!("docs index not installed: {e}");
+                }
                 for filename in crate::api::audit::AUDIT_REDIRECTOR_FILES {
                     let src = template_dir.join(filename);
                     let dst = project_path.join(filename);

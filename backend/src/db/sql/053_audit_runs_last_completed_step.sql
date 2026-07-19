@@ -9,9 +9,8 @@
 --
 -- Values:
 --   0    — audit started but no step has finished yet (default).
---   1..N — last successfully completed step (matches the 1-based step
---          index in `ANALYSIS_STEPS`). N=10 means the full pipeline
---          ran to completion.
+--   1..N — last successfully completed step in the executed 1-based chain.
+--          For the current chained Full audit, N=16 means completion.
 --
 -- Updated on each `step_done` SSE event where `validate_and_repair_step_output`
 -- returns success=true. NOT updated for step_warning or step_error.

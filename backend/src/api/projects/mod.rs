@@ -324,13 +324,11 @@ pub(crate) fn enrich_audit_status(project: &mut Project) {
     // first list-fetch following a Kronn upgrade, retroactively-broken
     // projects (e.g. amp-easy-backo, user-reported 2026-05-11) have
     // their cookie-cutter placeholders replaced with sensible defaults.
-    if matches!(project.audit_status, crate::models::AiAuditStatus::TemplateInstalled) {
-        let _ = crate::core::docs_migration::prefill_template_placeholders(&resolved);
-        // Re-detect after the heal — the placeholder regex no longer
-        // matches our 5, so the next status read can advance past
-        // `TemplateInstalled` if all `{{...}}` were ours.
-        project.audit_status = scanner::detect_audit_status(&project.path);
-    }
+    // Read paths must not write (Codex A2): the retroactive placeholder
+    // heal used to fire from here on every list/get. It now only runs on
+    // the WRITE paths that own the docs tree — template install and the
+    // audit Phase 1 — where prefill_template_placeholders is invoked
+    // explicitly. Legacy projects heal on their next install/audit.
 }
 
 /// Find the common parent directory of existing projects.

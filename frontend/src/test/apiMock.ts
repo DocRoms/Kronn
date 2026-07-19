@@ -197,7 +197,6 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       partialAudit: resolve({}),
       exportZip: resolve(new Blob()),
       importZip: resolve({ imported: 0 }),
-      auditStream: vi.fn(),
       // 0.8.3 — ProjectCard polls this at mount to detect if an audit
       // is running on the project (independent of localStorage
       // checkpoint). Default `null` = no audit; tests override per-case

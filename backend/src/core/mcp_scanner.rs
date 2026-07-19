@@ -2252,6 +2252,13 @@ fn ensure_gitignore(project_path: &str, pattern: &str) {
     let resolved = resolve_host_path(project_path);
     let gitignore = Path::new(&resolved).join(".gitignore");
 
+    // no-follow (Codex A2): a symlinked .gitignore — dangling included —
+    // would route the create+append OUTSIDE the project. Leave it intact.
+    if std::fs::symlink_metadata(&gitignore).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        tracing::warn!("{} is a symlink — skipping gitignore update", gitignore.display());
+        return;
+    }
+
     let content = std::fs::read_to_string(&gitignore).unwrap_or_default();
 
     // Check if pattern is already present (exact line match)
@@ -2329,6 +2336,22 @@ pub fn is_default_mcp_context(content: &str) -> bool {
     })
 }
 
+/// Whether a per-MCP context file is REAL user/agent-written guidance worth
+/// injecting into agent prompts. Filters out (a) the scaffolding file itself
+/// (`TEMPLATE.md`), (b) any file still carrying `{{...}}` placeholders — an
+/// unfilled template injected verbatim wastes tokens and confuses the agent
+/// (`# {{MCP_NAME}} — Context` was reaching live audit prompts), and (c) the
+/// legacy `<!-- Examples: -->` boilerplate.
+pub fn should_inject_mcp_context(file_name: &str, content: &str) -> bool {
+    if file_name.eq_ignore_ascii_case("TEMPLATE.md") {
+        return false;
+    }
+    if content.contains("{{") {
+        return false;
+    }
+    !is_default_mcp_context(content)
+}
+
 /// Read all MCP context files for a project and return concatenated content.
 /// Used for prompt injection when spawning agents.
 pub fn read_all_mcp_contexts(project_path: &str) -> String {
@@ -2357,8 +2380,9 @@ pub fn read_all_mcp_contexts(project_path: &str) -> String {
             files.sort_by_key(|e| e.file_name());
 
             for entry in files {
+                let name = entry.file_name();
                 if let Ok(content) = std::fs::read_to_string(entry.path()) {
-                    if !is_default_mcp_context(&content) {
+                    if should_inject_mcp_context(&name.to_string_lossy(), &content) {
                         contexts.push(content);
                     }
                 }
@@ -2883,6 +2907,25 @@ fn resolve_host_path(path: &str) -> String {
 }
 
 // ─── Tests for Phase-3 host_sync (merge logic) ───────────────────────────────
+
+#[cfg(test)]
+mod inject_context_tests {
+    use super::should_inject_mcp_context;
+
+    #[test]
+    fn scaffolding_and_unfilled_templates_are_never_injected() {
+        // The scaffolding file itself, whatever the casing.
+        assert!(!should_inject_mcp_context("TEMPLATE.md", "# Real content, no placeholder"));
+        assert!(!should_inject_mcp_context("template.md", "# Real content"));
+        // Unfilled placeholders — `# {{MCP_NAME}} — Context` reached live
+        // audit prompts verbatim.
+        assert!(!should_inject_mcp_context("github.md", "# {{MCP_NAME}} — Context\n{{TOOL_1}}"));
+        // Legacy default boilerplate.
+        assert!(!should_inject_mcp_context("jira.md", "<!-- Examples: -->\n# Title\n> quote"));
+        // Real user-written guidance passes.
+        assert!(should_inject_mcp_context("github.md", "# GitHub — Context\nUse repo DocRoms/Kronn."));
+    }
+}
 
 #[cfg(test)]
 mod host_sync_tests {

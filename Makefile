@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -233,6 +233,17 @@ dev-backend:
 	@echo "$(GREEN)▸ Starting backend (watch mode)...$(RESET)"
 	cd backend && cargo watch -x run
 
+# Exploitation mode: NO watcher. cargo watch SIGTERMs the backend on any
+# repo file change — it killed live audits mid-run. Use this whenever
+# agents/audits must survive edits to the repo.
+# NB: .cargo/config.toml shares target-dir at the repo root — the binary
+# lands HERE, not in backend/target/.
+run-backend:
+	@echo "$(GREEN)▸ Building backend...$(RESET)"
+	cd backend && cargo build
+	@echo "$(GREEN)▸ Starting backend (bare binary — no watcher)...$(RESET)"
+	./target/debug/kronn
+
 ## Frontend dev server
 dev-frontend:
 	@echo "$(GREEN)▸ Starting frontend dev server...$(RESET)"
@@ -384,6 +395,7 @@ help:
 	@echo "  make clean          Remove containers & data"
 	@echo "  make build          Production build (native)"
 	@echo "  make dev-backend    Rust hot reload"
+	@echo "  make run-backend    Bare binary, no watcher (audits/agents survive edits)"
 	@echo "  make dev-frontend   Vite dev server"
 	@echo "  make check          Verify prerequisites"
 	@echo "  make kiro-login     Kiro OAuth login (device flow in container)"
@@ -408,13 +420,13 @@ endif
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' frontend/package.json
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
-	@sed $(SEDI) 's/Kronn v[0-9]\+\.[0-9]\+\.[0-9]\+/Kronn v$(V)/' README.md
+	@sed $(SEDI) -E 's/Kronn v[0-9]+\.[0-9]+\.[0-9]+/Kronn v$(V)/' README.md
 	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
 	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
 	@# still claiming v0.8.5 on the early-access disclaimer + credits line.
 	@# Pattern: any "v<semver>" occurrence in site/*.html is the Kronn version
 	@# (no other tokens use that prefix today).
-	@sed $(SEDI) 's/v[0-9]\+\.[0-9]\+\.[0-9]\+/v$(V)/g' site/index.html site/en.html site/es.html
+	@sed $(SEDI) -E 's/v[0-9]+\.[0-9]+\.[0-9]+/v$(V)/g' site/index.html site/en.html site/es.html
 	@# Sync Cargo.lock workspace entries so `cargo check --locked` stays green in CI.
 	@# `cargo update --workspace --offline` only touches local package versions in the
 	@# lock file — no network, no dep bumps. Required after editing a workspace

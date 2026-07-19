@@ -154,6 +154,29 @@ pub fn mark_validated(project_path: &Path) -> Result<(), String> {
     write(project_path, &mut state)
 }
 
+/// Clear `validated_at` (Codex A5) — called at the start of EVERY audit
+/// mutation (full, specialized, partial): the Validated badge asserts the
+/// docs match a validated state, which stops being true the moment a new
+/// run mutates them. Contractual for callers: a failure must refuse the
+/// run, never warn-and-continue. No-op when nothing was validated (a
+/// missing .kronn.json is fine — nothing to revoke).
+pub fn revoke_validated(project_path: &Path) -> Result<(), String> {
+    // Legacy projects carry `KRONN:VALIDATED` markers without a
+    // .kronn.json: backfill FIRST (contractually — an error here must
+    // refuse the run) so the revocation below clears real state instead
+    // of no-oping on a default while the scanner keeps reading the old
+    // marker as Validated.
+    backfill_from_legacy_state(project_path)?;
+    // `load_for_mutation` distinguishes missing (Ok(default) — nothing to
+    // revoke) from corrupt/unreadable (Err — refuse the run).
+    let mut state = load_for_mutation(project_path)?;
+    if state.validated_at.is_none() {
+        return Ok(());
+    }
+    state.validated_at = None;
+    write(project_path, &mut state)
+}
+
 /// Set `bootstrapped_at`. No-op if already set.
 pub fn mark_bootstrapped(project_path: &Path) -> Result<(), String> {
     let mut state = load_for_mutation(project_path)?;

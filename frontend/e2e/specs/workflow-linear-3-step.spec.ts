@@ -35,13 +35,31 @@ let workflowId: string | null = null;
 
 interface RunStatus {
   status: string; // 'Running' | 'Success' | 'Failed' | …
-  step_results: Array<{
-    step_index: number;
-    step_name: string;
-    status: string;
-    output?: unknown;
-  }>;
+  step_results: StepResult[];
   state: Record<string, unknown>;
+}
+
+interface StepResult {
+  step_index: number;
+  step_name: string;
+  status: string;
+  output?: unknown;
+  step_kind?: string;
+  duration_ms?: number;
+}
+
+function isExternalNotifyFlake(stepResults: StepResult[]): boolean {
+  const notifyPathWorked = stepResults.some(
+    step => step.status === 'Success' && step.step_kind === 'Notify',
+  );
+  if (!notifyPathWorked) return false;
+
+  return stepResults.some(step => {
+    if (step.status !== 'Failed' || step.step_kind !== 'Notify') return false;
+    const output = typeof step.output === 'string' ? step.output : JSON.stringify(step.output ?? '');
+    const timedOut = output.startsWith('HTTP request failed:') && (step.duration_ms ?? 0) >= 29_000;
+    return timedOut || /"http_status":\s*5\d\d/.test(output);
+  });
 }
 
 async function readRun(request: APIRequestContext, wfId: string, runId: string): Promise<RunStatus | null> {
@@ -58,6 +76,29 @@ test.describe('Workflow linear runner — 3 steps end-to-end', () => {
     if (workflowId) {
       await request.delete(`/api/workflows/${workflowId}`).catch(() => { /* idempotent */ });
     }
+  });
+
+  test('external-flake guard is limited to failed Notify transport/5xx results', () => {
+    const successfulNotify: StepResult = {
+      step_index: 1,
+      step_name: 'notify_a',
+      status: 'Success',
+      step_kind: 'Notify',
+    };
+    const transportFailure: StepResult = {
+      step_index: 2,
+      step_name: 'notify_b',
+      status: 'Failed',
+      step_kind: 'Notify',
+      output: 'HTTP request failed: error sending request for url (https://httpbin.org/anything)',
+      duration_ms: 30_012,
+    };
+    expect(isExternalNotifyFlake([successfulNotify, transportFailure])).toBe(true);
+    expect(isExternalNotifyFlake([transportFailure])).toBe(false);
+    expect(isExternalNotifyFlake([successfulNotify, { ...transportFailure, duration_ms: 20 }])).toBe(false);
+    expect(isExternalNotifyFlake([successfulNotify, { ...transportFailure, step_kind: 'Agent' }])).toBe(false);
+    expect(isExternalNotifyFlake([successfulNotify, { ...transportFailure, output: '{"http_status":400}' }])).toBe(false);
+    expect(isExternalNotifyFlake([successfulNotify, { ...transportFailure, output: '{"http_status":503}' }])).toBe(true);
   });
 
   test('JsonData → Notify → Notify reaches Success with state propagated', async ({ request }) => {
@@ -156,22 +197,15 @@ test.describe('Workflow linear runner — 3 steps end-to-end', () => {
     }
     expect(final, 'run should terminate within 60s').toBeTruthy();
 
-    // External-flake guard: if the run Failed because httpbin returned a 5xx
-    // to a Notify step (it passed the up-front probe, then flaked mid-run —
-    // the probe→run window is a few seconds), SKIP rather than fail. The
-    // runner plumbing is what's under test, not httpbin's uptime. A 4xx, a
-    // missing run, or a non-Notify failure is a REAL regression → still asserted.
+    // External-flake guard: the probe can pass and httpbin can still return a
+    // 5xx or become unreachable during the run. Skip only failures positively
+    // identified as Notify transport/5xx results; a 4xx, a missing run, or a
+    // non-Notify failure remains a real regression.
     if (final!.status !== 'Success') {
-      // Test each step's RAW output string, NOT `JSON.stringify(step_results)`:
-      // `output` is itself a JSON string, so re-stringifying the array escapes
-      // its quotes (`\"http_status\":502`) and the naive `"http_status":5xx`
-      // regex never matched — the guard silently never fired and httpbin 5xx
-      // flakes surfaced as hard failures (observed in CI 2026-07-02).
-      const externalFivexx = final!.step_results.some(sr => {
-        const out = typeof sr.output === 'string' ? sr.output : JSON.stringify(sr.output ?? '');
-        return sr.status === 'Failed' && /"http_status":\s*5\d\d/.test(out);
-      });
-      test.skip(externalFivexx, `httpbin returned a 5xx to a Notify step mid-run (external flake): ${JSON.stringify(final!.step_results)}`);
+      test.skip(
+        isExternalNotifyFlake(final!.step_results),
+        `httpbin transport/5xx failure during a Notify step (external flake): ${JSON.stringify(final!.step_results)}`,
+      );
     }
     expect(
       final!.status,

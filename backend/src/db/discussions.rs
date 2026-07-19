@@ -104,7 +104,11 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
 
     const FOOTER: &str = "⏸️ **Réponse interrompue** — le backend a redémarré avant qu'une \
         réponse de l'agent soit enregistrée pour cette discussion (interruption possiblement \
-        volontaire). Relancez si besoin.";
+        volontaire). Relancez si besoin.\n\n\
+        *Note pour l'agent relancé : ce message est un marqueur système, pas une réponse. \
+        Ignore-le et exécute la demande du dernier message utilisateur ci-dessus — si c'est \
+        un protocole à phases, reprends à la première phase non complétée visible dans \
+        l'historique.*";
 
     let mut marked = Vec::with_capacity(candidates.len());
     for disc_id in candidates {

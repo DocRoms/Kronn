@@ -36,6 +36,7 @@ import type {
   DiscoveredHostMcp,
   AdoptHostMcpRequest,
   AiAuditStatus,
+  AuditKind,
   AuditProgress,
   LaunchAuditRequest,
   BootstrapProjectRequest,
@@ -232,10 +233,116 @@ async function parseSSEStream(
  *  `parseSSEStream` which JSON-parses the `data:` line — we don't
  *  validate shape, the cast trusts the backend (which we own).
  */
+/** Terminal payload of a partial refresh (matrix v2). */
+export interface PartialDoneInfo {
+  status: 'complete' | 'interrupted' | 'no_change';
+  discussionId: string | null;
+  /** Every done follows a mandatory audit_runs insert — non-null for ALL
+   *  three statuses (an abort carries no payload at all). */
+  auditRunId: string;
+  succeededSteps: number[];
+  unchangedSteps: number[];
+  failedSteps: number[];
+}
+
+const PARTIAL_DONE_STATUSES = ['complete', 'interrupted', 'no_change'] as const;
+const isStepList = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.every((s) => Number.isInteger(s) && (s as number) > 0);
+
+/** Runtime validation of the partial `done` payload against the matrix-v2
+ *  contract. A payload that fails ANY invariant is refused (error string) —
+ *  never coerced into a success:
+ *  - the three lists partition `requestedSteps` exactly (disjoint, complete);
+ *  - `complete`  ⇒ succeeded non-empty, failed empty, discussion + run ids;
+ *  - `no_change` ⇒ only unchanged non-empty, no discussion;
+ *  - `interrupted` ⇒ failed non-empty, no discussion. */
+function parsePartialDone(
+  p: Record<string, unknown>,
+  requestedSteps: number[],
+): PartialDoneInfo | string {
+  const status = p.status;
+  if (typeof status !== 'string'
+      || !(PARTIAL_DONE_STATUSES as readonly string[]).includes(status)) {
+    return `Malformed audit done event: status=${JSON.stringify(status ?? null)}`;
+  }
+  const lists = {
+    succeededSteps: p.succeeded_steps,
+    unchangedSteps: p.unchanged_steps,
+    failedSteps: p.failed_steps,
+  };
+  for (const [name, v] of Object.entries(lists)) {
+    if (!isStepList(v)) return `Malformed audit done event: ${name} is not a step list`;
+  }
+  const succeeded = lists.succeededSteps as number[];
+  const unchanged = lists.unchangedSteps as number[];
+  const failed = lists.failedSteps as number[];
+
+  const all = [...succeeded, ...unchanged, ...failed];
+  if (new Set(all).size !== all.length) {
+    return 'Malformed audit done event: step lists overlap';
+  }
+  const requested = new Set(requestedSteps);
+  if (all.length !== requested.size || !all.every((s) => requested.has(s))) {
+    return 'Malformed audit done event: step lists do not partition the requested steps';
+  }
+
+  const discussionId = typeof p.discussion_id === 'string' && p.discussion_id !== ''
+    ? p.discussion_id : null;
+  const auditRunId = typeof p.audit_run_id === 'string' && p.audit_run_id !== ''
+    ? p.audit_run_id : null;
+  // Every done follows a mandatory audit_runs insert — a missing run id is
+  // an incomplete payload whatever the status.
+  if (auditRunId === null) {
+    return 'Malformed audit done event: missing audit_run_id';
+  }
+  switch (status as PartialDoneInfo['status']) {
+    case 'complete':
+      if (succeeded.length === 0 || failed.length > 0) {
+        return 'Malformed audit done event: complete requires succeeded steps and no failures';
+      }
+      if (discussionId === null) {
+        return 'Malformed audit done event: complete requires a validation discussion';
+      }
+      break;
+    case 'no_change':
+      if (succeeded.length > 0 || failed.length > 0 || unchanged.length === 0) {
+        return 'Malformed audit done event: no_change requires an all-unchanged partition';
+      }
+      if (discussionId !== null) {
+        return 'Malformed audit done event: no_change cannot carry a discussion';
+      }
+      break;
+    case 'interrupted':
+      if (failed.length === 0) {
+        return 'Malformed audit done event: interrupted requires failed steps';
+      }
+      if (discussionId !== null) {
+        return 'Malformed audit done event: interrupted cannot carry a discussion';
+      }
+      break;
+  }
+  return {
+    status: status as PartialDoneInfo['status'],
+    discussionId,
+    auditRunId,
+    succeededSteps: succeeded,
+    unchangedSteps: unchanged,
+    failedSteps: failed,
+  };
+}
+
 interface AuditSseEvent {
   step?: number;
+  /** Sequential 1-based position within a PARTIAL selection (drift refresh) —
+   *  `step` stays the canonical pipeline index there ("Étape 8/3" bug). */
+  progress?: number;
   total?: number;
   total_steps?: number;
+  /** Canonical (resolved) partial steps carried by `start` — the terminal
+   *  partition is validated against this list, not the raw request. */
+  requested_steps?: number[];
+  /** Non-terminal `warning` event payload (post-commit baseline failure). */
+  message?: string;
   file?: string;
   text?: string;
   success?: boolean;
@@ -243,6 +350,12 @@ interface AuditSseEvent {
   error?: string;
   discussion_id?: string;
   template_was_installed?: boolean;
+  /** Terminal status carried by the done event (`complete` | `interrupted` | `no_change`). */
+  status?: string;
+  audit_run_id?: string;
+  succeeded_steps?: number[];
+  unchanged_steps?: number[];
+  failed_steps?: number[];
   // 0.8.3 (#272) — legacy-docs migration report. Emitted ONCE in
   // Phase 1 when a user-curated docs/ was detected and moved to
   // docs/legacy/. Frontend renders a toast + the moved entries list.
@@ -271,10 +384,10 @@ interface AuditSseEvent {
   tool?: string;
   // 0.8.3 root-cause fix — `step_warning` is emitted when the CLI
   // exited 0 but the step's target_file is empty / suspiciously
-  // small (e.g. agent crashed mid-Write). Backend auto-repairs from
-  // template; frontend surfaces a per-step banner so the user knows
-  // the audit "succeeded" but this step actually didn't produce
-  // useful output.
+  // small (e.g. agent crashed mid-Write). The step FAILS honestly and
+  // the file is never overwritten; the frontend surfaces a per-step
+  // banner. `repaired_from_template` is legacy (new runs always send
+  // false) — kept so historical recap rows still parse.
   reason?: string;
   repaired_from_template?: boolean;
 }
@@ -578,13 +691,14 @@ export const projects = {
   auditStatusAll: () => api<AuditProgress[]>('GET', '/audit-status'),
   /**
    * 0.8.3 (#311) — fetch the most-recent resumable audit run for the
-   * project, or `null`. Resumable = status='Interrupted' AND
-   * last_completed_step in 1..=9. Used by ProjectCard to flip the
-   * "Lancer l'audit" button to "Reprendre Step N/10" + pass
-   * `resume_from` in the launch request.
+   * project, or `null`. Resumable = status='Interrupted'. Used by
+   * ProjectCard to flip the "Lancer l'audit" button to "Reprendre Step
+   * N/M" and pass `resume_run_id` in the launch request — the server
+   * derives the kind + checkpoint from that row, so the frontend never
+   * grafts a stale selector kind onto a resumed run.
    */
   auditResumable: (id: string) =>
-    api<{ id: string; last_completed_step: number; started_at: string } | null>(
+    api<{ id: string; kind: AuditKind; last_completed_step: number; started_at: string } | null>(
       'GET', `/projects/${id}/audit-resumable`,
     ),
   /**
@@ -724,42 +838,6 @@ export const projects = {
   cloneAndRemap: (id: string, req: CloneAndRemapRequest = { parent_dir: null }) =>
     api<CloneAndRemapResponse>('POST', `/projects/${id}/clone-and-remap`, req),
 
-  /** Stream the AI audit progress via SSE */
-  auditStream: async (
-    id: string,
-    req: LaunchAuditRequest,
-    handlers: {
-      onStepStart: (step: number, total: number, file: string) => void;
-      onChunk: (text: string, step: number) => void;
-      onStepDone: (step: number, success: boolean) => void;
-      onDone: () => void;
-      onError: (error: string) => void;
-    },
-    signal?: AbortSignal,
-  ) => {
-    let finished = false;
-    const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
-
-    await fetchAndParseSSE(
-      `${_apiBase}/api/projects/${id}/ai-audit`,
-      { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify(req), signal },
-      {
-        onEvent: (type, payload) => {
-          const p = payload as AuditSseEvent;
-          switch (type) {
-            case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
-            case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
-            case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
-            case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
-            case 'done': done(); break;
-            case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
-          }
-        },
-        onDone: done,
-        onError: handlers.onError,
-      },
-    );
-  },
   /** Stream a partial re-audit for stale sections via SSE */
   partialAuditStream: async (
     id: string,
@@ -768,13 +846,42 @@ export const projects = {
       onStepStart: (step: number, total: number, file: string) => void;
       onChunk: (text: string, step: number) => void;
       onStepDone: (step: number, success: boolean) => void;
-      onDone: () => void;
+      /** A fully-successful partial creates a validation discussion scoped
+       * to the refreshed sections (A5) — fired before `done`. */
+      onValidationCreated?: (discussionId: string) => void;
+      /** A step whose target did not change after all gates passed —
+       * additive; the step still closes with its own step_done. */
+      onStepUnchanged?: (step: number, file: string) => void;
+      /** NON-terminal per-step failure: the step closes with its own
+       * `step_done failed` and the loop continues — never terminal cleanup. */
+      onStepError?: (error: string, step?: number) => void;
+      /** NON-terminal warning after a committed run (e.g. baseline write
+       * failed post-Completed) — `done` still follows and stays coherent. */
+      onWarning?: (message: string) => void;
+      /** Typed terminal payload (matrix v2): `complete` | `interrupted` |
+       * `no_change` + the exact requested-steps partition. Undefined on a
+       * user abort (fetch cancelled before any done event). */
+      onDone: (info?: PartialDoneInfo) => void;
+      /** TERMINAL: the stream is over after this fires — onDone is sealed
+       * and never follows (no double cleanup). */
       onError: (error: string) => void;
     },
     signal?: AbortSignal,
   ) => {
     let finished = false;
-    const done = () => { if (!finished) { finished = true; handlers.onDone(); } };
+    // Canonical step list carried by the `start` event: the backend
+    // de-positionalizes/dedups the requested steps against the baseline
+    // (reorder re-route by ai_file), so the terminal partition is defined
+    // over THIS list, never over the raw `req.steps`.
+    let canonicalSteps: number[] | null = null;
+    const done = (info?: PartialDoneInfo) => {
+      if (!finished) { finished = true; handlers.onDone(info); }
+    };
+    // Terminal error: seal `finished` so the stream-close onDone is a no-op —
+    // onError owns the cleanup, a second callback would double the toasts.
+    const fail = (error: string) => {
+      if (!finished) { finished = true; handlers.onError(error); }
+    };
 
     await fetchAndParseSSE(
       `${_apiBase}/api/projects/${id}/partial-audit`,
@@ -783,16 +890,45 @@ export const projects = {
         onEvent: (type, payload) => {
           const p = payload as AuditSseEvent;
           switch (type) {
-            case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
+            case 'start': {
+              const rs = (payload as Record<string, unknown>).requested_steps;
+              if (isStepList(rs)) canonicalSteps = rs;
+              break;
+            }
+            case 'step_start': handlers.onStepStart((p.progress ?? p.step) as number, p.total as number, p.file as string); break;
             case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
             case 'step_done': handlers.onStepDone(p.step as number, p.success as boolean); break;
-            case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
-            case 'done': done(); break;
-            case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
+            case 'validation_created': handlers.onValidationCreated?.(p.discussion_id as string); break;
+            case 'step_unchanged': handlers.onStepUnchanged?.(p.step as number, p.file as string); break;
+            // NON-terminal: the step closes with its own `step_done failed`
+            // and the pipeline continues — terminal cleanup here would race
+            // the `done interrupted` that follows.
+            case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
+            case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
+            case 'done': {
+              // Runtime-validated: a malformed terminal payload must never
+              // read as success.
+              if (canonicalSteps === null) {
+                fail('Malformed audit stream: done before start');
+                break;
+              }
+              const info = parsePartialDone(payload as Record<string, unknown>, canonicalSteps);
+              if (typeof info === 'string') { fail(info); }
+              else { done(info); }
+              break;
+            }
+            case 'error': fail(p.error ?? 'Unknown error'); break;
           }
         },
-        onDone: done,
-        onError: handlers.onError,
+        // Stream closure: a user abort stays the clean no-payload done; an
+        // EOF WITHOUT a terminal event (backend crash, proxy cut) must not
+        // read as a normal ending — the terminal seal cannot be bypassed by
+        // simply closing the socket.
+        onDone: () => {
+          if (signal?.aborted) { done(); return; }
+          fail('Audit stream closed before a terminal event');
+        },
+        onError: fail,
       },
     );
   },
@@ -842,13 +978,21 @@ export const projects = {
       /**
        * 0.8.3 root-cause fix — backend detected that this step's
        * `target_file` is empty / truncated despite the CLI exiting 0.
-       * Backend auto-repairs from template; frontend should surface
-       * a warning so the user knows the step didn't produce useful
-       * output and may want to re-audit. Optional for backwards-compat.
+       * The step fails honestly and the file is never touched —
+       * re-running the step is the only repair path; the frontend
+       * surfaces the warning. Optional for backwards-compat.
        */
       onStepWarning?: (step: number, file: string, reason: string, repaired: boolean) => void;
+      /** NON-terminal per-step failure (spawn error): the step closes with
+       * its own `step_done success=false` and the loop continues. */
+      onStepError?: (error: string, step?: number) => void;
+      /** NON-terminal run-level warning (e.g. drift baseline write failed)
+       * — a coherent `done interrupted` still follows. */
+      onWarning?: (message: string) => void;
       onValidationCreated: (discussionId: string) => void;
       onDone: (discussionId: string | null, templateWasInstalled: boolean) => void;
+      /** TERMINAL: the stream is over after this fires — onDone is sealed
+       * and never follows (no double cleanup). */
       onError: (error: string) => void;
     },
     signal?: AbortSignal,
@@ -856,6 +1000,11 @@ export const projects = {
     let finished = false;
     const done = (discId: string | null, tmpl: boolean) => {
       if (!finished) { finished = true; handlers.onDone(discId, tmpl); }
+    };
+    // Terminal error: seal `finished` so the stream-close onDone is a no-op
+    // — onError owns the cleanup, a second callback would double the toasts.
+    const fail = (error: string) => {
+      if (!finished) { finished = true; handlers.onError(error); }
     };
 
     await fetchAndParseSSE(
@@ -891,7 +1040,7 @@ export const projects = {
                 (p.started_at ?? new Date().toISOString()) as string,
               );
               break;
-            case 'step_start': handlers.onStepStart(p.step as number, p.total as number, p.file as string); break;
+            case 'step_start': handlers.onStepStart((p.progress ?? p.step) as number, p.total as number, p.file as string); break;
             case 'chunk': handlers.onChunk(p.text as string, p.step as number); break;
             case 'step_done':
               handlers.onStepDone(
@@ -921,9 +1070,9 @@ export const projects = {
               break;
             case 'step_warning':
               // 0.8.3 root-cause fix — emitted when the step's
-              // target_file is empty/truncated. The backend has
-              // already repaired the file from the template (if
-              // available); the frontend just surfaces the alert so
+              // target_file is empty/truncated. The backend never
+              // rewrites the file (re-running the step is the only
+              // repair path); the frontend just surfaces the alert so
               // the user sees the partial failure rather than a
               // silent green tick.
               if (typeof p.step === 'number' && typeof p.file === 'string') {
@@ -935,14 +1084,23 @@ export const projects = {
                 );
               }
               break;
-            case 'step_error': handlers.onError(p.error ?? 'Step error'); break;
+            // NON-terminal: the step closes with its own `step_done
+            // success=false` and the pipeline continues — terminal cleanup
+            // here would race the `done interrupted` that follows.
+            case 'step_error': handlers.onStepError?.(p.error ?? 'Step error', p.step); break;
+            case 'warning': handlers.onWarning?.(p.message ?? 'Audit warning'); break;
             case 'validation_created': handlers.onValidationCreated(p.discussion_id as string); break;
             case 'done': done(p.discussion_id ?? null, p.template_was_installed ?? false); break;
-            case 'error': handlers.onError(p.error ?? 'Unknown error'); break;
+            case 'error': fail(p.error ?? 'Unknown error'); break;
           }
         },
-        onDone: () => done(null, false),
-        onError: handlers.onError,
+        // Same closure rule as the partial stream: abort = clean done, EOF
+        // without a terminal event = terminal failure.
+        onDone: () => {
+          if (signal?.aborted) { done(null, false); return; }
+          fail('Audit stream closed before a terminal event');
+        },
+        onError: fail,
       },
     );
   },

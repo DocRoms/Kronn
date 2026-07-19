@@ -71,7 +71,7 @@ pub fn complete(
     let started: DateTime<Utc> = DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&Utc);
     let duration_ms: i64 = (ended_at - started).num_milliseconds().max(0);
 
-    conn.execute(
+    let affected = conn.execute(
         "UPDATE audit_runs SET
             ended_at = ?2,
             duration_ms = ?3,
@@ -87,7 +87,7 @@ pub fn complete(
             health_score = ?13,
             report_path = ?14,
             recommendations_json = ?15
-         WHERE id = ?1",
+         WHERE id = ?1 AND status = 'Running'",
         params![
             id,
             ended_str,
@@ -106,6 +106,10 @@ pub fn complete(
             recommendations_json,
         ],
     )?;
+    // A 0-row update means the row vanished OR was already terminal; the
+    // caller treats this write as THE authoritative terminal transition, so
+    // a non-Running row must be an error, never a silent overwrite.
+    anyhow::ensure!(affected > 0, "complete: run row {id} not Running — terminal status not persisted");
     Ok(())
 }
 
@@ -139,6 +143,42 @@ pub fn mark_cancelled(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// STRICT variants for the partial-run terminal transaction (Codex lot 3):
+/// a 0-row update means the Running row was never transitioned (missing or
+/// already terminal) — the server must NOT report a terminal status the DB
+/// does not carry. The lenient versions above stay for reconcile paths
+/// where idempotence on already-terminal rows is the point.
+pub fn mark_failed_strict(conn: &Connection, id: &str, reason: &str) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE audit_runs SET
+            ended_at = ?2,
+            duration_ms = CAST(((julianday(?2) - julianday(started_at)) * 86400000) AS INTEGER),
+            status = 'Failed',
+            report_path = COALESCE(report_path, ?3)
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, Utc::now().to_rfc3339(), format!("failure: {reason}")],
+    )?;
+    anyhow::ensure!(affected > 0, "mark_failed_strict: run {id} not Running — terminal status not persisted");
+    Ok(())
+}
+
+/// See [`mark_failed_strict`] — own guarded UPDATE: a row ALREADY
+/// Interrupted must refuse too (re-reading the status after a lenient call
+/// would wrongly pass it).
+pub fn mark_interrupted_strict(conn: &Connection, id: &str, reason: &str) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE audit_runs SET
+            ended_at = ?2,
+            duration_ms = CAST(((julianday(?2) - julianday(started_at)) * 86400000) AS INTEGER),
+            status = 'Interrupted',
+            report_path = ?3
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, Utc::now().to_rfc3339(), reason],
+    )?;
+    anyhow::ensure!(affected > 0, "mark_interrupted_strict: run {id} not Running — transition refused");
+    Ok(())
+}
+
 /// Latest N runs for a project, most recent first. Used by the health
 /// badge to render the sparkline + delta chip.
 pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Vec<AuditRun>> {
@@ -146,10 +186,11 @@ pub fn list_recent(conn: &Connection, project_id: &str, limit: u32) -> Result<Ve
         "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
-                health_score, report_path, recommendations_json, last_completed_step
+                health_score, report_path, recommendations_json, last_completed_step,
+                validation_discussion_id, step_outcomes_json
          FROM audit_runs
          WHERE project_id = ?1
-         ORDER BY started_at DESC
+         ORDER BY started_at DESC, rowid DESC
          LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![project_id, limit], row_to_audit_run)?;
@@ -168,13 +209,58 @@ pub fn latest_completed(conn: &Connection, project_id: &str) -> Result<Option<Au
         "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
                 td_critical, td_high, td_medium, td_low, td_total,
                 td_resolved_since_last, td_new_since_last, td_carried_over,
-                health_score, report_path, recommendations_json, last_completed_step
+                health_score, report_path, recommendations_json, last_completed_step,
+                validation_discussion_id, step_outcomes_json
          FROM audit_runs
          WHERE project_id = ?1 AND status = 'Completed'
          ORDER BY ended_at DESC
          LIMIT 1",
     )?;
     let mut rows = stmt.query_map(params![project_id], row_to_audit_run)?;
+    if let Some(r) = rows.next() {
+        Ok(Some(r?))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Link the run to its validation discussion — executed INSIDE the same
+/// transaction as `complete("Completed")` (076): the validate endpoint
+/// trusts only this durable link, never title/date heuristics.
+pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE audit_runs SET validation_discussion_id = ?2 WHERE id = ?1",
+        params![run_id, disc_id],
+    )?;
+    anyhow::ensure!(affected > 0, "set_validation_discussion: run row {run_id} not found");
+    Ok(())
+}
+
+/// Persist the structured per-step outcomes of a (partial) run (076).
+pub fn set_step_outcomes(conn: &Connection, run_id: &str, outcomes_json: &str) -> Result<()> {
+    let affected = conn.execute(
+        "UPDATE audit_runs SET step_outcomes_json = ?2 WHERE id = ?1",
+        params![run_id, outcomes_json],
+    )?;
+    anyhow::ensure!(affected > 0, "set_step_outcomes: run row {run_id} not found");
+    Ok(())
+}
+
+/// Fetch a single run by id. Used by the resume path: the caller passes a
+/// `resume_run_id` and the server derives the kind + checkpoint from the
+/// authoritative row rather than trusting a client-supplied `resume_from`.
+pub fn get_by_id(conn: &Connection, id: &str) -> Result<Option<AuditRun>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
+                td_critical, td_high, td_medium, td_low, td_total,
+                td_resolved_since_last, td_new_since_last, td_carried_over,
+                health_score, report_path, recommendations_json, last_completed_step,
+                validation_discussion_id, step_outcomes_json
+         FROM audit_runs
+         WHERE id = ?1
+         LIMIT 1",
+    )?;
+    let mut rows = stmt.query_map(params![id], row_to_audit_run)?;
     if let Some(r) = rows.next() {
         Ok(Some(r?))
     } else {
@@ -213,6 +299,8 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         report_path: row.get(17)?,
         recommendations_json: row.get(18)?,
         last_completed_step: row.get::<_, i64>(19).unwrap_or(0).max(0) as u32,
+        validation_discussion_id: row.get(20).unwrap_or(None),
+        step_outcomes_json: row.get(21).unwrap_or(None),
     })
 }
 
@@ -237,6 +325,29 @@ pub fn update_last_completed_step(conn: &Connection, id: &str, step: u32) -> Res
 /// stream ended before reaching step 10 without an explicit signal,
 /// most often a CLI rate-limit, OOM, or network blip. The frontend
 /// surfaces these specifically as resumable: "Reprendre Step N/10".
+/// Stamp the TD counters computed at end-of-stream onto a row regardless of
+/// its terminal status. Interrupted runs used to keep td_* at 0 while 14 TD
+/// files sat on disk — the history chip strip under-reported real findings.
+pub fn update_td_counts(
+    conn: &Connection,
+    id: &str,
+    td_critical: u32,
+    td_high: u32,
+    td_medium: u32,
+    td_low: u32,
+    td_carried_over: u32,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE audit_runs SET
+            td_critical = ?2, td_high = ?3, td_medium = ?4, td_low = ?5,
+            td_total = ?6, td_carried_over = ?7
+         WHERE id = ?1",
+        params![id, td_critical, td_high, td_medium, td_low,
+                td_critical + td_high + td_medium + td_low, td_carried_over],
+    )?;
+    Ok(())
+}
+
 pub fn mark_interrupted(conn: &Connection, id: &str, reason: &str) -> Result<()> {
     conn.execute(
         "UPDATE audit_runs SET
@@ -302,30 +413,16 @@ pub fn reconcile_all_running(conn: &Connection) -> Result<u64> {
     Ok(affected as u64)
 }
 
-/// 0.8.3 (#311) — fetch the most-recent resumable run for a project,
-/// if any. "Resumable" means `status = 'Interrupted'` AND
-/// `last_completed_step` is in 1..=9 (no point resuming if step 10
-/// finished, and step 0 means nothing was produced so resume = restart).
-/// Returns `None` when the project has no resumable run.
+/// 0.8.3 (#311) — the project's resumable run, if any. Mirrors the launch
+/// rule EXACTLY: only the project's most recent run (any status, same
+/// ordering as `list_recent`) is eligible, and it must be `Interrupted`
+/// with at least one completed step (step 0 produced nothing — resume =
+/// restart). Anything the launch would refuse must never be offered here:
+/// a stale Interrupted run behind ANY newer attempt (Completed, Running,
+/// Cancelled, a fresher Interrupted) is not resumable.
 pub fn latest_resumable(conn: &Connection, project_id: &str) -> Result<Option<AuditRun>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, project_id, kind, agent_type, started_at, ended_at, duration_ms, status,
-                td_critical, td_high, td_medium, td_low, td_total,
-                td_resolved_since_last, td_new_since_last, td_carried_over,
-                health_score, report_path, recommendations_json, last_completed_step
-         FROM audit_runs
-         WHERE project_id = ?1
-           AND status = 'Interrupted'
-           AND last_completed_step BETWEEN 1 AND 9
-         ORDER BY started_at DESC
-         LIMIT 1",
-    )?;
-    let mut rows = stmt.query_map(params![project_id], row_to_audit_run)?;
-    if let Some(r) = rows.next() {
-        Ok(Some(r?))
-    } else {
-        Ok(None)
-    }
+    let newest = list_recent(conn, project_id, 1)?.into_iter().next();
+    Ok(newest.filter(|r| r.status == "Interrupted" && r.last_completed_step >= 1))
 }
 
 // ─── 0.8.4 (#298) audit_run_steps helpers ─────────────────────────────
@@ -351,7 +448,7 @@ pub fn insert_audit_step_start(
 }
 
 /// Finalize a step row at `step_done` (or step_warning). `success`
-/// is `false` when `validate_and_repair_step_output` (#292) emitted
+/// is `false` when `validate_step_output` (#292) emitted
 /// a warning OR when the CLI exited non-zero. `step_warning` is the
 /// reason string (None on success).
 #[allow(clippy::too_many_arguments)]
@@ -463,7 +560,9 @@ mod tests {
                 health_score INTEGER,
                 report_path TEXT,
                 recommendations_json TEXT,
-                last_completed_step INTEGER NOT NULL DEFAULT 0
+                last_completed_step INTEGER NOT NULL DEFAULT 0,
+                validation_discussion_id TEXT,
+                step_outcomes_json TEXT
             );
             CREATE TABLE audit_run_steps (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -525,6 +624,26 @@ mod tests {
             Some("docs/tech-debt/_reconciliation-2026-05-13.md")
         );
         assert!(runs[0].recommendations_json.is_some());
+    }
+
+    #[test]
+    fn get_by_id_returns_the_row_or_none() {
+        // Backs the resume path: the handler loads a run by id then derives
+        // kind + checkpoint from it. Must return the exact row, and None for
+        // an unknown id (never someone else's row).
+        let conn = fresh_conn();
+        insert_running(&conn, "run-x", "p1", "Security", "ClaudeCode", Utc::now()).unwrap();
+        update_last_completed_step(&conn, "run-x", 1).unwrap();
+        mark_interrupted(&conn, "run-x", "test").unwrap();
+
+        let row = get_by_id(&conn, "run-x").unwrap().expect("row exists");
+        assert_eq!(row.id, "run-x");
+        assert_eq!(row.project_id, "p1");
+        assert_eq!(row.kind, "Security");
+        assert_eq!(row.status, "Interrupted");
+        assert_eq!(row.last_completed_step, 1);
+
+        assert!(get_by_id(&conn, "nope").unwrap().is_none());
     }
 
     #[test]
@@ -631,6 +750,105 @@ mod tests {
     }
 
     #[test]
+    fn update_td_counts_stamps_interrupted_runs() {
+        // The TD files exist on disk even when the run ends Interrupted —
+        // the history row must not report 0 findings.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", start).unwrap();
+        mark_interrupted(&conn, "r1", "warned steps: [1]").unwrap();
+        update_td_counts(&conn, "r1", 0, 2, 8, 4, 14).unwrap();
+        let row = &list_recent(&conn, "p1", 1).unwrap()[0];
+        assert_eq!(row.status, "Interrupted");
+        assert_eq!(row.td_total, 14);
+        assert_eq!(row.td_high, 2);
+        assert_eq!(row.td_carried_over, 14);
+    }
+
+    #[test]
+    fn latest_resumable_covers_chained_steps_past_nine() {
+        // The chained Full pipeline runs 16 steps: a hardcoded 1..=9 window
+        // silently excluded late-interrupted runs from the resume offer.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "r-chain", "p1", "Full", "ClaudeCode", start).unwrap();
+        update_last_completed_step(&conn, "r-chain", 12).unwrap();
+        mark_interrupted(&conn, "r-chain", "warned steps: [12]").unwrap();
+        let row = latest_resumable(&conn, "p1").unwrap().expect("step-12 run must be resumable");
+        assert_eq!(row.last_completed_step, 12);
+    }
+
+    #[test]
+    fn latest_resumable_superseded_by_newer_completed_run() {
+        // An Interrupted run older than a Completed one must NOT be offered:
+        // resuming it would replay stale steps over the fresh docs.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "r-old", "p1", "Full", "ClaudeCode", start).unwrap();
+        update_last_completed_step(&conn, "r-old", 1).unwrap();
+        mark_interrupted(&conn, "r-old", "backend restarted").unwrap();
+        // A later run completes the whole pipeline.
+        insert_running(&conn, "r-new", "p1", "Full", "ClaudeCode",
+                       start + chrono::Duration::minutes(30)).unwrap();
+        complete(&conn, "r-new", start + chrono::Duration::minutes(40),
+                 "Completed", 0, 0, 0, 0, 0, 0, 0, 80, None, None).unwrap();
+
+        assert!(latest_resumable(&conn, "p1").unwrap().is_none(),
+                "a newer Completed run supersedes the old Interrupted one");
+    }
+
+    #[test]
+    fn latest_resumable_requires_being_the_projects_newest_run() {
+        // Codex round 4 — the UI must never offer a resume the launch would
+        // refuse: an Interrupted run behind ANY newer attempt (here a
+        // step-0 Interrupted, then a Cancelled) is not resumable.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "r-a", "p1", "Full", "ClaudeCode", start).unwrap();
+        update_last_completed_step(&conn, "r-a", 5).unwrap();
+        mark_interrupted(&conn, "r-a", "cut").unwrap();
+        // Newer attempt that produced nothing (step 0, itself not resumable).
+        insert_running(&conn, "r-b", "p1", "Full", "ClaudeCode",
+                       start + chrono::Duration::minutes(5)).unwrap();
+        mark_interrupted(&conn, "r-b", "cut early").unwrap();
+        assert!(latest_resumable(&conn, "p1").unwrap().is_none(),
+                "r-a is stale behind r-b; r-b has no completed step — nothing resumable");
+        // And a newer Cancelled attempt blocks the old one just the same.
+        insert_running(&conn, "r-c", "p1", "Full", "ClaudeCode",
+                       start + chrono::Duration::minutes(10)).unwrap();
+        mark_cancelled(&conn, "r-c").unwrap();
+        assert!(latest_resumable(&conn, "p1").unwrap().is_none());
+    }
+
+    #[test]
+    fn old_completed_stays_latest_completed_after_a_no_change_failed_run() {
+        // Matrix v2 #7 — a no_change refresh ends Failed: the health
+        // snapshot (latest_completed) must keep pointing at the real last
+        // Completed audit, not lose it.
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "r-full", "p1", "Full", "ClaudeCode", start).unwrap();
+        complete(&conn, "r-full", start + chrono::Duration::minutes(30),
+                 "Completed", 0, 0, 0, 0, 0, 0, 0, 90, None, None).unwrap();
+        insert_running(&conn, "r-nc", "p1", "Partial", "ClaudeCode",
+                       start + chrono::Duration::hours(1)).unwrap();
+        mark_failed_strict(&conn, "r-nc", "partial refresh wrote nothing").unwrap();
+        let latest = latest_completed(&conn, "p1").unwrap().unwrap();
+        assert_eq!(latest.id, "r-full", "the Failed no_change run must not displace it");
+    }
+
+    #[test]
+    fn strict_marks_refuse_non_running_rows() {
+        let conn = fresh_conn();
+        let start = Utc::now();
+        insert_running(&conn, "r1", "p1", "Partial", "ClaudeCode", start).unwrap();
+        mark_cancelled(&conn, "r1").unwrap();
+        assert!(mark_failed_strict(&conn, "r1", "x").is_err());
+        assert!(mark_interrupted_strict(&conn, "r1", "x").is_err());
+        assert!(mark_failed_strict(&conn, "ghost", "x").is_err());
+    }
+
+    #[test]
     fn mark_failed_is_idempotent_on_terminal() {
         let conn = fresh_conn();
         let start = Utc::now();
@@ -709,6 +927,9 @@ mod tests {
         // surface in the recap with cli_success=false AND the warning
         // reason AND the repaired flag, so the UI can paint the row
         // red + show the warning text.
+        // `repaired_from_template` is LEGACY: the auto-repair path was
+        // removed (new runs always write false) but historical rows
+        // carry true and must keep rendering — this fixture pins that.
         let conn = fresh_conn();
         let t0 = Utc::now();
         insert_running(&conn, "run-w", "p1", "Full", "ClaudeCode", t0).unwrap();
