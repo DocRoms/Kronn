@@ -982,6 +982,11 @@ mod tests {
         let disc = get_discussion(&conn, "d-owed").unwrap().unwrap();
         assert_eq!(disc.messages.len(), 2);
         assert!(matches!(disc.messages[1].role, MessageRole::Agent));
+        // The notice speaks to BOTH readers: the human ("Relancez") and
+        // the relaunched agent (system-marker brief) — dropping either
+        // regresses a live failure (agent floundering on its own marker).
+        assert!(disc.messages[1].content.contains("Relancez"));
+        assert!(disc.messages[1].content.contains("marqueur système"));
         // Flag cleared → a second reconcile is a no-op.
         assert!(reconcile_awaiting_agents(&conn).unwrap().is_empty());
     }

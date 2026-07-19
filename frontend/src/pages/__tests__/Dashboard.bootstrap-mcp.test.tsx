@@ -4,6 +4,10 @@ import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock everything Dashboard touches at mount. The bootstrap auto-pick is the
 // only behavior under test, so the rest is stubbed to no-op responses.
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: vi.fn(() => ({ connected: false })),
+}));
+
 vi.mock('../../lib/api', () => ({
   projects: {
     list: vi.fn().mockResolvedValue([]),

@@ -134,7 +134,7 @@ pub async fn migrate_project(
     // overview) — the legacy `ai/index.md` was renamed to AGENTS.md
     // for the AI loader, but humans browsing the folder on GitHub
     // expect a plain README-shaped landing page.
-    if let Err(e) = ensure_docs_index(&docs_dir) {
+    if let Err(e) = ensure_docs_index(project_path, &docs_dir) {
         // Non-fatal — log and continue. The migration result still
         // reports Migrated; the operator can `touch docs/index.md`
         // themselves if they care.
@@ -145,12 +145,10 @@ pub async fn migrate_project(
     refs_rewritten += rewrite_internal_refs(&docs_dir);
     refs_rewritten += rewrite_root_redirectors(project_path);
 
-    // Pre-fill obvious template placeholders (PROJECT_NAME, STACK_SUMMARY,
-    // TEST_CMD, LINT_CMD, PROJECT_LANGUAGE) that the agent's bootstrap
-    // pass is supposed to fill. Idempotent: only replaces literal `{{...}}`
-    // tokens, never overwrites filled-in content. Counts toward the
-    // refs_rewritten tally so the operator sees "X files changed" in the UI.
-    refs_rewritten += prefill_template_placeholders(project_path);
+    // No placeholder prefill here (Codex A2): the migration MOVES the
+    // user's own documents — any `{{TOKEN}}` inside them is user content,
+    // not our skeleton. Prefill only ever runs on files a template
+    // install just created (see `prefill_files`).
 
     let symlink_created = if create_symlink {
         create_ai_symlink(project_path).is_ok()
@@ -345,7 +343,7 @@ pub fn backfill_docs_index(project_path: &Path) {
         // Only backfill on the post-pivot layout. Legacy `ai/index.md`
         // is the LLM entry — different semantics, leave alone.
         if dir.join("AGENTS.md").is_file() && !dir.join("index.md").exists() {
-            if let Err(e) = ensure_docs_index(&dir) {
+            if let Err(e) = ensure_docs_index(project_path, &dir) {
                 tracing::debug!(target: "kronn::docs_migration",
                     "backfill index.md skipped for {}: {}", dir.display(), e);
             }
@@ -363,13 +361,18 @@ pub fn backfill_docs_index(project_path: &Path) {
 /// Idempotent : skips silently if `docs/index.md` already exists, so
 /// re-running the migration (or operators who hand-craft an index)
 /// won't get clobbered.
-pub(crate) fn ensure_docs_index(docs_dir: &Path) -> std::io::Result<()> {
+pub(crate) fn ensure_docs_index(project_root: &Path, docs_dir: &Path) -> Result<(), String> {
     let index_path = docs_dir.join("index.md");
-    if index_path.exists() {
-        return Ok(());
-    }
     let body = build_docs_index_body(docs_dir);
-    std::fs::write(&index_path, body)
+    // no-follow create-only: a pre-existing index (including a dangling
+    // symlink) is left alone; nothing is ever written through a link.
+    // The trust root is the EXPLICIT project root, never inferred: the
+    // lstat walk starts below the root, so rooting at docs_dir would never
+    // check docs_dir itself — a symlinked docs/ would route the write
+    // outside the project. A guard refusal PROPAGATES — best-effort is the
+    // callers' decision (warn vs debug), not a silent success channel.
+    crate::core::fs_guard::guarded_write_new(project_root, &index_path, body.as_bytes())
+        .map(|_| ())
 }
 
 fn build_docs_index_body(docs_dir: &Path) -> String {
@@ -566,51 +569,34 @@ fn count_md_files(dir: &Path) -> usize {
 ///
 /// **Idempotent**: only replaces literal `{{TOKEN}}` substrings; if the
 /// placeholder is already filled, the regex doesn't match and we skip.
-/// Safe to re-run on every migration/install without clobbering
-/// hand-edited content.
 ///
-/// **Scope**: every `*.md` under `docs/` (or whatever the entry folder
-/// is) + the root redirectors (`CLAUDE.md`, `.cursorrules`, etc.) so
-/// agents on either side of the entry see consistent content.
+/// **Scope**: EXCLUSIVELY the `files` the caller just created in the
+/// current operation — ownership by construction. There is deliberately
+/// no walk-the-tree variant (Codex A2): a global walk rewrote tokens
+/// inside pre-existing user documents.
 ///
 /// Returns the number of files modified (for telemetry / UI feedback).
-pub fn prefill_template_placeholders(project_path: &Path) -> usize {
-    let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
-    if !docs_dir.is_dir() {
+pub fn prefill_files(project_path: &Path, files: &[std::path::PathBuf]) -> usize {
+    // Scoped by contract (Codex A2): ONLY the files the caller just
+    // created may be rewritten — ownership is proven by construction.
+    // There is deliberately no walk-the-tree variant anymore: a global
+    // walk rewrote `{{TOKEN}}`s inside pre-existing user documents.
+    if files.is_empty() {
         return 0;
     }
     let replacements = compute_replacements(project_path);
     if replacements.is_empty() {
         return 0;
     }
-
     let mut files_changed = 0usize;
-    // 1. Every `*.md` under docs/.
-    walk_md_files(&docs_dir, &mut |path| {
-        if rewrite_file_with_replacements(path, &replacements) {
-            files_changed += 1;
-        }
-    });
-    // 2. Root redirectors — same shape as `rewrite_root_redirectors`.
-    static REDIRECTORS: &[&str] = &[
-        "README.md",
-        "CLAUDE.md",
-        "AGENTS.md",
-        "GEMINI.md",
-        ".cursorrules",
-        ".windsurfrules",
-        ".clinerules",
-        ".kiro/steering/instructions.md",
-        ".vibe/instructions.md",
-        ".github/copilot-instructions.md",
-        ".cursor/rules/repo-instructions.mdc",
-    ];
-    for &rel in REDIRECTORS {
-        let path = project_path.join(rel);
-        if !path.is_file() {
+    for path in files {
+        // Defense in depth: even a wrong internal caller list may not make
+        // us rewrite through a symlink or outside the project root.
+        if crate::core::fs_guard::assert_contained_no_symlink(project_path, path).is_err() {
+            tracing::warn!("prefill skipped non-contained path {}", path.display());
             continue;
         }
-        if rewrite_file_with_replacements(&path, &replacements) {
+        if path.is_file() && rewrite_file_with_replacements(path, &replacements) {
             files_changed += 1;
         }
     }
@@ -823,6 +809,27 @@ fn has_visible_files(dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Test-only stand-in for the removed global walk: enumerates the
+    /// fixture's docs/*.md + root redirectors and prefills THAT list —
+    /// the production API only ever receives freshly-created files.
+    fn prefill_all_for_tests(root: &Path) -> usize {
+        let mut files = Vec::new();
+        let docs = crate::core::scanner::detect_docs_dir(root);
+        if docs.is_dir() {
+            walk_md_files(&docs, &mut |p| files.push(p.to_path_buf()));
+        }
+        for rel in [
+            "README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md",
+            ".cursorrules", ".windsurfrules", ".clinerules",
+            ".kiro/steering/instructions.md", ".vibe/instructions.md",
+            ".github/copilot-instructions.md", ".cursor/rules/repo-instructions.mdc",
+        ] {
+            let p = root.join(rel);
+            if p.is_file() { files.push(p); }
+        }
+        prefill_files(root, &files)
+    }
+
     use super::*;
 
     // ─── rewrite_refs_in_text (pure logic) ────────────────────────────
@@ -1109,16 +1116,83 @@ mod tests {
         assert!(root.join("doc/index.md").is_file());
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn backfill_refuses_a_symlinked_docs_dir_even_when_probes_follow() {
+        // Copilot r4 family — `is_dir()`/`is_file()` FOLLOW links, so the
+        // backfill happily selects a symlinked docs/ pointing at an
+        // external tree carrying AGENTS.md. The write sink must still
+        // refuse: the guard walk (rooted at the explicit project root)
+        // lstats the docs component.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        std::fs::write(external.join("AGENTS.md"), "# agents").unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::os::unix::fs::symlink(&external, project.join("docs")).unwrap();
+
+        backfill_docs_index(&project);
+
+        assert!(
+            !external.join("index.md").exists(),
+            "the backfill must never write through a symlinked docs/"
+        );
+        assert!(
+            std::fs::symlink_metadata(project.join("docs"))
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself stays intact"
+        );
+        assert_eq!(
+            std::fs::read_to_string(external.join("AGENTS.md")).unwrap(),
+            "# agents",
+            "the external tree is byte-untouched"
+        );
+    }
+
     // ─── ensure_docs_index ────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_docs_index_refuses_a_symlinked_docs_dir() {
+        // Copilot r4 — the trust root is the EXPLICIT project root: a
+        // docs/ that is itself a symlink must never route the index outside
+        // the project (the lstat walk never checks the root itself).
+        let tmp = tempfile::TempDir::new().unwrap();
+        let external = tmp.path().join("external");
+        std::fs::create_dir_all(&external).unwrap();
+        let project = tmp.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        let docs = project.join("docs");
+        std::os::unix::fs::symlink(&external, &docs).unwrap();
+
+        let err = ensure_docs_index(&project, &docs).unwrap_err();
+        assert!(err.contains("symlink"), "{err}");
+
+        assert!(
+            !external.join("index.md").exists(),
+            "nothing may be written through a symlinked docs/"
+        );
+        assert!(
+            std::fs::symlink_metadata(&docs)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link itself stays intact"
+        );
+    }
 
     #[test]
     fn ensure_docs_index_writes_when_missing() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let docs = tmp.path().to_path_buf();
+        let project = tmp.path().join("proj");
+        let docs = project.join("docs");
         std::fs::create_dir_all(docs.join("conventions")).unwrap();
         std::fs::create_dir_all(docs.join("operations")).unwrap();
 
-        ensure_docs_index(&docs).unwrap();
+        ensure_docs_index(&project, &docs).unwrap();
 
         let body = std::fs::read_to_string(docs.join("index.md")).unwrap();
         assert!(body.contains("# Project documentation"));
@@ -1132,11 +1206,12 @@ mod tests {
     #[test]
     fn ensure_docs_index_is_idempotent() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let docs = tmp.path().to_path_buf();
+        let project = tmp.path().join("proj");
+        let docs = project.join("docs");
         std::fs::create_dir_all(&docs).unwrap();
         std::fs::write(docs.join("index.md"), "# my hand-written index").unwrap();
 
-        ensure_docs_index(&docs).unwrap();
+        ensure_docs_index(&project, &docs).unwrap();
 
         // The hand-written body must survive a re-run.
         let body = std::fs::read_to_string(docs.join("index.md")).unwrap();
@@ -1146,10 +1221,11 @@ mod tests {
     #[test]
     fn ensure_docs_index_handles_unknown_subfolders() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let docs = tmp.path().to_path_buf();
+        let project = tmp.path().join("proj");
+        let docs = project.join("docs");
         std::fs::create_dir_all(docs.join("custom-stuff")).unwrap();
 
-        ensure_docs_index(&docs).unwrap();
+        ensure_docs_index(&project, &docs).unwrap();
 
         let body = std::fs::read_to_string(docs.join("index.md")).unwrap();
         assert!(body.contains("`custom-stuff/`"));
@@ -1235,7 +1311,7 @@ mod tests {
         let renamed = parent.join("amp-easy-backo");
         std::fs::rename(&generic_root, &renamed).unwrap();
 
-        let modified = prefill_template_placeholders(&renamed);
+        let modified = prefill_all_for_tests(&renamed);
         assert!(modified >= 1, "at least the AGENTS.md should be touched");
 
         let body = std::fs::read_to_string(renamed.join("docs/AGENTS.md")).unwrap();
@@ -1254,9 +1330,9 @@ mod tests {
     #[test]
     fn prefill_is_idempotent_and_noops_when_no_placeholders_left() {
         let (_tmp, root) = write_rust_with_placeholders();
-        let _ = prefill_template_placeholders(&root);
+        let _ = prefill_all_for_tests(&root);
         // Second pass — no `{{KNOWN}}` left for us to replace.
-        let modified = prefill_template_placeholders(&root);
+        let modified = prefill_all_for_tests(&root);
         assert_eq!(modified, 0, "second pass must be a noop");
     }
 
@@ -1278,7 +1354,7 @@ mod tests {
             "Stack: {{STACK_SUMMARY}}\nTest: {{TEST_CMD}}\nLint: {{LINT_CMD}}\n",
         ).unwrap();
 
-        prefill_template_placeholders(root);
+        prefill_all_for_tests(root);
 
         let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(body.contains("Stack: TypeScript"), "got: {body}");
@@ -1300,7 +1376,7 @@ mod tests {
             "Stack: {{STACK_SUMMARY}}\nTest: {{TEST_CMD}}\nLint: {{LINT_CMD}}\n",
         ).unwrap();
 
-        prefill_template_placeholders(root);
+        prefill_all_for_tests(root);
 
         let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(body.contains("Stack: Rust + Python"), "got: {body}");
@@ -1322,7 +1398,7 @@ mod tests {
         std::fs::write(root.join("CLAUDE.md"), "Project: {{PROJECT_NAME}} ({{STACK_SUMMARY}})").unwrap();
         std::fs::write(root.join(".cursorrules"), "Stack: {{STACK_SUMMARY}}").unwrap();
 
-        prefill_template_placeholders(root);
+        prefill_all_for_tests(root);
 
         let claude = std::fs::read_to_string(root.join("CLAUDE.md")).unwrap();
         let cursor = std::fs::read_to_string(root.join(".cursorrules")).unwrap();
@@ -1336,13 +1412,13 @@ mod tests {
     fn prefill_is_safe_on_a_project_with_no_docs_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
         // No docs/ at all — must return 0, not panic, not create the dir.
-        let n = prefill_template_placeholders(tmp.path());
+        let n = prefill_all_for_tests(tmp.path());
         assert_eq!(n, 0);
         assert!(!tmp.path().join("docs").exists());
     }
 
     #[tokio::test]
-    async fn migration_prefills_placeholders_in_one_pass() {
+    async fn migration_preserves_user_placeholders() {
         // Regression: the user-reported `amp-easy-backo` shape. The
         // legacy `ai/` had raw `{{PROJECT_NAME}}` etc. that no agent
         // ever filled. Running the migration should now move AND
@@ -1361,10 +1437,12 @@ mod tests {
         assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
 
         let body = std::fs::read_to_string(root.join("docs/agents.md")).unwrap();
-        assert!(!body.contains("{{PROJECT_NAME}}"),
-            "migration should have prefilled PROJECT_NAME — got: {body}");
-        assert!(!body.contains("{{TEST_CMD}}"),
-            "migration should have prefilled TEST_CMD — got: {body}");
-        assert!(body.contains("cargo test"), "expected detected Rust test cmd, got: {body}");
+        // Codex A2 — the migration moves the USER's documents: their
+        // placeholders are user content and must survive byte-level.
+        // Prefill only ever runs on files a template install created.
+        assert!(body.contains("{{PROJECT_NAME}}"),
+            "migration must NOT prefill user placeholders — got: {body}");
+        assert!(body.contains("{{TEST_CMD}}"),
+            "migration must NOT prefill user placeholders — got: {body}");
     }
 }

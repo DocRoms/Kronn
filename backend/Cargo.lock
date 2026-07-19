@@ -1488,7 +1488,7 @@ dependencies = [
 
 [[package]]
 name = "kronn"
-version = "0.8.12"
+version = "0.8.13"
 dependencies = [
  "aes-gcm",
  "anyhow",

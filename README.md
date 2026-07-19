@@ -27,7 +27,7 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.8.12 (in development — latest stable release: 0.8.11).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.8.13 (in development — latest stable release: 0.8.12).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
 ## Contents
@@ -90,7 +90,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.8.11 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.8.12 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -105,7 +105,7 @@ cd Kronn
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.8.11 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.8.12 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -198,12 +198,12 @@ The whole tree is injected as project context into every Discussion, Quick Promp
 
 **What 0.8.2 hardens (from real-world misses)**
 
-- **Mandatory baseline checklist**: Step 9 now ALWAYS scans 5 categories that are too common to skip (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, `.env*` secrets, web a11y/CSP). Each item produces an explicit "verified present / verified absent / TD" line so you trust the audit didn't just look the other way.
+- **Mandatory baseline checklist**: Step 8 now ALWAYS scans 5 categories that are too common to skip (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, `.env*` tracking/deploy hygiene without reading secret values, web a11y/CSP). Each item produces an explicit "verified present / verified absent / TD" line so you trust the audit didn't just look the other way.
 - **Anti-repetition memory**: each audit reads existing TDs as priors and REUSES their IDs instead of churning slugs. An `audit_history` YAML block on each TD detail file tracks every pass. A reconciliation report (`_reconciliation-<date>.md`) classifies dropped TDs as `Fixed / Stale / Missed / Uncertain` so nothing silently vanishes between audits.
 - **Two-tier Status**: `Verified in source` (the agent opened the file and confirmed) vs `Inferred` (pattern-matched only). Phase 3 validation skips Verified ones to save your time.
-- **Specialized audit kinds**: alongside the canonical 10-step Full audit, Kronn ships focused passes — `Drift`, `Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, plus a `Custom` escape hatch. Each one writes to its own index file so it doesn't clobber the Full audit's TDs.
+- **Specialized audit kinds**: since 0.8.13 the Full audit is **chained** — 9 docs steps then every focused pass (`Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `CodeQuality`) in one launch (16 steps total), each opening with a relevance gate ("not applicable → one line and move on"). The focused kinds — plus `Drift`, `Rgaa` and a `Custom` escape hatch — remain launchable standalone. Each one writes to its own index file so it doesn't clobber the Full audit's TDs.
 - **Health badge with cluster recommendations**: every run is persisted in `audit_runs` with duration, severity counts (Critical × 12 + High × 4 + Medium × 1.5 + Low × 0.3 = score 0–100) and a `recommendations_json` list. When ≥3 findings cluster in one dimension (e.g. 5 Docker TDs), the dashboard surfaces "Run a focused Docker audit" inline.
-- **Community-standards gate**: if your project shows OSS intent (LICENSE present OR remote on github/gitlab/codeberg OR README mentions "contribute"), Step 9 also flags missing `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue/PR templates. Private projects skip this block entirely.
+- **Community-standards gate**: if your project shows OSS intent (LICENSE present OR remote on github/gitlab/codeberg OR README mentions "contribute"), Step 8 also flags missing `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, issue/PR templates. Private projects skip this block entirely.
 
 This is what makes Kronn a **knowledge-persistence layer with strict baselines**, not just a prompt launcher.
 

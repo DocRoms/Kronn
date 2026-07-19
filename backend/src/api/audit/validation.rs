@@ -1,4 +1,4 @@
-//! Per-step output validation + auto-repair.
+//! Per-step output validation — validate and fail honestly, NEVER overwrite.
 //!
 //! 0.8.3 — Root cause of the empty-tech-debt bug on DOCROMS_WEB.
 //!
@@ -23,23 +23,62 @@
 //!   - target file exists
 //!   - size is plausible vs the template source (≥ 25 %)
 //!
-//! If the check fails, we emit a `step_warning` SSE event AND
-//! auto-repair the file from the template so the user can either
-//! re-run the step OR ship the audit knowing it's flagged.
+//! If the check fails, we emit a `step_warning` SSE event and the
+//! step fails honestly. The file is NEVER touched (Codex r7/r8): a
+//! short file might be the agent's only partial output OR a
+//! pre-existing user file this run does not own — template staging
+//! belongs to Phase 1 (owner run start), never here. The historical
+//! auto-repair path was removed; `repaired`/`repaired_from_template`
+//! survive as legacy fields so old recap rows still render — new
+//! runs always emit `false`.
 
 use std::path::{Path, PathBuf};
 
-/// The minimum dest/src size ratio (in %) below which a step's
-/// output is treated as corrupt. Mirrors the threshold used by
-/// `api::projects::template::copy_dir_nondestructive` so a step that
-/// fails here will also be repaired on the next audit if the user
-/// didn't restart.
+/// The minimum dest/template size ratio (in %) below which a step's
+/// output is treated as suspicious. Pure suspicion heuristic local to
+/// this validator: a legitimately-edited doc stays well above it,
+/// while a mid-Write crash leaves a stub far below. Nothing repairs
+/// the file — the step fails and re-running it is the only path.
 const MIN_DEST_RATIO_PCT: u64 = 25;
 
 /// Minimum template source size (in bytes) below which the
 /// heuristic is disabled. Tiny templates produce too many false
 /// positives (a short README, a one-line example file).
 const MIN_TEMPLATE_SIZE_B: u64 = 200;
+
+/// Snapshot of a step's target file for the rewrite proof (Codex lot 3).
+/// Explicit Missing/Present — never a sentinel hash. The hash is NORMALIZED
+/// (CRLF→LF, per-line trailing whitespace stripped) so a cosmetic touch
+/// cannot masquerade as a rewrite; this normalizer is deliberately ISOLATED
+/// from the source-drift checksums (`compute_sha256` stays byte-exact).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetSnapshot {
+    Missing,
+    Present(String),
+}
+
+/// Take the snapshot of `target_file` under `project_path`. ONLY a true
+/// NotFound maps to `Missing` — any other read error (permissions, invalid
+/// UTF-8, a directory at the path) is an `Err` the caller must turn into a
+/// FAILED step: the rewrite proof cannot equate "absent" and "unreadable".
+pub fn target_snapshot(project_path: &Path, target_file: &str) -> Result<TargetSnapshot, String> {
+    match std::fs::read_to_string(project_path.join(target_file)) {
+        Ok(content) => Ok(TargetSnapshot::Present(normalized_content_hash(&content))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(TargetSnapshot::Missing),
+        Err(e) => Err(format!("target unreadable for rewrite proof: {e}")),
+    }
+}
+
+/// SHA-256 of the content after newline + trailing-whitespace normalization.
+pub fn normalized_content_hash(content: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for line in content.replace("\r\n", "\n").lines() {
+        hasher.update(line.trim_end().as_bytes());
+        hasher.update(b"\n");
+    }
+    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+}
 
 /// Outcome of a step-output validation.
 pub struct StepValidationWarning {
@@ -48,14 +87,14 @@ pub struct StepValidationWarning {
 }
 
 /// Check that a step's target file is plausibly filled. If it's
-/// missing or suspiciously small, auto-repair from the template (if
-/// available) and return a warning. The function returns `(success,
+/// missing or suspiciously small, the step FAILS with a warning —
+/// the file itself is never modified. Returns `(success,
 /// Option<warning>)` where `success` is the effective step status
 /// the caller should report at `step_done`.
 ///
 /// `cli_success` is the raw CLI exit-code success — if it's already
-/// `false`, we don't bother repairing (the failure is already loud).
-pub fn validate_and_repair_step_output(
+/// `false`, the failure is already loud and only the warning is added.
+pub fn validate_step_output(
     cli_success: bool,
     project_path: &Path,
     target_file: &str,
@@ -107,16 +146,12 @@ pub fn validate_and_repair_step_output(
 
     let ratio_pct = dst_size.saturating_mul(100) / template_size;
     if dst_size == 0 || ratio_pct < MIN_DEST_RATIO_PCT {
-        // Try to repair from template so the audit can complete on
-        // a clean baseline (or the user can re-run the step).
-        let repaired = if let Some(src) = &template_path {
-            if let Some(parent) = dst_path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            std::fs::copy(src, &dst_path).is_ok()
-        } else {
-            false
-        };
+        // NO in-place repair (Codex r7/r8): the short file might be the
+        // agent's only partial output OR a pre-existing user file this run
+        // does not own — overwriting either destroys data, and template
+        // staging belongs to Phase 1 (owner run start), never here. The
+        // step fails honestly; the file stays byte-intact at its path.
+        let repaired = false;
         let reason = if dst_size == 0 {
             format!(
                 "step produced no output: `{}` is empty (0 B) after CLI completed",
@@ -271,7 +306,7 @@ pub fn check_detector_disposition(
 /// Liquid / Mermaid syntax that uses `{{` for its own purposes (e.g.
 /// `{{ asset('foo') }}` in a Twig snippet inside coding-rules.md, or
 /// `{{ DECISION_1 }}` is matched, but `{{ asset(...) }}` is not).
-fn count_raw_placeholders(content: &str) -> usize {
+pub(crate) fn count_raw_placeholders(content: &str) -> usize {
     // Match `{{IDENT}}` and `{{ IDENT }}` where IDENT is
     // UPPERCASE_SNAKE (with optional digits + _). The trailing
     // boundary is a literal `}}`, not just `}`, to avoid hits on
@@ -435,7 +470,7 @@ mod tests {
     #[test]
     fn review_pseudo_step_is_always_ok() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (success, warn) = validate_and_repair_step_output(true, tmp.path(), "REVIEW");
+        let (success, warn) = validate_step_output(true, tmp.path(), "REVIEW");
         assert!(success);
         assert!(warn.is_none());
     }
@@ -443,7 +478,7 @@ mod tests {
     #[test]
     fn empty_target_file_path_is_passthrough() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (success, warn) = validate_and_repair_step_output(true, tmp.path(), "");
+        let (success, warn) = validate_step_output(true, tmp.path(), "");
         assert!(success);
         assert!(warn.is_none());
     }
@@ -451,7 +486,7 @@ mod tests {
     #[test]
     fn non_docs_path_is_passthrough() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let (success, _) = validate_and_repair_step_output(true, tmp.path(), "src/foo.rs");
+        let (success, _) = validate_step_output(true, tmp.path(), "src/foo.rs");
         assert!(success);
     }
 
@@ -460,7 +495,7 @@ mod tests {
         // If the CLI itself exited non-zero, we don't override the
         // success bit — the failure is already loud.
         let tmp = tempfile::TempDir::new().unwrap();
-        let (success, _) = validate_and_repair_step_output(false, tmp.path(), "REVIEW");
+        let (success, _) = validate_step_output(false, tmp.path(), "REVIEW");
         assert!(!success);
     }
 
@@ -469,7 +504,7 @@ mod tests {
     fn healthy_dest_passes_through() {
         let (_tmp, project) = fixture("docs/foo.md", 1000, 1000);
         let (success, warn) =
-            validate_and_repair_step_output(true, &project, "docs/foo.md");
+            validate_step_output(true, &project, "docs/foo.md");
         assert!(success);
         assert!(warn.is_none());
     }
@@ -651,37 +686,40 @@ mod tests {
 
     #[test]
     #[serial(kronn_templates_env)]
-    fn empty_dest_flagged_and_repaired() {
-        // 0 B vs 1000 B template — must flag + repair.
+    fn empty_dest_flagged_never_repaired() {
+        // 0 B vs 1000 B template — must flag, and (Codex r8) NEVER write
+        // in place: the file may not belong to this run.
         let (_tmp, project) = fixture("docs/inconsistencies-tech-debt.md", 0, 1000);
-        let (success, warn) = validate_and_repair_step_output(
+        let (success, warn) = validate_step_output(
             true,
             &project,
             "docs/inconsistencies-tech-debt.md",
         );
         assert!(!success, "empty dest must be reported as failure");
         let w = warn.expect("a warning must be emitted for empty output");
-        assert!(w.repaired, "template repair must succeed when template is on disk");
+        assert!(!w.repaired, "no in-place repair, ever");
         assert!(w.reason.contains("empty (0 B)"));
-        // File now contains the template bytes.
+        // File untouched (still 0 B at its own path).
         let after = std::fs::read(project.join("docs/inconsistencies-tech-debt.md")).unwrap();
-        assert_eq!(after.len(), 1000);
+        assert_eq!(after.len(), 0);
     }
 
     #[test]
     #[serial(kronn_templates_env)]
-    fn truncated_dest_flagged_and_repaired() {
-        // 100 B vs 1000 B = 10 % → below 25 % threshold.
+    fn truncated_dest_flagged_and_preserved() {
+        // 100 B vs 1000 B = 10 % → below 25 % threshold: flagged, intact.
         let (_tmp, project) = fixture("docs/architecture/overview.md", 100, 1000);
-        let (success, warn) = validate_and_repair_step_output(
+        let (success, warn) = validate_step_output(
             true,
             &project,
             "docs/architecture/overview.md",
         );
         assert!(!success);
         let w = warn.unwrap();
-        assert!(w.repaired);
+        assert!(!w.repaired, "no in-place repair, ever");
         assert!(w.reason.contains("truncated"));
+        let after = std::fs::read(project.join("docs/architecture/overview.md")).unwrap();
+        assert_eq!(after.len(), 100, "the short output stays byte-intact");
     }
 
     #[test]
@@ -692,7 +730,7 @@ mod tests {
         let (_tmp, project) = fixture("docs/foo.md", 300, 1000);
         let before = std::fs::read(project.join("docs/foo.md")).unwrap();
         let (success, warn) =
-            validate_and_repair_step_output(true, &project, "docs/foo.md");
+            validate_step_output(true, &project, "docs/foo.md");
         assert!(success);
         assert!(warn.is_none());
         let after = std::fs::read(project.join("docs/foo.md")).unwrap();
@@ -722,7 +760,7 @@ mod tests {
         let tpl_dir = std::env::var("KRONN_TEMPLATES_DIR").unwrap();
         std::fs::write(std::path::PathBuf::from(tpl_dir).join("docs/decisions.md"), &template_body).unwrap();
 
-        let (success, warn) = validate_and_repair_step_output(true, &project, "docs/decisions.md");
+        let (success, warn) = validate_step_output(true, &project, "docs/decisions.md");
         assert!(!success, "step with leaked placeholders must fail validation");
         let w = warn.expect("a warning must be emitted");
         assert!(w.reason.contains("placeholders remain"),
@@ -749,6 +787,34 @@ mod tests {
     }
 
     #[test]
+    fn normalized_hash_ignores_cosmetic_touches_only() {
+        // Matrix v2 — a cosmetic touch (CRLF, trailing ws) must not read as
+        // a rewrite; a real change must. Isolated from source checksums.
+        let a = normalized_content_hash("line one\nline two\n");
+        let crlf = normalized_content_hash("line one\r\nline two\r\n");
+        let trailing = normalized_content_hash("line one   \nline two\t\n");
+        let real = normalized_content_hash("line one\nline TWO\n");
+        assert_eq!(a, crlf, "CRLF vs LF is cosmetic");
+        assert_eq!(a, trailing, "trailing whitespace is cosmetic");
+        assert_ne!(a, real, "a content change must move the hash");
+    }
+
+    #[test]
+    fn target_snapshot_is_explicit_missing_or_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert_eq!(target_snapshot(tmp.path(), "docs/nope.md").unwrap(), TargetSnapshot::Missing);
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        std::fs::write(tmp.path().join("docs/a.md"), "content").unwrap();
+        let s1 = target_snapshot(tmp.path(), "docs/a.md").unwrap();
+        assert!(matches!(s1, TargetSnapshot::Present(_)));
+        // Missing -> Present is a change, never equality with Missing.
+        assert_ne!(s1, TargetSnapshot::Missing);
+        // A DIRECTORY at the target path is unreadable — Err, never Missing.
+        std::fs::create_dir_all(tmp.path().join("docs/dir.md")).unwrap();
+        assert!(target_snapshot(tmp.path(), "docs/dir.md").is_err());
+    }
+
+    #[test]
     #[serial]
     #[serial(kronn_templates_env)]
     fn missing_template_only_flags_empty_dest() {
@@ -760,7 +826,7 @@ mod tests {
         std::fs::write(project.join("docs/inconsistencies-security.md"), "").unwrap();
         // Force resolver away from real templates dir.
         std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
-        let (success, warn) = validate_and_repair_step_output(
+        let (success, warn) = validate_step_output(
             true,
             &project,
             "docs/inconsistencies-security.md",
@@ -769,5 +835,40 @@ mod tests {
         let w = warn.unwrap();
         assert!(!w.repaired, "no template to repair from");
         assert!(w.reason.contains("missing or empty"));
+    }
+
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn short_output_is_never_overwritten() {
+        // Codex r7 P0 — the repair used to copy the template OVER a
+        // truncated agent output, destroying the only copy of the partial
+        // work. It must sidecar the partial first.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let templates = tmp.path().join("templates/docs");
+        std::fs::create_dir_all(&templates).unwrap();
+        std::fs::write(
+            templates.join("inconsistencies-security.md"),
+            "x".repeat(1000), // big template → 1% ratio below threshold
+        ).unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("docs")).unwrap();
+        let dest = project.join("docs/inconsistencies-security.md");
+        std::fs::write(&dest, "partial agent output").unwrap();
+        std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("templates"));
+        let (success, warn) = validate_step_output(
+            true,
+            &project,
+            "docs/inconsistencies-security.md",
+        );
+        assert!(!success);
+        assert!(!warn.unwrap().repaired, "no in-place repair, ever");
+        assert_eq!(
+            std::fs::read_to_string(&dest).unwrap(),
+            "partial agent output",
+            "the file must stay byte-intact at its own path"
+        );
+        assert!(!project.join("docs/inconsistencies-security.partial.bak").exists(),
+            "no sidecar noise either");
     }
 }

@@ -101,7 +101,7 @@ describe('api module', () => {
       const { projects } = await getApi();
       const expected = [
         'list', 'get', 'scan', 'create', 'bootstrap', 'delete', 'clone',
-        'discoverRepos', 'installTemplate', 'auditInfo', 'auditStream',
+        'discoverRepos', 'installTemplate', 'auditInfo',
         'fullAuditStream', 'validateAudit', 'markBootstrapped', 'cancelAudit',
         'setDefaultSkills', 'setDefaultProfile',
         'listAiFiles', 'readAiFile', 'searchAiFiles',

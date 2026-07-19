@@ -6,5 +6,5 @@ export type LaunchAuditRequest = {
     agent: AgentType,
     kind?: AuditKind | null,
     custom_prompt?: string | null,
-    resume_from?: number | null,
+    resume_run_id?: string | null,
 };

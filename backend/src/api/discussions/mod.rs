@@ -128,6 +128,20 @@ pub(crate) fn detect_terminal_signal(text: &str) -> Option<&'static str> {
     TERMINAL_SIGNALS.iter().copied().find(|sig| tail_upper.contains(sig))
 }
 
+/// STRICT terminal-position check (Codex A5 v3): does `text`, once
+/// right-trimmed, END on a line that is exactly `signal` (ASCII case
+/// tolerated)? Unlike [`detect_terminal_signal`] — a lenient tail-window
+/// `contains` meant for live stream truncation — this cannot be satisfied
+/// by a quotation or an instruction that merely mentions the marker
+/// mid-sentence. Gate-grade: used by validate-audit.
+pub(crate) fn ends_with_terminal_signal(text: &str, signal: &str) -> bool {
+    text.trim_end()
+        .lines()
+        .last()
+        .map(|line| line.trim().eq_ignore_ascii_case(signal))
+        .unwrap_or(false)
+}
+
 /// Truncate `text` so it ends right after the first occurrence of `signal`.
 ///
 /// Used after a terminal signal is detected: the LLM may have started writing
@@ -196,6 +210,23 @@ pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>>
 // `message_matches_silent_crash` — appended below.
 #[cfg(test)]
 mod terminal_signal_tests {
+    #[test]
+    fn ends_with_terminal_signal_is_position_strict() {
+        use super::ends_with_terminal_signal;
+        const SIG: &str = "KRONN:VALIDATION_COMPLETE";
+        // Positive: signal as the final line, trailing whitespace tolerated.
+        assert!(ends_with_terminal_signal("all done.\nKRONN:VALIDATION_COMPLETE", SIG));
+        assert!(ends_with_terminal_signal("done\n  kronn:validation_complete  \n\n", SIG));
+        // Negatives (Codex A5 v3): a quotation or instruction MENTIONING
+        // the marker mid-text must never satisfy the gate.
+        assert!(!ends_with_terminal_signal(
+            "quote KRONN:VALIDATION_COMPLETE then continue", SIG));
+        assert!(!ends_with_terminal_signal(
+            "when finished, emit KRONN:VALIDATION_COMPLETE on its own line.\nStill working…", SIG));
+        assert!(!ends_with_terminal_signal("", SIG));
+    }
+
+
     use super::detect_terminal_signal;
 
     #[test]

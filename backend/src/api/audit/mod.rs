@@ -41,11 +41,11 @@ pub(super) type SseStream = Pin<Box<dyn Stream<Item = Result<Event, Infallible>>
 
 pub(crate) const PROMPT_PREAMBLE: &str = "\
 Rules: Write in English. Be factual and concise — this is AI context for coding agents, NOT human documentation.\n\
-- Do NOT invent — read `docs/AGENTS.md` § 0 Anti-Hallucination Protocol (STEP 0 of this audit just wrote/refreshed it). The cascade is `read code → existing docs/ → external doc → escalate via TODO marker → never assert without proof`. Every non-trivial fact written into `docs/` MUST carry `[src: file: <path>:<line>]` or `[src: url: …]` ; fabricated citations (path doesn't exist / outside project root) are mechanically rejected.\n\
+- Do NOT invent — read `docs/AGENTS.md` § 0 Anti-Hallucination Protocol (STEP 0 of this audit just wrote/refreshed it). The cascade is `read code → existing docs/ → external doc → escalate via TODO marker → never assert without proof`. Every non-trivial fact written into `docs/` MUST carry `[src: file: <path>:<line>]` or `[src: url: …]` ; fabricated citations (path doesn't exist / outside project root) are mechanically checked — `enforce` mode rejects them with a retry, the default `warn` logs them; treat any warning as a defect.\n\
 - Replace ALL `{{PLACEHOLDERS}}` and `<!-- ... -->` comment placeholders with real content. {{PLACEHOLDERS}} are literal text markers — replace by editing file content directly.\n\
 - Keep the existing file structure and section headings — fill in the blanks, do NOT rewrite the file from scratch.\n\
 - If a section does not apply to this project, replace placeholders with 'N/A — not used in this project.' Do not delete the section.\n\
-- Write plain facts, not opinions or recommendations. No debate, no trade-offs analysis.\n\
+- Plain facts in docs/ files — no opinions, debate or trade-off analysis. One exception: `Suggested direction` in TD detail files (and index remediation lines) may carry a one-line, non-binding fix hint.\n\
 - Each section should be self-contained: another AI agent reading just that section should get the full picture.\n\
 - Add or remove table rows as needed to match the project. Write fewer entries rather than inventing content to fill slots.\n\
 \n\
@@ -70,11 +70,14 @@ Three marker types exist. Each has a STRICT semantic — using the wrong one cre
 \n\
 This is an autonomous (non-interactive) pass. Do NOT ask questions inline — use the marker discipline above and move on.";
 
+#[derive(Clone, Copy)]
 pub(crate) struct AnalysisStep {
     pub(crate) target_file: &'static str,
     pub(crate) prompt: &'static str,
     /// Source file patterns to hash for drift detection.
-    /// Special values: "__GIT_HEAD__" (git commit hash), "__GIT_LS_FILES__" (directory structure).
+    /// Special values: "__GIT_SOURCE_TREE__" (F27 content+structure fingerprint of the
+    /// source tree, excluding Kronn outputs — the preferred whole-repo signal);
+    /// "__GIT_HEAD__"/"__GIT_LS_FILES__" (legacy, kept for back-compat only).
     /// Glob patterns: "*.json", ".github/workflows/*"
     /// Empty = step is excluded from drift detection.
     pub(crate) sources: &'static [&'static str],
@@ -199,7 +202,12 @@ Then fill docs/AGENTS.md — replace ALL {{PLACEHOLDERS}} in each section:\n\
 - Workflow constraints: replace {{WORKFLOW_CONSTRAINT_*}} with project-specific rules\n\
 - {{DATE}}: set to today's date (YYYY-MM-DD)\n\
 \n\
-**ANTI-HALLU FOR THIS STEP** — every cell in the Stack / Source-of-truth / Code-placement / Prerequisites / Common-tasks tables MUST be anchored. Append a citation in parentheses at the end of each cell value: `(src: file: <path>:<line>)`. For the Stack table specifically: a version cell MUST cite the lockfile or the manifest line where the version is pinned (e.g. `Rust 1.78 (src: file: Cargo.toml:5)`, `Symfony 7.3.6 (src: file: composer.lock:2884)`). If a row cannot be anchored to a real file/line, do NOT add it — Quality > quantity. {{DATE}} is the only exception.",
+**CLEANUP ONCE FILLED** — the template ships with scaffolding that MUST NOT survive the fill: \
+remove the `> **TEMPLATE FILE.** Every {{...}} MUST be filled…` banner block entirely, and strip \
+every inline bracketed hint left next to a value (e.g. `[ex: \"French\", \"English\" — …]`). \
+A filled file that still shows the banner or hints counts as a FAILED fill.\n\
+\n\
+**ANTI-HALLU FOR THIS STEP** — every cell in the Stack / Source-of-truth / Code-placement / Prerequisites / Common-tasks tables MUST be anchored. Append a citation at the end of each cell value using the EXACT bracket form the mechanical linter recognizes: `[src: file: <path>:<line>]`. For the Stack table specifically: a version cell MUST cite the lockfile or the manifest line where the version is pinned (e.g. `Rust 1.78 [src: file: Cargo.toml:5]`, `Symfony 7.3.6 [src: file: composer.lock:2884]`). If a row cannot be anchored to a real file/line, do NOT add it — Quality > quantity. {{DATE}} is the only exception.",
         sources: &["README.md", "package.json", "Cargo.toml", "composer.json", "go.mod", "docker-compose.yml", "Makefile", "Dockerfile"],
     },
 
@@ -226,7 +234,7 @@ Fill docs/repo-map.md — replace ALL {{PLACEHOLDERS}}:\n\
 - Key folders tree: replace {{FOLDER_*}} with every major directory (2-3 levels deep), tree format with annotations\n\
 - Entrypoints table: replace {{ENTRYPOINT_*}} with 5-7 key files (config, routes, models, etc.)\n\
 - Auto-generated files: replace {{FILE_PATTERN}} with files NOT to edit manually",
-        sources: &["__GIT_LS_FILES__"],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 
     // Step 4: Coding rules
@@ -352,22 +360,21 @@ present\", \"verified absent\") so the user can trust the audit.\n\n\
 - Secrets are NOT passed via `ARG` (build args are visible in `docker history` — emit TD if found).\n\n\
 \n\
 **If a `docker-compose.yml` or `compose.yaml` exists**:\n\
-- `mem_limit` (or `deploy.resources.limits.memory`) set on every service (otherwise: runaway process risk — emit TD).\n\
-- `cpus` (or `deploy.resources.limits.cpus`) set on every service (same rationale).\n\
+- Resource limits (`mem_limit`/`cpus` or `deploy.resources.limits.*`) on services that can realistically run away (app, workers, DB). Missing limits are `Medium` at most — and NOT a finding when the compose file is clearly dev-only or the platform (Swarm/K8s) owns limits elsewhere; say which case applies.\n\
 - `read_only: true` where the service is stateless (otherwise: writable rootfs is a useful RCE escalation surface — emit TD only if clearly stateless).\n\
 - No `:latest` image tags (otherwise: non-reproducible — emit TD).\n\
-- No secrets in `environment:` block (use `secrets:` or `env_file:` — emit TD if literal credentials found).\n\n\
+- Credential hygiene of `environment:` blocks: `Not evaluated safely (requires Kronn's local secret scanner)`. Safe signal only: `grep -lE 'secrets:|env_file:' <compose files>` (filename-only) tells you whether the safe mechanisms are used at all.\n\n\
 \n\
 **If `.github/workflows/*.y(a)ml` OR `.gitlab-ci.yml` OR equivalent CI config exists**:\n\
 - No `StrictHostKeyChecking=no` in ssh/scp calls (otherwise: trivial MitM — emit TD).\n\
 - Deploy workflow has a quality gate (lint OR test OR static analysis) before pushing to prod (otherwise: broken code can ship — emit TD).\n\
-- Secrets are sourced from `${{ secrets.* }}` (or equivalent), not hardcoded (emit TD if literal credentials found).\n\
+- CI secret sourcing: `Not evaluated safely (requires Kronn's local secret scanner)` — detecting a hardcoded literal means reading the line that contains it. Safe signal only: `grep -l 'secrets.' <workflow files>` (filename-only) shows whether the secure mechanism is used at all.\n\
 - No `pull_request_target` without explicit checkout of the base branch's workflow definition (RCE risk — emit TD if pattern found).\n\
 - Pinned action versions (`uses: actions/checkout@v4` not `@master`) (emit TD only if drift is dramatic, e.g. pinning to a moving branch).\n\n\
 \n\
 **If `.env*` files exist at repo root**:\n\
 - No `.env` file tracked in git (only `.env.dist` / `.env.example`) — check `git ls-files .env*` (otherwise: emit TD).\n\
-- No real-looking secrets (32+ hex chars, base64-like strings ≥ 24 chars, vendor-prefixed tokens like `sk-`, `xoxb-`, `p8e-`, `AIzaSy…`) inside ANY tracked `.env*` file (emit TD if found, this is almost always a leak).\n\
+- Values inside tracked `.env*` files: `Not evaluated safely (requires Kronn's local secret scanner)` — never open or pattern-scan their content. The tracking status itself (`git ls-files -- '*.env*' '.env*'`, quoted pathspec, filename-only) is the safe signal and already a finding when a real `.env` is tracked.\n\
 - Deploy step EXCLUDES `.env*` from the deploy bundle (rsync/scp/tar `--exclude .env*`) — otherwise the tracked `.env.dist` lands in production with its hardcoded defaults (emit TD if not excluded).\n\n\
 \n\
 **For any web project** (HTML templates detected — Twig / Blade / JSX / Vue / ERB / Razor — > 3 template files):\n\
@@ -509,13 +516,13 @@ metadata:\n\
 For UPDATES of existing TDs: APPEND a new entry to `audit_history`, do not replace previous entries. The chronological list is the value.\n\n\
 \
 **Scope reminder**: this step ONLY fills `docs/inconsistencies-tech-debt.md` + creates/updates `docs/tech-debt/TD-*.md` detail files. The companion `docs/decisions.md` is intentionally filled in Step 9 (not here) so the agent has the full audit picture before recording positive choices.",
-        sources: &["__GIT_HEAD__"],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 
     // Step 9: Final review + fill decisions.md
     //
     // Step 9 has a *real* target_file (`docs/decisions.md`) so the
-    // validate_and_repair_step_output guard catches the case where the
+    // validate_step_output guard catches the case where the
     // agent forgets it. The prompt is a TWO-PHASE pass:
     //   (1) Final quality review across all docs/ files.
     //   (2) Fill docs/decisions.md with intentional architectural
@@ -572,14 +579,14 @@ Quality rules:\n\
 - Remove the `{{DECISION_2}}` row entirely if you only have one real decision (don't pad).\n\n\
 \
 **End state**: `docs/decisions.md` has zero `{{...}}` placeholders, contains 3-8 traceable decisions, and all OTHER docs/ files passed the Phase 1 review with markers cleaned up per the discipline rules above.",
-        sources: &["__GIT_HEAD__"],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
 
 // ─── Specialized audit kinds (0.8.2 "Design C") ──────────────────────────
 //
 // Each focused kind reuses Step 8's prompt scaffolding but narrows the
-// scope. The Full pipeline keeps all 9 steps. Specialized kinds skip
+// scope. The Full foundation pipeline keeps all 9 steps. Specialized kinds skip
 // the docs-generation steps (1-8) because the user only wants a focused
 // re-scan, and they emit findings into a *named* tech-debt index file
 // per kind (e.g. `docs/inconsistencies-security.md`) so they don't
@@ -614,17 +621,18 @@ Walk through every item below. If satisfied, write \"verified present\" or \"ver
 If NOT satisfied, emit a TD finding. These do NOT count against any cap.\n\n\
 \
 **Secrets & credentials in source:**\n\
-- No real-looking secrets in tracked `.env*` files (32+ hex chars, base64 ≥ 24 chars, vendor prefixes like `sk-`, `xoxb-`, `p8e-`, `AIzaSy…`). Run `git ls-files | grep -E '\\.env'` and read each.\n\
-- No credentials hardcoded in CI YAML (`.github/workflows/*`, `.gitlab-ci.yml`) — must source from `${{ secrets.* }}` or equivalent.\n\
-- No real credentials in docker-compose `environment:` blocks — must use `secrets:` or `env_file:`.\n\
+- No REAL `.env*` file is tracked (`git ls-files -- '*.env*' '.env*'` — pathspec listing, no grep) — `.env.example`/`.env.dist`/`.env.sample` are legitimate templates and NOT findings. Tracking status and file NAMES are the ONLY safe signals you may collect.\n\
+- **Secret VALUES are out of your scope entirely.** You may not open, grep, or otherwise inspect file contents for secret-looking values — any command whose output could echo a matched line would pull the secret into your context, which leaves the machine. For the value-scan sub-dimension, write exactly `Not evaluated safely (requires Kronn's local secret scanner)` — NEVER `verified absent`/`verified clean` on a scan you did not safely run.\n\
+- CI YAML / docker-compose credential hygiene: `Not evaluated safely (requires Kronn's local secret scanner)` — proving the absence of a hardcoded credential means reading the very content that could contain it. You may only note the SAFE structural facts: which workflow/compose files exist, and whether they use `secrets:`/`env_file:` — established EXCLUSIVELY via `grep -lE 'secrets:|env_file:' <files>` (filename-only output, zero lines, zero context; `-l` is the ONLY grep flag allowed near credential material).\n\
 - No private keys or certs in repo (`*.pem`, `*.key`, `*.p12`, `id_rsa*`).\n\
-- `git log --all -p -S 'BEGIN PRIVATE KEY'` returns nothing recent (last 12 months).\n\n\
+- `git log --all -S 'BEGIN PRIVATE KEY' --name-only --format='%h %ad'` returns nothing recent (last 12 months) — metadata only, NEVER `-p` (a patch dump would pull the key itself into your context).\n\n\
+\
+**EXFILTRATION GUARD (absolute)**: you run with filesystem access and your context leaves the machine. NEVER open, quote, print or write the VALUE of any secret, key or token — in your output, in docs/, in TDs, anywhere. Findings carry file + line + pattern type only.\n\n\
 \
 **Authentication & sessions:**\n\
 - Session cookies set with `HttpOnly` AND `Secure` AND `SameSite=Lax|Strict` (grep for `setcookie`, `Set-Cookie`, `withCredentials`).\n\
 - Password storage uses a slow hash (`bcrypt`, `argon2`, `scrypt`, `PBKDF2`) — not MD5/SHA1/plain.\n\
-- JWT secret is sourced from env, not from code; verify alg is RS256 or HS256 (never `none`).\n\
-- No `Authorization: Bearer <hardcoded>` in source (search for `Bearer ` literal).\n\
+- JWT secret sourcing and hardcoded `Bearer` tokens: `Not evaluated safely (requires Kronn's local secret scanner)` — same boundary, the match line would BE the secret. You may note the safe structural fact that a JWT/auth library is configured (dependency name from the manifest) without inspecting its key material.\n\
 - Password reset tokens are single-use AND time-limited.\n\n\
 \
 **Input validation & injection:**\n\
@@ -644,7 +652,7 @@ If NOT satisfied, emit a TD finding. These do NOT count against any cap.\n\n\
 \
 **Dependencies & supply chain:**\n\
 - Lockfile present and tracked (`package-lock.json`, `pnpm-lock.yaml`, `composer.lock`, `Cargo.lock` for bins, `poetry.lock`, `Gemfile.lock`).\n\
-- No known-vulnerable versions in lockfile (cross-check a sample of the top 5 deps against public CVE lists via your knowledge; flag only when severity is clearly High/Critical).\n\
+- Dependency risk signals you can VERIFY in the repo: lockfile pins to versions the project's own tooling flags (`cargo audit`/`npm audit`/`composer audit` output or config if present), deps several majors behind their manifest constraint, or abandoned forks. Do NOT assert specific CVEs from memory — model knowledge is stale; if no tooling output exists, record `Inferred` and suggest wiring an audit tool instead.\n\
 - CI runs a dependency audit step (`npm audit`, `pnpm audit`, `cargo audit`, `composer audit`, `pip-audit`, etc.) or has a Dependabot/Renovate config.\n\
 - No `npm install` / `pip install` of git URLs with `master`/`main` branches (must be tagged or pinned commit).\n\n\
 \
@@ -706,10 +714,10 @@ For EACH `Dockerfile`, `*.dockerfile`, or `*/Dockerfile` (use `git ls-files | gr
 \
 # B. COMPOSE CHECKLIST (per `docker-compose*.yml` / `compose*.yaml`)\n\
 \n\
-- **Resource limits**: every service has `mem_limit` + `cpus` OR `deploy.resources.limits.{memory,cpus}` set (without limits, one runaway container can starve the host).\n\
+- **Resource limits**: services that can realistically starve the host (app, workers, DB) carry `mem_limit`/`cpus` or `deploy.resources.limits.*`. Not a finding on clearly dev-only compose files or when the deployment platform owns limits — state which case applies.\n\
 - **No `:latest`** image tags (reproducibility).\n\
 - **Healthchecks**: critical services (DB, app, gateway) have `healthcheck:` blocks AND `depends_on` uses `condition: service_healthy` instead of bare `depends_on: [svc]`.\n\
-- **Secrets handling**: no literal credentials in `environment:` (use `env_file:` or `secrets:` block). Grep for `_PASSWORD=`, `_TOKEN=`, `_KEY=` followed by a non-empty literal.\n\
+- **Secrets handling**: `Not evaluated safely (requires Kronn's local secret scanner)` — never grep for credential literals (the match line would be the secret). Safe signal: `grep -lE 'secrets:|env_file:'` (filename-only) shows whether the safe mechanisms are present.\n\
 - **Read-only rootfs**: stateless services have `read_only: true` (or note exceptions). Worth a TD only when the service is obviously stateless (gateway, static-asset proxy).\n\
 - **Restart policy**: services have `restart: unless-stopped` or `restart: always` (otherwise a crash stops them silently).\n\
 - **Logging cap**: `logging.options.max-size` + `max-file` set somewhere — either per-service or via a default driver — otherwise the host disk fills up.\n\
@@ -801,7 +809,7 @@ Match → reuse ID + APPEND `audit_history` entry. Slug churn is the #1 audit an
 5. Each finding: file path + line number, one-sentence impact (latency / throughput cost — be quantitative when possible), one-sentence remediation.\n\n\
 \
 Do NOT modify source. Do NOT touch other docs/ files.",
-        sources: &[],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
 
@@ -865,7 +873,7 @@ Match → reuse ID + APPEND `audit_history` entry. Slug churn is the #1 audit an
 5. Each finding: file path + line number, who is impacted (screen reader / keyboard-only / low-vision / cognitive), and one-sentence remediation.\n\n\
 \
 Do NOT modify source. Do NOT touch other docs/ files.",
-        sources: &[],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
 
@@ -995,7 +1003,7 @@ DATABASE AUDIT (0.8.4) — focused re-scan on data-layer hygiene. Read existing 
 Same rules as the Full audit Step 8 (§ C and § D): scan `docs/tech-debt/` for existing TDs; for each finding, decide REUSE / REFINE / NEW per § C; create `docs/tech-debt/TD-<date>-<slug>.md` for new ones; UPDATE `audit_history` for existing. Detail file schema = the Full audit's. Index file = `docs/inconsistencies-database.md` (not `inconsistencies-tech-debt.md`). Severity calibration is the same.\n\n\
 \
 Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions). If no findings, the index reads `'None identified during this database audit pass'`.",
-        sources: &["__GIT_HEAD__"],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
 
@@ -1003,13 +1011,13 @@ pub(crate) const API_DESIGN_STEPS: &[AnalysisStep] = &[
     AnalysisStep {
         target_file: "docs/inconsistencies-api.md",
         prompt: "\
-API DESIGN AUDIT (0.8.4) — focused re-scan on the public-facing contract. Read existing `docs/inconsistencies-api.md` if present (anti-repetition rules apply, same as Full audit Step 9).\n\n\
+API DESIGN AUDIT (0.8.4) — focused re-scan on the public-facing contract. Read existing `docs/inconsistencies-api.md` if present (anti-repetition rules apply, same as Full audit Step 8).\n\n\
 \
 # A. CONTRACT CONSISTENCY\n\
 - **Naming**: REST endpoints must follow ONE convention (kebab-case, snake_case, camelCase) — flag inconsistencies like `/api/users-list` next to `/api/orderItems`. Same for query params, JSON keys.\n\
 - **HTTP semantics**: GET that mutates state (anti-pattern); POST that returns 200 for create (should be 201); DELETE that returns the deleted resource (should be 204 unless explicitly part of the contract); PATCH vs PUT confusion.\n\
 - **Error envelope**: ONE shape, used by EVERY endpoint. Flag endpoints returning `{ \"error\": \"...\" }` next to ones returning `{ \"errors\": [...] }`, mixed status codes (400 vs 422 for validation).\n\
-- **Status codes**: 200 vs 201 vs 204 on writes ; 401 vs 403 (authn vs authz) ; 404 vs 410 (gone). Flag wrong codes that leak app behaviour (e.g. 200 with `{ \"error\": ... }` for a failed login).\n\n\
+- **Status codes**: judge against the API's OWN documented contract first (OpenAPI/docs); flag INTERNAL inconsistency (same operation returning different codes, 200 bodies carrying `{ \"error\": ... }` for failures, 401/403 confusion between authn and authz). 200-on-write is a style choice, not a defect, when the contract says so — flag it as `Low`/`Inferred` only if no contract exists.\n\n\
 \
 # B. VERSIONING + EVOLUTION\n\
 - **Versioning strategy**: header (`Accept: application/vnd.api+json; version=2`) vs path (`/api/v2/`) — pick one, don't mix.\n\
@@ -1036,13 +1044,154 @@ API DESIGN AUDIT (0.8.4) — focused re-scan on the public-facing contract. Read
 Same rules as the Full audit Step 8: anti-repetition pass + detail-file schema + severity calibration. Index file = `docs/inconsistencies-api.md`. If no findings, the index reads `'None identified during this API design audit pass'`.\n\n\
 \
 Apply the marker discipline (`TODO: verify` only if you couldn't check; `TODO: ask user` for human decisions).",
-        sources: &[],
+        sources: &["__GIT_SOURCE_TREE__"],
     },
 ];
 
 /// Dispatch table for `LaunchAuditRequest.kind`. Returns the step
 /// slice to drive the agent through. For `Custom`, callers should
 /// inline the user-supplied prompt rather than going through this fn.
+/// 0.8.13 — Code quality & maintainability. Born from the DOCROMS_WEB
+/// dogfooding: a Full audit surfaced docs & infra debt but zero findings
+/// about the CODE (templates, styles, backend smells) — "un audit qui ne
+/// sort pas de soucis de qualité de code, c'est super limité".
+pub(crate) const CODE_QUALITY_STEPS: &[AnalysisStep] = &[
+    AnalysisStep {
+        target_file: "docs/inconsistencies-code-quality.md",
+        prompt: "\
+You are running a FOCUSED CODE-QUALITY AUDIT. Output ONLY code quality / maintainability \
+findings — ignore security, docs drift, infra config (other audits own those).\n\n\
+If `docs/briefing.md` exists, read it FIRST: the user's stated quality concerns take priority \
+over the generic checklist below.\n\n\
+# A. MANDATORY QUALITY CHECKLIST (adapt to the project's actual stack)\n\n\
+Walk through every applicable item. If satisfied, write \"verified clean\". \
+If NOT, emit a TD finding. Sample REAL files — never assert from file names alone.\n\n\
+**Templates / markup (Twig, Blade, JSX, ERB, plain HTML…):**\n\
+- Duplication: same block/markup repeated across ≥3 templates instead of a partial/macro/component (diff 3 similar templates).\n\
+- Dead templates: files never referenced by any route/controller/include (grep template names against source).\n\
+- Inline `style=` / inline `<script>` blocks in templates (grep, count, sample) — belongs in the asset pipeline.\n\
+- Oversized templates (> ~300 lines): candidates for decomposition; name the worst 3.\n\
+- Data/logic in templates: heavy computation, raw SQL-ish calls or business rules inside template files.\n\n\
+**Styles (CSS/SCSS):**\n\
+- Architecture: is there a discernible convention (BEM, utility, tokens)? Mixed conventions in the same codebase = finding.\n\
+- Duplication: same rule blocks repeated (sample the 2 largest files); hardcoded colors/sizes repeated ≥5 times instead of variables.\n\
+- Dead selectors: classes defined but absent from every template (sample 20 selectors).\n\
+- Single global stylesheet > ~1500 lines with no imports/layers = finding.\n\n\
+**Backend code (PHP, TS/JS, Rust, Python… — whatever the project uses):**\n\
+- God files: source files > ~500 lines mixing unrelated responsibilities; name the worst 3 with line counts.\n\
+- Dead code: unreferenced functions/classes/exports (sample; use grep on symbol names).\n\
+- Swallowed errors: empty catch blocks, `catch (e) {}`, `@`-suppression (PHP), `.unwrap()` chains on fallible paths in handlers.\n\
+- Copy-paste logic: same function body duplicated across files (sample the controllers/services layer).\n\
+- Typing hygiene where the language offers it: untyped public signatures, `any`/`mixed` density.\n\
+- TODO/FIXME/HACK density: count them; > 20 in source (not docs) = finding listing the 5 oldest.\n\n\
+**Perf & eco hygiene (code-level only — infra belongs to other audits):**\n\
+- Assets: images > 300 KB served without modern format (webp/avif); JS/CSS bundles not minified in the build.\n\
+- Requests in loops: DB/HTTP calls inside iteration (N+1 shape) — sample controllers/services.\n\
+- Caching affordances in code: repeated identical computations/fetches with no memoization where an obvious hot path exists.\n\n\
+# B. ANTI-REPETITION (priors)\n\n\
+Before writing findings: read existing `docs/tech-debt/TD-*.md`. If a finding matches an \
+existing one, REUSE its ID (append an `audit_history` entry — never overwrite, never re-slug).\n\n\
+# C. OUTPUT FORMAT\n\n\
+1. Write `docs/inconsistencies-code-quality.md` with the standard table header:\n\
+   `| ID | Problem | Area | Severity |`\n\
+2. For each finding, also write `docs/tech-debt/<ID>.md` using the existing TD detail template — \
+   add a `**Category**: code-quality` line.\n\
+3. Status taxonomy: `Verified in source` (you read the file) vs `Inferred` (pattern only).\n\
+4. Cap: 20 findings. High severity exempt from the cap.\n\
+5. Each finding: file path + line, one-sentence maintainability impact, one-sentence remediation.",
+        sources: &["__GIT_SOURCE_TREE__"],
+    },
+];
+
+/// Relevance gate prepended to every CHAINED sub-audit step: a dimension
+/// that doesn't apply to the audited project must cost one line, not a
+/// full agent pass ("si pas utile au projet → on passe").
+pub(crate) const CHAINED_STEP_GATE: &str = "\
+# RELEVANCE GATE (answer FIRST, before anything else)\n\
+This dimension may not apply to this project. Assess applicability in ≤ 5 tool calls \
+(e.g. a Docker audit on a project with no Dockerfile/compose, a Database audit on a \
+static site with no DB layer). If NOT applicable: write your index file with the single \
+line `Not applicable: <one-sentence reason>` and STOP — no findings, no TD files.\n";
+
+/// 0.8.13 — the chained audit: a Full run = the 9 foundation steps PLUS
+/// every focused sub-audit appended, so one launch covers everything and
+/// the single validation discussion at the end confirms the WHOLE TD set.
+/// RGAA stays on-demand (French legal norm, superset of the chained a11y
+/// pass). Sub-audits remain individually launchable for surgical re-scans.
+/// Which prompt gate a step gets: chained sub-audit steps (past the
+/// foundation) open with the relevance gate; foundation steps and
+/// standalone sub-audits (deliberately chosen by the user) never do.
+pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &'static str {
+    if step_1_based >= first_chained_step { CHAINED_STEP_GATE } else { "" }
+}
+
+pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<AnalysisStep> {
+    use crate::models::AuditKind;
+    if !matches!(kind, AuditKind::Full) {
+        return kind_to_steps(kind).to_vec();
+    }
+    let mut chain = ANALYSIS_STEPS.to_vec();
+    for sub in [
+        AuditKind::Security,
+        AuditKind::Docker,
+        AuditKind::Performance,
+        AuditKind::Accessibility,
+        AuditKind::Database,
+        AuditKind::ApiDesign,
+        AuditKind::CodeQuality,
+    ] {
+        chain.extend_from_slice(kind_to_steps(sub));
+    }
+    chain
+}
+
+/// Step-8 prompt context, shared by the Full and partial pipelines (Codex
+/// lot-3 #4): the deterministic detector signals AND the known-debt digest
+/// block travel together — a partial re-run of step 8 with only half the
+/// inputs would duplicate priors or miss anchored signals.
+pub(crate) fn step8_context_block(
+    signals: &[crate::core::audit_detectors::DetectedSignal],
+    prior_td_digests: &[reconciliation::PriorDigest],
+) -> String {
+    let mut out = format!("\n\n{}\n", crate::core::audit_detectors::render_signals_block(signals));
+    if !prior_td_digests.is_empty() {
+        out.push_str(&format!(
+            "\n\n{}\n",
+            reconciliation::render_known_debt_block(prior_td_digests),
+        ));
+    }
+    out
+}
+
+/// Whether a chained step can be refreshed via partial-audit: only steps
+/// with a REAL docs/ target are verifiable post-run — the synthetic REVIEW
+/// pseudo-step (no file) would pass the validator on exit code 0 alone.
+pub(crate) fn partial_selectable(step: &AnalysisStep) -> bool {
+    step.target_file != "REVIEW"
+        && !step.target_file.is_empty()
+        && step.target_file.starts_with("docs/")
+}
+
+/// Agents eligible to RUN an audit: the pipeline's only deliverable is
+/// files written into `docs/`, so an agent without filesystem access can
+/// only produce a silent no-op that the validator then flags step by step.
+/// ALLOWLIST, not denylist (Codex A4 v2): a new/unknown variant must force
+/// a compiler decision here instead of being audit-capable by default —
+/// `Custom`'s runner is a bare `echo` that exits 0, the exact silent no-op
+/// this gate exists to stop. Mirrored by the UI's `canRunAudit`, enforced
+/// here because MCP/bridge callers bypass the UI entirely.
+pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
+    use crate::models::AgentType;
+    match agent {
+        AgentType::ClaudeCode
+        | AgentType::Codex
+        | AgentType::GeminiCli
+        | AgentType::Kiro
+        | AgentType::CopilotCli => true,
+        AgentType::Vibe | AgentType::Ollama | AgentType::Custom => false,
+    }
+}
+
 pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [AnalysisStep] {
     use crate::models::AuditKind;
     match kind {
@@ -1055,6 +1204,7 @@ pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [Analysi
         AuditKind::Rgaa          => RGAA_STEPS,
         AuditKind::Database      => DATABASE_STEPS,
         AuditKind::ApiDesign     => API_DESIGN_STEPS,
+        AuditKind::CodeQuality   => CODE_QUALITY_STEPS,
         // Custom is handled at the call site: it builds a one-off
         // AnalysisStep from req.custom_prompt rather than using a const.
         AuditKind::Custom        => &[],
@@ -1074,11 +1224,83 @@ mod kind_dispatch_tests {
     use crate::models::AuditKind;
 
     #[test]
-    fn full_kind_returns_canonical_9_steps() {
+    fn public_docs_match_chained_audit_contract() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("backend crate must live below the repository root");
+        let readme = std::fs::read_to_string(repo_root.join("README.md"))
+            .expect("README.md must be readable");
+        let architecture = std::fs::read_to_string(
+            repo_root.join("docs/architecture/overview.md"),
+        )
+        .expect("architecture overview must be readable");
+
+        for expected in ["Step 8", "CodeQuality", "Rgaa"] {
+            assert!(
+                readme.contains(expected) || architecture.contains(expected),
+                "public docs must name {expected}"
+            );
+        }
+        assert!(readme.contains("9 docs steps"));
+        assert!(readme.contains("16 steps"));
+        assert!(architecture.contains("9 étapes de fondation"));
+        assert!(architecture.contains("chaîne complète de 16 étapes"));
+
+        for stale in [
+            "Step 9 now ALWAYS",
+            "Step 9 also flags",
+            "Full` reste la base (10 steps)",
+            "4 checks non-skippables",
+            "`Active`/`Reopened`",
+        ] {
+            assert!(
+                !readme.contains(stale) && !architecture.contains(stale),
+                "public docs still contain stale audit contract: {stale}"
+            );
+        }
+
+        let active_contract_sources = [
+            include_str!("full.rs"),
+            include_str!("run.rs"),
+            include_str!("helpers.rs"),
+            include_str!("../../models/projects.rs"),
+            include_str!("../../db/sql/050_audit_runs.sql"),
+            include_str!("../../../../frontend/src/components/ProjectCard.tsx"),
+            include_str!("../../../../frontend/src/types/generated.ts"),
+        ]
+        .join("\n");
+        for stale in [
+            "run the 9-step audit",
+            "run 9-step audit",
+            "once the 9-step loop begins",
+            "Run 9-step audit",
+            "auditing step N/10",
+            "Reprendre Step N/10",
+            "`last_completed_step` ∈ 1..=9",
+            "before reaching step 10",
+            "10 = full pipeline ran to end",
+            "Step 9's cluster detector",
+            "outside the audit's 9-step pipeline",
+            "all 9 steps success",
+            "before step 10",
+            "did we reach step 10?",
+            "protocol the 9-step audit",
+            "runs the canonical 9-step pipeline",
+        ] {
+            assert!(
+                !active_contract_sources.contains(stale),
+                "active source comments still contain stale audit contract: {stale}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_kind_returns_canonical_9_step_foundation() {
         let steps = kind_to_steps(AuditKind::Full);
         assert_eq!(steps.len(), ANALYSIS_STEPS.len(),
             "Full kind must return the canonical step list, not a subset");
-        assert_eq!(steps.len(), 9, "Full audit is the documented 9-step pipeline");
+        assert_eq!(steps.len(), 9,
+            "kind_to_steps(Full) is the 9-step foundation before launch-time chaining");
     }
 
     #[test]
@@ -1092,11 +1314,68 @@ mod kind_dispatch_tests {
             AuditKind::Accessibility,
             AuditKind::Database,
             AuditKind::ApiDesign,
+            AuditKind::CodeQuality,
         ] {
             let steps = kind_to_steps(kind);
             assert_eq!(steps.len(), 1,
                 "{:?} should expose one focused step in 0.8.2 (S2.D3-D5 fill the body)", kind);
         }
+    }
+
+    #[test]
+    fn full_chain_appends_every_sub_audit_after_the_foundation() {
+        // "Un seul audit qui envoie du pâté" : Full = 9 foundation steps +
+        // the 7 chained dimensions, each single-step. RGAA stays on-demand.
+        let chain = assemble_chained_steps(AuditKind::Full);
+        assert_eq!(chain.len(), ANALYSIS_STEPS.len() + 7);
+        assert_eq!(chain[ANALYSIS_STEPS.len()].target_file, "docs/inconsistencies-security.md");
+        assert_eq!(chain.last().unwrap().target_file, "docs/inconsistencies-code-quality.md");
+        assert!(!chain.iter().any(|s| s.target_file.contains("rgaa")),
+            "RGAA is legal/on-demand, never chained by default");
+    }
+
+    #[test]
+    fn non_full_kinds_do_not_chain() {
+        assert_eq!(assemble_chained_steps(AuditKind::Security).len(), 1);
+        assert_eq!(assemble_chained_steps(AuditKind::CodeQuality).len(), 1);
+    }
+
+    #[test]
+    fn chained_sub_audits_are_findings_indices_and_drift_trackable() {
+        // #8 + F27 — the Full baseline checksums the WHOLE chain, so every
+        // chained sub-audit (steps 10..16) is a findings index AND carries a
+        // drift source: the source-bearing dimensions (Security/Docker) hash
+        // their own file sets, the broad passes (perf/a11y/api-design/
+        // code-quality/database) use the F27 `__GIT_SOURCE_TREE__` fingerprint
+        // — content+structure of the source tree, excluding Kronn outputs, so
+        // tracking them no longer self-drifts on the audit's own commit.
+        let chain = assemble_chained_steps(AuditKind::Full);
+        let subs = &chain[ANALYSIS_STEPS.len()..];
+        assert_eq!(subs.len(), 7, "7 chained sub-audits after the 9 foundation steps");
+        for s in subs {
+            assert!(s.target_file.contains("inconsistencies-"),
+                "{} must be a findings index", s.target_file);
+            assert!(!s.sources.is_empty(),
+                "{} must carry a drift source (F27 fingerprint or file set)", s.target_file);
+        }
+    }
+
+    #[test]
+    fn gate_applies_to_chained_steps_only() {
+        let first_chained = ANALYSIS_STEPS.len() + 1;
+        assert_eq!(gate_for_step(1, first_chained), "");
+        assert_eq!(gate_for_step(ANALYSIS_STEPS.len(), first_chained), "");
+        assert_eq!(gate_for_step(first_chained, first_chained), CHAINED_STEP_GATE);
+        assert_eq!(gate_for_step(16, first_chained), CHAINED_STEP_GATE);
+        // A standalone sub-audit (1 step, user-chosen) never gets gated.
+        assert_eq!(gate_for_step(1, first_chained), "");
+    }
+
+    #[test]
+    fn chained_gate_orders_the_early_exit() {
+        assert!(CHAINED_STEP_GATE.contains("RELEVANCE GATE"));
+        assert!(CHAINED_STEP_GATE.contains("Not applicable"));
+        assert!(CHAINED_STEP_GATE.contains("STOP"));
     }
 
     #[test]
@@ -1120,6 +1399,7 @@ mod kind_dispatch_tests {
             (AuditKind::Rgaa,          "docs/inconsistencies-rgaa"),
             (AuditKind::Database,      "docs/inconsistencies-database"),
             (AuditKind::ApiDesign,     "docs/inconsistencies-api"),
+            (AuditKind::CodeQuality,   "docs/inconsistencies-code-quality"),
         ] {
             let steps = kind_to_steps(kind);
             assert_ne!(steps[0].target_file, canonical,
@@ -1239,9 +1519,185 @@ mod kind_dispatch_tests {
 
 #[cfg(test)]
 mod prompt_tests {
-    use super::helpers::{build_briefing_prompt, build_validation_prompt};
+    use super::helpers::{build_briefing_prompt, build_sub_audit_validation_prompt, build_validation_prompt, run_scope_block};
     use super::*;
     use crate::models::AuditInfo;
+
+    #[test]
+    fn code_quality_validation_routes_to_its_own_index() {
+        // Codex r6 P0 — the CodeQuality arm was missing from the sub-audit
+        // validation builder: it fell into the defensive fallback and told
+        // the agent to validate against inconsistencies-tech-debt.md while
+        // the audit had written inconsistencies-code-quality.md.
+        let p = build_sub_audit_validation_prompt(
+            crate::models::AuditKind::CodeQuality, "fr", false, &[],
+        );
+        assert!(p.contains("docs/inconsistencies-code-quality.md"),
+            "CodeQuality validation must target its own index");
+        assert!(!p.contains("docs/inconsistencies-tech-debt.md"),
+            "…and never the Full-audit fallback index");
+    }
+
+    #[test]
+    fn validation_never_confirms_on_silence() {
+        // Codex r6 P0 — option (c) auto-confirmed every unselected TD while
+        // the same prompt forbade batch confirmation. Silence must never
+        // become `Confirmed by user`, in any locale or variant.
+        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        for lang in ["fr", "en", "es"] {
+            let p = build_validation_prompt(lang, &info, false, &[]);
+            assert!(!p.contains("automatiquement marqu") && !p.contains("automaticamente `Confirmed"),
+                "{lang}: no TD may be auto-confirmed");
+            assert!(!p.contains("default to `Confirmed by user`"),
+                "{lang}: unselected TDs must keep their status");
+        }
+        let sub = build_sub_audit_validation_prompt(
+            crate::models::AuditKind::Security, "fr", false, &[],
+        );
+        assert!(sub.contains("gardent leur statut actuel"),
+            "sub-audit variant must state that unselected TDs keep their status");
+    }
+
+    #[test]
+    fn validation_scopes_to_the_run_td_ids() {
+        // Codex r6 P0 — the validation phase read every TD-*.md on disk and
+        // could re-open findings settled by previous validations. The scope
+        // block pins the exact ids this run touched.
+        let ids = vec!["TD-20260720-a".to_string(), "TD-20260720-b".to_string()];
+        let block = run_scope_block(&ids, "fr");
+        assert!(block.contains("TD-20260720-a, TD-20260720-b"));
+        assert!(block.contains("UNIQUEMENT"));
+        assert!(run_scope_block(&[], "fr").is_empty(), "no ids → no scope block (fresh install)");
+
+        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        let p = build_validation_prompt("fr", &info, false, &ids);
+        assert!(p.contains("TD-20260720-a"), "Full validation prompt must embed the run scope");
+        let sub = build_sub_audit_validation_prompt(
+            crate::models::AuditKind::Docker, "fr", false, &ids,
+        );
+        assert!(sub.contains("TD-20260720-b"), "sub-audit prompt must embed the run scope");
+    }
+
+    #[test]
+    fn validation_no_longer_claims_a_ten_step_pipeline() {
+        // Codex r6 P1 — the prompt announced "step 10/10" and "9 analysis
+        // steps" after the pipeline grew to 16 chained steps.
+        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        for lang in ["fr", "en", "es"] {
+            let p = build_validation_prompt(lang, &info, false, &[]);
+            assert!(!p.contains("10/10"), "{lang}: stale step count");
+            assert!(!p.contains("9 analysis steps") && !p.contains("9 etapes") && !p.contains("9 étapes"),
+                "{lang}: stale analysis-step count");
+        }
+    }
+
+    #[test]
+    fn security_prompt_never_pulls_secret_values_into_context() {
+        // Codex r7 P0 — the agent runs full-access and its context leaves
+        // the machine: the checklist must detect secrets by metadata only.
+        // Canary on the assembled step prompt (static — values only ever
+        // enter via tool use the prompt now forbids).
+        let p = SECURITY_STEPS[0].prompt;
+        assert!(!p.contains("and read each"), "must never instruct reading .env content");
+        assert!(!p.contains("-p -S") && !p.contains("--all -p"), "git history search must never dump patches");
+        assert!(p.contains("--name-only"), "history search is metadata-only");
+        assert!(p.contains("EXFILTRATION GUARD"), "the absolute never-transmit rule must be present");
+        assert!(p.contains("Findings carry file + line + pattern type only"));
+        // Codex r9 — the value-scan is not safely runnable by an LLM agent:
+        // the prompt must claim honest non-coverage, never a clean bill.
+        assert!(p.matches("Not evaluated safely").count() >= 3,
+            "each secret-content sub-check must be individually labeled");
+        // Codex sync (msg 105) — positive semantic coverage on the FULL
+        // pipeline's own secret mentions, not just the Security sub-audit.
+        let full: String = ANALYSIS_STEPS.iter().map(|s| s.prompt).collect();
+        assert!(full.contains("CI secret sourcing: `Not evaluated safely"),
+            "Full step 7 CI credential check must be honestly non-evaluated");
+        assert!(full.contains("Values inside tracked `.env*` files: `Not evaluated safely"),
+            "Full step 7 .env value check must be honestly non-evaluated");
+        assert!(full.contains("git ls-files -- '*.env*' '.env*'"),
+            "tracked-.env detection must be the quoted pathspec form");
+        // The RULE, over EVERY step prompt of all three lists: any grep
+        // command shape near credential material must be filename-only, and
+        // no content-inspection recipe may exist anywhere.
+        let all_prompts: Vec<&str> = ANALYSIS_STEPS.iter()
+            .chain(SECURITY_STEPS.iter())
+            .chain(DOCKER_STEPS.iter())
+            .map(|s| s.prompt)
+            .collect();
+        for prompt in all_prompts {
+            for recipe in ["grep -cE", "grep -nE", "search for `Bearer ", "and read each", "emit TD if literal credentials found", "emit TD if found, this is almost always a leak"] {
+                assert!(!prompt.contains(recipe), "content-inspection recipe survived: {recipe}");
+            }
+            for (i, _) in prompt.match_indices("grep -") {
+                let window = &prompt[i..(i + 60).min(prompt.len())];
+                let near_secrets = ["secret", "credential", "env_file", "_PASSWORD", "Bearer", ".env"]
+                    .iter().any(|w| prompt[i.saturating_sub(300)..(i + 200).min(prompt.len())].contains(w));
+                if near_secrets {
+                    assert!(window.starts_with("grep -l"),
+                        "only filename-only grep (-l) allowed near credential material, found: {window}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn audit_capability_excludes_agents_without_filesystem() {
+        // Codex A4 — Ollama is a bare HTTP chat (runner: "NO executable
+        // tools and NO file access") and Vibe is API-only: neither can
+        // write the docs/ deliverables. The predicate gates BOTH launch
+        // endpoints because MCP callers bypass the UI's canAudit.
+        use crate::models::AgentType;
+        // Exhaustive over EVERY variant — a new one added without updating
+        // the allowlist fails compilation, and this pins today's contract.
+        for (agent, expected) in [
+            (AgentType::ClaudeCode, true),
+            (AgentType::Codex, true),
+            (AgentType::GeminiCli, true),
+            (AgentType::Kiro, true),
+            (AgentType::CopilotCli, true),
+            (AgentType::Vibe, false),
+            (AgentType::Ollama, false),
+            // Custom's runner is `echo "Custom agent not configured"` —
+            // exit 0, zero writes: the canonical silent no-op.
+            (AgentType::Custom, false),
+        ] {
+            assert_eq!(agent_can_audit(&agent), expected, "{agent:?}");
+        }
+    }
+
+    #[test]
+    fn partial_validation_prompt_matrix_localized_and_scoped() {
+        // Codex lot-2 v3 — full localization matrix × TD presence. The
+        // allowlist must be exact, EN/ES must carry no French protocol, and
+        // the TD phase must vanish entirely when no TD was touched.
+        use super::helpers::build_partial_validation_prompt;
+        let files = vec!["docs/inconsistencies-security.md".to_string()];
+        let ids = vec!["TD-20260720-x".to_string()];
+        for lang in ["fr", "en", "es"] {
+            // With TDs: allowlist = index + exact detail file, review phase present.
+            let p = build_partial_validation_prompt(&files, &ids, lang);
+            assert!(p.contains("docs/inconsistencies-security.md"), "{lang}");
+            assert!(p.contains("docs/tech-debt/TD-20260720-x.md"),
+                "{lang}: the exact TD detail file must be allowlisted");
+            assert!(p.contains("TD-20260720-x"), "{lang}: scope block present");
+            assert!(p.contains("KRONN:VALIDATION_COMPLETE"), "{lang}");
+            // Without TDs: no scope block, no TD phase, explicit no-TD note.
+            let p0 = build_partial_validation_prompt(&files, &[], lang);
+            assert!(!p0.contains("SCOPE"), "{lang}: empty ids → no scope block");
+            assert!(!p0.contains("BULK-FIRST"), "{lang}: no TD review phase");
+            assert!(!p0.contains("audit_history"), "{lang}: no TD instruction at all");
+        }
+        // EN/ES carry none of the French protocol.
+        for lang in ["en", "es"] {
+            let p = build_partial_validation_prompt(&files, &ids, lang);
+            for french in ["Marqueurs", "Revue des TDs", "gardent leur statut", "ré-émis"] {
+                assert!(!p.contains(french), "{lang} must not contain French: {french}");
+            }
+        }
+        // FR sanity.
+        let fr = build_partial_validation_prompt(&files, &ids, "fr");
+        assert!(fr.contains("SURFACE MODIFIABLE"));
+    }
 
     #[test]
     fn preamble_says_autonomous() {
@@ -1255,6 +1711,17 @@ mod prompt_tests {
     fn analysis_steps_include_decisions_md() {
         let has_decisions = ANALYSIS_STEPS.iter().any(|step| step.prompt.contains("decisions.md"));
         assert!(has_decisions, "At least one audit step must fill decisions.md");
+    }
+
+    #[test]
+    fn step1_prompt_orders_template_scaffolding_cleanup() {
+        // A filled AGENTS.md kept the "TEMPLATE FILE" banner + inline
+        // bracketed hints (observed on the docroms-web run) — the prompt
+        // must order their removal explicitly.
+        let prompt = ANALYSIS_STEPS[0].prompt;
+        assert!(prompt.contains("CLEANUP ONCE FILLED"), "cleanup section missing");
+        assert!(prompt.contains("TEMPLATE FILE"), "must name the banner to remove");
+        assert!(prompt.contains("bracketed hint"), "must order inline-hint removal");
     }
 
     #[test]
@@ -1289,10 +1756,10 @@ mod prompt_tests {
     }
 
     #[test]
-    fn step9_target_is_decisions_md_for_validate_and_repair_guard() {
+    fn step9_target_is_decisions_md_for_validation_guard() {
         // 0.8.3 FIX — decisions.md was getting forgotten because it was
         // a *secondary* output of Step 8 (tech-debt) buried 200 lines
-        // deep in the prompt. `validate_and_repair_step_output` only
+        // deep in the prompt. `validate_step_output` only
         // checks `target_file`, so a missed decisions.md produced no
         // step_warning. Step 9 now PROMOTES decisions.md to its own
         // target_file so the guard fires when it's not filled, AND
@@ -1301,7 +1768,7 @@ mod prompt_tests {
         assert_eq!(
             step9.target_file,
             "docs/decisions.md",
-            "Step 9 must target decisions.md so validate_and_repair_step_output catches an unfilled file"
+            "Step 9 must target decisions.md so validate_step_output catches an unfilled file"
         );
         // The prompt must still cover the original "final review" duty.
         assert!(step9.prompt.contains("PHASE 1"), "Step 9 must keep the final-review phase");
@@ -1547,8 +2014,8 @@ mod prompt_tests {
         // the nudge is noise.
         let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
         for lang in ["fr", "en", "es"] {
-            let with    = build_validation_prompt(lang, &info, true);
-            let without = build_validation_prompt(lang, &info, false);
+            let with    = build_validation_prompt(lang, &info, true, &[]);
+            let without = build_validation_prompt(lang, &info, false, &[]);
             assert!(with.contains(".github/ISSUE_TEMPLATE"),
                 "{} prompt with tracker MCP must contain the template check", lang);
             assert!(!without.contains(".github/ISSUE_TEMPLATE"),
@@ -1566,7 +2033,7 @@ mod prompt_tests {
         // enumerates all 3 types AND tells the agent to grep + resolve.
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
-            let prompt = build_validation_prompt(lang, &info, false);
+            let prompt = build_validation_prompt(lang, &info, false, &[]);
             for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
                 assert!(prompt.contains(marker),
                     "{lang} Phase 2 must mention `{marker}` so the agent processes it");
@@ -1587,7 +2054,7 @@ mod prompt_tests {
         // silently revert it.
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
-            let prompt = build_validation_prompt(lang, &info, false);
+            let prompt = build_validation_prompt(lang, &info, false, &[]);
             // The new flow advertises itself with "BULK-FIRST" — a
             // marker an unfamiliar editor will see + understand.
             assert!(prompt.contains("BULK-FIRST"),
@@ -1611,7 +2078,7 @@ mod prompt_tests {
     fn validation_prompt_forbids_code_modification() {
         for lang in ["fr", "en", "es"] {
             let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
-            let prompt = build_validation_prompt(lang, &info, false);
+            let prompt = build_validation_prompt(lang, &info, false, &[]);
             let lower = prompt.to_lowercase();
             assert!(lower.contains("never modify") || lower.contains("ne modifie jamais") || lower.contains("nunca modifiques"),
                 "Validation prompt ({}) must forbid code modification", lang);
@@ -1745,7 +2212,7 @@ mod prompt_tests {
     /// `touch backend/src/models/projects.rs && cargo test export_bindings`
     /// to regen, or hand-edit `frontend/src/types/LaunchAuditRequest.ts`.
     #[test]
-    fn launch_audit_request_shape_pins_kind_and_resume_from() {
+    fn launch_audit_request_shape_pins_kind_and_resume_run_id() {
         // Round-trip JSON to assert the field set hasn't drifted from
         // what the frontend expects. If a new field is added to the
         // Rust struct, this test forces the maintainer to also update
@@ -1757,25 +2224,25 @@ mod prompt_tests {
             "agent": "ClaudeCode",
             "kind": "Rgaa",
             "custom_prompt": null,
-            "resume_from": 5
-        }"#).expect("LaunchAuditRequest must accept the full 0.8.4 shape");
+            "resume_run_id": "run-abc"
+        }"#).expect("LaunchAuditRequest must accept the current shape");
         assert!(matches!(req.agent, AgentType::ClaudeCode));
         assert_eq!(req.kind, Some(AuditKind::Rgaa));
         assert!(req.custom_prompt.is_none());
-        assert_eq!(req.resume_from, Some(5));
+        assert_eq!(req.resume_run_id.as_deref(), Some("run-abc"));
 
-        // Backwards compat: a 0.8.2-era client that only sends `agent`
-        // must still parse (the audit pipeline defaults kind=Full).
+        // Backwards compat: a client that only sends `agent` must still
+        // parse (the audit pipeline defaults kind=Full, fresh run).
         let legacy: LaunchAuditRequest = serde_json::from_str(r#"{"agent":"ClaudeCode"}"#)
-            .expect("legacy 0.8.2 shape must still parse");
+            .expect("minimal shape must still parse");
         assert!(legacy.kind.is_none());
-        assert!(legacy.resume_from.is_none());
+        assert!(legacy.resume_run_id.is_none());
     }
 
     /// 0.8.4 (#320 / B4) — assert the hand-shipped
     /// `frontend/src/types/LaunchAuditRequest.ts` covers ALL fields of
     /// the Rust struct. ts-rs auto-export is unreliable on this struct
-    /// in the current setup (cf. `launch_audit_request_shape_pins_kind_and_resume_from`),
+    /// in the current setup (cf. `launch_audit_request_shape_pins_kind_and_resume_run_id`),
     /// so we pin the file content here. If a new field is added to
     /// the Rust struct, this test fails until the .ts file is
     /// updated to match — preventing the silent type drift that bit
@@ -1802,7 +2269,7 @@ mod prompt_tests {
         // (with `?` for Option<T>). The test is intentionally loose
         // on the exact spelling — what matters is that the property
         // name is present and the file imports the right enum types.
-        for field in ["agent", "kind", "custom_prompt", "resume_from"] {
+        for field in ["agent", "kind", "custom_prompt", "resume_run_id"] {
             assert!(content.contains(field),
                 "LaunchAuditRequest.ts is missing field `{}` — update the hand-shipped file to match the Rust struct ({})",
                 field, ts_path.display(),

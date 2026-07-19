@@ -37,8 +37,8 @@ pub const DEFAULT_MAX_CONCURRENT_AGENTS: usize = 5;
 ///
 /// `progress` is the data source for `GET /api/projects/:id/audit-status` —
 /// the UI polls it to resume the progress bar after tab/page navigation.
-/// Entries are inserted by the SSE streams (`run_audit`, `partial_audit`,
-/// `full_audit`) and removed on completion/cancel/error.
+/// Entries are inserted by the SSE streams (`full_audit`, `partial_audit`)
+/// and removed on completion/cancel/error.
 #[derive(Default)]
 pub struct AuditTracker {
     /// Currently running child PID per project (if any)
@@ -47,9 +47,28 @@ pub struct AuditTracker {
     pub cancelled: HashSet<String>,
     /// Live progress snapshot per project — empty when no audit runs.
     pub progress: HashMap<String, crate::models::AuditProgress>,
+    /// Projects with an audit lease held. One audit (Full, specialized OR
+    /// partial) per project at a time: `try_acquire_lease` is the single
+    /// atomic gate all three launch paths go through, replacing the old
+    /// check-then-insert race (two callers could both see the tracker + DB
+    /// idle, then both insert a Running row). Released by the run's
+    /// drop-guard when it ends — normally, on cancel, or on abandonment.
+    pub leased: HashSet<String>,
 }
 
 impl AuditTracker {
+    /// Atomically take the audit lease for a project. Returns `false` if one
+    /// is already held (caller must refuse the launch). Called under the
+    /// tracker mutex, so the check-and-insert can't race a second caller.
+    pub fn try_acquire_lease(&mut self, project_id: &str) -> bool {
+        self.leased.insert(project_id.to_string())
+    }
+
+    /// Release a project's audit lease. Idempotent.
+    pub fn release_lease(&mut self, project_id: &str) {
+        self.leased.remove(project_id);
+    }
+
     /// Seed progress when an audit stream starts. Called from the `start`
     /// SSE event. Resets any stale progress row for the same project.
     pub fn start_progress(
@@ -567,7 +586,6 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/{id}/anti-hallu/status", get(api::projects::anti_hallu_inject::status))
         .route("/api/projects/{id}/anti-hallu/inject", post(api::projects::anti_hallu_inject::inject))
         .route("/api/projects/{id}/redirectors/sync", post(api::projects::anti_hallu_inject::sync_redirectors))
-        .route("/api/projects/{id}/ai-audit", post(api::audit::run_audit))
         .route("/api/projects/{id}/audit-info", get(api::audit::audit_info))
         .route("/api/projects/{id}/drift", get(api::audit::check_drift))
         .route("/api/projects/{id}/partial-audit", post(api::audit::partial_audit))
@@ -1003,6 +1021,20 @@ mod audit_tracker_tests {
         t.start_progress("proj-c", 5, "partial");
         t.clear_progress("proj-c");
         assert!(t.get_progress("proj-c").is_none());
+    }
+
+    #[test]
+    fn audit_lease_is_exclusive_per_project() {
+        // The single atomic gate for Full/specialized/partial: the first
+        // acquire wins, a second is refused until release. Different projects
+        // are independent.
+        let mut t = AuditTracker::default();
+        assert!(t.try_acquire_lease("p1"), "first acquire wins");
+        assert!(!t.try_acquire_lease("p1"), "second acquire refused while held");
+        assert!(t.try_acquire_lease("p2"), "other project unaffected");
+        t.release_lease("p1");
+        assert!(t.try_acquire_lease("p1"), "re-acquirable after release");
+        t.release_lease("nonexistent"); // idempotent, no panic
     }
 
     #[test]

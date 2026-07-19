@@ -3,7 +3,8 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
-import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isUsable, isTrackerMcp } from '../lib/constants';
+import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
+import { canRunAudit, canRunBriefing } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from './SwipeableDiscItem';
 import AuditRecapPanel from './AuditRecapPanel';
@@ -36,15 +37,15 @@ function formatElapsedShort(ms: number): string {
   return s >= 60 ? `${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s` : `${s}s`;
 }
 
-/** Agents that can run audits/briefings (need filesystem access + CLI mode). Excludes Vibe (API-only). */
-const canAudit = (a: AgentDetection) => isUsable(a) && a.agent_type !== 'Vibe';
-
 export interface ProjectCardProps {
   project: Project;
   isOpen: boolean;
   onToggleOpen: () => void;
   discussions: Discussion[];
   driftStatus: DriftCheckResponse | undefined;
+  /** The Dashboard fleet poll sees a live audit for this project (possibly
+   *  launched outside this card — MCP bridge, CLI). Triggers poll adoption. */
+  externalAuditLive?: boolean;
   agents: AgentDetection[];
   allSkills: Skill[];
   mcpConfigs: McpConfigDisplay[];
@@ -62,6 +63,7 @@ export interface ProjectCardProps {
 }
 
 export function ProjectCard({
+  externalAuditLive = false,
   project: proj,
   isOpen,
   onToggleOpen,
@@ -270,9 +272,9 @@ export function ProjectCard({
 
   // 0.8.3 (#311) — resumable audit detection. Polled at mount + after
   // each audit completion/error so the "Lancer l'audit" button can
-  // flip to "Reprendre Step N/10" when an Interrupted run is on file
+  // flip to the dynamic resume CTA when an Interrupted run is on file
   // for this project. `null` = no resumable run; otherwise the row.
-  const [resumableAudit, setResumableAudit] = useState<{ id: string; last_completed_step: number; started_at: string } | null>(null);
+  const [resumableAudit, setResumableAudit] = useState<{ id: string; kind: AuditKind; last_completed_step: number; started_at: string } | null>(null);
   useEffect(() => {
     let cancelled = false;
     projectsApi.auditResumable(proj.id).then(row => {
@@ -281,6 +283,14 @@ export function ProjectCard({
     }).catch(() => { /* idle on error — button stays "Lancer" */ });
     return () => { cancelled = true; };
   }, [proj.id, proj.audit_status, auditActive]);
+
+  // Briefing agent: an explicit audit pick stays valid (audit-capable ⊂
+  // briefing-capable), otherwise fall back to any BRIEFING-capable agent —
+  // never the audit list, which is empty when only Ollama is installed
+  // while the briefing legitimately works with it.
+  const briefingAgentPick = (auditAgentChoice && agents.some(a => a.agent_type === auditAgentChoice && canRunBriefing(a)))
+    ? auditAgentChoice
+    : (agents.filter(canRunBriefing)[0]?.agent_type ?? 'ClaudeCode');
 
   // ── Computed ──
   const validationDisc = projDiscussions.find(d => isValidationDisc(d.title) && !d.archived);
@@ -457,7 +467,7 @@ export function ProjectCard({
     onRefetchDiscussions();
   }, [auditAbortController, proj.id, toast, t, onRefetch, onRefetchDiscussions, stopAuditPolling]);
 
-  const handleFullAudit = useCallback(async (resumeFromOverride?: number, kindOverride?: AuditKind) => {
+  const handleFullAudit = useCallback(async (kindOverride?: AuditKind) => {
     // Guard against double-click — `setAuditActive(true)` flips the UI to
     // the progress panel synchronously, but a fast double-click can call
     // this handler twice before React re-renders, spawning two concurrent
@@ -468,12 +478,15 @@ export function ProjectCard({
     // bails out before the second SSE is dispatched.
     if (auditActiveRef.current) return;
     auditActiveRef.current = true;
-    // 0.8.3 (#311) — resume support. If the caller didn't pass
-    // an explicit `resumeFromOverride` AND there is a resumable
-    // interrupted run on file, transparently resume from there.
-    // The button copy reflects this via `resumableAudit` in the
-    // render block.
-    const resumeFrom = resumeFromOverride ?? resumableAudit?.last_completed_step ?? 0;
+    // Resume support. When a resumable interrupted run exists we resume it
+    // by id — the server derives the kind AND the checkpoint from that row,
+    // so a stale selector value can never graft onto the wrong pipeline
+    // (Codex #3). A fresh launch uses the selector's kind.
+    const resumeRunId = resumableAudit?.id ?? null;
+    // Progress-bar total: a resumed run uses its OWN kind, a fresh launch the
+    // selector's. Full/foundation → the backend sends the authoritative total
+    // on `start`; a standalone sub-audit is a single step.
+    const effectiveKind = resumeRunId ? resumableAudit?.kind : kindOverride;
     const controller = new AbortController();
     setAuditAbortController(controller);
     setAuditActive(true);
@@ -481,7 +494,7 @@ export function ProjectCard({
     // 0.8.4 (#287) — sub-audits run a single targeted step (not 10).
     // Without this the progress bar shows 1/10 forever — visually
     // freezing as if the audit hung.
-    const isSubAudit = kindOverride !== undefined && kindOverride !== 'Full';
+    const isSubAudit = effectiveKind !== undefined && effectiveKind !== 'Full';
     setAuditTotalSteps(isSubAudit ? 1 : 10);
     setAuditCurrentFile(t('audit.templateStep'));
     // 0.8.3 TD #274 — fallback wallclock seed so the elapsed chip
@@ -501,14 +514,15 @@ export function ProjectCard({
       stepIndex: 0, totalSteps: 10, currentFile: null,
     });
     try {
-      const auditAgent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
+      const auditAgent = auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode';
       await projectsApi.fullAuditStream(proj.id, {
         agent: auditAgent,
-        // 0.8.4 (#287) — pass kind through so the backend routes to
-        // SECURITY_STEPS / RGAA_STEPS / DATABASE_STEPS / etc. instead
-        // of the default ANALYSIS_STEPS.
-        kind: kindOverride ?? null,
-        resume_from: resumeFrom > 0 ? resumeFrom : null,
+        // Fresh launch: pass the selector kind so the backend routes to
+        // SECURITY_STEPS / RGAA_STEPS / etc. Resume: send ONLY the run id
+        // and null the kind — the server is authoritative for both kind and
+        // checkpoint, so a stale selector can't hijack the resumed pipeline.
+        kind: resumeRunId ? null : (kindOverride ?? null),
+        resume_run_id: resumeRunId,
       }, {
         onTemplateInstalled: () => {},
         // 0.8.3 TD #274 — backend-authoritative wallclock for the
@@ -569,13 +583,13 @@ export function ProjectCard({
           // forward motion in a tool-only phase).
           setAuditToolCallCount(prev => (prev ?? 0) + 1);
         },
-        // 0.8.3 root-cause fix — the CLI exited 0 but the step's
-        // target_file is empty / truncated (e.g. agent crashed
-        // mid-Write or the sandbox blocked the file write but the
-        // CLI didn't propagate). Backend already auto-repaired from
-        // the template; we surface a per-step warning toast so the
-        // user immediately knows the audit "succeeded" but this
-        // particular step didn't produce useful output.
+        // 0.8.3 root-cause fix — the CLI exited 0, but validation
+        // FAILED the step (target_file empty / truncated: agent crashed
+        // mid-Write, or the sandbox blocked the write without the CLI
+        // propagating it). The backend never rewrites the file
+        // (re-running the step is the only repair path) and the run
+        // will end non-green; this per-step toast tells the user which
+        // step is the culprit.
         onStepWarning: (_step, file, reason, repaired) => {
           console.warn(`[audit] step warning on ${file}: ${reason} (repaired=${repaired})`);
           toast(
@@ -583,6 +597,18 @@ export function ProjectCard({
             'error',
           );
         },
+        // NON-terminal: the step closed with its own step_done and the run
+        // continues — the done/interrupted terminal owns the cleanup UX.
+        onStepError: (error) => {
+          // The Full done has no interrupted toast (unlike the partial
+          // flow), so this non-terminal toast is the user's only visible
+          // signal for a failed step — no cleanup here.
+          console.warn('Full audit step failed:', error);
+          toast(t('audit.streamWarning', error), 'error');
+        },
+        // NON-terminal (e.g. drift baseline write failed): surface it, no
+        // cleanup — a coherent done still follows.
+        onWarning: (message) => { toast(t('audit.streamWarning', message), 'error'); },
         onValidationCreated: () => {},
         onDone: (discussionId) => {
           auditActiveRef.current = false;
@@ -631,7 +657,7 @@ export function ProjectCard({
     const steps = drift.stale_sections.map(s => s.audit_step);
     const controller = new AbortController();
     setAuditAbortController(controller);
-    const auditAgent = auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode';
+    const auditAgent = auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode';
     setAuditActive(true);
     setAuditStep(0);
     setAuditTotalSteps(steps.length);
@@ -654,14 +680,46 @@ export function ProjectCard({
         },
         onChunk: () => {},
         onStepDone: () => {},
-        onDone: () => {
+        // NON-terminal: the step closes with its own step_done and the loop
+        // continues — the `done interrupted` toast owns the terminal UX.
+        onStepError: (error) => { console.warn('Partial audit step failed:', error); },
+        // NON-terminal (post-commit baseline failure): surface it, no cleanup
+        // — the `done complete` that follows stays the terminal signal.
+        onWarning: (message) => { toast(t('audit.streamWarning', message), 'error'); },
+        onDone: (info) => {
+          // A user cancel aborts the fetch and the parser reports a clean
+          // done with no payload — the cancel handler already owns that UX
+          // (its own toast + cleanup via cancelAudit): never fall into the
+          // interrupted branch on an abort.
+          if (controller.signal.aborted) return;
           auditActiveRef.current = false;
           setAuditActive(false);
           setAuditAbortController(null);
           clearAuditCheckpoint(proj.id);
           onRefetch();
           onRefetchDrift(proj.id);
-          toast(t('audit.updateStale', String(steps.length)), 'success');
+          // A5 — a fully-successful partial created a SCOPED validation
+          // discussion (the backend already spawned its agent — no auto-run
+          // here or it would double-spawn): surface it like the Full flow.
+          onRefetchDiscussions();
+          // The runtime validator guarantees complete ⇒ discussionId — the
+          // second condition only narrows the type, a payload without an id
+          // never reaches here (refused as malformed, no legacy fallback).
+          if (info?.status === 'complete' && info.discussionId) {
+            toast(t('audit.partialValidationCreated', String(info.succeededSteps.length)), 'success');
+            // Open AND navigate — same UX as the Full validation flow; no
+            // auto-run (the backend already spawned the agent post-commit).
+            onOpenDiscussion(info.discussionId);
+            onNavigate('discussions');
+          } else if (info?.status === 'no_change') {
+            // Honest: nothing was rewritten, sections stay stale — and NO
+            // "just relaunch" nudge (manual review/acceptance is a future
+            // feature, not an available action).
+            toast(t('audit.partialNoChange'), 'error');
+          } else {
+            // Interrupted: some sections stayed stale — never a green toast.
+            toast(t('audit.partialInterrupted'), 'error');
+          }
         },
         onError: (error) => {
           // Same fix as `handleFullAudit.onError` — without resetting
@@ -684,7 +742,7 @@ export function ProjectCard({
     } finally {
       setAuditAbortController(null);
     }
-  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDrift]);
+  }, [auditAgentChoice, agents, proj.id, t, toast, onRefetch, onRefetchDrift, onRefetchDiscussions, onOpenDiscussion, onNavigate]);
 
   // ─── Audit resume on mount ───────────────────────────────────────────────
   // When a local checkpoint indicates an audit was in-flight (tab switch, page
@@ -692,6 +750,19 @@ export function ProjectCard({
   // progress bar without restarting the audit. Polls every 2 s until the
   // server reports `null` (done/cancelled/error) — then clear the checkpoint
   // and refetch the project so `audit_status` catches up.
+  // Adopt an audit launched OUTSIDE this card (MCP bridge, CLI). The mount
+  // poll below stops itself on idle cards, so an external launch that came
+  // AFTER mount was invisible — the card even offered to start an audit
+  // while one was running. The Dashboard fleet poll tells us one is live:
+  // re-arm the same adoption poll and every existing badge/chip/CTA works.
+  const [externalAdoptTick, setExternalAdoptTick] = useState(0);
+  useEffect(() => {
+    if (!externalAuditLive) return;
+    if (auditActiveRef.current || auditPollRef.current) return; // already tracking
+    resumeSettledRef.current = false;
+    setExternalAdoptTick(t => t + 1);
+  }, [externalAuditLive]);
+
   useEffect(() => {
     if (resumeSettledRef.current) return;
     resumeSettledRef.current = true;
@@ -818,7 +889,7 @@ export function ProjectCard({
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [proj.id]);
+  }, [proj.id, externalAdoptTick]);
 
   // Defensive cleanup: stop any lingering polling when the card unmounts.
   useEffect(() => {
@@ -1438,7 +1509,7 @@ export function ProjectCard({
                     {briefingFormOpen && (
                       <BriefingForm
                         projectId={proj.id}
-                        agent={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                        agent={briefingAgentPick}
                         onClose={() => setBriefingFormOpen(false)}
                         onSaved={(discId) => {
                           // 0.8.4 UX fix — single briefing flow. The form
@@ -1478,7 +1549,7 @@ export function ProjectCard({
                         <button
                           className="dash-icon-btn dash-btn-info"
                           onClick={() => setBriefingFormOpen(true)}
-                          disabled={agents.filter(canAudit).length === 0 || briefingStarting}
+                          disabled={agents.filter(canRunBriefing).length === 0 || briefingStarting}
                           title={t('briefing.formBtnTooltip')}
                           data-testid="briefing-open-form-btn"
                         >
@@ -1520,13 +1591,13 @@ export function ProjectCard({
                     <div className="flex-row gap-4">
                       <select
                         className="dash-audit-select"
-                        value={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                        value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
                         onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
                       >
-                        {agents.filter(canAudit).map(a => (
+                        {agents.filter(canRunAudit).map(a => (
                           <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
                         ))}
-                        {agents.filter(canAudit).length === 0 && (
+                        {agents.filter(canRunAudit).length === 0 && (
                           <option value="" disabled>{t('disc.noAgent')}</option>
                         )}
                       </select>
@@ -1542,6 +1613,9 @@ export function ProjectCard({
                         value={auditKindChoice}
                         onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
                         title={t('audit.kindSelector.tooltip')}
+                        // Resume is bound to the interrupted run's kind (server-derived);
+                        // lock the selector so the UI can't imply the kind is still a choice.
+                        disabled={!!resumableAudit}
                       >
                         <option value="Full">{t('audit.kind.Full')}</option>
                         <option value="Security" disabled>{t('audit.kind.Security')} {t('audit.kind.afterFull')}</option>
@@ -1551,11 +1625,12 @@ export function ProjectCard({
                         <option value="Rgaa" disabled>{t('audit.kind.Rgaa')} {t('audit.kind.afterFull')}</option>
                         <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
                         <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
+                        <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit(undefined, auditKindChoice)}
-                        disabled={agents.filter(canAudit).length === 0}
+                        onClick={() => handleFullAudit(auditKindChoice)}
+                        disabled={agents.filter(canRunAudit).length === 0}
                       >
                         <Play size={12} /> {resumableAudit
                           ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
@@ -1647,13 +1722,13 @@ export function ProjectCard({
                     <div className="flex-row gap-4">
                       <select
                         className="dash-audit-select"
-                        value={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                        value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
                         onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
                       >
-                        {agents.filter(canAudit).map(a => (
+                        {agents.filter(canRunAudit).map(a => (
                           <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
                         ))}
-                        {agents.filter(canAudit).length === 0 && (
+                        {agents.filter(canRunAudit).length === 0 && (
                           <option value="" disabled>{t('disc.noAgent')}</option>
                         )}
                       </select>
@@ -1663,6 +1738,7 @@ export function ProjectCard({
                         value={auditKindChoice}
                         onChange={e => setAuditKindChoice(e.target.value as AuditKind)}
                         title={t('audit.kindSelector.tooltip')}
+                        disabled={!!resumableAudit}
                       >
                         <option value="Full">{t('audit.kind.Full')}</option>
                         <option value="Security" disabled>{t('audit.kind.Security')} {t('audit.kind.afterFull')}</option>
@@ -1672,11 +1748,12 @@ export function ProjectCard({
                         <option value="Rgaa" disabled>{t('audit.kind.Rgaa')} {t('audit.kind.afterFull')}</option>
                         <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
                         <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
+                        <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit(undefined, auditKindChoice)}
-                        disabled={agents.filter(canAudit).length === 0}
+                        onClick={() => handleFullAudit(auditKindChoice)}
+                        disabled={agents.filter(canRunAudit).length === 0}
                       >
                         <Play size={12} /> {resumableAudit
                           ? t('audit.resumeFromStep', resumableAudit.last_completed_step + 1)
@@ -1733,13 +1810,13 @@ export function ProjectCard({
                       <div className="flex-row gap-4" style={{ marginTop: 8 }}>
                         <select
                           className="dash-audit-select"
-                          value={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                          value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
                           onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
                         >
-                          {agents.filter(canAudit).map(a => (
+                          {agents.filter(canRunAudit).map(a => (
                             <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
                           ))}
-                          {agents.filter(canAudit).length === 0 && (
+                          {agents.filter(canRunAudit).length === 0 && (
                             <option value="" disabled>{t('disc.noAgent')}</option>
                           )}
                         </select>
@@ -1758,11 +1835,12 @@ export function ProjectCard({
                           <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
                           <option value="Database">{t('audit.kind.Database')}</option>
                           <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
+                          <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
                         </select>
                         <button
                           className="dash-icon-btn dash-btn-accent-border"
-                          onClick={() => handleFullAudit(undefined, auditKindChoice)}
-                          disabled={agents.filter(canAudit).length === 0}
+                          onClick={() => handleFullAudit(auditKindChoice)}
+                          disabled={agents.filter(canRunAudit).length === 0}
                         >
                           <Play size={12} /> {t('audit.kindSelector.launchLabel', t(`audit.kind.${auditKindChoice}`))}
                         </button>
@@ -1800,13 +1878,13 @@ export function ProjectCard({
                     <div className="flex-row gap-4">
                       <select
                         className="dash-audit-select"
-                        value={auditAgentChoice ?? agents.filter(canAudit)[0]?.agent_type ?? 'ClaudeCode'}
+                        value={auditAgentChoice ?? agents.filter(canRunAudit)[0]?.agent_type ?? 'ClaudeCode'}
                         onChange={e => setAuditAgentChoice(e.target.value as AgentType)}
                       >
-                        {agents.filter(canAudit).map(a => (
+                        {agents.filter(canRunAudit).map(a => (
                           <option key={a.agent_type} value={a.agent_type}>{a.name}</option>
                         ))}
-                        {agents.filter(canAudit).length === 0 && (
+                        {agents.filter(canRunAudit).length === 0 && (
                           <option value="" disabled>{t('disc.noAgent')}</option>
                         )}
                       </select>
@@ -1825,11 +1903,12 @@ export function ProjectCard({
                         <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
                         <option value="Database">{t('audit.kind.Database')}</option>
                         <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
+                          <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
-                        onClick={() => handleFullAudit(undefined, auditKindChoice)}
-                        disabled={agents.filter(canAudit).length === 0}
+                        onClick={() => handleFullAudit(auditKindChoice)}
+                        disabled={agents.filter(canRunAudit).length === 0}
                       >
                         <Play size={12} /> {t('audit.kindSelector.launchLabel', auditKindChoice === 'Full' ? t('audit.kind.Full') : t(`audit.kind.${auditKindChoice}`))}
                       </button>

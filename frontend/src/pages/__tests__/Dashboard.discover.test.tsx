@@ -23,6 +23,10 @@ import { I18nProvider } from '../../lib/I18nContext';
 // to share the spy with the test body without tripping the hoist guard.
 const { discoverRepos } = vi.hoisted(() => ({ discoverRepos: vi.fn() }));
 
+vi.mock('../../hooks/useWebSocket', () => ({
+  useWebSocket: vi.fn(() => ({ connected: false })),
+}));
+
 vi.mock('../../lib/api', () => ({
   projects: {
     list: vi.fn().mockResolvedValue([]),

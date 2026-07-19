@@ -421,3 +421,94 @@ mod tests {
         assert!(run.feedbacks.is_empty());
     }
 }
+
+/// The FULL enforce-gate decision, shared verbatim by the Full and partial
+/// pipelines (Codex lot-3 #8): read the written target, lint its `[src:]`
+/// citations against the real tree, and decide. The caller only maps each
+/// outcome to its own SSE events — the DECISION can no longer drift between
+/// the two loops.
+pub enum EnforceGateOutcome {
+    /// Gate not applicable (not enforce mode / step already failing /
+    /// synthetic REVIEW target).
+    NotApplicable,
+    /// Target unreadable — a FAIL, never a bypass (Codex lot-3 #3).
+    Unreadable(String),
+    /// Fabricated citations, budget left: re-run with this feedback.
+    Retry { feedback: String, fabricated: usize },
+    /// Fabricated citations, retries exhausted: fail the step.
+    Fail { reason: String },
+    /// Clean citations — the written content, for any post-proof stamping.
+    Pass { written: String },
+}
+
+pub fn evaluate_enforce_gate(
+    enforce_mode: bool,
+    step_success_so_far: bool,
+    target_file: &str,
+    project_path: &Path,
+    attempt: usize,
+    max_attempts: usize,
+) -> EnforceGateOutcome {
+    if !enforce_mode || !step_success_so_far || target_file == "REVIEW" {
+        return EnforceGateOutcome::NotApplicable;
+    }
+    let target_path = project_path.join(target_file);
+    let written = match std::fs::read_to_string(&target_path) {
+        Ok(w) => w,
+        Err(e) => {
+            return EnforceGateOutcome::Unreadable(format!(
+                "enforce mode: target unreadable for citation lint: {e}"
+            ));
+        }
+    };
+    let verdict = lint_step_file(&written, &[project_path]);
+    match decide(&verdict, attempt, max_attempts) {
+        GateDecision::Retry => EnforceGateOutcome::Retry {
+            feedback: corrective_feedback(target_file, &verdict),
+            fabricated: verdict.count(),
+        },
+        GateDecision::Fail => EnforceGateOutcome::Fail {
+            reason: format!(
+                "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
+                verdict.count(), max_attempts
+            ),
+        },
+        GateDecision::Pass => EnforceGateOutcome::Pass { written },
+    }
+}
+
+#[cfg(test)]
+mod enforce_gate_tests {
+    use super::*;
+
+    /// Codex lot-3 #1 — the no-op forge seam. An old curated file the agent
+    /// did NOT touch passes the lint (Pass), and the gate must not mutate it:
+    /// the old stamp path rewrote `audit="<date>"` BEFORE the rewrite proof,
+    /// so the pipeline's own write made a no-op step read as `succeeded`.
+    #[test]
+    fn passing_gate_leaves_a_stale_curated_target_byte_intact() {
+        use crate::api::audit::validation::{target_snapshot, TargetSnapshot};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
+        let stale = "<!-- kronn:section id=\"arch\" curated=\"ai\" audit=\"2020-01-01\" -->\n\
+                     Old but honest content, no citations.\n";
+        std::fs::write(tmp.path().join("docs/architecture.md"), stale).unwrap();
+
+        // The fixture IS stampable — the seam is real, not vacuous.
+        assert!(stamp_curated_audit_dates(stale, "2026-07-20").is_some());
+
+        let pre = target_snapshot(tmp.path(), "docs/architecture.md").unwrap();
+        assert!(matches!(pre, TargetSnapshot::Present(_)));
+
+        let outcome = evaluate_enforce_gate(
+            true, true, "docs/architecture.md", tmp.path(), 0, 3,
+        );
+        assert!(matches!(outcome, EnforceGateOutcome::Pass { .. }), "lint-green must Pass");
+
+        let post = target_snapshot(tmp.path(), "docs/architecture.md").unwrap();
+        assert_eq!(pre, post, "a passing gate must not fabricate a rewrite");
+        let on_disk = std::fs::read_to_string(tmp.path().join("docs/architecture.md")).unwrap();
+        assert_eq!(on_disk, stale, "byte-intact: the stale audit date survives");
+    }
+}

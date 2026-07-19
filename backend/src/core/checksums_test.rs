@@ -249,6 +249,195 @@ fn compute_step_checksums_handles_git_ls_files() {
 }
 
 #[test]
+fn is_kronn_generated_path_is_tight() {
+    // F27 — only the DETECTED docs dir and .kronn state are generated
+    // wholesale. Root agent files are NOT excluded here (they get normalized
+    // hashing so user rules count), and a project whose docs live in `docs/`
+    // keeps a real `ai/` source dir counted.
+    for kronn in [
+        "docs/AGENTS.md", "docs/checksums.json", "docs/tech-debt/TD-1.md",
+        ".kronn.json", ".kronn.lock", ".kronn/state",
+    ] {
+        assert!(is_kronn_generated_path(kronn, "docs"), "{kronn} must be excluded");
+    }
+    for source in [
+        "src/main.rs", "package.json", "Dockerfile", ".github/workflows/ci.yml",
+        "docsite/index.html", "README.md", "src/docs.rs",
+        "ai/model.py",                       // real source when docs dir = docs/
+        "CLAUDE.md", "AGENTS.md",            // normalized elsewhere, not excluded
+        ".github/copilot-instructions.md",
+        "sub/checksums.json",                // someone else's file, not ours
+    ] {
+        assert!(!is_kronn_generated_path(source, "docs"), "{source} must stay counted");
+    }
+    // Legacy layout: ai/ IS the detected docs dir → excluded there.
+    assert!(is_kronn_generated_path("ai/AGENTS.md", "ai"));
+    assert!(!is_kronn_generated_path("docsx/file.md", "docs"), "prefix must not over-match");
+}
+
+#[test]
+fn strip_kronn_regions_removes_managed_blocks_keeps_user_content() {
+    let content = format!(
+        "{}\nkronn pointer\n{}\n# My rules\nnever use lib X\n<!-- KRONN:FACTS — regenerated -->\nTest: cargo test\n<!-- END KRONN:FACTS -->\ntail rule\n",
+        super::super::root_agent_files::KRONN_BLOCK_START,
+        super::super::root_agent_files::KRONN_BLOCK_END,
+    );
+    let stripped = strip_kronn_regions(&content);
+    assert!(stripped.contains("# My rules"));
+    assert!(stripped.contains("never use lib X"));
+    assert!(stripped.contains("tail rule"));
+    assert!(!stripped.contains("kronn pointer"));
+    assert!(!stripped.contains("Test: cargo test"));
+    // A file that is ONLY Kronn regions normalizes to whitespace.
+    let only_block = format!(
+        "{}\nbody\n{}\n",
+        super::super::root_agent_files::KRONN_BLOCK_START,
+        super::super::root_agent_files::KRONN_BLOCK_END,
+    );
+    assert!(strip_kronn_regions(&only_block).trim().is_empty());
+}
+
+fn git(dir: &std::path::Path, args: &[&str]) {
+    let ok = super::sync_cmd("git").arg("-C").arg(dir).args(args)
+        .output().expect("git runs").status.success();
+    assert!(ok, "git {args:?} failed");
+}
+
+#[test]
+fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
+    // The F27 guarantee, end to end: a commit that only versions the audit's
+    // own output must NOT move the fingerprint; a source change (file OR
+    // user rules in a root agent file) must.
+    let dir = temp_dir("f27_fingerprint");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["config", "user.email", "t@t"]);
+    git(&dir, &["config", "user.name", "t"]);
+    fs::write(dir.join("app.js"), "console.log(1)").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "src"]);
+    let fp_initial = git_source_tree_fingerprint(&dir).expect("fingerprint");
+
+    // Simulate committing an audit's output: docs/ tree, checksums, a
+    // CLAUDE.md that holds ONLY the managed block (what Phase 1 creates on a
+    // project that had none). Fingerprint must be unchanged (no self-drift,
+    // not even on the very first audit commit).
+    fs::create_dir_all(dir.join("docs/tech-debt")).unwrap();
+    fs::write(dir.join("docs/AGENTS.md"), "# audited").unwrap();
+    fs::write(dir.join("docs/checksums.json"), "{}").unwrap();
+    fs::write(dir.join("CLAUDE.md"), format!(
+        "{}\n> Kronn context pointer\n{}\n",
+        super::super::root_agent_files::KRONN_BLOCK_START,
+        super::super::root_agent_files::KRONN_BLOCK_END,
+    )).unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "audit output"]);
+    assert_eq!(git_source_tree_fingerprint(&dir).as_deref(), Some(fp_initial.as_str()),
+        "committing docs/ + a block-only CLAUDE.md must NOT move the fingerprint (F27)");
+
+    // USER rules added to CLAUDE.md are source — fingerprint must move
+    // (worktree-read: no commit needed).
+    fs::write(dir.join("CLAUDE.md"), format!(
+        "{}\n> Kronn context pointer\n{}\n# House rules\nnever use lib X\n",
+        super::super::root_agent_files::KRONN_BLOCK_START,
+        super::super::root_agent_files::KRONN_BLOCK_END,
+    )).unwrap();
+    let fp_with_rules = git_source_tree_fingerprint(&dir).expect("fingerprint");
+    assert_ne!(fp_with_rules, fp_initial,
+        "user-authored rules in a root agent file must count as source");
+
+    // UNCOMMITTED source change — the audit reads the worktree, so drift
+    // must flag before any commit (Codex round 4: HEAD-only missed this).
+    fs::write(dir.join("app.js"), "console.log(2)").unwrap();
+    let fp_dirty = git_source_tree_fingerprint(&dir).expect("fingerprint");
+    assert_ne!(fp_dirty, fp_with_rules,
+        "an uncommitted tracked modification must move the fingerprint");
+
+    // Committing that same content is a no-op on the print (records are
+    // content-derived): stable across add+commit, no re-flag after commit.
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "real change"]);
+    assert_eq!(git_source_tree_fingerprint(&dir).as_deref(), Some(fp_dirty.as_str()),
+        "committing unchanged content must NOT move the fingerprint");
+
+    // A brand-new untracked source file counts too (the next audit reads it).
+    fs::write(dir.join("new-module.js"), "export {}").unwrap();
+    assert_ne!(git_source_tree_fingerprint(&dir).as_deref(), Some(fp_dirty.as_str()),
+        "an untracked (non-ignored) source file must move the fingerprint");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {
+    // Codex round 3 — byte-safety: a path containing a newline must neither
+    // corrupt the record encoding nor be silently altered; a chmod +x (mode
+    // change, same blob) is a real source change and must move the print.
+    let dir = temp_dir("f27_bytes");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["config", "user.email", "t@t"]);
+    git(&dir, &["config", "user.name", "t"]);
+    fs::write(dir.join("app.sh"), "#!/bin/sh\necho hi").unwrap();
+    let weird = dir.join("we\nird.txt"); // newline is legal on POSIX filesystems
+    fs::write(&weird, "v1").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "base"]);
+    let fp_base = git_source_tree_fingerprint(&dir).expect("fingerprint");
+
+    // Content change inside the newline-named file must move the print
+    // (proves the record for that path is tracked, not mangled/dropped).
+    fs::write(&weird, "v2").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "weird change"]);
+    let fp_weird = git_source_tree_fingerprint(&dir).expect("fingerprint");
+    assert_ne!(fp_weird, fp_base, "a newline-named file's change must be tracked");
+
+    // chmod +x: same blob, different mode — must move the print too.
+    let mut perms = fs::metadata(dir.join("app.sh")).unwrap().permissions();
+    use std::os::unix::fs::PermissionsExt;
+    perms.set_mode(0o755);
+    fs::set_permissions(dir.join("app.sh"), perms).unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "exec bit"]);
+    let fp_mode = git_source_tree_fingerprint(&dir).expect("fingerprint");
+    assert_ne!(fp_mode, fp_weird, "a mode flip must move the fingerprint");
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn source_tree_fingerprint_keeps_non_utf8_paths() {
+    // Non-UTF-8 file names exist on Linux filesystems (APFS rejects them, so
+    // this can only run there). Such a path can't match any ASCII exclusion —
+    // it must stay counted as source, byte-exact.
+    use std::os::unix::ffi::OsStrExt;
+    let dir = temp_dir("f27_non_utf8");
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["config", "user.email", "t@t"]);
+    git(&dir, &["config", "user.name", "t"]);
+    let name = std::ffi::OsStr::from_bytes(b"caf\xe9.txt"); // latin-1 é
+    fs::write(dir.join(name), "v1").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "base"]);
+    let fp1 = git_source_tree_fingerprint(&dir).expect("fingerprint");
+    fs::write(dir.join(name), "v2").unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-qm", "change"]);
+    assert_ne!(git_source_tree_fingerprint(&dir).unwrap(), fp1,
+        "a non-UTF-8 path's change must be tracked");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn compute_step_checksums_handles_source_tree_sentinel() {
+    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let checksums = compute_step_checksums(&kronn_root, &["__GIT_SOURCE_TREE__"]);
+    let fp = checksums.get("__GIT_SOURCE_TREE__").expect("source-tree key present");
+    assert_eq!(fp.len(), 64, "SHA-256 hex is 64 chars");
+    assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+}
+
+#[test]
 fn empty_sources_returns_empty_checksums() {
     let dir = temp_dir("empty_sources");
     fs::create_dir_all(&dir).unwrap();
@@ -354,4 +543,40 @@ fn glob_multiple_stars_falls_back_to_exact_match() {
     // isn't silently broken.
     assert!(matches_simple_glob("a*b*c", "a*b*c"), "fallback is exact match on multi-star");
     assert!(!matches_simple_glob("a*b*c", "aXbYc"));
+}
+
+#[cfg(unix)]
+#[test]
+fn failed_checksums_write_preserves_the_previous_manifest() {
+    // Codex lot-2 #4 — a truncating fs::write could corrupt the manifest:
+    // read_checksums_file then returned None and the whole drift scope
+    // silently disappeared. With the atomic sibling-temp+rename, a write
+    // failure leaves the previous valid manifest byte-intact.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = temp_dir("atomic_manifest");
+    let docs = dir.join("docs");
+    fs::create_dir_all(&docs).unwrap();
+    let mapping = ChecksumMapping {
+        ai_file: "docs/repo-map.md".into(),
+        audit_step: 3,
+        sources: vec!["src/main.rs".into()],
+        checksums: BTreeMap::new(),
+    };
+    write_checksums_file(&dir, std::slice::from_ref(&mapping)).unwrap();
+    let before = fs::read(docs.join("checksums.json")).unwrap();
+
+    // Make docs/ read-only: the sibling temp file cannot be created.
+    let mut perms = fs::metadata(&docs).unwrap().permissions();
+    perms.set_mode(0o555);
+    fs::set_permissions(&docs, perms).unwrap();
+    let err = write_checksums_file(&dir, &[mapping]).unwrap_err();
+    assert!(err.contains("temp") || err.contains("denied") || err.contains("write"), "{err}");
+
+    let mut restore = fs::metadata(&docs).unwrap().permissions();
+    restore.set_mode(0o755);
+    fs::set_permissions(&docs, restore).unwrap();
+    assert_eq!(fs::read(docs.join("checksums.json")).unwrap(), before,
+        "the previous valid manifest must survive byte-for-byte");
+    assert!(read_checksums_file(&dir).is_some(), "and still parse");
+    let _ = fs::remove_dir_all(&dir);
 }

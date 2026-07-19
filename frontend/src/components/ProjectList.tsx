@@ -3,7 +3,7 @@ import { useState, useMemo, useDeferredValue, useEffect, useRef } from 'react';
 import { useT } from '../lib/I18nContext';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { ProjectCard } from './ProjectCard';
-import type { Project, AgentDetection, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
+import type { Project, AgentDetection, AuditProgress, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
 import {
   Folder, ChevronDown, Eye, Search, X, AlertTriangle,
 } from 'lucide-react';
@@ -13,6 +13,9 @@ const isAiReady = (p: Project) => p.audit_status !== 'NoTemplate';
 
 export interface ProjectListProps {
   projects: Project[];
+  /** Fleet-wide live audits (Dashboard poll) — lets each card adopt an
+   *  audit launched outside the UI (MCP bridge, CLI). */
+  activeAudits?: AuditProgress[];
   discussions: Discussion[];
   discussionsByProject: Record<string, Discussion[]>;
   driftByProject: Record<string, DriftCheckResponse>;
@@ -36,6 +39,7 @@ export interface ProjectListProps {
 
 export function ProjectList({
   projects,
+  activeAudits = [],
   discussionsByProject,
   driftByProject,
   agents,
@@ -258,6 +262,7 @@ export function ProjectList({
               <div style={{ opacity: projHidden ? 0.5 : 1 }}>
                 <ProjectCard
                   project={proj}
+                  externalAuditLive={activeAudits.some(a => a.project_id === proj.id)}
                   isOpen={isOpen}
                   onToggleOpen={() => onSetExpandedId(isOpen ? null : proj.id)}
                   discussions={projDiscussions}

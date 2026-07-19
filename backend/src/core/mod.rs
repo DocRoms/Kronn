@@ -31,6 +31,7 @@ pub mod oauth2_cache;
 pub mod docs_sidecar;
 pub mod docs_write_filter;
 pub mod docs_migration;
+pub mod fs_guard;
 pub mod legacy_docs;
 pub mod root_agent_files;
 pub mod audit_mcp_filter;

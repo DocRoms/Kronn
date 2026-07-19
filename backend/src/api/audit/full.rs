@@ -1,5 +1,5 @@
 // `POST /api/projects/:id/full-audit` — the unified end-to-end pipeline:
-// install template if needed → run the 9-step audit → create the
+// install template if needed → run the assembled audit chain → create the
 // validation discussion. Plus `POST /api/projects/:id/cancel-audit`
 // which kills the running agent process and cleans the docs/ tree
 // + redirector files so the project is back to a clean slate.
@@ -24,10 +24,198 @@ use super::helpers::{
     check_ai_dir_permissions, compute_audit_info_sync, detect_issue_tracker_mcp,
     detect_project_skills, build_validation_prompt, build_sub_audit_validation_prompt, remove_bootstrap_block,
 };
-use super::{SseStream, ANALYSIS_STEPS, PROMPT_PREAMBLE};
+use super::{SseStream, PROMPT_PREAMBLE};
 
 /// POST /api/projects/:id/full-audit
-/// Unified endpoint: install template + run 9-step audit + create validation discussion.
+/// Unified endpoint: install template + run the assembled audit chain + create validation discussion.
+/// Finalizes an audit whose SSE consumer vanished mid-run (MCP bridge
+/// death, browser tab close): the generator is dropped at its next yield
+/// and nothing downstream runs — observed live as a zombie (tracker frozen
+/// on step 1, run row stuck on Running, orphaned agent, zero logs).
+/// Armed at pipeline start, disarmed on every normal ending. Drop can't do
+/// async work, so the cleanup is spawned onto the runtime.
+///
+/// Also owns the macOS power assertion (`caffeinate -i`): default `pmset`
+/// puts the machine to sleep mid-audit (a 1h27 freeze was measured when the
+/// operator moved with the laptop), cf. TD-20260717-run-power-assertion.
+pub(super) struct AuditDropGuard {
+    armed: bool,
+    db: std::sync::Arc<crate::db::Database>,
+    tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+    /// None for partial/drift refreshes — they have no audit_runs row;
+    /// the guard then only clears the tracker (+ power assertion).
+    run_id: Option<String>,
+    project_id: String,
+    caffeinate: Option<std::process::Child>,
+    /// Whether this guard owns the project's audit lease. When true, Drop
+    /// releases it on EVERY exit path (normal, cancel, abandonment) — so no
+    /// early `return` in the pipeline can leak a lease and wedge the project.
+    leased: bool,
+}
+
+impl AuditDropGuard {
+    pub(super) fn new(
+        db: std::sync::Arc<crate::db::Database>,
+        tracker: std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+        run_id: Option<String>,
+        project_id: String,
+    ) -> Self {
+        let caffeinate = if cfg!(target_os = "macos") {
+            sync_cmd("caffeinate")
+                .arg("-i")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()
+        } else {
+            None
+        };
+        Self { armed: true, db, tracker, run_id, project_id, caffeinate, leased: false }
+    }
+
+    /// Declare that this guard owns the project's audit lease — Drop will
+    /// release it. Called right after `try_acquire_lease` succeeds.
+    pub(super) fn hold_lease(&mut self) {
+        self.leased = true;
+    }
+
+    /// Attach the `audit_runs` row id once it exists (the lease + guard are
+    /// created BEFORE the insert so no await can leak the lease in between).
+    pub(super) fn set_run_id(&mut self, run_id: String) {
+        self.run_id = Some(run_id);
+    }
+
+    /// Normal ending reached — the pipeline finalized the run itself. The
+    /// lease is still released on Drop (this only stops the interrupt path).
+    pub(super) fn disarm(&mut self) {
+        self.armed = false;
+        self.release_power_assertion();
+    }
+
+    fn release_power_assertion(&mut self) {
+        if let Some(mut child) = self.caffeinate.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for AuditDropGuard {
+    fn drop(&mut self) {
+        self.release_power_assertion();
+        // Order matters everywhere here: the lease is released LAST, only
+        // once this run's terminal state is settled — otherwise a successor
+        // could start while the old run still reads as Running (two Running
+        // rows) or have its fresh progress wiped by a late clear.
+        if self.armed {
+            tracing::warn!(
+                "Audit for {} dropped mid-flight (SSE consumer vanished) — cleaning up (run: {:?})",
+                self.project_id, self.run_id
+            );
+            if let Ok(mut t) = self.tracker.lock() {
+                t.clear_progress(&self.project_id);
+            }
+            if let Some(run_id) = self.run_id.clone() {
+                let db = self.db.clone();
+                // Either way the lease is no longer this scope's to release:
+                // the abandonment task takes ownership (runtime case), or the
+                // process is dying and the lease dies with it (no-runtime
+                // case — never a sync release, the row is still Running and
+                // the boot reconcile settles it).
+                let leased = std::mem::take(&mut self.leased);
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    // Release ONLY after the Interrupted status is persisted:
+                    // on a DB failure the lease stays held (fail-closed — the
+                    // project refuses new runs rather than allowing a second
+                    // Running row next to an unsettled one).
+                    let tracker = self.tracker.clone();
+                    let project_id = self.project_id.clone();
+                    handle.spawn(async move {
+                        match db.with_conn(move |conn| {
+                            crate::db::audit_runs::mark_interrupted(
+                                conn, &run_id, "sse consumer dropped mid-run (bridge/tab gone)",
+                            )
+                        }).await {
+                            Ok(()) => {
+                                if leased {
+                                    if let Ok(mut t) = tracker.lock() {
+                                        t.release_lease(&project_id);
+                                    }
+                                }
+                            }
+                            Err(e) => tracing::error!(
+                                "Drop-guard failed to finalize audit run: {e} — lease kept (fail-closed) until restart"
+                            ),
+                        }
+                    });
+                } else {
+                    tracing::warn!("Drop-guard: no runtime (shutdown) — boot reconcile will settle run {run_id}");
+                }
+            }
+        }
+        // Synchronous release for the remaining paths: disarmed (the pipeline
+        // finalized the run itself before this Drop) and armed-without-row
+        // (partial/drift — tracker cleanup above is all there is to settle).
+        if self.leased {
+            if let Ok(mut t) = self.tracker.lock() {
+                t.release_lease(&self.project_id);
+            }
+        }
+    }
+}
+
+/// Wait (bounded) for the owning audit worker to acknowledge a cancel.
+///
+/// The cancel handler only *requests* cancellation (sets the flag + kills
+/// the agent PID); the worker that owns the run is the one that finalizes
+/// it and stops touching `docs/`. It signals completion by removing the
+/// project from `cancelled`. This wait lets the handler hold off its file
+/// cleanup until the worker has actually stopped — otherwise the cleanup
+/// races an in-flight Phase 1 (template install), and a cancel that
+/// "succeeded" could leave the audit still running (Codex #10).
+///
+/// Returns `true` if the worker acknowledged within `timeout`, `false` on
+/// timeout — meaning no live worker (audit already finished, or the
+/// generator died); the caller then cleans the flag up itself.
+async fn wait_for_cancel_ack(
+    tracker: &std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+    project_id: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        // A poisoned mutex is NOT an ack — assuming "not pending" there would
+        // fabricate a false acknowledgment; treat it as still-pending and let
+        // the timeout policy decide.
+        let still_pending = tracker
+            .lock()
+            .map(|t| t.cancelled.contains(project_id))
+            .unwrap_or(true);
+        if !still_pending {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// One-shot SSE error response, used for every pre-launch refusal (bad
+/// project, non-resumable run, already-running, unwired kind). Keeps the
+/// refusal shape identical everywhere so clients parse one `error` event.
+fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
+    let msg = msg.into();
+    let stream: SseStream = Box::pin(futures::stream::once(async move {
+        Ok::<_, Infallible>(
+            Event::default().event("error").data(
+                serde_json::json!({ "error": msg }).to_string(),
+            ),
+        )
+    }));
+    Sse::new(stream)
+}
+
 pub async fn full_audit(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -40,12 +228,7 @@ pub async fn full_audit(
     }).await.ok().flatten();
 
     if project.is_none() {
-        let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(
-                Event::default().event("error").data("{\"error\":\"Project not found\"}")
-            )
-        }));
-        return Sse::new(stream);
+        return sse_error("Project not found");
     }
 
     // Safety: early return above guarantees project is Some
@@ -73,30 +256,12 @@ pub async fn full_audit(
         }
     };
     let agent_type = req.agent;
-    let agent_label = format!("{:?}", agent_type);
-    // 0.8.3 (#311) — resume support. Caller passes the
-    // `last_completed_step` of an interrupted run; we skip steps
-    // 1..=resume_from and start at resume_from+1. Clamped to total_steps
-    // so a malicious / stale client can't ask us to skip past the
-    // pipeline entirely. None / 0 / >= total → fresh run.
-    let resume_from: u32 = req.resume_from.unwrap_or(0);
-
-    // 0.8.2 — Resolve specialized audit kind. `Full` is the default
-    // (backwards-compat for clients that don't send `kind`). `Custom`
-    // requires a body that S2.D3-D5 still need to design — for now
-    // surface a clean error rather than silently running an empty loop.
-    let kind = req.kind.unwrap_or_default();
-    let kind_label = kind.as_label();
-    if matches!(kind, crate::models::AuditKind::Custom) {
-        let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(
-                Event::default().event("error")
-                    .data("{\"error\":\"AuditKind::Custom is not yet wired (S2.D3-D5)\"}")
-            )
-        }));
-        return Sse::new(stream);
+    if !super::agent_can_audit(&agent_type) {
+        return sse_error(format!(
+            "{agent_type:?} cannot run audits: it has no filesystem access, so the docs/ deliverables would silently never be written. Pick a CLI agent."
+        ));
     }
-    let steps = super::kind_to_steps(kind);
+    let agent_label = format!("{:?}", agent_type);
 
     let tokens = {
         let config = state.config.read().await;
@@ -108,60 +273,208 @@ pub async fn full_audit(
         config.language.clone()
     };
 
-    let total_steps = steps.len();
+    let resume_run_id_req = req.resume_run_id.clone();
+    let requested_kind = req.kind;
     let db = state.db.clone();
     let audit_tracker = state.audit_tracker.clone();
+    let ws_broadcast = state.ws_broadcast.clone();
+    let state_for_validation = state.clone();
 
-    let active_in_tracker = audit_tracker
-        .lock()
-        .map(|t| t.get_progress(&project_id).is_some())
-        .unwrap_or(true);
-    let active_in_db = db.with_conn({
-        let project_id = project_id.clone();
-        move |conn| crate::db::audit_runs::has_running_for_project(conn, &project_id)
-    }).await.unwrap_or(true);
-    if active_in_tracker || active_in_db {
-        let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(
-                Event::default().event("error").data(
-                    serde_json::json!({
-                        "error": "Audit already running for this project; wait for it to finish or use the cleanup action before launching another audit."
-                    }).to_string(),
-                )
-            )
-        }));
-        return Sse::new(stream);
-    }
-
-    // Clear any stale cancellation flag for this project
-    if let Ok(mut tracker) = audit_tracker.lock() {
-        tracker.cancelled.remove(&project_id);
-    }
-
-    // 0.8.2 — record this audit invocation in the `audit_runs` table.
-    // Inserted with status='Running' here, completed at the end of the
-    // pipeline (or marked Failed/Cancelled on abnormal exit). The row
-    // powers the health-badge sparkline + audit-history doc.
-    let audit_run_id = Uuid::new_v4().to_string();
-    let audit_started_at = Utc::now();
-    {
-        let run_id = audit_run_id.clone();
-        let pid = project_id.clone();
-        let agent_name = agent_label.clone();
-        let _ = db.with_conn(move |conn| {
-            crate::db::audit_runs::insert_running(
-                conn, &run_id, &pid, kind_label, &agent_name, audit_started_at,
-            )
-        }).await;
-    }
-
+    let drop_guard_db = db.clone();
+    let drop_guard_tracker = audit_tracker.clone();
     let stream: SseStream = Box::pin(async_stream::try_stream! {
+        // Atomic single-project lease — the ONE gate all three launch paths
+        // share (Full, specialized, partial), replacing the old
+        // check-tracker-then-check-db-then-insert race where two concurrent
+        // launches could both see the project idle and both insert a Running
+        // row. Taken under the tracker mutex so check-and-take can't
+        // interleave. Refusing via an SSE `error` event is, from the client's
+        // side, identical to the pre-stream `sse_error` used elsewhere.
+        if !audit_tracker.lock().map(|mut t| t.try_acquire_lease(&project_id)).unwrap_or(false) {
+            yield Event::default().event("error").data(
+                serde_json::json!({
+                    "error": "Audit already running for this project; wait for it to finish or use the cleanup action before launching another audit."
+                }).to_string(),
+            );
+            return;
+        }
+        // Lease held. Build the guard IMMEDIATELY (no await in between) so it
+        // owns the lease before any suspension point that could drop us — it
+        // releases the lease on every exit path (normal, cancel, abandon).
+        let mut drop_guard = AuditDropGuard::new(
+            drop_guard_db,
+            drop_guard_tracker,
+            None, // run id attached just below, after the insert
+            project_id.clone(),
+        );
+        drop_guard.hold_lease();
+
+        // Clear any stale cancellation flag for this project.
+        if let Ok(mut tracker) = audit_tracker.lock() {
+            tracker.cancelled.remove(&project_id);
+        }
+
+        // Resolve kind + resume checkpoint UNDER the lease. When
+        // `resume_run_id` is set the persisted row is authoritative for BOTH
+        // kind and checkpoint, and it must be THE MOST RECENT run of the
+        // project, any status: an Interrupted run with a newer successor
+        // (Completed OR a later Interrupted attempt) describes docs that
+        // successor has since rewritten — "finishing" it would clobber
+        // fresher output. Resolving after the lease closes the TOCTOU where
+        // another run could finish between validation and insert. Every
+        // rejection is a hard error, never a silent fresh run.
+        let (kind, resume_from) = if let Some(run_id) = resume_run_id_req.clone() {
+            let fetched = db.with_conn({
+                let run_id = run_id.clone();
+                let pid = project_id.clone();
+                move |conn| {
+                    let row = crate::db::audit_runs::get_by_id(conn, &run_id)?;
+                    let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
+                        .into_iter().next();
+                    Ok((row, latest))
+                }
+            }).await;
+            let resolved = match fetched {
+                Ok((row, latest)) => {
+                    if latest.as_ref().map(|l| l.id != run_id).unwrap_or(true) {
+                        Err(format!(
+                            "resume_run_id {run_id} is not the project's most recent run — \
+                             a newer attempt supersedes it; launch a fresh audit instead"
+                        ))
+                    } else {
+                        resolve_resume_row(&run_id, row.as_ref(), &project_id)
+                    }
+                }
+                Err(e) => Err(format!("resume_run_id lookup failed: {e}")),
+            };
+            match resolved {
+                Ok(plan) => plan,
+                Err(msg) => {
+                    yield Event::default().event("error").data(
+                        serde_json::json!({ "error": msg }).to_string(),
+                    );
+                    return;
+                }
+            }
+        } else {
+            (requested_kind.unwrap_or_default(), 0u32)
+        };
+        let kind_label = kind.as_label();
+
+        // `Custom` requires a body that S2.D3-D5 still need to design — for
+        // now surface a clean error rather than silently running an empty loop.
+        if matches!(kind, crate::models::AuditKind::Custom) {
+            yield Event::default().event("error").data(
+                serde_json::json!({ "error": "AuditKind::Custom is not yet wired (S2.D3-D5)" }).to_string(),
+            );
+            return;
+        }
+
+        // 0.8.13 — chained audit ("un seul audit qui envoie du pâté"): a Full
+        // run appends every focused sub-audit after the 9 foundation steps, so
+        // ONE launch covers docs + security + docker + perf + a11y + database +
+        // API design + code quality, and the single validation discussion at
+        // the end confirms the WHOLE TD set. Each chained step carries a
+        // relevance gate (see CHAINED_STEP_GATE) so a dimension that doesn't
+        // apply to the project writes a one-liner and moves on. RGAA stays
+        // on-demand (French legal norm, superset of the chained a11y pass).
+        // Sub-audits remain individually launchable via `kind` for surgical
+        // re-scans (the recommendations engine keeps suggesting those).
+        let steps: Vec<super::AnalysisStep> = super::assemble_chained_steps(kind);
+        // Index of the first chained sub-audit step (1-based), used to inject
+        // the relevance gate into the prompt at build time.
+        let first_chained_step = super::ANALYSIS_STEPS.len() + 1;
+        let total_steps = steps.len();
+        // A checkpoint beyond the pipeline is a corrupt/mismatched row, not a
+        // request to skip everything — REFUSE it rather than clamp (a clamp
+        // to total_steps would silently jump to validation-only on a run
+        // nothing vouches for). == total_steps stays legal (validation only).
+        if resume_from > total_steps as u32 {
+            yield Event::default().event("error").data(
+                serde_json::json!({
+                    "error": format!("resume checkpoint {resume_from} exceeds the {total_steps}-step {kind_label} pipeline — corrupt run row, launch a fresh audit")
+                }).to_string(),
+            );
+            return;
+        }
+
+        // 0.8.2 — record this audit in `audit_runs` (status='Running',
+        // finalized at pipeline end / abnormal exit). Powers the health-badge
+        // sparkline + audit-history doc. The insert is MANDATORY: `accepted`
+        // below announces "the run is real", and every downstream contract
+        // (drop-guard finalization, resume, cancel persistence) needs the
+        // row — a failed insert refuses the launch instead of running
+        // unaccounted. The guard releases the lease on the early return.
+        let audit_run_id = Uuid::new_v4().to_string();
+        let audit_started_at = Utc::now();
+        let inserted = {
+            let run_id = audit_run_id.clone();
+            let pid = project_id.clone();
+            let agent_name = agent_label.clone();
+            db.with_conn(move |conn| {
+                crate::db::audit_runs::insert_running(
+                    conn, &run_id, &pid, kind_label, &agent_name, audit_started_at,
+                )
+            }).await
+        };
+        if let Err(e) = inserted {
+            yield Event::default().event("error").data(
+                serde_json::json!({
+                    "error": format!("Could not record the audit run (db): {e} — launch refused.")
+                }).to_string(),
+            );
+            return;
+        }
+        drop_guard.set_run_id(audit_run_id.clone());
+
+        // CONTRACTUAL revocation (Codex A5): this run is about to mutate
+        // docs/, so any prior "Validated" state is stale the moment we
+        // start. A failed revocation refuses the run (the armed guard
+        // settles the row as Interrupted) — never warn-and-continue, or a
+        // project could stay Validated on the faith of pre-mutation state.
+        {
+            let pp = project_path.clone();
+            let revoked = tokio::task::spawn_blocking(move || {
+                crate::core::kronn_state::revoke_validated(&pp)
+            }).await;
+            match revoked {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    yield Event::default().event("error").data(
+                        serde_json::json!({
+                            "error": format!("Could not revoke the prior validation state: {e} — launch refused (the Validated badge must never outlive a new mutation).")
+                        }).to_string(),
+                    );
+                    return;
+                }
+                Err(e) => {
+                    yield Event::default().event("error").data(
+                        serde_json::json!({ "error": format!("revocation task failed: {e}") }).to_string(),
+                    );
+                    return;
+                }
+            }
+        }
+
+        // Launch confirmation, emitted BEFORE Phase 1. `start` only fires
+        // after template install + legacy migration + ownership fixup, which
+        // on a fresh project can exceed the MCP bridge's start-wait — the
+        // bridge would then close the stream and interrupt a perfectly
+        // healthy audit (Codex #7). `accepted` says "the run is real and
+        // owns the lease"; `start` still follows with the step count.
+        yield Event::default().event("accepted").data(
+            serde_json::json!({
+                "audit_run_id": audit_run_id,
+                "kind": kind_label,
+            }).to_string()
+        );
+
         // Seed live progress so GET /audit-status can report where we are
         // even when the SSE client (browser tab) went away.
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id, total_steps as u32, "full_audit");
             // Phase 1 starts here; advance_step will update to "auditing"
-            // once the 9-step loop begins. The intermediate installing
+            // once the assembled step chain begins. The intermediate installing
             // phase is visible by checking step_index == 0.
             if let Some(entry) = t.progress.get_mut(&project_id) {
                 entry.phase = "installing".into();
@@ -218,7 +531,7 @@ pub async fn full_audit(
                 if docs_template.is_dir() {
                     crate::api::projects::copy_dir_nondestructive(&docs_template, &docs_target)?;
                 }
-                crate::api::projects::ensure_agent_writable_subfolders(&docs_target)?;
+                crate::api::projects::ensure_agent_writable_subfolders(&project_path, &docs_target);
 
                 // 0.8.4 (#295) — auto-write `docs/linked-repos.md` from
                 // the project's linked_repos list. Catch-up for projects
@@ -335,7 +648,7 @@ pub async fn full_audit(
             );
         }
 
-        // ── Phase 2: Run 9-step audit ──
+        // ── Phase 2: Run the assembled audit chain ──
         // Remove bootstrap prompt
         let index_file = project_path.join("docs/AGENTS.md");
         if index_file.exists() {
@@ -382,17 +695,24 @@ pub async fn full_audit(
         // successful `step_done` we bump `last_successful_step` AND
         // persist via `update_last_completed_step`. At end-of-stream
         // we use these two locals to decide between:
-        //   - `complete()`         (all 9 steps success — happy path)
+        //   - `complete()`         (the whole assembled chain succeeded)
         //   - `mark_interrupted()` (some step warning OR stream ended
-        //                          before step 10 — resumable later)
+        //                          before the final step — resumable later)
         //   - `mark_failed()`      (catastrophic failure, e.g. start_agent
         //                          returned Err for every step)
         // The validation discussion is only created on the happy path.
         // 0.8.3 (#311) — when resuming, prime `last_successful_step`
-        // with the caller-provided value so the "did we reach step 10?"
-        // check at end-of-stream considers the previously-done steps.
-        let mut last_successful_step: u32 = resume_from.min(total_steps as u32);
+        // with the caller-provided value so the completion check at
+        // end-of-stream considers the previously-done steps.
+        // Validated against total_steps at launch (out-of-range = refused).
+        let mut last_successful_step: u32 = resume_from;
         let mut any_step_warning: bool = false;
+        let mut warned_steps: Vec<u32> = Vec::new();
+        // Findings indices actually (re)written this run — successful steps
+        // plus resume-skipped ones (written by the interrupted predecessor of
+        // the same logical audit). Reconciliation unions TD ids from THESE,
+        // never from an index a failed/warned step left stale on disk.
+        let mut freshly_written_indices: Vec<String> = Vec::new();
         let start = serde_json::json!({
             "total_steps": total_steps,
             "started_at": audit_started_at.to_rfc3339(),
@@ -480,14 +800,29 @@ pub async fn full_audit(
         for (step_num, analysis_step) in steps.iter().enumerate() {
             // Check for cancellation before each step
             if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
-                if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
+                // Persist the terminal status BEFORE acknowledging: the ack
+                // releases the waiting cancel handler into its file cleanup,
+                // and a fire-and-forget write could lose a DB failure and
+                // leave the row Running with no safety net. On failure the
+                // guard stays ARMED so its Drop stamps Interrupted (boot
+                // reconcile is the last resort).
                 let run_id = audit_run_id.clone();
-                let db_for_cancel = db.clone();
-                tokio::spawn(async move {
-                    let _ = db_for_cancel.with_conn(move |conn| {
-                        crate::db::audit_runs::mark_cancelled(conn, &run_id)
-                    }).await;
-                });
+                let persisted = db.with_conn(move |conn| {
+                    crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                }).await;
+                match persisted {
+                    Ok(()) => drop_guard.disarm(),
+                    Err(e) => tracing::error!(
+                        "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
+                    ),
+                }
+                // Acknowledge the cancel: clear progress AND remove the flag
+                // so the waiting handler knows the worker has stopped and it's
+                // safe to clean up docs/ without racing us.
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.clear_progress(&project_id);
+                    t.cancelled.remove(&project_id);
+                }
                 let cancelled = serde_json::json!({ "status": "cancelled" });
                 yield Event::default().event("cancelled").data(cancelled.to_string());
                 return;
@@ -503,6 +838,11 @@ pub async fn full_audit(
             if (step as u32) <= resume_from {
                 if let Ok(mut t) = audit_tracker.lock() {
                     t.advance_step(&project_id, step as u32, Some(file_label.to_string()));
+                }
+                // Written by the interrupted predecessor of this same logical
+                // audit — counts as freshly emitted for reconciliation.
+                if analysis_step.target_file.contains("inconsistencies-") {
+                    freshly_written_indices.push(analysis_step.target_file.to_string());
                 }
                 // Surface to the frontend so it can render a "(skipped — already done)"
                 // marker on the step instead of pretending we re-did the work.
@@ -548,7 +888,11 @@ pub async fn full_audit(
 
             let today = Utc::now().format("%Y-%m-%d").to_string();
             let today_compact = Utc::now().format("%Y%m%d").to_string();
-            let mut full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, analysis_step.prompt)
+            // Chained sub-audit steps get the relevance gate FIRST — a
+            // dimension foreign to the project must cost one line, not a
+            // full agent pass.
+            let gate = super::gate_for_step(step, first_chained_step);
+            let mut full_prompt = format!("{}\n\n{}{}", PROMPT_PREAMBLE, gate, analysis_step.prompt)
                 .replace("YYYYMMDD=today", &format!("YYYYMMDD={}", today_compact))
                 .replace("today's date (YYYY-MM-DD)", &today)
                 .replace("set to today's date", &format!("set to {}", today));
@@ -561,16 +905,9 @@ pub async fn full_audit(
             // coverage with verifiable file:line signals the LLM single-pass
             // commonly misses.
             if analysis_step.target_file.ends_with("inconsistencies-tech-debt.md") {
-                let block = crate::core::audit_detectors::render_signals_block(&detector_signals);
-                full_prompt.push_str(&format!("\n\n{}\n", block));
-                // chantier 4 — re-audit dedup list (Option C). Only when priors
-                // exist; on a first audit `prior_td_digests` is empty and the
-                // block is skipped (render returns "" but we guard to avoid the
-                // stray blank lines).
-                if !prior_td_digests.is_empty() {
-                    let known = super::reconciliation::render_known_debt_block(&prior_td_digests);
-                    full_prompt.push_str(&format!("\n\n{}\n", known));
-                }
+                // Shared with the partial pipeline (Codex lot-3 #4): the
+                // detector signals and the known-debt digests travel together.
+                full_prompt.push_str(&super::step8_context_block(&detector_signals, &prior_td_digests));
             }
             // 0.8.3 (#272) — pre-existing user docs are migrated to
             // docs/legacy/ before the audit runs. Tell the agent to
@@ -650,7 +987,7 @@ pub async fn full_audit(
                     // (npx-launched MCP servers — `sequential-thinking`,
                     // `memory`, `context7` — inherit the stdout fd and don't
                     // release it on parent exit). Result: the audit stays
-                    // "auditing step N/10" forever in the tracker, the user
+                    // "auditing step N/total" forever in the tracker, the user
                     // can't proceed, and 100+k tokens are wasted on a run
                     // that's actually dead.
                     //
@@ -768,9 +1105,29 @@ pub async fn full_audit(
                         tracker.running_pids.remove(&project_id);
                     }
 
-                    // Check if cancelled during this step
+                    // Check if cancelled during this step. Must finalize
+                    // exactly like the pre-step branch: persist `Cancelled`
+                    // and disarm the drop-guard. Without this the guard's Drop
+                    // would stamp `Interrupted`, making a deliberate user
+                    // cancel look like a resumable crash.
                     if audit_tracker.lock().map(|t| t.cancelled.contains(&project_id)).unwrap_or(false) {
-                        if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
+                        // Same contract as the pre-step branch: persist first
+                        // (failure leaves the guard armed → Interrupted net),
+                        // then acknowledge so the handler can clean up.
+                        let run_id = audit_run_id.clone();
+                        let persisted = db.with_conn(move |conn| {
+                            crate::db::audit_runs::mark_cancelled(conn, &run_id)
+                        }).await;
+                        match persisted {
+                            Ok(()) => drop_guard.disarm(),
+                            Err(e) => tracing::error!(
+                                "mark_cancelled failed for {audit_run_id}: {e} — leaving the drop-guard armed"
+                            ),
+                        }
+                        if let Ok(mut t) = audit_tracker.lock() {
+                            t.clear_progress(&project_id);
+                            t.cancelled.remove(&project_id);
+                        }
                         let cancelled = serde_json::json!({ "status": "cancelled" });
                         yield Event::default().event("cancelled").data(cancelled.to_string());
                         return;
@@ -791,11 +1148,11 @@ pub async fn full_audit(
                     // hole later when validating findings, or never.
                     //
                     // If suspicious: emit `step_warning` (frontend
-                    // surfaces a banner), auto-repair from the template
-                    // so the user can re-run the step OR resume from a
-                    // clean baseline, and report `success: false` in
+                    // surfaces a banner) and report `success: false` in
                     // step_done so the overall audit summary is honest.
-                    let (mut success, mut warning) = crate::api::audit::validation::validate_and_repair_step_output(
+                    // The file is NEVER overwritten — re-running the
+                    // step is the only repair path.
+                    let (mut success, mut warning) = crate::api::audit::validation::validate_step_output(
                         cli_success,
                         &project_path,
                         analysis_step.target_file,
@@ -855,72 +1212,70 @@ pub async fn full_audit(
                     // the step is otherwise successful and wrote a real file
                     // (the "REVIEW" pseudo-step writes nothing). Re-lints the
                     // written file's `[src:]` markers against the real tree.
-                    if enforce_mode && success && analysis_step.target_file != "REVIEW" {
-                        let target_path = project_path.join(analysis_step.target_file);
-                        if let Ok(written) = std::fs::read_to_string(&target_path) {
-                            let verdict = super::anti_hallu_enforce::lint_step_file(
-                                &written,
-                                &[&project_path],
-                            );
-                            use super::anti_hallu_enforce::GateDecision;
-                            match super::anti_hallu_enforce::decide(&verdict, attempt, max_attempts) {
-                                GateDecision::Retry => {
-                                    // Re-run the step with a corrective addendum
-                                    // naming the fabricated citations.
-                                    tracing::warn!(
-                                        "Audit step {} ({}) enforce gate: {} fabricated citation(s), retry {}/{}",
-                                        step, file_label, verdict.count(), attempt + 1, max_attempts
-                                    );
-                                    yield Event::default().event("step_retry").data(
-                                        serde_json::json!({
-                                            "step": step,
-                                            "file": file_label,
-                                            "attempt": attempt,
-                                            "max_attempts": max_attempts,
-                                            "fabricated_count": verdict.count(),
-                                            "reason": "anti_hallu_fabricated_citations",
-                                        }).to_string()
-                                    );
-                                    citation_feedback = Some(
-                                        super::anti_hallu_enforce::corrective_feedback(file_label, &verdict),
-                                    );
-                                    continue 'attempts;
-                                }
-                                GateDecision::Fail => {
-                                    // Retries exhausted — fail the step so the run
-                                    // ends Interrupted (no validation disc) rather
-                                    // than committing a doc with fabricated citations.
-                                    success = false;
-                                    let reason = format!(
-                                        "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
-                                        verdict.count(), max_attempts
-                                    );
-                                    tracing::warn!("Audit step {} ({}) enforce gate failed: {}", step, file_label, reason);
-                                    yield Event::default().event("step_warning").data(
-                                        serde_json::json!({
-                                            "step": step,
-                                            "file": file_label,
-                                            "reason": reason.clone(),
-                                            "repaired_from_template": false,
-                                        }).to_string()
-                                    );
-                                    warning = Some(crate::api::audit::validation::StepValidationWarning {
-                                        reason,
-                                        repaired: false,
-                                    });
-                                }
-                                GateDecision::Pass => {
-                                    // Clean citations — stamp `audit="<today>"` on
-                                    // any curated="ai" section (deterministic, 0 tokens).
-                                    if let Some(stamped) =
-                                        super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
-                                    {
-                                        if let Err(e) = std::fs::write(&target_path, &stamped) {
-                                            tracing::warn!(
-                                                "Audit step {} ({}): failed to stamp audit dates: {}",
-                                                step, file_label, e
-                                            );
-                                        }
+                    {
+                        use super::anti_hallu_enforce::EnforceGateOutcome;
+                        // Shared decision with the partial pipeline (Codex
+                        // lot-3 #8) — only the SSE mapping lives here.
+                        match super::anti_hallu_enforce::evaluate_enforce_gate(
+                            enforce_mode, success, analysis_step.target_file,
+                            &project_path, attempt, max_attempts,
+                        ) {
+                            EnforceGateOutcome::NotApplicable => {}
+                            EnforceGateOutcome::Unreadable(reason) => {
+                                success = false;
+                                yield Event::default().event("step_warning").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "reason": reason.clone(), "repaired_from_template": false,
+                                    }).to_string()
+                                );
+                                warning = Some(crate::api::audit::validation::StepValidationWarning {
+                                    reason, repaired: false,
+                                });
+                            }
+                            EnforceGateOutcome::Retry { feedback, fabricated } => {
+                                tracing::warn!(
+                                    "Audit step {} ({}) enforce gate: {} fabricated citation(s), retry {}/{}",
+                                    step, file_label, fabricated, attempt + 1, max_attempts
+                                );
+                                yield Event::default().event("step_retry").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "attempt": attempt, "max_attempts": max_attempts,
+                                        "fabricated_count": fabricated,
+                                        "reason": "anti_hallu_fabricated_citations",
+                                    }).to_string()
+                                );
+                                citation_feedback = Some(feedback);
+                                continue 'attempts;
+                            }
+                            EnforceGateOutcome::Fail { reason } => {
+                                success = false;
+                                tracing::warn!("Audit step {} ({}) enforce gate failed: {}", step, file_label, reason);
+                                yield Event::default().event("step_warning").data(
+                                    serde_json::json!({
+                                        "step": step, "file": file_label,
+                                        "reason": reason.clone(), "repaired_from_template": false,
+                                    }).to_string()
+                                );
+                                warning = Some(crate::api::audit::validation::StepValidationWarning {
+                                    reason, repaired: false,
+                                });
+                            }
+                            EnforceGateOutcome::Pass { written } => {
+                                // Clean citations — stamp `audit="<today>"` on
+                                // any curated="ai" section (deterministic, 0
+                                // tokens). The Full pipeline has no rewrite
+                                // proof, so stamping here is safe.
+                                if let Some(stamped) =
+                                    super::anti_hallu_enforce::stamp_curated_audit_dates(&written, &today)
+                                {
+                                    let target_path = project_path.join(analysis_step.target_file);
+                                    if let Err(e) = std::fs::write(&target_path, &stamped) {
+                                        tracing::warn!(
+                                            "Audit step {} ({}): failed to stamp audit dates: {}",
+                                            step, file_label, e
+                                        );
                                     }
                                 }
                             }
@@ -973,14 +1328,29 @@ pub async fn full_audit(
                     // (no warning, no cli_failure) so a half-baked step
                     // doesn't get treated as done on resume.
                     if success {
-                        last_successful_step = step as u32;
-                        let run_id = audit_run_id.clone();
-                        let log_run_id = run_id.clone();
-                        let step_n = step as u32;
-                        if let Err(e) = db.with_conn(move |conn| {
-                            crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
-                        }).await {
-                            tracing::error!("Failed to persist last_completed_step={step_n} for run {log_run_id}: {e}");
+                        // This index was (re)written by THIS run — eligible
+                        // for the reconciliation union. A warned/failed step
+                        // must NOT contribute: its on-disk index is a
+                        // leftover from a previous audit and treating it as
+                        // freshly-emitted would misclassify its TDs.
+                        if analysis_step.target_file.contains("inconsistencies-") {
+                            freshly_written_indices.push(analysis_step.target_file.to_string());
+                        }
+                        // The checkpoint is the CONTIGUOUS successful prefix:
+                        // once any step warned/failed, later successes no
+                        // longer advance it — otherwise resume would skip
+                        // 1..=checkpoint right over the failed step and the
+                        // gap would never be re-run.
+                        if !any_step_warning {
+                            last_successful_step = step as u32;
+                            let run_id = audit_run_id.clone();
+                            let log_run_id = run_id.clone();
+                            let step_n = step as u32;
+                            if let Err(e) = db.with_conn(move |conn| {
+                                crate::db::audit_runs::update_last_completed_step(conn, &run_id, step_n)
+                            }).await {
+                                tracing::error!("Failed to persist last_completed_step={step_n} for run {log_run_id}: {e}");
+                            }
                         }
                     } else {
                         // Track that something went wrong so the
@@ -990,16 +1360,28 @@ pub async fn full_audit(
                         // (cf F8c #312 — no validation disc unless all
                         // 9 steps reported success).
                         any_step_warning = true;
+                        warned_steps.push(step as u32);
                     }
                 }
                 Err(e) => {
                     tracing::error!("Audit step {} failed to start: {}", step, e);
                     any_step_warning = true;
+                    warned_steps.push(step as u32);
                     let err = serde_json::json!({
                         "error": format!("Step {} ({}): {}", step, file_label, e),
                         "step": step
                     });
                     yield Event::default().event("step_error").data(err.to_string());
+                    // Same closure invariant as the partial pipeline: every
+                    // step ends with exactly one step_done — step_error is
+                    // non-terminal and the loop continues.
+                    yield Event::default().event("step_done").data(
+                        serde_json::json!({
+                            "step": step, "success": false, "file": file_label,
+                            "tokens": 0, "duration_ms": 0,
+                            "total_tokens": total_tokens_so_far,
+                        }).to_string()
+                    );
                 }
             }
             // Terminal attempt (success, exhausted retries, or start failure).
@@ -1038,24 +1420,37 @@ pub async fn full_audit(
         // the user informed across audits — without this, dropped TDs
         // would vanish silently and the user couldn't tell "fixed" from
         // "missed" between audit runs.
-        if is_full && !pre_audit_td_snapshot.is_empty() {
+        // Reconciliation needs a COHERENT view of the whole TD set: on a run
+        // with a gap (warned/failed step) even the successfully-rewritten
+        // indices don't cover every dimension, so classifying priors against
+        // them would fabricate Missed/Stale verdicts. Complete runs only.
+        let run_is_complete = !any_step_warning && last_successful_step == total_steps as u32;
+        if is_full && run_is_complete && !pre_audit_td_snapshot.is_empty() {
             let project_path_for_recon = project_path.clone();
             let snapshot = pre_audit_td_snapshot.clone();
+            // Union the TD ids from every index the chain ACTUALLY wrote this
+            // run (Codex #11): a chained Full lists Security/Docker/...
+            // findings in their own `inconsistencies-<dim>.md` files, so a
+            // still-valid sub-audit prior re-listed there would otherwise
+            // look Missed/Stale. Tracked per-step (success + resume-skipped)
+            // rather than derived from the plan, so an index a warned/failed
+            // step left stale on disk never masquerades as freshly emitted.
+            let recon_index_files: Vec<String> = freshly_written_indices.clone();
             let recon_outcome = tokio::task::spawn_blocking(move || {
                 use super::reconciliation::{
                     check_signature_in_source, classify, compute_delta_with_index,
                     parse_index_td_ids, render_report, DeltaKind,
                 };
                 // Index-aware delta (fix 2026-06-03): a prior whose id is still
-                // listed in the freshly-written index is `Carried` (re-emitted),
+                // listed in a freshly-written index is `Carried` (re-emitted),
                 // NOT a `Missed` candidate. Without this, Step 8's anti-repetition
                 // (keep correct detail files verbatim) made every re-listed prior
                 // look "missed".
-                let still_listed = std::fs::read_to_string(
-                    project_path_for_recon.join("docs/inconsistencies-tech-debt.md"),
-                )
-                .map(|c| parse_index_td_ids(&c))
-                .unwrap_or_default();
+                let still_listed: std::collections::HashSet<String> = recon_index_files
+                    .iter()
+                    .filter_map(|f| std::fs::read_to_string(project_path_for_recon.join(f)).ok())
+                    .flat_map(|c| parse_index_td_ids(&c))
+                    .collect();
                 let deltas = compute_delta_with_index(&snapshot, &still_listed);
                 let project_path_for_check = project_path_for_recon.clone();
                 let entries = classify(
@@ -1126,19 +1521,82 @@ pub async fn full_audit(
                 audit_run_id, project_id, last_successful_step, total_steps, any_step_warning
             );
             // Surface the interrupted state to the frontend so it can
-            // show "Reprendre Step N/10" instead of "Validation en cours".
+            // show the dynamic resume step instead of "Validation en cours".
             yield Event::default().event("audit_interrupted").data(
                 serde_json::json!({
                     "last_completed_step": last_successful_step,
                     "total_steps": total_steps as u32,
                     "had_warnings": any_step_warning,
+                    "warned_steps": warned_steps,
                 }).to_string()
             );
         }
+        // The drift baseline is written BEFORE the validation discussion is
+        // created: spawning the validation agent is the point of no return
+        // (it runs detached), so every contractual artifact must exist first.
+        // A baseline failure blocks validation entirely — the run stays
+        // Interrupted and a validation-only resume redoes baseline + disc.
+        let mut baseline_ok = true;
+        if should_write_full_baseline(kind) && audit_fully_succeeded {
+            let pp = project_path.clone();
+            // Baseline the WHOLE executed chain, not just the 9 foundation
+            // steps (Codex #8): each chained sub-audit index (steps 10..16)
+            // gets its own mapping with a stable audit_step id, so drift can
+            // flag a stale sub-audit section and the partial path can refresh
+            // exactly that step.
+            let baseline_steps: Vec<super::AnalysisStep> = steps.clone();
+            let baseline_written = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+                let mappings: Vec<crate::core::checksums::ChecksumMapping> = baseline_steps.iter()
+                    .enumerate()
+                    .filter(|(_, s)| !s.sources.is_empty())
+                    .map(|(i, s)| {
+                        let checksums = crate::core::checksums::compute_step_checksums(&pp, s.sources);
+                        crate::core::checksums::ChecksumMapping {
+                            ai_file: s.target_file.to_string(),
+                            audit_step: i + 1,
+                            sources: s.sources.iter().map(|p| p.to_string()).collect(),
+                            checksums,
+                        }
+                    })
+                    .collect();
+                crate::core::checksums::write_checksums_file(&pp, &mappings)?;
+                // Best-effort state marker — informational, not contractual.
+                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
+                    tracing::warn!("Failed to record audit in .kronn.json: {}", e);
+                }
+                Ok(mappings.len())
+            }).await;
+            let baseline_outcome: Result<usize, String> = match baseline_written {
+                Ok(r) => r,
+                Err(join_err) => Err(format!("baseline task panicked: {join_err}")),
+            };
+            match baseline_outcome {
+                Ok(n) => tracing::info!("Wrote docs/checksums.json with {n} mappings"),
+                Err(msg) => {
+                    // Drift detection is contractual for a Full audit: a run
+                    // without a baseline must not read as a clean success —
+                    // `baseline_ok = false` downgrades the terminal to
+                    // Interrupted, so this event is a NON-terminal warning
+                    // (the coherent `done interrupted` still follows).
+                    baseline_ok = false;
+                    tracing::error!("Failed to write checksums baseline: {msg}");
+                    yield Event::default().event("warning").data(
+                        serde_json::json!({
+                            "message": format!("Drift baseline write failed: {msg} — validation is not started and the run stays resumable.")
+                        }).to_string(),
+                    );
+                }
+            }
+        }
+
         // 0.8.4 (#287) — both Full and sub-audits get a validation
         // discussion now. Pre-fix only Full was wired; sub-audits
         // would dump TDs to disk with no human-validation flow.
-        let disc_id: Option<String> = if kind.is_validatable() && audit_fully_succeeded {
+        // BUILT here, INSERTED in the terminal transaction below: the
+        // invariant "a validation discussion exists iff the run is
+        // Completed" is structural (same commit), not compensated.
+        let pending_validation: Option<(Discussion, DiscussionMessage)> =
+            if kind.is_validatable() && audit_fully_succeeded && baseline_ok {
         if let Ok(mut t) = audit_tracker.lock() { t.mark_validating(&project_id); }
 
         let pp = project_path_str.clone();
@@ -1149,14 +1607,31 @@ pub async fn full_audit(
         // Detect if project has an issue tracker MCP (GitHub, GitLab, Jira, Linear, etc.)
         let has_issue_tracker_mcp = detect_issue_tracker_mcp(&project_path);
 
+        // TD ids this run actually created/re-emitted — parsed from the
+        // indices the run wrote. Injected into the validation prompt so
+        // Phase 3 reviews THIS run's findings only, never re-opening TDs
+        // settled by previous validation discussions.
+        let run_td_ids: Vec<String> = {
+            let pp = project_path.clone();
+            let idx_files = freshly_written_indices.clone();
+            tokio::task::spawn_blocking(move || {
+                idx_files.iter()
+                    .filter_map(|f| std::fs::read_to_string(pp.join(f)).ok())
+                    .flat_map(|c| super::reconciliation::parse_index_td_ids(&c))
+                    .collect::<std::collections::BTreeSet<String>>()
+                    .into_iter()
+                    .collect::<Vec<String>>()
+            }).await.unwrap_or_default()
+        };
+
         // 0.8.4 (#287) — Full keeps the 4-phase protocol; sub-audits
         // get the shorter version scoped to the kind-specific index
         // file + (for RGAA) the explicit manual-audit + Access42 /
         // Opquast reminder.
         let validation_prompt = if kind.is_sub_audit() {
-            build_sub_audit_validation_prompt(kind, &language, has_issue_tracker_mcp)
+            build_sub_audit_validation_prompt(kind, &language, has_issue_tracker_mcp, &run_td_ids)
         } else {
-            build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp)
+            build_validation_prompt(&language, &audit_info, has_issue_tracker_mcp, &run_td_ids)
         };
 
         let now = Utc::now();
@@ -1223,60 +1698,17 @@ pub async fn full_audit(
             updated_at: now,
         };
 
-        let disc = discussion.clone();
-        let msg = initial_message;
-        let disc_created = db.with_conn(move |conn| {
-            crate::db::discussions::insert_discussion(conn, &disc)?;
-            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
-            Ok(())
-        }).await;
-
-        let disc_id = match disc_created {
-            Ok(()) => {
-                let ev = serde_json::json!({ "discussion_id": discussion_id });
-                yield Event::default().event("validation_created").data(ev.to_string());
-                Some(discussion_id)
-            }
-            Err(e) => {
-                tracing::error!("Failed to create validation discussion: {}", e);
-                let err = serde_json::json!({ "error": format!("Failed to create validation discussion: {}", e) });
-                yield Event::default().event("step_error").data(err.to_string());
-                None
-            }
-        };
-
-        // Generate checksums for drift detection — Full-audit only;
-        // specialized kinds don't regenerate the docs/ baseline.
-        {
-            let pp = project_path.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let mappings: Vec<crate::core::checksums::ChecksumMapping> = ANALYSIS_STEPS.iter()
-                    .enumerate()
-                    .filter(|(_, s)| !s.sources.is_empty())
-                    .map(|(i, s)| {
-                        let checksums = crate::core::checksums::compute_step_checksums(&pp, s.sources);
-                        crate::core::checksums::ChecksumMapping {
-                            ai_file: s.target_file.to_string(),
-                            audit_step: i + 1,
-                            sources: s.sources.iter().map(|p| p.to_string()).collect(),
-                            checksums,
-                        }
-                    })
-                    .collect();
-                if let Err(e) = crate::core::checksums::write_checksums_file(&pp, &mappings) {
-                    tracing::warn!("Failed to write checksums: {}", e);
-                } else {
-                    tracing::info!("Wrote docs/checksums.json with {} mappings", mappings.len());
-                }
-                if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
-                    tracing::warn!("Failed to record audit in .kronn.json: {}", e);
-                }
-            }).await;
-        }
-        disc_id
+        Some((discussion, initial_message))
         } else {
             None
         };
+
+        // A Full run whose drift baseline could not be written did NOT
+        // satisfy its success contract — it stays resumable so the missing
+        // piece can be retried. The validation-discussion half of the
+        // contract is enforced structurally below (same transaction as the
+        // Completed write).
+        let audit_fully_succeeded = audit_fully_succeeded && baseline_ok;
 
         // 0.8.2 — record the audit completion in `audit_runs`. The
         // severity distribution is counted by scanning the freshly-
@@ -1297,7 +1729,7 @@ pub async fn full_audit(
             let score = crate::models::compute_health_score(
                 counts.critical, counts.high, counts.medium, counts.low,
             );
-            // 0.8.2 — Step 9 cluster detector. Surfaces "you have 4
+            // 0.8.2 — completion-time cluster detector. Surfaces "you have 4
             // docker findings, consider a focused Docker audit" cards
             // on the dashboard. Empty Vec is fine — UI hides the card.
             let recs = compute_cluster_recommendations(&td_dir);
@@ -1309,47 +1741,133 @@ pub async fn full_audit(
             (counts, resolved, new, carried, score, recs_json)
         })
         .await;
-        match completion_counts {
+        // The terminal write is AUTHORITATIVE and ATOMIC. Happy path: ONE
+        // transaction inserts the validation discussion + its prompt AND
+        // stamps the run Completed — "a validation discussion exists iff the
+        // run is Completed" holds structurally, no compensation. Interrupted
+        // path: terminal write alone. If the write (or the metrics feeding
+        // it) fails, the run does NOT present as finished: terminal `error`
+        // + return, never a `done`, no disarm — the guard's Drop retries
+        // mark_interrupted and keeps the lease fail-closed on failure.
+        let finalize_result: Result<(), String> = match completion_counts {
             Ok((counts, resolved, new, carried, score, recs_json)) => {
                 let run_id = run_id_for_complete.clone();
-                let log_run_id = run_id.clone();
                 let succeeded = audit_fully_succeeded;
                 let last_step = last_successful_step;
-                if let Err(e) = db_for_complete.with_conn(move |conn| {
+                let warned = warned_steps.clone();
+                let validation = pending_validation.clone();
+                // steps + the validation phase — the historical "/10" for a
+                // 9-step run, now dynamic (a chained Full is 16+1).
+                let total_for_report = total_steps + 1;
+                db_for_complete.with_conn(move |conn| {
+                    let tx = conn.unchecked_transaction()?;
                     if succeeded {
+                        if let Some((disc, msg)) = validation.as_ref() {
+                            crate::db::discussions::insert_discussion(&tx, disc)?;
+                            crate::db::discussions::insert_message(&tx, &disc.id, msg)?;
+                        }
                         crate::db::audit_runs::complete(
-                            conn, &run_id, ended_at, "Completed",
+                            &tx, &run_id, ended_at, "Completed",
                             counts.critical, counts.high, counts.medium, counts.low,
                             resolved, new, carried,
                             score, None, recs_json.as_deref(),
-                        )
+                        )?;
+                        // 076 — durable run→validation link, same commit:
+                        // the validate endpoint trusts only this.
+                        if let Some((disc, _)) = validation.as_ref() {
+                            crate::db::audit_runs::set_validation_discussion(&tx, &run_id, &disc.id)?;
+                        }
                     } else {
                         // 0.8.3 (#311) — mark as Interrupted (not Completed,
                         // not Failed): the resume mechanism will pick this
                         // row up via `latest_resumable` and the frontend
-                        // shows "Reprendre Step N/10".
+                        // shows the dynamic resume step.
                         crate::db::audit_runs::mark_interrupted(
-                            conn,
+                            &tx,
                             &run_id,
-                            &format!("interrupted after step {last_step}/10 (warning or stream-end)"),
-                        )
+                            &if warned.is_empty() {
+                                format!("interrupted after step {last_step}/{} (stream-end)", total_for_report)
+                            } else {
+                                format!("interrupted after step {last_step}/{} (warned steps: {warned:?})", total_for_report)
+                            },
+                        )?;
+                        // The TD files ARE on disk even when the run ends
+                        // Interrupted — keep the counters honest (they read
+                        // 0 while 14 TD files existed).
+                        crate::db::audit_runs::update_td_counts(
+                            &tx, &run_id,
+                            counts.critical, counts.high, counts.medium, counts.low,
+                            carried,
+                        )?;
                     }
-                }).await {
-                    tracing::error!("Failed to finalize audit run {log_run_id}: {e}");
-                }
+                    tx.commit()?;
+                    Ok(())
+                }).await.map_err(|e| format!("terminal write failed: {e}"))
             }
-            Err(e) => {
-                tracing::error!("Failed to compute audit completion metrics for run {run_id_for_complete}: {e}");
-            }
+            Err(e) => Err(format!("completion metrics task failed: {e}")),
+        };
+
+        if let Err(msg) = finalize_result {
+            // NOT finished: the row still says Running, so no terminal event
+            // may claim otherwise. The armed guard settles it (retry of
+            // mark_interrupted; on failure the lease stays held fail-closed
+            // and the boot reconcile is the last resort).
+            tracing::error!("Failed to finalize audit run {run_id_for_complete}: {msg}");
+            // Terminal failure ⇒ terminal event (`error`, not `step_error`):
+            // the stream ends here and the client must clean up exactly once.
+            yield Event::default().event("error").data(
+                serde_json::json!({
+                    "error": format!("Could not persist the run's final status: {msg} — the run is NOT finished; it will be reconciled and stays resumable.")
+                }).to_string(),
+            );
+            return;
+        }
+
+        // ── Terminal status durably persisted — side effects may fire. ──
+        let disc_id: Option<String> = pending_validation.as_ref().map(|(d, _)| d.id.clone());
+        if let Some(vdisc) = disc_id.clone() {
+            yield Event::default().event("validation_created").data(
+                serde_json::json!({ "discussion_id": vdisc }).to_string(),
+            );
+            // Spawned ONLY now: the agent runs detached (point of no return)
+            // and must never outlive a run whose finalization failed.
+            // Fire-and-forget with the batch-grade silent retry — the run
+            // outlives this SSE stream by design.
+            let vstate = state_for_validation.clone();
+            tokio::spawn(async move {
+                crate::api::discussions::spawn_agent_run_with_chain(
+                    vstate, vdisc, Vec::new(), None,
+                ).await;
+            });
         }
 
         // Audit fully complete — drop progress so UI polling can stop and
         // `GET /audit-status` reports `None`.
         if let Ok(mut t) = audit_tracker.lock() { t.clear_progress(&project_id); }
 
+        // The row reached its terminal status — the guard has nothing left
+        // to settle.
+        drop_guard.disarm();
+
+        // Completion notification for every connected client — the audit may
+        // have been launched from another page or another surface entirely
+        // (MCP bridge): without this the UI just goes quiet and the user
+        // can't tell "finished clean" from "finished, needs attention".
+        let _ = ws_broadcast.send(crate::models::WsMessage::AuditFinished {
+            project_id: project_id.clone(),
+            status: if audit_fully_succeeded { "complete".into() } else { "interrupted".into() },
+            last_completed_step: last_successful_step,
+            total_steps: total_steps as u32,
+            warned_steps: warned_steps.clone(),
+            discussion_id: disc_id.clone(),
+        });
+
+        // The done event mirrors what was DURABLY persisted.
         let done = serde_json::json!({
-            "status": "complete",
+            "status": if audit_fully_succeeded { "complete" } else { "interrupted" },
             "total_steps": total_steps,
+            "last_completed_step": last_successful_step,
+            "warned_steps": warned_steps,
             "discussion_id": disc_id,
             "template_was_installed": template_installed,
             "audit_run_id": audit_run_id,
@@ -1358,6 +1876,39 @@ pub async fn full_audit(
     });
 
     Sse::new(stream)
+}
+
+/// Resolve a resume-by-run-id request against the persisted row. The row is
+/// authoritative: it dictates both the kind AND the checkpoint, so a client
+/// can never oversize a step count nor graft a Full checkpoint onto a
+/// Security selector (Codex #1/#3). Every rejection is a hard error — a
+/// missing / cross-project / non-Interrupted / unknown-kind row must never
+/// silently degrade to a fresh run (that would discard the work the user
+/// asked to resume). Returns `(kind, resume_from)` on success.
+pub(crate) fn resolve_resume_row(
+    run_id: &str,
+    row: Option<&crate::models::AuditRun>,
+    project_id: &str,
+) -> Result<(crate::models::AuditKind, u32), String> {
+    match row {
+        None => Err(format!("resume_run_id {run_id} not found")),
+        Some(r) if r.project_id != project_id =>
+            Err(format!("resume_run_id {run_id} belongs to another project")),
+        Some(r) if r.status != "Interrupted" =>
+            Err(format!("resume_run_id {run_id} is not resumable (status: {})", r.status)),
+        Some(r) => crate::models::AuditKind::from_label(&r.kind)
+            .map(|k| (k, r.last_completed_step))
+            .ok_or_else(|| format!("resume_run_id {run_id}: unknown kind {:?}", r.kind)),
+    }
+}
+
+/// Whether this kind regenerates the `docs/checksums.json` drift baseline
+/// on success. Only **Full** owns the baseline: a standalone specialized
+/// audit runs a single step and must never rewrite the 9 foundation-doc
+/// checksums, which would mark stale foundation docs "fresh" without ever
+/// re-auditing them against current source.
+pub(crate) fn should_write_full_baseline(kind: crate::models::AuditKind) -> bool {
+    matches!(kind, crate::models::AuditKind::Full)
 }
 
 /// Decision returned by [`classify_docs_dir_for_cancel`] — does the
@@ -1520,15 +2071,18 @@ pub async fn cancel_audit(
 
     let project_id = project.id.clone();
 
-    // 1. Signal cancellation and kill any running agent process
+    // 1. REQUEST cancellation and kill any running agent process. We do NOT
+    //    clear the flag or the live progress here: the worker that owns the
+    //    run acknowledges by finalizing it (mark_cancelled + disarm) and
+    //    removing both. Clearing them here is what let a Phase-1 cancel get
+    //    lost — the handler removed the flag before the worker's loop ever
+    //    checked it, so the audit ran on after a "cancelled" response
+    //    (Codex #10).
     {
         let Ok(mut tracker) = state.audit_tracker.lock() else {
             return Json(ApiResponse::err("Internal error: audit tracker lock poisoned"));
         };
         tracker.cancelled.insert(project_id.clone());
-        // Drop live progress so GET /audit-status stops reporting "running"
-        // even if the SSE stream is slow to notice the cancellation flag.
-        tracker.clear_progress(&project_id);
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
             tracing::info!("Killing audit agent process (PID {}) for project {}", pid, project_id);
             // Kill the process tree: first try killing the process group, then the process itself
@@ -1545,8 +2099,26 @@ pub async fn cancel_audit(
         }
     }
 
-    // Small delay to let the SSE stream detect the cancellation
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    // Wait for the worker to acknowledge (it removes the flag once it has
+    // finalized the run and stopped touching docs/). Generous timeout — a
+    // cancel during Phase 1 can't land until the template install / legacy
+    // migration spawn_blocking returns. On timeout we must NOT assume "no
+    // live worker": a Phase 1 longer than the window is still a live worker,
+    // and cleaning docs/ under it would race its writes while the removed
+    // flag would let the audit run on. Refuse instead — the flag stays set
+    // (a live worker will still honor it at its next check; a truly dead one
+    // leaves a stale flag that the next launch clears), and the caller can
+    // retry the cancel.
+    let acked = wait_for_cancel_ack(
+        &state.audit_tracker, &project_id, std::time::Duration::from_secs(15),
+    ).await;
+    if !acked {
+        return Json(ApiResponse::err(
+            "Cancel requested but not acknowledged by the audit worker yet \
+             (a long install phase can delay it). The cancellation stays \
+             pending — retry in a moment to complete the cleanup.",
+        ));
+    }
 
     // 2. Delete audit-created files — DATA-LOSS GUARDS via
     // `should_preserve_docs_folder()`.
@@ -1606,9 +2178,12 @@ pub async fn cancel_audit(
         tracing::error!("Failed to delete validation discussions for project: {e}");
     }
 
-    // 4. Clear cancellation flag
+    // 4. Defensive flag clear. The worker (or the timeout branch above)
+    //    already removed it on ack; this only matters if the worker never
+    //    ran. Also clear stale progress so an orphaned entry can't linger.
     if let Ok(mut tracker) = state.audit_tracker.lock() {
         tracker.cancelled.remove(&project_id);
+        tracker.clear_progress(&project_id);
     }
 
     // Return updated status (should be NoTemplate now)
@@ -1826,6 +2401,299 @@ pub(crate) fn compute_cluster_recommendations(td_dir: &std::path::Path) -> Vec<c
     // impactful recommendation at the top of the card.
     recs.sort_by(|a, b| b.cluster_size.cmp(&a.cluster_size).then_with(|| a.kind.cmp(&b.kind)));
     recs
+}
+
+#[cfg(test)]
+mod drop_guard_tests {
+    use super::AuditDropGuard;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn abandoned_run_is_finalized_as_interrupted() {
+        // The SSE consumer vanishing drops the pipeline generator: the
+        // guard must settle the run row (observed live: zombie tracker +
+        // row stuck on Running until the next boot reconcile).
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        {
+            let db = db.clone();
+            db.with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p1', 'P', '/tmp', ?1, ?1)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::audit_runs::insert_running(
+                    conn, "r-drop", "p1", "Full", "ClaudeCode", chrono::Utc::now(),
+                )
+            }).await.unwrap();
+        }
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(crate::AuditTracker::default()));
+        if let Ok(mut t) = tracker.lock() {
+            t.start_progress("p1", 9, "full_audit");
+        }
+
+        {
+            let _guard = AuditDropGuard::new(db.clone(), tracker.clone(), Some("r-drop".into()), "p1".into());
+            // dropped ARMED — simulates the generator being cancelled
+        }
+        let rows = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                let rows = db.with_conn(|conn| crate::db::audit_runs::list_recent(conn, "p1", 1)).await.unwrap();
+                if rows.first().map(|r| r.status.as_str()) == Some("Interrupted") {
+                    break rows;
+                }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("drop-guard finalize timed out");
+        assert_eq!(rows[0].status, "Interrupted");
+        assert!(rows[0].report_path.as_deref().unwrap_or("").contains("sse consumer dropped"));
+        assert!(tracker.lock().unwrap().progress.is_empty(), "tracker entry must be cleared");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disarmed_guard_touches_nothing() {
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        {
+            let db = db.clone();
+            db.with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO projects (id, name, path, created_at, updated_at)
+                     VALUES ('p1', 'P', '/tmp', ?1, ?1)",
+                    rusqlite::params![now],
+                )?;
+                crate::db::audit_runs::insert_running(
+                    conn, "r-ok", "p1", "Full", "ClaudeCode", chrono::Utc::now(),
+                )
+            }).await.unwrap();
+        }
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(crate::AuditTracker::default()));
+        {
+            let mut guard = AuditDropGuard::new(db.clone(), tracker.clone(), Some("r-ok".into()), "p1".into());
+            guard.disarm();
+        }
+        // No async work is spawned when the guard is disarmed; no waiting needed.
+        let rows = db.with_conn(|conn| crate::db::audit_runs::list_recent(conn, "p1", 1)).await.unwrap();
+        assert_eq!(rows[0].status, "Running", "a disarmed guard must not finalize anything");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_releases_the_lease_on_drop_even_when_disarmed() {
+        // The lease must be freed however the run ends — a normal (disarmed)
+        // end just as much as an abandonment — or the project wedges: every
+        // future launch would hit "already running".
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(crate::AuditTracker::default()));
+        assert!(tracker.lock().unwrap().try_acquire_lease("p1"));
+        {
+            let mut guard = AuditDropGuard::new(db.clone(), tracker.clone(), None, "p1".into());
+            guard.hold_lease();
+            guard.disarm(); // normal ending
+        }
+        assert!(!tracker.lock().unwrap().leased.contains("p1"),
+            "lease must be released on drop after a normal (disarmed) end");
+        // And the project is immediately re-acquirable.
+        assert!(tracker.lock().unwrap().try_acquire_lease("p1"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn guard_without_lease_leaves_the_set_untouched() {
+        // A guard that never took the lease (e.g. the drop-guard tests) must
+        // not remove someone else's lease on drop.
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let tracker = std::sync::Arc::new(std::sync::Mutex::new(crate::AuditTracker::default()));
+        tracker.lock().unwrap().try_acquire_lease("p1");
+        {
+            let mut guard = AuditDropGuard::new(db.clone(), tracker.clone(), None, "p1".into());
+            guard.disarm(); // never called hold_lease
+        }
+        assert!(tracker.lock().unwrap().leased.contains("p1"),
+            "a guard that doesn't own the lease must not release it");
+    }
+}
+
+#[cfg(test)]
+mod finalization_decision_tests {
+    use super::should_write_full_baseline;
+    use crate::models::AuditKind;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn validation_discussion_exists_iff_run_completed() {
+        // #6 evolved (Codex): the invariant is STRUCTURAL — the validation
+        // discussion and the Completed status commit in ONE transaction, so
+        // a failure on either side rolls back both. This exercises the exact
+        // tx shape the pipeline uses, with `complete` failing (unknown run
+        // row → 0-row update → error) — the discussion must vanish with it.
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let outcome = db.with_conn(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO discussions (id, title, agent, language, created_at, updated_at)
+                 VALUES ('d-atomic', 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now'), datetime('now'))",
+                [],
+            )?;
+            crate::db::audit_runs::complete(
+                &tx, "run-that-does-not-exist", chrono::Utc::now(), "Completed",
+                0, 0, 0, 0, 0, 0, 0, 100, None, None,
+            )?;
+            tx.commit()?;
+            Ok(())
+        }).await;
+        assert!(outcome.is_err(), "complete on a missing row must fail the tx");
+        let orphan = db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM discussions WHERE id = 'd-atomic'",
+                [], |r| r.get::<_, i64>(0),
+            )?)
+        }).await.unwrap();
+        assert_eq!(orphan, 0, "the discussion must roll back with the failed terminal write");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn terminal_transaction_persists_status_discussion_and_link_together() {
+        // Happy path of the exact tx shape the pipeline uses: Completed +
+        // validation discussion + durable 076 link land in ONE commit.
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p1', 'P', '/tmp', ?1, ?1)",
+                rusqlite::params![now],
+            )?;
+            crate::db::audit_runs::insert_running(
+                conn, "run-tx", "p1", "Full", "ClaudeCode", chrono::Utc::now(),
+            )?;
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT INTO discussions (id, project_id, title, agent, language, created_at, updated_at)
+                 VALUES ('d-tx', 'p1', 'Validation audit AI', 'ClaudeCode', 'fr', datetime('now'), datetime('now'))",
+                [],
+            )?;
+            crate::db::audit_runs::complete(
+                &tx, "run-tx", chrono::Utc::now(), "Completed",
+                0, 0, 0, 0, 0, 0, 0, 100, None, None,
+            )?;
+            crate::db::audit_runs::set_validation_discussion(&tx, "run-tx", "d-tx")?;
+            tx.commit()?;
+            Ok(())
+        }).await.unwrap();
+        let run = db.with_conn(|conn| {
+            Ok(crate::db::audit_runs::get_by_id(conn, "run-tx")?.unwrap())
+        }).await.unwrap();
+        assert_eq!(run.status, "Completed");
+        assert_eq!(run.validation_discussion_id.as_deref(), Some("d-tx"),
+            "the durable link must land in the same commit as Completed");
+    }
+
+    #[test]
+    fn only_full_owns_the_drift_baseline() {
+        // #4 — a standalone specialized audit must never rewrite the 9
+        // foundation-doc checksums (false-freshness). Only Full does.
+        assert!(should_write_full_baseline(AuditKind::Full));
+        for k in [
+            AuditKind::Security, AuditKind::Docker, AuditKind::Performance,
+            AuditKind::Accessibility, AuditKind::Rgaa, AuditKind::Database,
+            AuditKind::ApiDesign, AuditKind::CodeQuality, AuditKind::Drift,
+            AuditKind::Custom,
+        ] {
+            assert!(!should_write_full_baseline(k), "{k:?} must not touch the Full baseline");
+        }
+    }
+}
+
+#[cfg(test)]
+mod cancel_ack_tests {
+    use super::wait_for_cancel_ack;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn returns_true_when_worker_acknowledges() {
+        // The handler must WAIT for the worker to stop before cleaning up.
+        let tracker = Arc::new(Mutex::new(crate::AuditTracker::default()));
+        tracker.lock().unwrap().cancelled.insert("p1".into());
+        // Simulated worker: acks (removes the flag) after a short delay,
+        // like a real one finishing Phase 1 then hitting the cancel check.
+        let t2 = tracker.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            t2.lock().unwrap().cancelled.remove("p1");
+        });
+        let acked = wait_for_cancel_ack(&tracker, "p1", Duration::from_secs(2)).await;
+        assert!(acked, "must observe the worker's ack");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn timeout_returns_false_and_leaves_the_pending_flag_intact() {
+        // A timeout proves NOTHING about the worker (a >window Phase 1 is a
+        // live worker): the wait reports it and touches nothing — the handler
+        // REFUSES the cancel on this signal (no cleanup, flag stays pending
+        // so a live worker still honors it; the caller retries).
+        let tracker = Arc::new(Mutex::new(crate::AuditTracker::default()));
+        tracker.lock().unwrap().cancelled.insert("p1".into());
+        let acked = wait_for_cancel_ack(&tracker, "p1", Duration::from_millis(150)).await;
+        assert!(!acked, "must time out when nothing acknowledges");
+        assert!(tracker.lock().unwrap().cancelled.contains("p1"),
+            "wait must not remove the flag itself — the caller refuses, never cleans up");
+    }
+}
+
+#[cfg(test)]
+mod resume_resolution_tests {
+    use super::resolve_resume_row;
+    use crate::models::{AuditKind, AuditRun};
+
+    fn run(kind: &str, status: &str, project_id: &str, step: u32) -> AuditRun {
+        serde_json::from_value(serde_json::json!({
+            "id": "r1", "project_id": project_id, "kind": kind,
+            "agent_type": "ClaudeCode", "started_at": "2026-07-20T00:00:00Z",
+            "status": status, "last_completed_step": step,
+        })).unwrap()
+    }
+
+    #[test]
+    fn interrupted_row_yields_its_own_kind_and_checkpoint() {
+        // #1/#3 — kind + checkpoint come from the row, never the client.
+        let r = run("Full", "Interrupted", "p1", 12);
+        assert_eq!(resolve_resume_row("r1", Some(&r), "p1"), Ok((AuditKind::Full, 12)));
+        let r = run("Security", "Interrupted", "p1", 0);
+        assert_eq!(resolve_resume_row("r1", Some(&r), "p1"), Ok((AuditKind::Security, 0)));
+    }
+
+    #[test]
+    fn missing_row_is_a_hard_error_not_a_fresh_run() {
+        // A silent fresh run would discard the work the user asked to resume.
+        assert!(resolve_resume_row("r1", None, "p1").is_err());
+    }
+
+    #[test]
+    fn cross_project_row_is_rejected() {
+        // #3 — a run id from another project must never launch here.
+        let r = run("Full", "Interrupted", "other", 5);
+        let err = resolve_resume_row("r1", Some(&r), "p1").unwrap_err();
+        assert!(err.contains("another project"), "{err}");
+    }
+
+    #[test]
+    fn non_interrupted_row_is_rejected() {
+        // Only Interrupted runs are resumable; a Completed/Running/Cancelled
+        // row must not be re-driven (would double-run or skip everything).
+        for status in ["Completed", "Running", "Cancelled", "Failed"] {
+            let r = run("Full", status, "p1", 9);
+            let err = resolve_resume_row("r1", Some(&r), "p1").unwrap_err();
+            assert!(err.contains("not resumable"), "{status}: {err}");
+        }
+    }
+
+    #[test]
+    fn unknown_kind_label_is_rejected_never_defaulted_to_full() {
+        // A corrupt/legacy label must fail loudly, never silently run Full
+        // (which would execute the wrong, heavier pipeline on resume).
+        let r = run("Nonsense", "Interrupted", "p1", 3);
+        let err = resolve_resume_row("r1", Some(&r), "p1").unwrap_err();
+        assert!(err.contains("unknown kind"), "{err}");
+    }
 }
 
 #[cfg(test)]

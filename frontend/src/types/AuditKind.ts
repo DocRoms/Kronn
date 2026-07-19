@@ -10,4 +10,5 @@ export type AuditKind =
     | "Rgaa"
     | "Database"
     | "ApiDesign"
+    | "CodeQuality"
     | "Custom";

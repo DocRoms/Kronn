@@ -83,6 +83,55 @@ fn record_audit_appends_to_existing() {
 }
 
 #[test]
+fn revoke_validated_clears_the_badge_and_noops_on_fresh_projects() {
+    // Codex A5 — every audit mutation revokes the prior validation. The
+    // revocation is contractual for callers, so it must be reliable: set →
+    // revoked; already-none → Ok; no state file at all → Ok (nothing to
+    // revoke, never an error that would block a first run).
+    let tmp = fresh_tmp("validated-revoke");
+    let mut state = KronnState {
+        validated_at: Some("2020-01-01".into()),
+        ..Default::default()
+    };
+    write(&tmp, &mut state).unwrap();
+    revoke_validated(&tmp).unwrap();
+    assert_eq!(read(&tmp).unwrap().validated_at, None);
+    // Idempotent.
+    revoke_validated(&tmp).unwrap();
+    cleanup(&tmp);
+
+    let virgin = fresh_tmp("validated-revoke-virgin");
+    revoke_validated(&virgin).unwrap();
+    cleanup(&virgin);
+}
+
+#[test]
+fn revoke_validated_neutralizes_a_legacy_marker_project() {
+    // Codex A5 v3 — a pre-.kronn.json project carries KRONN:VALIDATED as
+    // an HTML marker in the docs entry. Without the contractual backfill,
+    // revoke no-oped on a default state and the scanner kept reading the
+    // marker as Validated forever.
+    let tmp = fresh_tmp("validated-revoke-legacy");
+    std::fs::create_dir_all(tmp.join("docs")).unwrap();
+    std::fs::write(
+        tmp.join("docs/AGENTS.md"),
+        "# Proj\n<!-- KRONN:VALIDATED:2020-01-01 -->\n",
+    ).unwrap();
+    assert_eq!(
+        crate::core::scanner::detect_audit_status(tmp.to_str().unwrap()),
+        crate::models::AiAuditStatus::Validated,
+        "sanity: the legacy marker alone reads Validated"
+    );
+    revoke_validated(&tmp).unwrap();
+    assert_ne!(
+        crate::core::scanner::detect_audit_status(tmp.to_str().unwrap()),
+        crate::models::AiAuditStatus::Validated,
+        "after revocation the project must NOT read Validated anymore"
+    );
+    cleanup(&tmp);
+}
+
+#[test]
 fn mark_validated_preserves_original_date() {
     let tmp = fresh_tmp("validated-preserve");
     let mut state = KronnState {

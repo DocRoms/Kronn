@@ -395,3 +395,114 @@ describe('fullAuditStream — legacy_docs_migrated event (0.8.3 #272)', () => {
     });
   });
 });
+
+// ── Terminal contract mirror (Codex msg 165) — same semantics as the
+// partial stream: step_error is NON-terminal (onStepError, followed by its
+// own step_done), `warning` is non-terminal, `event:error` is terminal and
+// SEALS the stream (onError once, onDone never).
+describe('fullAuditStream — terminal contract (step_error / warning / error)', () => {
+  const BASE = {
+    onTemplateInstalled: () => {},
+    onStepStart: () => {},
+    onChunk: () => {},
+    onValidationCreated: () => {},
+  };
+
+  it('a spawn step_error flows onStepError → step_done false → done, no terminal onError', async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      fakeSseResponse([
+        { event: 'step_error', data: { error: 'spawn failed', step: 2 } },
+        { event: 'step_done', data: { step: 2, success: false, tokens: 0, duration_ms: 0, total_tokens: 0 } },
+        { event: 'done', data: { discussion_id: null, template_was_installed: false } },
+      ])
+    );
+    const { projects } = await import('../api');
+    const onStepError = vi.fn();
+    const onStepDone = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.fullAuditStream('p-1', { agent: 'ClaudeCode' }, {
+      ...BASE, onStepDone, onStepError, onDone, onError,
+    });
+    expect(onStepError).toHaveBeenCalledWith('spawn failed', 2);
+    expect(onStepDone).toHaveBeenCalledWith(2, false, 0, 0, 0);
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a baseline warning is non-terminal: onWarning then the coherent done', async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      fakeSseResponse([
+        { event: 'warning', data: { message: 'Drift baseline write failed: disk full' } },
+        { event: 'done', data: { discussion_id: null, template_was_installed: false } },
+      ])
+    );
+    const { projects } = await import('../api');
+    const onWarning = vi.fn();
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.fullAuditStream('p-1', { agent: 'ClaudeCode' }, {
+      ...BASE, onStepDone: () => {}, onWarning, onDone, onError,
+    });
+    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('Drift baseline write failed'));
+    expect(onDone).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('a finalization event:error is terminal — onError once, onDone never', async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      fakeSseResponse([
+        { event: 'error', data: { error: 'Could not persist the run' } },
+      ])
+    );
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.fullAuditStream('p-1', { agent: 'ClaudeCode' }, {
+      ...BASE, onStepDone: () => {}, onDone, onError,
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('Could not persist'));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+});
+
+describe('fullAuditStream — stream closure (EOF vs abort)', () => {
+  const BASE2 = {
+    onTemplateInstalled: () => {},
+    onStepStart: () => {},
+    onChunk: () => {},
+    onStepDone: () => {},
+    onValidationCreated: () => {},
+  };
+
+  it('an EOF without any terminal event is a terminal failure, never a clean done', async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      fakeSseResponse([{ event: 'start', data: { total_steps: 9 } }])
+    );
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    await projects.fullAuditStream('p-1', { agent: 'ClaudeCode' }, {
+      ...BASE2, onDone, onError,
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining('closed before a terminal event'));
+    expect(onDone).not.toHaveBeenCalled();
+  });
+
+  it('an aborted signal keeps the clean cancellation done', async () => {
+    const err = Object.assign(new Error('aborted'), { name: 'AbortError' });
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockRejectedValue(err);
+    const { projects } = await import('../api');
+    const onDone = vi.fn();
+    const onError = vi.fn();
+    const controller = new AbortController();
+    controller.abort();
+    await projects.fullAuditStream('p-1', { agent: 'ClaudeCode' }, {
+      ...BASE2, onDone, onError,
+    }, controller.signal);
+    expect(onDone).toHaveBeenCalledWith(null, false);
+    expect(onError).not.toHaveBeenCalled();
+  });
+});

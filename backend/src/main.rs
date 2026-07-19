@@ -48,9 +48,29 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|| default_filter.to_string());
     use tracing_subscriber::prelude::*;
     let env_filter = tracing_subscriber::EnvFilter::new(&filter_src);
+    // Persistent log file in the data dir (append, no ANSI). Without it a
+    // crash or watcher-kill is only diagnosable from the operator's
+    // terminal scrollback. Best-effort: an unwritable data dir must not
+    // block boot.
+    let file_layer = kronn::core::config::config_dir()
+        .ok()
+        .and_then(|dir| {
+            std::fs::create_dir_all(&dir).ok()?;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("kronn.log"))
+                .ok()
+        })
+        .map(|file| {
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(std::sync::Arc::new(file))
+        });
     tracing_subscriber::registry()
         .with(env_filter)
         .with(tracing_subscriber::fmt::layer().with_writer(std::io::stdout))
+        .with(file_layer)
         .with(kronn::core::log_buffer::BufferLayer)
         .init();
 
