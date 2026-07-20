@@ -141,6 +141,13 @@
     box-shadow 140ms ease;
 }
 
+/* Euronews sits on a very light base (#f5f8fd) with white cards, so the
+   default resting --kr-border-light hairline nearly disappears. Bump the
+   resting border a notch (medium); hover still steps up to strong. */
+:root[data-theme="euronews"] .wf-card {
+  border-color: var(--kr-border-medium);
+}
+
 .wf-card:hover {
   border-color: var(--kr-border-strong);
   box-shadow: 0 5px 18px rgba(0, 0, 0, 0.08);
@@ -2528,14 +2535,19 @@
 .wf-bm-arc-c4 { stroke: #60a5fa; }
 .wf-bm-arc-cx { stroke: var(--kr-text-ghost); }
 :root[data-theme="light"] .wf-bm-arc-c0,
+:root[data-theme="euronews"] .wf-bm-arc-c0,
 :root[data-theme="sakura"] .wf-bm-arc-c0 { stroke: #4338ca; }
 :root[data-theme="light"] .wf-bm-arc-c1,
+:root[data-theme="euronews"] .wf-bm-arc-c1,
 :root[data-theme="sakura"] .wf-bm-arc-c1 { stroke: #0891b2; }
 :root[data-theme="light"] .wf-bm-arc-c2,
+:root[data-theme="euronews"] .wf-bm-arc-c2,
 :root[data-theme="sakura"] .wf-bm-arc-c2 { stroke: #be185d; }
 :root[data-theme="light"] .wf-bm-arc-c3,
+:root[data-theme="euronews"] .wf-bm-arc-c3,
 :root[data-theme="sakura"] .wf-bm-arc-c3 { stroke: #c2410c; }
 :root[data-theme="light"] .wf-bm-arc-c4,
+:root[data-theme="euronews"] .wf-bm-arc-c4,
 :root[data-theme="sakura"] .wf-bm-arc-c4 { stroke: #15803d; }
 
 /* Follow a crossing line: hovering the map dims every arc, hovering one arc's

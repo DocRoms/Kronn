@@ -62,6 +62,12 @@ const BUILT_IN_UNLOCK_HASHES: &[(&str, &str, &str)] = &[
         "sakura",
         "0cf0d64c6ede3ad870a872f14600e4970b3b4809a80be27aa93bbebce351ac97",
     ),
+    // ── kronnEuronews ──
+    (
+        "theme",
+        "euronews",
+        "05fc827690f607111aad8cb16b9981b455dd00f728d166821fecb96a6b38672c",
+    ),
     // ── kronnBatman (bundle: Batman profile + Gotham theme) ──
     (
         "profile",

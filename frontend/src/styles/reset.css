@@ -41,6 +41,7 @@ body {
 :root[data-theme="light"] body,
 :root[data-theme="matrix"] body,
 :root[data-theme="gotham"] body,
+:root[data-theme="euronews"] body,
 :root[data-theme="sakura"] body {
   background: var(--kr-bg-base);
 }
