@@ -5,16 +5,16 @@ import { themes as themesApi, type UnlockedItem } from './api';
  *
  *  `system` resolves to light/dark from `prefers-color-scheme`.
  *  `light` and `dark` are always available.
- *  `matrix`, `sakura`, `gotham` are secret themes — the picker only
- *  shows them after the user has successfully submitted their unlock
- *  code via POST /api/themes/unlock. Codes are stored server-side
+ *  `matrix`, `sakura`, `gotham`, `euronews` are secret themes — the
+ *  picker only shows them after the user has successfully submitted their
+ *  unlock code via POST /api/themes/unlock. Codes are stored server-side
  *  (built-in hashes or config.toml) and never appear in this bundle.
  */
-export type ThemeMode = 'system' | 'light' | 'dark' | 'matrix' | 'sakura' | 'gotham';
+export type ThemeMode = 'system' | 'light' | 'dark' | 'matrix' | 'sakura' | 'gotham' | 'euronews';
 
 /** Themes that require unlock. Keep in sync with tokens.css. A theme
  *  name absent from this set is considered "always available". */
-const SECRET_THEMES: ReadonlySet<ThemeMode> = new Set<ThemeMode>(['matrix', 'sakura', 'gotham']);
+const SECRET_THEMES: ReadonlySet<ThemeMode> = new Set<ThemeMode>(['matrix', 'sakura', 'gotham', 'euronews']);
 
 interface ThemeContextValue {
   theme: ThemeMode;
@@ -42,7 +42,7 @@ const UNLOCKED_KEY = 'kronn:unlockedThemes';
 
 const isValidTheme = (s: unknown): s is ThemeMode =>
   s === 'system' || s === 'light' || s === 'dark' ||
-  s === 'matrix' || s === 'sakura' || s === 'gotham';
+  s === 'matrix' || s === 'sakura' || s === 'gotham' || s === 'euronews';
 
 function loadUnlocked(): ThemeMode[] {
   try {

@@ -127,6 +127,85 @@
   line-height: 12px;
 }
 
+/* ── Euronews theme: solid blue nav bar ────────────────────
+   Reuses the Euronews brand blue (--kr-accent = #0172f0, same fill as
+   the "Créer avec l'IA" button) and recolors everything sitting on top
+   to stay legible. Scoped to euronews so other themes are untouched. */
+:root[data-theme="euronews"] .dash-nav {
+  background: var(--kr-accent);
+  border-bottom-color: rgba(255, 255, 255, 0.15);
+}
+:root[data-theme="euronews"] .dash-nav-title,
+:root[data-theme="euronews"] .dash-nav-title-mobile {
+  color: var(--kr-text-on-accent);
+}
+:root[data-theme="euronews"] .dash-nav-btn {
+  color: rgba(255, 255, 255, 0.82);
+}
+:root[data-theme="euronews"] .dash-nav-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+:root[data-theme="euronews"] .dash-nav-btn[data-active="true"] {
+  background: #fff;
+  color: var(--kr-accent);
+}
+/* Running spinner (workflows / audits) uses .text-accent = blue. On an
+   INACTIVE tab the nav is still blue → blue-on-blue, invisible. Recolor
+   the spinner white so it reads on the blue bar. On the ACTIVE tab the bg
+   is white, so the blue spinner stays (excluded via :not). */
+:root[data-theme="euronews"] .dash-nav-btn:not([data-active="true"]) .text-accent {
+  color: #fff;
+}
+:root[data-theme="euronews"] .dash-nav-badge {
+  background: var(--kr-error);
+  color: #fff;
+}
+:root[data-theme="euronews"] .dash-scan-btn {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #fff;
+}
+:root[data-theme="euronews"] .dash-nav-brand .text-accent {
+  color: #fff;
+}
+
+/* ── Live indicator (rendered only while a run is active) ──
+   Red pulsing "● LIVE" pill next to the brand — a real status signal
+   wired to runningWorkflows, not a permanent decoration. */
+.dash-nav-live {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin-left: var(--kr-sp-3);
+  padding: 2px 8px;
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-error-rgb), 0.12);
+  color: var(--kr-error);
+  font-size: var(--kr-fs-xs);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+.dash-nav-live-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--kr-error);
+  animation: dash-live-pulse 1.2s ease-in-out infinite;
+}
+@keyframes dash-live-pulse {
+  0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(var(--kr-error-rgb), 0.5); }
+  50% { opacity: 0.35; box-shadow: 0 0 0 4px rgba(var(--kr-error-rgb), 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-nav-live-dot { animation: none; }
+}
+/* On the blue Euronews nav: crisp white pill, red text + dot (TV look). */
+:root[data-theme="euronews"] .dash-nav-live {
+  background: #fff;
+  color: var(--kr-error);
+}
+
 /* ── Scan / action button ──────────────────────────────── */
 .dash-scan-btn {
   padding: 7px var(--kr-sp-7);
@@ -1831,3 +1910,12 @@ html[data-density="large"] .dash-main {
   white-space: nowrap;
 }
 .dash-running-badge:hover { background: rgba(var(--kr-accent-rgb, 99,102,241), 0.2); }
+/* Euronews: on the solid blue nav the default accent-tinted pill is blue-on-blue
+   (invisible). Recolor to a solid white pill with blue text + spinner, matching
+   the active-tab and LIVE white-pill language. */
+:root[data-theme="euronews"] .dash-running-badge {
+  background: #fff;
+  color: var(--kr-accent);
+  border-color: #fff;
+}
+:root[data-theme="euronews"] .dash-running-badge:hover { background: rgba(255, 255, 255, 0.88); }

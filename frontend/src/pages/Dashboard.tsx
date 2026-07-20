@@ -640,6 +640,16 @@ export function Dashboard({ onReset }: DashboardProps) {
           <Zap size={18} className="text-accent" />
           {!isMobile && <span className="dash-nav-title">Kronn</span>}
           {isMobile && <span className="dash-nav-title-mobile">K</span>}
+          {runningWorkflows > 0 && (
+            <span
+              className="dash-nav-live"
+              title={t('workflows.runningTooltip', runningWorkflows, runningWorkflows > 1 ? 's' : '')}
+              aria-label={t('workflows.runningTooltip', runningWorkflows, runningWorkflows > 1 ? 's' : '')}
+            >
+              <span className="dash-nav-live-dot" />
+              {!isMobile && 'LIVE'}
+            </span>
+          )}
         </div>
         <div className="dash-nav-tabs" data-mobile={isMobile}>
         {([

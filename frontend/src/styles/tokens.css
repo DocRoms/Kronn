@@ -610,6 +610,86 @@
   --kr-shadow-modal: 0 8px 20px rgba(131, 24, 67, 0.14), 0 20px 40px rgba(131, 24, 67, 0.20);
 }
 
+/* ── Euronews (secret) — light editorial base, Euronews blue #0172f0 accent ── */
+:root[data-theme="euronews"] {
+  --kr-bg-base: #f5f8fd;
+  --kr-bg-raised: #e8f0fb;
+  --kr-bg-surface: #ffffff;
+  --kr-bg-elevated: #ffffff;
+  --kr-bg-input: #ffffff;
+  --kr-bg-hover: rgba(1, 114, 240, 0.06);
+  --kr-bg-hover-strong: rgba(1, 114, 240, 0.12);
+  --kr-bg-active: rgba(1, 114, 240, 0.18);
+  --kr-bg-selected: rgba(1, 114, 240, 0.20);
+  --kr-bg-subtle: rgba(1, 114, 240, 0.03);
+  --kr-bg-overlay: rgba(10, 20, 32, 0.35);
+  --kr-bg-code: #0a1420;
+  --kr-bg-code-panel: #060d16;
+  --kr-bg-scrim: rgba(1, 114, 240, 0.08);
+
+  --kr-accent: #0172f0;
+  --kr-accent-rgb: 1, 114, 240;
+  --kr-accent-fill: #0172f0;
+  --kr-accent-fill-rgb: 1, 114, 240;
+  --kr-accent-ink: #013a7a;
+  --kr-accent-tint-rgb: 1, 114, 240;
+  --kr-accent-bg: rgba(1, 114, 240, 0.08);
+  --kr-accent-bg-hover: rgba(1, 114, 240, 0.14);
+  --kr-accent-bg-strong: rgba(1, 114, 240, 0.22);
+  --kr-accent-border: rgba(1, 114, 240, 0.35);
+  --kr-accent-border-light: rgba(1, 114, 240, 0.18);
+  --kr-accent-text: #0355b0;
+
+  --kr-text-primary: #0a1420;
+  --kr-text-secondary: #22344a;
+  --kr-text-tertiary: #3d4f66;
+  --kr-text-muted: #566880;
+  --kr-text-faint: #7789a0;
+  --kr-text-dim: #7789a0;
+  --kr-text-ghost: #98a8bc;
+
+  --kr-success: #0a8f4a;
+  --kr-success-rgb: 10, 143, 74;
+  --kr-error: #d11f3c;
+  --kr-error-rgb: 209, 31, 60;
+  --kr-error-soft: #e11d48;
+  --kr-warning: #c2410c;
+  --kr-warning-rgb: 194, 65, 12;
+  --kr-warning-soft: #c2410c;
+  --kr-warning-amber: #b45309;
+  --kr-warning-amber-rgb: 180, 83, 9;
+  --kr-info: #0172f0;
+  --kr-info-rgb: 1, 114, 240;
+  --kr-cyan: #0e7490;
+  --kr-cyan-rgb: 14, 116, 144;
+  --kr-purple: #6d28d9;
+  --kr-purple-rgb: 109, 40, 217;
+  --kr-purple-soft: #8b5cf6;
+  --kr-purple-soft-rgb: 139, 92, 246;
+  --kr-pink: #db2777;
+  --kr-pink-rgb: 219, 39, 119;
+  --kr-cancelled: #566880;
+  --kr-text-on-accent: #ffffff;
+  --kr-text-on-dark: #fff;
+
+  /* Neutral slate hairlines (not saturated blue) — soft on a light base,
+     avoids the "blue lines everywhere" eye strain. */
+  --kr-border-ghost: rgba(10, 20, 32, 0.03);
+  --kr-border: rgba(10, 20, 32, 0.06);
+  --kr-border-light: rgba(10, 20, 32, 0.04);
+  --kr-border-medium: rgba(10, 20, 32, 0.09);
+  --kr-border-strong: rgba(10, 20, 32, 0.13);
+  --kr-border-heavy: rgba(10, 20, 32, 0.20);
+  --kr-border-emphasis: rgba(10, 20, 32, 0.26);
+
+  --kr-shadow-sm: 0 1px 2px rgba(10, 20, 32, 0.06), 0 1px 3px rgba(10, 20, 32, 0.10);
+  --kr-shadow-md: 0 4px 6px rgba(10, 20, 32, 0.06), 0 10px 15px rgba(10, 20, 32, 0.10);
+  --kr-shadow-lg: 0 4px 8px rgba(10, 20, 32, 0.08), 0 20px 25px rgba(10, 20, 32, 0.14);
+  --kr-shadow-xl: 0 8px 16px rgba(10, 20, 32, 0.10), 0 30px 60px rgba(10, 20, 32, 0.18);
+  --kr-shadow-popover: 0 4px 12px rgba(10, 20, 32, 0.10), 0 12px 28px rgba(10, 20, 32, 0.12);
+  --kr-shadow-modal: 0 8px 20px rgba(10, 20, 32, 0.12), 0 20px 40px rgba(10, 20, 32, 0.18);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    Neon glow neutralization for non-arcade themes.
    The lime/magenta/electric glow tokens belong to the Lila Arcade dark
@@ -620,6 +700,7 @@
 :root[data-theme="light"],
 :root[data-theme="matrix"],
 :root[data-theme="gotham"],
+:root[data-theme="euronews"],
 :root[data-theme="sakura"] {
   --kr-glow-lime-sm: none;
   --kr-glow-lime-md: none;

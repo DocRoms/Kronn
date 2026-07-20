@@ -1,7 +1,7 @@
 /* ═══════════════════════════════════════════════════════════════════════════
    Kronn Atmosphere — ambient effects on the dark default theme.
    CRT scanlines + aurora drift are ON by default on dark, automatically
-   OFF on light / matrix / gotham / sakura (they have their own ambient).
+   OFF on light / matrix / gotham / sakura / euronews (own ambient / clean).
    Reduced-motion gracefully stops the drift animation.
 
    Load order : after `neon.css`, before `components.css`.
@@ -13,7 +13,7 @@
    content but below modals/tooltips (which sit at 5000+).
    Two-layer recipe : black darken bands + faint lime phosphor micro-rows
    so the CRT feel is visible without crushing the readability.            */
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]) body::after {
+:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) body::after {
   content: "";
   position: fixed;
   inset: 0;
@@ -55,7 +55,7 @@
   100% { transform: translate3d(0%, 0%, 0) scale(1); }
 }
 
-:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]) body::before {
+:root:not([data-theme="light"]):not([data-theme="matrix"]):not([data-theme="gotham"]):not([data-theme="sakura"]):not([data-theme="euronews"]) body::before {
   animation: kr-aurora-drift 40s ease-in-out infinite;
   will-change: transform;
 }
