@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { discussions as discussionsApi } from '../lib/api';
-import { freshnessOf, DEFAULT_AWAY_AFTER_MS, AWAY_MARGIN_MS } from '../lib/discPresence';
+import { presenceFromActivity, DEFAULT_AWAY_AFTER_MS, AWAY_MARGIN_MS } from '../lib/discPresence';
 import type { Freshness } from '../lib/discPresence';
 import type { ToastFn } from '../hooks/useToast';
 import { UserPlus, Copy, X } from 'lucide-react';
@@ -50,6 +50,7 @@ interface ParticipantRow {
 const ACTIVITY_LABEL_KEY: Partial<Record<string, string>> = {
   listening: 'disc.activityListening',
   reading: 'disc.activityReading',
+  waiting: 'disc.activityWaiting',
 };
 
 // Presence thresholds live in `lib/discPresence.ts` (pure, unit-tested);
@@ -169,7 +170,7 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
         </span>
       )}
       {participants.map(p => {
-        const f = freshnessOf(p.last_seen, awayAfterMs);
+        const f = presenceFromActivity(p.activity, p.last_seen, awayAfterMs);
         const activityKey = p.activity ? ACTIVITY_LABEL_KEY[p.activity] : undefined;
         return (
           <span

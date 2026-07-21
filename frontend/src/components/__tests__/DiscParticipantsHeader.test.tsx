@@ -152,6 +152,26 @@ describe('activity placeholder — presence phase 1 (0.8.12 PR B)', () => {
     expect(labels[1].textContent).toBe('disc.activityReading');
   });
 
+  it('a waiting participant with a stale heartbeat renders fresh (dormant), not away', async () => {
+    // Presence-gap fix, rendered: a dormant agent mid-pacing-pause keeps a
+    // fresh dot (activity outranks the aged last_seen) and shows the
+    // "dormant" label — instead of flipping to "away" and prompting a
+    // needless relaunch.
+    const staleHeartbeat = new Date(Date.now() - 20 * 60_000).toISOString();
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', activity: 'waiting', last_seen: staleHeartbeat },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-wait" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chip = document.querySelector('.disc-participant-chip');
+    expect(chip?.getAttribute('data-freshness'), 'waiting outranks stale last_seen').toBe('fresh');
+    const label = document.querySelector('.disc-participant-activity');
+    expect(label?.textContent).toBe('disc.activityWaiting');
+  });
+
   it('never renders a raw token for an unknown future activity value', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', activity: 'compiling' },
