@@ -628,18 +628,72 @@ fn is_heading_or_imperative(s: &str) -> bool {
 
 /// Strip fenced ```code blocks``` — agents emit lots of code and linting it
 /// would be pure noise. Returns the text with fenced regions removed.
-fn strip_fenced_code(text: &str) -> String {
+///
+/// Fail-closed semantics (benchmark hotfix, 2026-07-21):
+/// - a fence OPENS on a run of ≥3 backticks indented ≤3 spaces (info
+///   string allowed); anything more indented or shorter is content;
+/// - it CLOSES only on a run of the same character, at least as long,
+///   indented ≤3 spaces, with a whitespace-only suffix — a ```suffix line
+///   is CONTENT, never a closer;
+/// - everything withheld (opening line included) is RESTORED verbatim if
+///   the document ends before a valid closer: a truncated markdown must
+///   never hide real content from a fail-closed consumer (the step-8
+///   placeholder validator feeds on this).
+pub(crate) fn strip_fenced_code(text: &str) -> String {
+    /// `Some((run_len, suffix))` when the line is a fence marker candidate:
+    /// ≤3 leading spaces then a run of ≥3 backticks. Tabs disqualify.
+    fn fence_marker(line: &str) -> Option<(usize, &str)> {
+        let stripped = line.trim_start_matches(' ');
+        if line.len() - stripped.len() > 3 {
+            return None; // 4+ spaces = indented code, not a fence
+        }
+        let run = stripped.chars().take_while(|&c| c == '`').count();
+        if run < 3 {
+            return None;
+        }
+        Some((run, &stripped[run..]))
+    }
+
     let mut out = String::with_capacity(text.len());
-    let mut in_fence = false;
+    // (opening run length, withheld lines — restored verbatim on EOF)
+    let mut fence: Option<(usize, String)> = None;
     for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            continue;
+        match fence.as_mut() {
+            None => {
+                // A backtick fence's info string may not contain a backtick
+                // (CommonMark): ```lang`oops is CONTENT, not an opener — a
+                // false opener must never swallow a real slot.
+                match fence_marker(line) {
+                    Some((run, info)) if !info.contains('`') => {
+                        let mut buf = String::new();
+                        buf.push_str(line);
+                        buf.push('\n');
+                        fence = Some((run, buf));
+                    }
+                    _ => {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+            }
+            Some((open_run, buf)) => match fence_marker(line) {
+                // Closer suffix: spaces/tabs ONLY — Unicode whitespace must
+                // not promote a content line into a closer.
+                Some((run, suffix))
+                    if run >= *open_run
+                        && suffix.chars().all(|c| c == ' ' || c == '\t') =>
+                {
+                    fence = None; // valid closer: the withheld block is code — drop it
+                }
+                _ => {
+                    buf.push_str(line);
+                    buf.push('\n');
+                }
+            },
         }
-        if !in_fence {
-            out.push_str(line);
-            out.push('\n');
-        }
+    }
+    if let Some((_, buf)) = fence {
+        out.push_str(&buf);
     }
     out
 }
@@ -657,7 +711,7 @@ const MAX_BACKTICK_RUNS_PER_LINE: usize = 64;
 /// kept verbatim — backticks in plain prose never eat the rest of the line.
 /// Runs are pre-scanned once per line and their count is capped, so a long
 /// hostile line can't turn the pairing into a CPU hotspot (Copilot review).
-fn strip_inline_code(text: &str) -> String {
+pub(crate) fn strip_inline_code(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         // Fast path — the overwhelmingly common case.
@@ -1584,6 +1638,64 @@ pub fn finalize_lint_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_fenced_code_drops_closed_blocks_but_restores_unclosed_ones() {
+        // Closed fence: content is code, dropped.
+        assert_eq!(
+            strip_fenced_code("before\n```\ncode\n```\nafter"),
+            "before\nafter\n"
+        );
+        // UNCLOSED fence (truncated document): the withheld content is
+        // restored — a fail-closed consumer (step-8 placeholder validator)
+        // must never lose sight of real content behind a stray ```.
+        assert_eq!(
+            strip_fenced_code("```text\ntruncated example\n| {{ID}} |"),
+            "```text\ntruncated example\n| {{ID}} |\n"
+        );
+        // Two blocks, second unclosed: first dropped, second restored
+        // (including ITS opening line).
+        assert_eq!(
+            strip_fenced_code("```\na\n```\nkeep\n```\nb"),
+            "keep\n```\nb\n"
+        );
+        // The opening line itself is withheld-then-restored: an info-string
+        // carrying real content must survive an unclosed fence.
+        assert_eq!(
+            strip_fenced_code("```text {{ID}}\ntruncated"),
+            "```text {{ID}}\ntruncated\n"
+        );
+        // A ```suffix line is CONTENT, not a closer — without a valid
+        // closer the whole block is restored.
+        assert_eq!(
+            strip_fenced_code("```text\n| {{ID}} |\n```still-code"),
+            "```text\n| {{ID}} |\n```still-code\n"
+        );
+        // A closer run SHORTER than the opening run does not close.
+        assert_eq!(
+            strip_fenced_code("````\n| {{ID}} |\n```\ntail"),
+            "````\n| {{ID}} |\n```\ntail\n"
+        );
+        // 4-space indentation = indented code, not a fence at all.
+        assert_eq!(
+            strip_fenced_code("    ```\n| {{ID}} |"),
+            "    ```\n| {{ID}} |\n"
+        );
+        // Trailing whitespace on a closer is fine (CommonMark).
+        assert_eq!(strip_fenced_code("```\ncode\n```   "), "");
+        // A backtick in the info string invalidates the OPENER: the line is
+        // content and nothing after it is withheld.
+        assert_eq!(
+            strip_fenced_code("```lang`oops\n| {{ID}} |\n```"),
+            "```lang`oops\n| {{ID}} |\n```\n"
+        );
+        // Unicode whitespace in a closer suffix does NOT close (spaces and
+        // tabs only) — the block stays unclosed and is restored.
+        assert_eq!(
+            strip_fenced_code("```\n| {{ID}} |\n```\u{00A0}"),
+            "```\n| {{ID}} |\n```\u{00A0}\n"
+        );
+    }
 
     // ── Mode ──────────────────────────────────────────────────────────
 

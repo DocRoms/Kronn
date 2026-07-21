@@ -1797,7 +1797,7 @@ pub async fn full_audit(
                         crate::db::audit_runs::update_td_counts(
                             &tx, &run_id,
                             counts.critical, counts.high, counts.medium, counts.low,
-                            carried,
+                            resolved, new, carried,
                         )?;
                     }
                     tx.commit()?;
