@@ -829,6 +829,7 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // to validate the token and bind itself to the resolved disc.
         // Not scoped by id — the disc identity is what the token resolves to.
         .route("/api/discussions/peer-join", post(api::disc_invite::peer_join))
+        .route("/api/discussions/peer-resume", post(api::disc_invite::peer_resume))
         // Cross-instance leg of the unified "join by code": a peer asks whether
         // we host the room behind a token; if so we share it back. Auth-exempt
         // (self-auth via invite code in body — see auth_middleware).

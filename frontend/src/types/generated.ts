@@ -276,8 +276,8 @@ export type ApiCallStatus = "OK" | "ERROR" | "RateLimited" | "TimedOut";
 /**
  * A non-secret parameter the plugin instance needs (e.g. host, workspace id).
  * Stored in the same encrypted env blob as the API key, but the UI renders
- * these as plain inputs (no mask), and they're surfaced in the prompt
- * injection alongside the auth so the agent can build full URLs.
+ * these as plain inputs (no mask). Prompts may reference them symbolically;
+ * the broker resolves values server-side when it builds full URLs.
  */
 export type ApiConfigKey = { env_key: string, label: string, placeholder: string, description: string, };
 
@@ -317,8 +317,8 @@ docs_url?: string | null,
 /**
  * Additional config keys the user must provide on top of the credential
  * (e.g. Chartbeat's `host=example.com`). Stored alongside the secret
- * in the config's encrypted env, surfaced in the prompt injection so
- * the agent has the exact curl arguments to use.
+ * in the config's encrypted env and surfaced to agents only as
+ * `${ENV.KEY}` broker references — never as literal prompt values.
  */
 config_keys?: Array<ApiConfigKey>, };
 
@@ -998,7 +998,12 @@ export type DirectiveCategory = "Output" | "Language";
  */
 export type DiscAppendMessage = { source_msg_id: string, role: MessageRole, content: string, agent_type?: AgentType | null, };
 
-export type DiscAppendRequest = { disc_id: string, messages: Array<DiscAppendMessage>, };
+export type DiscAppendRequest = { disc_id: string, messages: Array<DiscAppendMessage>,
+/**
+ * Calling bridge session. New bridges always send this so heartbeat and
+ * activity cleanup cannot affect a sibling of the same agent type.
+ */
+session_id?: string | null, };
 
 export type DiscAppendResponse = { appended: number, skipped_as_duplicates: number,
 /**
@@ -1491,7 +1496,11 @@ export type InviteTokenRecord = { id: number, disc_id: string, created_at: strin
  * Used by the `POST /api/discussions/peer-join` endpoint that
  * the `disc_join` MCP tool calls.
  */
-export type JoinViaTokenResult = { disc_id: string, session_pk: number, };
+export type JoinViaTokenResult = { disc_id: string, session_pk: number,
+/**
+ * Plain resume credential, returned once. Only its SHA-256 hash is stored.
+ */
+resume_token: string, };
 
 export type JsonValue = number | string | boolean | Array<JsonValue> | { [key in string]: JsonValue } | null;
 
@@ -1743,8 +1752,8 @@ incomplete_configs: Array<McpIncompleteConfig>, };
 export type McpServer = { id: string, name: string, description: string, transport: McpTransport, source: McpSource,
 /**
  * When present, the plugin exposes a REST API. Emitted into the agent's
- * `--append-system-prompt` as a `=== AVAILABLE APIs ===` block so the
- * agent can call it via curl (vs. MCP-style tools). NULL = MCP only.
+ * `--append-system-prompt` as a secret-free `=== AVAILABLE APIs ===`
+ * block; authenticated execution goes through `api_call`. NULL = MCP only.
  */
 api_spec?: ApiSpec | null, };
 
@@ -1884,8 +1893,8 @@ headers?: { [key in string]: string },
 body_template: string, };
 
 /**
- * Static header rendered alongside the `Authorization: Bearer` from an
- * OAuth2 exchange. Used for providers (Adobe Analytics, some Salesforce
+ * Static header injected server-side alongside the `Authorization: Bearer`
+ * from an OAuth2 exchange. Used for providers (Adobe Analytics, some Salesforce
  * endpoints) that require extra identification headers beyond the
  * bearer token. `value_template` supports `{ENV_KEY}` substitution from
  * the config's env map.
@@ -1979,7 +1988,12 @@ session_id: string, };
  * the agent's first system-prompt notice, and a recent-message
  * preview so the joiner has immediate context.
  */
-export type PeerJoinResponse = { disc_id: string, session_pk: number, peer_count: number,
+export type PeerJoinResponse = { disc_id: string, session_pk: number,
+/**
+ * Opaque reload credential. Persist locally with mode 0600; never log or
+ * expose it to the model. The backend stores only its SHA-256 digest.
+ */
+resume_token: string, peer_count: number,
 /**
  * Title of the disc, surfaced in the agent's first reply so the
  * human can verify it joined the right conversation.
@@ -2026,6 +2040,14 @@ export type PeerLeaveResponse = {
  * or never joined). Either way, idempotent.
  */
 left: boolean, };
+
+export type PeerResumeRequest = { agent_type: string, session_id: string, resume_token: string, };
+
+export type PeerResumeResponse = { disc_id: string, session_pk: number,
+/**
+ * Rotated credential replacing the one supplied in the request.
+ */
+resume_token: string, };
 
 /**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
@@ -3040,7 +3062,16 @@ latest_sort_order: number,
  * within the attention lease; otherwise the next DETERMINISTIC step of
  * the cold backoff ramp, derived from the elapsed silence.
  */
-pacing: PacingState, };
+pacing: PacingState,
+/**
+ * Presence-gap fix — when `timed_out`, the RFC3339 instant this session
+ * intends to poll again (`now + pacing.next_delay_seconds`). Consumed by
+ * the MCP CALLER (to schedule its next wait); the participants UI does
+ * NOT read this field — it derives "dormant" from the paired `waiting`
+ * activity (generic label, no countdown). `None` on a delivery (the
+ * caller replies now, not later).
+ */
+next_poll_at: string | null, };
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
