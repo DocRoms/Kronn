@@ -173,6 +173,10 @@ pub struct DiscAppendMessage {
 pub struct DiscAppendRequest {
     pub disc_id: String,
     pub messages: Vec<DiscAppendMessage>,
+    /// Calling bridge session. New bridges always send this so heartbeat and
+    /// activity cleanup cannot affect a sibling of the same agent type.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 /// Compact lint feedback echoed to the POSTING agent (tool result), so it can
@@ -349,31 +353,33 @@ pub async fn disc_append(
     // counting it as a live responder. Best-effort; a failure here must
     // not fail the append.
     if appended > 0 {
+        let heartbeat_session_id = req.session_id.clone();
         let mut seen_agents = std::collections::HashSet::new();
         for incoming in req.messages.iter() {
             if let Some(at) = incoming.agent_type.clone() {
                 let agent_type = format!("{at:?}");
                 if seen_agents.insert(agent_type.clone()) {
+                    let Some(session_id) = heartbeat_session_id.clone() else {
+                        continue;
+                    };
                     let did_touch = req.disc_id.clone();
                     if let Err(e) = state
                         .db
                         .with_conn(move |conn| {
-                            crate::db::discussion_sessions::touch_session_by_agent(
+                            crate::db::discussion_sessions::touch_session(
                                 conn,
                                 &did_touch,
                                 &agent_type,
+                                &session_id,
                             )?;
                             // 0.8.12 PR B — the agent just replied: the
                             // listening/reading placeholder vanishes the
                             // instant its message lands.
-                            // No session id on this path — broad clear is
-                            // the safe direction (a sibling's label returns
-                            // at its next wait).
                             crate::db::discussion_sessions::clear_session_activity(
                                 conn,
                                 &did_touch,
                                 &agent_type,
-                                None,
+                                Some(&session_id),
                             )
                         })
                         .await
@@ -693,20 +699,33 @@ mod tests {
         }
     }
 
-    async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
+    async fn append_as(
+        state: &crate::AppState,
+        msgs: Vec<DiscAppendMessage>,
+        session_id: Option<&str>,
+    ) -> DiscAppendResponse {
         let resp = disc_append(
             axum::extract::State(state.clone()),
-            Json(DiscAppendRequest { disc_id: "d-lint".into(), messages: msgs }),
-        ).await;
+            Json(DiscAppendRequest {
+                disc_id: "d-lint".into(),
+                messages: msgs,
+                session_id: session_id.map(str::to_owned),
+            }),
+        )
+        .await;
         resp.0.data.expect("append succeeds")
+    }
+
+    async fn append(state: &crate::AppState, msgs: Vec<DiscAppendMessage>) -> DiscAppendResponse {
+        append_as(state, msgs, None).await
     }
 
     #[tokio::test]
     #[serial] // global anti-halluc mode cell
     async fn append_clears_the_activity_placeholder() {
         // 0.8.12 PR B (Copilot review): the REAL disc_append path must
-        // clear the presence placeholder of the posting agent — the
-        // "prépare une réponse" label vanishes the instant the reply lands.
+        // clear only the posting session's placeholder and heartbeat. A
+        // sibling Codex process in the same room must remain untouched.
         crate::core::anti_halluc::set_mode("off");
         let (state, _tmp) = lint_state(false).await;
         state
@@ -714,24 +733,61 @@ mod tests {
             .with_conn(|conn| {
                 crate::db::discussion_sessions::join_disc_session(conn, "d-lint", "Codex", "s-x")
                     .map(|_| ())?;
+                crate::db::discussion_sessions::join_disc_session(conn, "d-lint", "Codex", "s-y")
+                    .map(|_| ())?;
                 crate::db::discussion_sessions::set_session_activity(
-                    conn, "d-lint", "Codex", None, "reading", 300,
-                )
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("s-x"),
+                    "reading",
+                    300,
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("s-y"),
+                    "reading",
+                    300,
+                )?;
+                conn.execute(
+                    "UPDATE discussion_sessions SET last_seen = '2000-01-01T00:00:00Z'\
+                     WHERE disc_id = 'd-lint' AND agent_type = 'Codex'",
+                    [],
+                )?;
+                Ok(())
             })
             .await
             .unwrap();
 
-        append(&state, vec![agent_msg("s-act", "voilà ma réponse")]).await;
+        append_as(
+            &state,
+            vec![agent_msg("s-act", "voilà ma réponse")],
+            Some("s-x"),
+        )
+        .await;
 
-        let activity = state
+        let sessions = state
             .db
             .with_conn(|conn| crate::db::discussion_sessions::list_sessions(conn, "d-lint", false))
             .await
-            .unwrap()
-            .into_iter()
-            .find(|s| s.agent_type == "Codex")
-            .and_then(|s| s.activity);
-        assert!(activity.is_none(), "disc_append must clear the poster's activity");
+            .unwrap();
+        let poster = sessions
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("s-x"))
+            .unwrap();
+        let sibling = sessions
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("s-y"))
+            .unwrap();
+        assert!(
+            poster.activity.is_none(),
+            "disc_append must clear the poster's activity"
+        );
+        assert_ne!(poster.last_seen.as_deref(), Some("2000-01-01T00:00:00Z"));
+        assert_eq!(sibling.activity.as_deref(), Some("reading"));
+        assert_eq!(sibling.last_seen.as_deref(), Some("2000-01-01T00:00:00Z"));
     }
 
     #[tokio::test]

@@ -70,6 +70,9 @@ pub struct PeerJoinRequest {
 pub struct PeerJoinResponse {
     pub disc_id: String,
     pub session_pk: i64,
+    /// Opaque reload credential. Persist locally with mode 0600; never log or
+    /// expose it to the model. The backend stores only its SHA-256 digest.
+    pub resume_token: String,
     pub peer_count: i64,
     /// Title of the disc, surfaced in the agent's first reply so the
     /// human can verify it joined the right conversation.
@@ -94,6 +97,23 @@ pub struct PeerJoinResponse {
     /// itself (Copilot review: join was the one response missing it).
     #[serde(default)]
     pub pacing: crate::api::disc_introspection::PacingState,
+}
+
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct PeerResumeRequest {
+    pub agent_type: String,
+    pub session_id: String,
+    pub resume_token: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PeerResumeResponse {
+    pub disc_id: String,
+    pub session_pk: i64,
+    /// Rotated credential replacing the one supplied in the request.
+    pub resume_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -135,14 +155,14 @@ pub async fn peer_join(
     // miss, fall back to asking our contacts who hosts the room (the unified
     // "join by code"). The owning peer shares the disc back over the WS
     // federation, we mirror it, and bind a session to the mirror.
-    let (disc_id, session_pk) = {
+    let (disc_id, session_pk, resume_token) = {
         let (t, a, s) = (token.clone(), agent_type.clone(), session_id.clone());
         let local = state
             .db
             .with_conn(move |conn| db::discussion_sessions::join_via_token(conn, &t, &a, &s))
             .await;
         match local {
-            Ok(j) => (j.disc_id, j.session_pk),
+            Ok(j) => (j.disc_id, j.session_pk, j.resume_token),
             Err(local_err) => {
                 match try_remote_join(&state, &token, &agent_type, &session_id).await {
                     Ok(Some(r)) => r,
@@ -246,6 +266,7 @@ pub async fn peer_join(
                 pacing: Default::default(),
                 disc_id,
                 session_pk,
+                resume_token,
                 peer_count,
                 disc_title,
                 recent_messages: rows,
@@ -263,6 +284,48 @@ pub async fn peer_join(
     }
 }
 
+/// `POST /api/discussions/peer-resume`
+///
+/// Restore a bridge binding after MCP reload without minting or reusing an
+/// invite token. A successful call rotates the opaque credential and updates
+/// the original participant row in place.
+pub async fn peer_resume(
+    State(state): State<AppState>,
+    Json(req): Json<PeerResumeRequest>,
+) -> Json<ApiResponse<PeerResumeResponse>> {
+    if req.agent_type.trim().is_empty() {
+        return Json(ApiResponse::err("agent_type required"));
+    }
+    if req.session_id.trim().is_empty() {
+        return Json(ApiResponse::err("session_id required"));
+    }
+    if req.resume_token.trim().is_empty() {
+        return Json(ApiResponse::err("resume_token required"));
+    }
+    let agent_type = req.agent_type;
+    let session_id = req.session_id;
+    let resume_token = req.resume_token;
+    match state
+        .db
+        .with_conn(move |conn| {
+            db::discussion_sessions::resume_disc_session(
+                conn,
+                &agent_type,
+                &resume_token,
+                &session_id,
+            )
+        })
+        .await
+    {
+        Ok(resumed) => Json(ApiResponse::ok(PeerResumeResponse {
+            disc_id: resumed.disc_id,
+            session_pk: resumed.session_pk,
+            resume_token: resumed.resume_token,
+        })),
+        Err(e) => Json(ApiResponse::err(e.to_string())),
+    }
+}
+
 /// Cross-instance leg of `peer_join`: the token wasn't found locally, so ask
 /// each accepted contact "do you host the room behind this code?" via their
 /// `/api/disc/claim-by-token` endpoint. The owning peer shares the disc back
@@ -274,7 +337,7 @@ async fn try_remote_join(
     token: &str,
     agent_type: &str,
     session_id: &str,
-) -> anyhow::Result<Option<(String, i64)>> {
+) -> anyhow::Result<Option<(String, i64, String)>> {
     // Our own invite code — the credential the peer validates against its contacts.
     let our_code = {
         let cfg = state.config.read().await;
@@ -344,13 +407,17 @@ async fn try_remote_join(
             agent_type.to_string(),
             session_id.to_string(),
         );
-        let pk = state
+        let joined = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::join_disc_session(conn, &mdid, &a, &s)
+                crate::db::discussion_sessions::join_disc_session_resumable(conn, &mdid, &a, &s)
             })
             .await?;
-        return Ok(Some((mirror_disc_id, pk)));
+        return Ok(Some((
+            mirror_disc_id,
+            joined.session_pk,
+            joined.resume_token,
+        )));
     }
     Ok(None)
 }
@@ -431,9 +498,9 @@ pub struct WaitForPeerQuery {
     /// messages trigger the wake.
     #[serde(default)]
     pub exclude_agent_type: Option<String>,
-    /// 0.8.12 PR B — the caller's session id, so the activity placeholder
-    /// is scoped to THIS session's row. Without it (older bridges) the
-    /// activity falls back to agent_type granularity.
+    /// The caller's session id. Kept optional for wire compatibility, but an
+    /// omitted value never mutates presence: broad agent-type heartbeats let
+    /// a stale bridge process keep a resumed sibling alive.
     #[serde(default)]
     pub session_id: Option<String>,
 }
@@ -471,6 +538,14 @@ pub struct WaitForPeerResponse {
     /// within the attention lease; otherwise the next DETERMINISTIC step of
     /// the cold backoff ramp, derived from the elapsed silence.
     pub pacing: crate::api::disc_introspection::PacingState,
+    /// Presence-gap fix — when `timed_out`, the RFC3339 instant this session
+    /// intends to poll again (`now + pacing.next_delay_seconds`). Consumed by
+    /// the MCP CALLER (to schedule its next wait); the participants UI does
+    /// NOT read this field — it derives "dormant" from the paired `waiting`
+    /// activity (generic label, no countdown). `None` on a delivery (the
+    /// caller replies now, not later).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_poll_at: Option<String>,
 }
 
 /// stab-3 — pacing for a disc: hot while the last User message is within
@@ -515,6 +590,14 @@ const ACTIVITY_LISTENING_MARGIN_SECS: i64 = 30;
 /// "reading" = delivered-but-not-replied. Short by design: past this the
 /// placeholder would be a guess, and guesses are what phase 1 forbids.
 const ACTIVITY_READING_TTL_SECS: i64 = 120;
+/// Presence-gap fix — on a timed-out wait the caller sleeps for
+/// `pacing.next_delay_seconds` (up to the cold-ramp max) before polling
+/// again. `listening` (TTL = timeout + 30s) expires inside that pause, so
+/// the participant flipped to "disconnected" while merely dormant. We set a
+/// distinct `waiting` activity for the pacing window + this margin: honest
+/// ("I'll be back at next_poll_at"), and it still expires on its own if the
+/// process is truly dead. Never prolong `listening` — that would lie.
+const ACTIVITY_WAITING_MARGIN_SECS: i64 = 15;
 
 /// `GET /api/discussions/:id/wait`
 ///
@@ -553,18 +636,27 @@ pub async fn wait_for_peer(
     // fact. TTL = requested timeout + margin, so a crashed agent's
     // placeholder dies on its own (expiry read-side, no reaper).
     let session_id = q.session_id;
-    if let Some(ref agent_type) = exclude {
+    if let (Some(agent_type), Some(caller_session_id)) = (exclude.as_ref(), session_id.as_ref()) {
         let disc_id_touch = disc_id.clone();
         let agent_touch = agent_type.clone();
-        let sess_touch = session_id.clone();
+        let sess_touch = caller_session_id.clone();
         let listening_ttl = timeout_secs as i64 + ACTIVITY_LISTENING_MARGIN_SECS;
         if let Err(e) = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::touch_session_by_agent(conn, &disc_id_touch, &agent_touch)?;
+                crate::db::discussion_sessions::touch_session(
+                    conn,
+                    &disc_id_touch,
+                    &agent_touch,
+                    &sess_touch,
+                )?;
                 crate::db::discussion_sessions::set_session_activity(
-                    conn, &disc_id_touch, &agent_touch, sess_touch.as_deref(),
-                    "listening", listening_ttl,
+                    conn,
+                    &disc_id_touch,
+                    &agent_touch,
+                    Some(&sess_touch),
+                    "listening",
+                    listening_ttl,
                 )
             })
             .await
@@ -628,16 +720,22 @@ pub async fn wait_for_peer(
             // as "buggé/très long"). Short TTL; disc_append clears it the
             // instant the reply lands. An EMPTY timeout never sets this
             // (guard from the design debate: no fake "preparing" states).
-            if let Some(ref agent_type) = exclude {
+            if let (Some(agent_type), Some(caller_session_id)) =
+                (exclude.as_ref(), session_id.as_ref())
+            {
                 let disc_id_act = disc_id.clone();
                 let agent_act = agent_type.clone();
-                let sess_act = session_id.clone();
+                let sess_act = caller_session_id.clone();
                 if let Err(e) = state
                     .db
                     .with_conn(move |conn| {
                         crate::db::discussion_sessions::set_session_activity(
-                            conn, &disc_id_act, &agent_act, sess_act.as_deref(),
-                            "reading", ACTIVITY_READING_TTL_SECS,
+                            conn,
+                            &disc_id_act,
+                            &agent_act,
+                            Some(&sess_act),
+                            "reading",
+                            ACTIVITY_READING_TTL_SECS,
                         )
                     })
                     .await
@@ -651,16 +749,55 @@ pub async fn wait_for_peer(
                 messages,
                 latest_sort_order,
                 pacing,
+                // Delivery: the caller replies now, not after a pause.
+                next_poll_at: None,
             }));
         }
 
         if std::time::Instant::now() >= deadline {
             let pacing = pacing_for_disc(&state, &disc_id).await;
+            // Presence-gap fix: the caller will sleep `next_delay_seconds`
+            // before polling again. Mark this session `waiting` for that
+            // window + margin so the participants UI shows "dormant" instead
+            // of "disconnected" during the pause — and hand the intended
+            // next-poll instant back to the MCP caller for its scheduling.
+            let next_poll_at = if let Some(ref agent_type) = exclude {
+                let waiting_ttl = pacing.next_delay_seconds as i64 + ACTIVITY_WAITING_MARGIN_SECS;
+                if let Some(caller_session_id) = session_id.as_ref() {
+                    let disc_id_w = disc_id.clone();
+                    let agent_w = agent_type.clone();
+                    let sess_w = caller_session_id.clone();
+                    if let Err(e) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussion_sessions::set_session_activity(
+                                conn,
+                                &disc_id_w,
+                                &agent_w,
+                                Some(&sess_w),
+                                "waiting",
+                                waiting_ttl,
+                            )
+                        })
+                        .await
+                    {
+                        tracing::warn!("wait_for_peer: failed to set waiting activity: {e}");
+                    }
+                }
+                Some(
+                    (chrono::Utc::now()
+                        + chrono::Duration::seconds(pacing.next_delay_seconds as i64))
+                    .to_rfc3339(),
+                )
+            } else {
+                None
+            };
             return Json(ApiResponse::ok(WaitForPeerResponse {
                 timed_out: true,
                 messages: vec![],
                 latest_sort_order: since,
                 pacing,
+                next_poll_at,
             }));
         }
 
@@ -1193,6 +1330,7 @@ mod tests {
         let data = body.data.unwrap();
         assert_eq!(data.disc_id, "d-join-1");
         assert!(data.session_pk > 0);
+        assert!(data.resume_token.starts_with("kr-resume-"));
         assert_eq!(data.peer_count, 1, "exactly the joining session is active");
         assert_eq!(data.disc_title, "Test disc");
         assert_eq!(data.recent_messages.len(), 0, "empty disc → no previews");
@@ -1200,6 +1338,66 @@ mod tests {
         // pacing is really computed lives in the dedicated test below.
         assert_eq!(data.pacing.regime, crate::api::disc_introspection::PacingRegime::Cold);
         assert_eq!(data.pacing.next_delay_seconds, data.poll_policy.max_delay_seconds);
+    }
+
+    #[tokio::test]
+    async fn peer_resume_rotates_credential_and_keeps_one_participant_row() {
+        let state = make_state_with_disc("d-resume-1").await;
+        let token = invite_peer(State(state.clone()), Path("d-resume-1".to_string()))
+            .await
+            .0
+            .data
+            .unwrap()
+            .token;
+        let joined = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token,
+                agent_type: "Codex".into(),
+                session_id: "child-before-reload".into(),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        let resumed = peer_resume(
+            State(state.clone()),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "child-after-reload".into(),
+                resume_token: joined.resume_token.clone(),
+            }),
+        )
+        .await
+        .0
+        .data
+        .expect("resume succeeds");
+        assert_eq!(resumed.disc_id, "d-resume-1");
+        assert_eq!(resumed.session_pk, joined.session_pk);
+        assert_ne!(resumed.resume_token, joined.resume_token);
+
+        let replay = peer_resume(
+            State(state.clone()),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "replay".into(),
+                resume_token: joined.resume_token,
+            }),
+        )
+        .await
+        .0;
+        assert!(!replay.success);
+        assert!(replay.error.unwrap().contains("invalid, replayed"));
+
+        let rows = state
+            .db
+            .with_conn(|conn| db::discussion_sessions::list_sessions(conn, "d-resume-1", false))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].session_id.as_deref(), Some("child-after-reload"));
     }
 
     #[tokio::test]
@@ -1787,18 +1985,124 @@ mod tests {
                 since_sort_order: Some(0),
                 timeout_secs: Some(1),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
+                session_id: Some("s-act".to_string()),
+            }),
+        )
+        .await;
+        let data = resp.0.data.unwrap();
+        assert!(data.timed_out);
+        // Presence-gap fix: an EMPTY timeout now transitions listening →
+        // `waiting` (dormant during the pacing pause), never a fake
+        // `reading`.
+        assert_eq!(
+            activity_of(&state, "d-act-1", "ClaudeCode")
+                .await
+                .as_deref(),
+            Some("waiting"),
+            "empty timeout sets waiting (dormant), never a fake 'reading'",
+        );
+        // `next_poll_at` must be a parseable RFC3339 instant, in the future,
+        // and bounded by the pacing delay (not an arbitrary far-off time).
+        let npa = data.next_poll_at.expect("timeout hands back next_poll_at");
+        let npa = chrono::DateTime::parse_from_rfc3339(&npa)
+            .expect("next_poll_at is valid RFC3339")
+            .with_timezone(&chrono::Utc);
+        let ahead = (npa - chrono::Utc::now()).num_seconds();
+        let max_delay = data.pacing.next_delay_seconds as i64;
+        assert!(
+            ahead > 0 && ahead <= max_delay + 2,
+            "next_poll_at must be ~now + pacing delay ({max_delay}s), got {ahead}s ahead",
+        );
+    }
+
+    #[tokio::test]
+    async fn waiting_activity_expires_on_its_own() {
+        // Honest expiry: a `waiting` placeholder past its TTL reads back as
+        // None (read-side expiry, no reaper) — a dead process does not stay
+        // "dormant" forever.
+        let state = make_state_with_disc("d-wait-exp").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-wait-exp",
+                    "ClaudeCode",
+                    "s-we",
+                )?;
+                // TTL already elapsed (negative) → immediately expired.
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    "d-wait-exp",
+                    "ClaudeCode",
+                    Some("s-we"),
+                    "waiting",
+                    -1,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(
+            activity_of(&state, "d-wait-exp", "ClaudeCode")
+                .await
+                .is_none(),
+            "an expired waiting placeholder must read back as None",
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_without_session_id_cannot_refresh_presence() {
+        let state = make_state_with_disc("d-no-session").await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-no-session",
+                    "ClaudeCode",
+                    "s-current",
+                )?;
+                conn.execute(
+                    "UPDATE discussion_sessions SET last_seen = '2000-01-01T00:00:00Z'\
+                     WHERE disc_id = 'd-no-session'",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, agent_type, timestamp, sort_order)
+                     VALUES ('m-no-session', 'd-no-session', 'Agent', 'peer msg',
+                             'Codex', datetime('now'), 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state.clone()),
+            Path("d-no-session".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("ClaudeCode".to_string()),
                 session_id: None,
             }),
         )
         .await;
-        assert!(resp.0.data.unwrap().timed_out);
-        // The wait opened → "listening" was set, its TTL outlives the 1s
-        // timeout by the margin. An EMPTY timeout must never say "reading".
-        assert_eq!(
-            activity_of(&state, "d-act-1", "ClaudeCode").await.as_deref(),
-            Some("listening"),
-            "empty timeout keeps listening (never a fake 'reading')",
-        );
+        assert!(!response.0.data.unwrap().timed_out);
+
+        let session = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::list_sessions(conn, "d-no-session", false)
+            })
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
+        assert_eq!(session.last_seen.as_deref(), Some("2000-01-01T00:00:00Z"));
+        assert!(session.activity.is_none());
     }
 
     // The real disc_append→clear path is regression-tested in
@@ -1831,12 +2135,16 @@ mod tests {
                 since_sort_order: Some(0),
                 timeout_secs: Some(5),
                 exclude_agent_type: Some("ClaudeCode".to_string()),
-                session_id: None,
+                session_id: Some("s-act2".to_string()),
             }),
         )
         .await;
         let data = resp.0.data.unwrap();
         assert!(!data.timed_out && data.messages.len() == 1);
+        assert!(
+            data.next_poll_at.is_none(),
+            "a delivery replies now, not after a pause — no next_poll_at",
+        );
         assert_eq!(
             activity_of(&state, "d-act-2", "ClaudeCode").await.as_deref(),
             Some("reading"),
@@ -1847,7 +2155,12 @@ mod tests {
         state
             .db
             .with_conn(|conn| {
-                crate::db::discussion_sessions::clear_session_activity(conn, "d-act-2", "ClaudeCode", None)
+                crate::db::discussion_sessions::clear_session_activity(
+                    conn,
+                    "d-act-2",
+                    "ClaudeCode",
+                    Some("s-act2"),
+                )
             })
             .await
             .unwrap();

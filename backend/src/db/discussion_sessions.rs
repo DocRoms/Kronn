@@ -254,6 +254,23 @@ pub const SESSION_SKEW_SANITY_DAYS: i64 = 3650;
 /// isn't a live responder so its heartbeat is irrelevant. No-op (0 rows)
 /// when the caller isn't a tracked participant (e.g. a Kronn-launched
 /// agent with no session row) — harmless.
+pub fn touch_session(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: &str,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET last_seen = ?3
+          WHERE disc_id = ?1 AND agent_type = ?2 AND status = 'active'
+            AND session_id = ?4",
+        params![disc_id, agent_type, now, session_id],
+    )?;
+    Ok(())
+}
+
 pub fn touch_session_by_agent(conn: &Connection, disc_id: &str, agent_type: &str) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -541,6 +558,14 @@ pub fn consume_invite_token(
 pub struct JoinViaTokenResult {
     pub disc_id: String,
     pub session_pk: i64,
+    /// Plain resume credential, returned once. Only its SHA-256 hash is stored.
+    pub resume_token: String,
+}
+
+fn new_resume_credential() -> (String, String) {
+    let plain = format!("kr-resume-{}", Uuid::new_v4().simple());
+    let hash = sha256_hex(&plain);
+    (plain, hash)
 }
 
 /// Atomically validate the invite token, create a peer session row,
@@ -568,6 +593,7 @@ pub fn join_via_token(
 ) -> Result<JoinViaTokenResult> {
     let hash = sha256_hex(plain_token);
     let now = Utc::now().to_rfc3339();
+    let (resume_token, resume_token_hash) = new_resume_credential();
 
     let tx = conn.unchecked_transaction()?;
 
@@ -608,6 +634,12 @@ pub fn join_via_token(
         .optional()?;
 
     let session_pk = if let Some(pk) = existing_pk {
+        tx.execute(
+            "UPDATE discussion_sessions
+                SET resume_token_hash = ?2, resume_rotated_at = ?3
+              WHERE id = ?1",
+            params![pk, &resume_token_hash, &now],
+        )?;
         pk
     } else {
         // Step 2b — first join for this (agent_type, session_id) on THIS disc.
@@ -621,9 +653,10 @@ pub fn join_via_token(
         )?;
         tx.execute(
             "INSERT INTO discussion_sessions
-                (disc_id, agent_type, session_id, role, status, joined_at)
-             VALUES (?1, ?2, ?3, 'peer', 'active', ?4)",
-            params![&disc_id, agent_type, session_id, now],
+                (disc_id, agent_type, session_id, role, status, joined_at,
+                 resume_token_hash, resume_rotated_at)
+             VALUES (?1, ?2, ?3, 'peer', 'active', ?4, ?5, ?4)",
+            params![&disc_id, agent_type, session_id, &now, &resume_token_hash],
         )?;
         tx.last_insert_rowid()
     };
@@ -640,7 +673,86 @@ pub fn join_via_token(
     }
 
     tx.commit()?;
-    Ok(JoinViaTokenResult { disc_id, session_pk })
+    Ok(JoinViaTokenResult {
+        disc_id,
+        session_pk,
+        resume_token,
+    })
+}
+
+/// Resume a host-launched peer after its MCP bridge reloads. The opaque
+/// credential identifies exactly one logical session row; a successful resume
+/// updates that row in place and rotates the credential atomically. The old
+/// `session_id` immediately loses the ability to refresh activity/presence.
+pub fn resume_disc_session(
+    conn: &Connection,
+    agent_type: &str,
+    resume_token: &str,
+    new_session_id: &str,
+) -> Result<JoinViaTokenResult> {
+    let old_hash = sha256_hex(resume_token);
+    let (next_token, next_hash) = new_resume_credential();
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+
+    let row: Option<(i64, String)> = tx
+        .query_row(
+            "SELECT id, disc_id FROM discussion_sessions
+              WHERE resume_token_hash = ?1 AND agent_type = ?2 AND status != 'left'
+              LIMIT 1",
+            params![&old_hash, agent_type],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (session_pk, disc_id) =
+        row.ok_or_else(|| anyhow!("resume credential invalid, replayed, or no longer active"))?;
+
+    let updated = tx.execute(
+        "UPDATE discussion_sessions
+            SET session_id = ?2,
+                last_seen = ?3,
+                activity = NULL,
+                activity_expires_at = NULL,
+                resume_token_hash = ?4,
+                resume_rotated_at = ?3
+          WHERE id = ?1 AND resume_token_hash = ?5 AND status != 'left'",
+        params![session_pk, new_session_id, &now, &next_hash, &old_hash],
+    )?;
+    if updated != 1 {
+        return Err(anyhow!("resume credential was rotated concurrently"));
+    }
+    tx.commit()?;
+    Ok(JoinViaTokenResult {
+        disc_id,
+        session_pk,
+        resume_token: next_token,
+    })
+}
+
+/// Token-free bind for a freshly mirrored room that still needs the same
+/// authenticated reload contract as a local invite-token join.
+pub fn join_disc_session_resumable(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: &str,
+) -> Result<JoinViaTokenResult> {
+    let (resume_token, resume_token_hash) = new_resume_credential();
+    let now = Utc::now().to_rfc3339();
+    let tx = conn.unchecked_transaction()?;
+    let session_pk = join_disc_session(&tx, disc_id, agent_type, session_id)?;
+    tx.execute(
+        "UPDATE discussion_sessions
+            SET resume_token_hash = ?2, resume_rotated_at = ?3
+          WHERE id = ?1",
+        params![session_pk, resume_token_hash, now],
+    )?;
+    tx.commit()?;
+    Ok(JoinViaTokenResult {
+        disc_id: disc_id.to_string(),
+        session_pk,
+        resume_token,
+    })
 }
 
 /// Bind a CLI session to a disc by id, WITHOUT an invite token. Used when the
@@ -769,6 +881,80 @@ mod tests {
         assert_eq!(count, 1, "no phantom duplicate session rows");
         let pk3 = join_disc_session(&conn, "d1", "ClaudeCode", "sess-2").unwrap();
         assert_ne!(pk1, pk3, "a different session id is a distinct participant");
+    }
+
+    #[test]
+    fn resume_rotates_secret_reuses_row_and_invalidates_old_session_identity() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Codex", "old-child-ppid").unwrap();
+        assert!(joined.resume_token.starts_with("kr-resume-"));
+        let stored: String = conn
+            .query_row(
+                "SELECT resume_token_hash FROM discussion_sessions WHERE id = ?1",
+                params![joined.session_pk],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(stored, joined.resume_token, "database stores only a digest");
+
+        let resumed =
+            resume_disc_session(&conn, "Codex", &joined.resume_token, "new-child-ppid").unwrap();
+        assert_eq!(
+            resumed.session_pk, joined.session_pk,
+            "resume updates the same row"
+        );
+        assert_eq!(resumed.disc_id, "d1");
+        assert_ne!(
+            resumed.resume_token, joined.resume_token,
+            "credential rotates"
+        );
+
+        let replay =
+            resume_disc_session(&conn, "Codex", &joined.resume_token, "replay-child").unwrap_err();
+        assert!(replay.to_string().contains("invalid, replayed"));
+        let wrong_agent =
+            resume_disc_session(&conn, "ClaudeCode", &resumed.resume_token, "attacker-child")
+                .unwrap_err();
+        assert!(wrong_agent.to_string().contains("invalid, replayed"));
+
+        set_session_activity(
+            &conn,
+            "d1",
+            "Codex",
+            Some("old-child-ppid"),
+            "listening",
+            60,
+        )
+        .unwrap();
+        let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("new-child-ppid"));
+        assert!(
+            row.activity.is_none(),
+            "the superseded child identity cannot refresh presence"
+        );
+    }
+
+    #[test]
+    fn resuming_one_same_agent_peer_never_supersedes_its_sibling() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let first = join_via_token(&conn, &invite.token, "Codex", "codex-a-old").unwrap();
+        let second = join_via_token(&conn, &invite.token, "Codex", "codex-b").unwrap();
+
+        let resumed =
+            resume_disc_session(&conn, "Codex", &first.resume_token, "codex-a-new").unwrap();
+        assert_eq!(resumed.session_pk, first.session_pk);
+
+        let rows = list_sessions(&conn, "d1", false).unwrap();
+        assert_eq!(rows.len(), 2, "two legitimate Codex peers remain active");
+        assert!(rows
+            .iter()
+            .any(|r| r.session_id.as_deref() == Some("codex-a-new")));
+        assert!(rows
+            .iter()
+            .any(|r| r.session_id.as_deref() == Some("codex-b")));
+        assert_ne!(first.session_pk, second.session_pk);
     }
 
     #[test]
