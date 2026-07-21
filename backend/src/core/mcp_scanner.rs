@@ -2845,11 +2845,13 @@ fn interpolate_env_template(template: &str, env: &std::collections::HashMap<Stri
 ///
 /// This is how API-only plugins (and the API side of hybrid plugins) reach
 /// the agent — they aren't in `.mcp.json`, so the MCP context block above
-/// can't surface them. Emitted as a parallel section with curl examples and
-/// inlined credentials so the agent can call endpoints directly via Bash.
+/// can't surface them. Credentials are deliberately NEVER rendered here:
+/// authenticated calls must go through the `api_call` broker, which injects
+/// them server-side without exposing them to the model, argv or logs.
 ///
-/// `plugins_with_env` must already be decrypted by the caller — this
-/// function is pure (no DB, no secret) so it can be unit-tested cheaply.
+/// `plugins_with_env` is decrypted by the caller so declared non-secret
+/// config can be interpolated. Auth values may be present in that map but
+/// this pure renderer must never read or emit them.
 pub fn build_api_context_block(
     plugins_with_env: &[ActiveApiPlugin],
 ) -> String {
@@ -2868,107 +2870,82 @@ pub fn build_api_context_block(
     }
 
     let mut out = String::from("## REST APIs available\n\n");
-    out.push_str("The following REST APIs are configured for this project. **Prefer the `api_call` MCP tool** — \
-                  Kronn injects auth and already knows each API's endpoints (call `mcp_list` to see them). \
-                  Direct `curl` from Bash also works; auth + non-secret config are pre-filled per API below. \
-                  Never print credentials back to the user.\n\n");
+    out.push_str("The following REST APIs are configured for this project. Use the `api_call` MCP tool — \
+                  Kronn injects auth server-side and already knows each API's endpoints (call `mcp_list` to see them). \
+                  Never reconstruct authenticated `curl` commands or ask for credentials: secret values are intentionally \
+                  absent from this prompt.\n\n");
 
     for (server, env, spec) in api_plugins {
         out.push_str(&format!("### {}\n", server.name));
-        // If the base URL contains `{ENV_KEY}` placeholders, render the
-        // resolved form so the agent sees the actual URL it must call.
-        // Chartbeat has no placeholders → this is a no-op.
-        let resolved_base = interpolate_env_template(&spec.base_url, env);
-        out.push_str(&format!("Base URL: `{}`\n", resolved_base));
-
-        // Auth — we inject the literal credential. This is the same trust
-        // level as `.mcp.json` already gets; the agent needs the value to
-        // craft a working request. The prompt instruction above asks the
-        // agent not to echo it back.
+        // Base URLs may contain NON-SECRET config placeholders (tenant id,
+        // workspace slug, …). Interpolate only keys explicitly declared as
+        // `config_keys`: using the whole decrypted env here could leak an
+        // auth value if a malformed plugin referenced it from the URL.
+        let mut auth_env_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
         match &spec.auth {
-            ApiAuthKind::ApiKeyQuery { param_name, env_key } => {
-                let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
-                out.push_str(&format!("Auth: pass `{}={}` as a query parameter on every request.\n", param_name, val));
-            }
-            ApiAuthKind::ApiKeyHeader { header_name, env_key } => {
-                let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
-                out.push_str(&format!("Auth: send header `{}: {}` on every request.\n", header_name, val));
-            }
-            ApiAuthKind::Bearer { env_key } => {
-                let val = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
-                out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request.\n", val));
+            ApiAuthKind::ApiKeyQuery { env_key, .. }
+            | ApiAuthKind::ApiKeyHeader { env_key, .. }
+            | ApiAuthKind::Bearer { env_key }
+            | ApiAuthKind::BasicApiKey { env_key } => {
+                auth_env_keys.insert(env_key.as_str());
             }
             ApiAuthKind::Basic { user_env, password_env } => {
-                // Compose the encoded value here — the agent needs the
-                // exact wire-format header to craft `curl -H` calls.
-                // Both halves come from the encrypted env; an unset key
-                // surfaces as `<MISSING>` so the agent knows what to fix.
-                let user = env.get(user_env).map(|s| s.as_str()).unwrap_or("<MISSING>");
-                let password = env.get(password_env).map(|s| s.as_str()).unwrap_or("<MISSING>");
-                use base64::{engine::general_purpose::STANDARD, Engine as _};
-                let encoded = STANDARD.encode(format!("{user}:{password}"));
-                out.push_str(&format!("Auth: send header `Authorization: Basic {}` on every request (HTTP Basic, base64 of `{}:<token>`).\n", encoded, user));
+                auth_env_keys.insert(user_env.as_str());
+                auth_env_keys.insert(password_env.as_str());
             }
-            ApiAuthKind::BasicApiKey { env_key } => {
-                // Same wire format as Basic, but the password half is empty
-                // (`base64(KEY:)`). Used by SpeedCurve, Stripe, etc.
-                let key = env.get(env_key).map(|s| s.as_str()).unwrap_or("<MISSING>");
-                use base64::{engine::general_purpose::STANDARD, Engine as _};
-                let encoded = STANDARD.encode(format!("{key}:"));
-                out.push_str(&format!("Auth: send header `Authorization: Basic {}` on every request (HTTP Basic, base64 of `{}:` — note the trailing colon, the password is empty).\n", encoded, key));
+            ApiAuthKind::OAuth2ClientCredentials {
+                client_id_env,
+                client_secret_env,
+                ..
+            } => {
+                auth_env_keys.insert(client_id_env.as_str());
+                auth_env_keys.insert(client_secret_env.as_str());
+            }
+            ApiAuthKind::TokenExchange { creds_env_keys, .. } => {
+                auth_env_keys.extend(creds_env_keys.iter().map(String::as_str));
+            }
+            ApiAuthKind::None => {}
+        }
+        let public_env: std::collections::HashMap<String, String> = spec.config_keys.iter()
+            .filter(|key| !auth_env_keys.contains(key.env_key.as_str()))
+            .filter_map(|key| env.get(&key.env_key).map(|value| (key.env_key.clone(), value.clone())))
+            .collect();
+        let resolved_base = interpolate_env_template(&spec.base_url, &public_env);
+        out.push_str(&format!("Base URL: `{}`\n", resolved_base));
+
+        // Auth — describe only the injection SHAPE. Literal credentials,
+        // exchanged tokens and templated secret headers must never cross the
+        // broker boundary into model context (or its command-line argv).
+        match &spec.auth {
+            ApiAuthKind::ApiKeyQuery { param_name, .. } => {
+                out.push_str(&format!("Auth: injected server-side by `api_call` as query parameter `{param_name}`.\n"));
+            }
+            ApiAuthKind::ApiKeyHeader { header_name, .. } => {
+                out.push_str(&format!("Auth: injected server-side by `api_call` as header `{header_name}`.\n"));
+            }
+            ApiAuthKind::Bearer { .. } => {
+                out.push_str("Auth: Bearer token injected server-side by `api_call`.\n");
+            }
+            ApiAuthKind::Basic { .. } => {
+                out.push_str("Auth: HTTP Basic credentials injected server-side by `api_call`.\n");
+            }
+            ApiAuthKind::BasicApiKey { .. } => {
+                out.push_str("Auth: Basic API key injected server-side by `api_call`.\n");
             }
             ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
-                // By this point the async resolver (see make_agent_stream)
-                // has already called `core::oauth2_cache::resolve_token`
-                // and stashed the result under the virtual key
-                // `__access_token__` in this plugin's env map. If it's
-                // missing, token exchange failed earlier — we surface
-                // that inline so the agent knows to stop rather than
-                // fire unauthenticated requests.
-                match env.get("__access_token__") {
-                    Some(tok) => {
-                        out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request (Kronn refreshes this token automatically before it expires).\n", tok));
-                    }
-                    None => {
-                        let err = env.get("__token_error__").cloned().unwrap_or_else(|| "unknown error".into());
-                        out.push_str(&format!("Auth: **TOKEN UNAVAILABLE — {}**. Do not attempt API calls; tell the user and stop.\n", err));
-                    }
-                }
-                // Extra headers (e.g. Adobe's x-api-key, x-proxy-global-company-id).
-                // value_template supports `{ENV_KEY}` substitution from the
-                // config's env map so one plugin spec covers both the secret
-                // (client_id echoed as x-api-key) and non-secret keys.
-                for eh in extra_headers {
-                    let rendered = interpolate_env_template(&eh.value_template, env);
-                    out.push_str(&format!("Also send header `{}: {}` on every request.\n", eh.name, rendered));
+                out.push_str("Auth: OAuth2 token injected and refreshed server-side by `api_call`.\n");
+                if !extra_headers.is_empty() {
+                    let names = extra_headers.iter().map(|h| format!("`{}`", h.name)).collect::<Vec<_>>().join(", ");
+                    out.push_str(&format!("Additional auth headers injected server-side: {names}.\n"));
                 }
             }
             ApiAuthKind::TokenExchange { inject, .. } => {
-                // 0.8.6 — Same pattern as OAuth2: the async resolver
-                // (`resolve_token_exchange`) has already minted the token
-                // and stashed it under `__access_token__`. Plugins with
-                // a non-Bearer `inject` form get a description tailored
-                // to where the token lands (header / query) so the agent
-                // doesn't guess.
-                match env.get("__access_token__") {
-                    Some(tok) => {
-                        match inject {
-                            crate::models::TokenInjection::BearerHeader => {
-                                out.push_str(&format!("Auth: send header `Authorization: Bearer {}` on every request (Kronn refreshes this token automatically before it expires).\n", tok));
-                            }
-                            crate::models::TokenInjection::CustomHeader { name } => {
-                                out.push_str(&format!("Auth: send header `{}: {}` on every request (Kronn refreshes this token automatically before it expires).\n", name, tok));
-                            }
-                            crate::models::TokenInjection::QueryParam { name } => {
-                                out.push_str(&format!("Auth: send `{}={}` as a query parameter on every request (Kronn refreshes this token automatically before it expires).\n", name, tok));
-                            }
-                        }
-                    }
-                    None => {
-                        let err = env.get("__token_error__").cloned().unwrap_or_else(|| "unknown error".into());
-                        out.push_str(&format!("Auth: **TOKEN UNAVAILABLE — {}**. Do not attempt API calls; tell the user and stop.\n", err));
-                    }
-                }
+                let location = match inject {
+                    crate::models::TokenInjection::BearerHeader => "Bearer header".to_string(),
+                    crate::models::TokenInjection::CustomHeader { name } => format!("header `{name}`"),
+                    crate::models::TokenInjection::QueryParam { name } => format!("query parameter `{name}`"),
+                };
+                out.push_str(&format!("Auth: exchanged token injected server-side by `api_call` as {location}.\n"));
             }
             ApiAuthKind::None => {
                 out.push_str("Auth: none (public endpoints).\n");
@@ -2988,9 +2965,7 @@ pub fn build_api_context_block(
                 out.push_str("Config (pass as query params):\n");
             }
             for k in &spec.config_keys {
-                let val = env.get(&k.env_key).map(|s| s.as_str()).unwrap_or("");
-                let val_display = if val.is_empty() { "<not-configured>" } else { val };
-                out.push_str(&format!("- `{}={}`  ({})\n", k.env_key.to_lowercase(), val_display, k.description));
+                out.push_str(&format!("- `${{ENV.{}}}`  ({})\n", k.env_key, k.description));
             }
         }
 

@@ -426,46 +426,20 @@ pub(crate) async fn make_agent_stream(
                 Some(secret) => {
                     let pid = pid.clone();
                     let secret_c = secret.clone();
-                    // Step 1 (blocking): decrypt configs from the DB.
-                    let mut plugins = state.db.with_conn(move |conn| {
+                    // Decrypt configs only to resolve NON-SECRET values used
+                    // by the broker metadata block (tenant id, workspace
+                    // slug, …). Auth values stay in this backend process and
+                    // are never rendered into agent context.
+                    let plugins = state.db.with_conn(move |conn| {
                         crate::core::mcp_scanner::collect_active_api_plugins(
                             conn, &pid, &secret_c,
                         )
                     }).await.unwrap_or_default();
 
-                    // Step 2 (async): for every plugin whose auth is
-                    // OAuth2ClientCredentials, resolve a fresh bearer token
-                    // via the cache. We inject the result under the virtual
-                    // env keys `__access_token__` / `__token_error__` so the
-                    // sync context builder can read them without knowing
-                    // the auth flow. Per-plugin isolation: one bad token
-                    // doesn't hide the others.
-                    for (server, config_id, env) in plugins.iter_mut() {
-                        if let Some(ref spec) = server.api_spec {
-                            if matches!(spec.auth, crate::models::ApiAuthKind::OAuth2ClientCredentials { .. }) {
-                                // 2026-06-10 — the cache key is the EXACT
-                                // config id surfaced by the collector. The
-                                // previous DB re-derive matched the FIRST
-                                // config of the server on the project, so
-                                // two instances with different credentials
-                                // shared (and corrupted) one cached token.
-                                match crate::core::oauth2_cache::resolve_token(
-                                    &state.oauth2_cache, config_id, &spec.auth, env,
-                                ).await {
-                                    Ok(tok) => { env.insert("__access_token__".into(), tok); }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "OAuth2 token exchange failed for plugin '{}' config {}: {}",
-                                            server.name, config_id, e
-                                        );
-                                        env.insert("__token_error__".into(), e);
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Step 3 (sync): render the block.
+                    // Token exchange belongs exclusively to `api_call` at
+                    // request time. Resolving it here used to put the bearer
+                    // in `--append-system-prompt`, argv and logs even when the
+                    // agent never called the API.
                     crate::core::mcp_scanner::build_api_context_block(&plugins)
                 }
                 None => String::new(),

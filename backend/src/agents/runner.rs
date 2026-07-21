@@ -1943,8 +1943,13 @@ fn try_spawn(
             cmd_args.splice(exec_idx + 1..exec_idx + 1, overrides);
         }
     }
-    tracing::info!("Spawning agent: {} {:?} in {} (key: {})",
-        cmd_name, cmd_args, work_dir.display(),
+    // Never log argv: prompts may contain user data and, historically, API
+    // credentials. Besides the persistent log, argv is already visible to
+    // the child process; duplicating it at INFO turns a transient exposure
+    // into a durable one. Operational diagnostics only need the executable,
+    // argument count, workdir and auth mode.
+    tracing::info!("Spawning agent: {} ({} args) in {} (key: {})",
+        cmd_name, cmd_args.len(), work_dir.display(),
         if api_key.is_some() { "override" } else { "local auth" }
     );
 
