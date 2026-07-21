@@ -306,13 +306,25 @@ pub fn check_detector_disposition(
 /// Liquid / Mermaid syntax that uses `{{` for its own purposes (e.g.
 /// `{{ asset('foo') }}` in a Twig snippet inside coding-rules.md, or
 /// `{{ DECISION_1 }}` is matched, but `{{ asset(...) }}` is not).
+/// Fenced blocks and inline code spans are invisible to the counter —
+/// documenting a placeholder is not the same as leaving one unfilled
+/// (benchmark run 1 false positive: the TD index mentioning
+/// `{{DO_NOT_1}}` in inline code made a 43-TD file read as "still the
+/// template"). Reuses the anti-hallu strippers: inline spans pair
+/// N-backtick runs (an UNCLOSED run keeps its text — a stray backtick can
+/// never hide a real slot, bounded pairing on hostile lines); fences are
+/// lexical, and an UNCLOSED fence restores everything it withheld,
+/// opening line included.
 pub(crate) fn count_raw_placeholders(content: &str) -> usize {
+    let stripped = crate::core::anti_halluc::strip_inline_code(
+        &crate::core::anti_halluc::strip_fenced_code(content),
+    );
     // Match `{{IDENT}}` and `{{ IDENT }}` where IDENT is
     // UPPERCASE_SNAKE (with optional digits + _). The trailing
     // boundary is a literal `}}`, not just `}`, to avoid hits on
     // Twig double-brace blocks that contain spaces / parens.
     let mut count = 0usize;
-    let mut rest = content;
+    let mut rest = stripped.as_str();
     while let Some(start) = rest.find("{{") {
         let after_open = &rest[start + 2..];
         // Find closing `}}`
@@ -784,6 +796,59 @@ mod tests {
         // Mixed body
         let body = "| {{ID}} | {{ asset('x') }} | {{SEVERITY}} |";
         assert_eq!(count_raw_placeholders(body), 2);
+    }
+
+    #[test]
+    fn count_raw_placeholders_ignores_code_spans_and_fences() {
+        // Benchmark run 1 (2026-07-21) false positive: the TD index
+        // DOCUMENTED `{{DO_NOT_1}}`/`{{DO_NOT_2}}` in inline code while
+        // describing a redirector stub — a 43-TD file read as "still the
+        // template" and failed step 8. Documenting a placeholder in code
+        // is content, not an unfilled slot.
+        assert_eq!(count_raw_placeholders("mentions `{{DO_NOT_1}}` in prose"), 0);
+        assert_eq!(
+            count_raw_placeholders("it carries `{{DO_NOT_1}}`/`{{DO_NOT_2}}` placeholders"),
+            0
+        );
+        assert_eq!(
+            count_raw_placeholders("```\n| {{ID}} |\n```\nafter the fence"),
+            0
+        );
+        // CommonMark double-backtick spans strip too (a naive char toggle
+        // would leave the inner token counted).
+        assert_eq!(count_raw_placeholders("``{{ID}}``"), 0);
+        // An UNCLOSED fence (truncated markdown) must never hide a real
+        // slot sitting after it — fail-closed, like the stray backtick.
+        assert_eq!(
+            count_raw_placeholders("```text\nexemple tronqué\n| {{ID}} |"),
+            1
+        );
+        // The OPENING line of an unclosed fence must not swallow a slot
+        // sitting on it either.
+        assert_eq!(count_raw_placeholders("```text {{ID}}\ntruncated"), 1);
+        // A ```suffix line is NOT a valid closer: no closer before EOF ⇒
+        // everything restored ⇒ the slot stays visible.
+        assert_eq!(
+            count_raw_placeholders("```text\n| {{ID}} |\n```still-code"),
+            1
+        );
+        // A backtick inside the info string is NOT a valid opener — the
+        // slot after it stays visible.
+        assert_eq!(
+            count_raw_placeholders("```lang`oops\n| {{ID}} |\n```"),
+            1
+        );
+        // A REAL unfilled slot outside code still counts — including next
+        // to documented ones.
+        assert_eq!(count_raw_placeholders("| {{ID}} |"), 1);
+        assert_eq!(
+            count_raw_placeholders("mentions `{{DOC}}` but leaves | {{ID}} | unfilled"),
+            1
+        );
+        // An UNCLOSED backtick run keeps its text: a stray backtick (typo)
+        // must never hide a real unfilled slot behind it.
+        assert_eq!(count_raw_placeholders("stray ` then | {{ID}} |"), 1);
+        assert_eq!(count_raw_placeholders("| {{ID}} | then stray `"), 1);
     }
 
     #[test]

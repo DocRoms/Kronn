@@ -328,6 +328,7 @@ pub fn update_last_completed_step(conn: &Connection, id: &str, step: u32) -> Res
 /// Stamp the TD counters computed at end-of-stream onto a row regardless of
 /// its terminal status. Interrupted runs used to keep td_* at 0 while 14 TD
 /// files sat on disk — the history chip strip under-reported real findings.
+#[allow(clippy::too_many_arguments)]
 pub fn update_td_counts(
     conn: &Connection,
     id: &str,
@@ -335,15 +336,31 @@ pub fn update_td_counts(
     td_high: u32,
     td_medium: u32,
     td_low: u32,
+    td_resolved_since_last: u32,
+    td_new_since_last: u32,
     td_carried_over: u32,
 ) -> Result<()> {
+    // resolved/new are persisted too (benchmark run 1, 2026-07-21): the
+    // Interrupted path computed them but left the row at its 0 defaults,
+    // and the UI presented "0 new" as a KNOWN value while a genuinely new
+    // TD existed on disk.
     conn.execute(
         "UPDATE audit_runs SET
             td_critical = ?2, td_high = ?3, td_medium = ?4, td_low = ?5,
-            td_total = ?6, td_carried_over = ?7
+            td_total = ?6, td_resolved_since_last = ?7,
+            td_new_since_last = ?8, td_carried_over = ?9
          WHERE id = ?1",
-        params![id, td_critical, td_high, td_medium, td_low,
-                td_critical + td_high + td_medium + td_low, td_carried_over],
+        params![
+            id,
+            td_critical,
+            td_high,
+            td_medium,
+            td_low,
+            td_critical + td_high + td_medium + td_low,
+            td_resolved_since_last,
+            td_new_since_last,
+            td_carried_over
+        ],
     )?;
     Ok(())
 }
@@ -752,17 +769,26 @@ mod tests {
     #[test]
     fn update_td_counts_stamps_interrupted_runs() {
         // The TD files exist on disk even when the run ends Interrupted —
-        // the history row must not report 0 findings.
+        // the history row must not report 0 findings. Benchmark run 1
+        // (2026-07-21): resolved/new were computed but never persisted on
+        // this path, so a genuinely new TD read as "0 new" — the exact
+        // reconciliation partition (13 carried + 1 new, 2 resolved) must
+        // land in the row.
         let conn = fresh_conn();
         let start = Utc::now();
         insert_running(&conn, "r1", "p1", "Full", "ClaudeCode", start).unwrap();
         mark_interrupted(&conn, "r1", "warned steps: [1]").unwrap();
-        update_td_counts(&conn, "r1", 0, 2, 8, 4, 14).unwrap();
+        update_td_counts(&conn, "r1", 0, 2, 8, 4, 2, 1, 13).unwrap();
         let row = &list_recent(&conn, "p1", 1).unwrap()[0];
         assert_eq!(row.status, "Interrupted");
         assert_eq!(row.td_total, 14);
         assert_eq!(row.td_high, 2);
-        assert_eq!(row.td_carried_over, 14);
+        assert_eq!(row.td_resolved_since_last, 2);
+        assert_eq!(
+            row.td_new_since_last, 1,
+            "a new TD on an interrupted run must not read as 0"
+        );
+        assert_eq!(row.td_carried_over, 13);
     }
 
     #[test]
