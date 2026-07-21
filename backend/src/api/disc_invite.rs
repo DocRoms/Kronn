@@ -544,7 +544,6 @@ pub struct WaitForPeerResponse {
     /// NOT read this field — it derives "dormant" from the paired `waiting`
     /// activity (generic label, no countdown). `None` on a delivery (the
     /// caller replies now, not later).
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub next_poll_at: Option<String>,
 }
 
@@ -2144,6 +2143,11 @@ mod tests {
         assert!(
             data.next_poll_at.is_none(),
             "a delivery replies now, not after a pause — no next_poll_at",
+        );
+        let wire = serde_json::to_value(&data).expect("wait response serializes");
+        assert!(
+            wire.get("next_poll_at").is_some() && wire["next_poll_at"].is_null(),
+            "the non-optional TypeScript field must be serialized as null, never omitted",
         );
         assert_eq!(
             activity_of(&state, "d-act-2", "ClaudeCode").await.as_deref(),
