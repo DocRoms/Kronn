@@ -525,6 +525,51 @@ pub(crate) fn atomic_write_if_unchanged(
     commit_atomic_temp(&tmp, target)
 }
 
+/// Atomically replace a file only if it is still byte-identical to `observed`,
+/// while preserving the target's existing permissions. Permissions are copied
+/// to the temporary sibling *before* the rename, so there is no post-rename
+/// window where a normal 0644 document becomes the temp file's defensive 0600.
+pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
+    target: &Path,
+    content: &str,
+    observed: &[u8],
+) -> Result<(), String> {
+    let metadata = std::fs::symlink_metadata(target)
+        .map_err(|e| format!("Failed to stat {} before atomic write: {e}", target.display()))?;
+    if metadata.file_type().is_symlink() {
+        return Err(format!(
+            "{} is a symlink; refusing atomic permission-preserving write",
+            target.display()
+        ));
+    }
+    if !metadata.is_file() {
+        return Err(format!(
+            "{} is not a regular file; refusing atomic permission-preserving write",
+            target.display()
+        ));
+    }
+    let permissions = metadata.permissions();
+    let tmp = write_atomic_temp(target, content.as_bytes())?;
+    let unchanged = std::fs::read(target)
+        .map(|current| current == observed)
+        .unwrap_or(false);
+    if !unchanged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "{} changed concurrently while its audit artifact was being sanitized; refusing overwrite",
+            target.display()
+        ));
+    }
+    if let Err(e) = std::fs::set_permissions(&tmp, permissions) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "Failed to preserve permissions for {} before atomic rename: {e}",
+            target.display()
+        ));
+    }
+    commit_atomic_temp(&tmp, target)
+}
+
 /// File mtime as of `read_target_mtime` invocation. Returned as
 /// `Option<SystemTime>` because the file may not exist yet (legitimate
 /// for a first-time sync) — `None` means "no prior version to defend

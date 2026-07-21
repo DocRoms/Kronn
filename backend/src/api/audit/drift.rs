@@ -100,6 +100,7 @@ pub async fn partial_audit(
     // #8) could never be refreshed, the "Mettre à jour" button would send a
     // step the endpoint rejects.
     let chain = super::assemble_chained_steps(crate::models::AuditKind::Full);
+    let redact_targets: Vec<String> = chain.iter().map(|s| s.target_file.to_string()).collect();
     let first_chained_step = ANALYSIS_STEPS.len() + 1;
     let total_steps_available = chain.len();
     // An empty selection would run nothing and still end `done complete` — a
@@ -300,6 +301,40 @@ pub async fn partial_audit(
             }
         }
 
+        // PRE-AGENT boundary: Partial agents also have full filesystem access.
+        // Sweep the complete managed surface before digests, prompts or spawn.
+        match super::redact_artifacts::sanitize_all(
+            &project_path,
+            &redact_targets,
+            "partial-pre-agent",
+        ) {
+            Ok(r) => {
+                if !r.is_empty() {
+                    tracing::warn!(target: "kronn::invariant", files = r.len(),
+                        "partial audit: redacted existing literals before agent read");
+                }
+            }
+            Err(e) => {
+                let run_id = audit_run_id.clone();
+                match state.db.with_conn(move |conn| crate::db::audit_runs::mark_failed(
+                    conn, &run_id, "secret-redaction failed before partial audit agent",
+                )).await {
+                    Ok(()) => drop_guard.disarm(),
+                    Err(db_err) => tracing::error!("partial redaction failure could not mark run failed: {db_err}"),
+                }
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.clear_progress(&project_id_for_progress);
+                }
+                yield Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": format!("secret-redaction failed before partial audit agent: {e}"),
+                        "fatal": true,
+                    }).to_string(),
+                );
+                return;
+            }
+        }
+
 
         if let Ok(mut t) = audit_tracker.lock() {
             t.start_progress(&project_id_for_progress, total_requested as u32, "partial");
@@ -437,6 +472,40 @@ pub async fn partial_audit(
                     let status = process.child.wait().await;
                     process.fix_ownership();
                     tracing::debug!("Partial audit step {}: fix_ownership applied for {}", step, file_label);
+
+                    // PER-ATTEMPT boundary: sanitize before validation can
+                    // choose Retry and before another agent process can spawn.
+                    match super::redact_artifacts::sanitize_all(
+                        &project_path,
+                        &redact_targets,
+                        "partial-per-attempt",
+                    ) {
+                        Ok(r) => {
+                            if !r.is_empty() {
+                                tracing::warn!(target: "kronn::invariant", step, attempt,
+                                    files = r.len(), "partial audit: redacted literals before validation/retry");
+                            }
+                        }
+                        Err(e) => {
+                            let run_id = audit_run_id.clone();
+                            match state.db.with_conn(move |conn| crate::db::audit_runs::mark_failed(
+                                conn, &run_id, "secret-redaction failed during partial audit",
+                            )).await {
+                                Ok(()) => drop_guard.disarm(),
+                                Err(db_err) => tracing::error!("partial redaction failure could not mark run failed: {db_err}"),
+                            }
+                            if let Ok(mut t) = audit_tracker.lock() {
+                                t.clear_progress(&project_id_for_progress);
+                            }
+                            yield Event::default().event("error").data(
+                                serde_json::json!({
+                                    "error": format!("secret-redaction failed after partial step {step} attempt {attempt}: {e}"),
+                                    "fatal": true,
+                                }).to_string(),
+                            );
+                            return;
+                        }
+                    }
                     let cli_success = status.map(|s| s.success()).unwrap_or(false);
                     // Gate order = Full parity (matrix v2): CLI → semantic
                     // validator → step-8 disposition → enforce lint → the
@@ -602,6 +671,40 @@ pub async fn partial_audit(
             }
             break 'attempts;
             } // 'attempts
+        }
+
+        // PRE-PUBLICATION backstop. Baseline merge, TD extraction and
+        // validation-discussion creation below must only observe clean data.
+        match super::redact_artifacts::sanitize_all(
+            &project_path,
+            &redact_targets,
+            "partial-post-loop",
+        ) {
+            Ok(r) => {
+                if !r.is_empty() {
+                    tracing::warn!(target: "kronn::invariant", files = r.len(),
+                        "partial audit: redacted literals before publication");
+                }
+            }
+            Err(e) => {
+                let run_id = audit_run_id.clone();
+                match state.db.with_conn(move |conn| crate::db::audit_runs::mark_failed(
+                    conn, &run_id, "secret-redaction failed before partial audit publication",
+                )).await {
+                    Ok(()) => drop_guard.disarm(),
+                    Err(db_err) => tracing::error!("partial redaction failure could not mark run failed: {db_err}"),
+                }
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.clear_progress(&project_id_for_progress);
+                }
+                yield Event::default().event("error").data(
+                    serde_json::json!({
+                        "error": format!("secret-redaction failed before partial audit publication: {e}"),
+                        "fatal": true,
+                    }).to_string(),
+                );
+                return;
+            }
         }
 
         // Compute the refreshed baseline — ONLY for steps whose agent

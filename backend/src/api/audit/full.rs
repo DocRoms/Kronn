@@ -655,12 +655,56 @@ pub async fn full_audit(
             remove_bootstrap_block(&index_file);
         }
 
+        // 0.8.13 security blocker — PRE-AGENT redaction boundary. The audit
+        // agent runs with the project root as cwd + full fs access, so it can
+        // `Read` a prior `docs/tech-debt/TD-*.md` directly; a leaked secret
+        // literal there would enter its context (which leaves the machine)
+        // before we ever rewrite the file. Sanitize the Kronn-managed priors in
+        // place NOW — before the snapshot/digest below and before the step loop
+        // spawns any agent — so the snapshot hashes, the injected dedup digest,
+        // and anything the agent reads are all already clean.
+        // The audit's own artifacts (chain target files + docs/tech-debt/*.md).
+        let redact_targets: Vec<String> = steps.iter().map(|s| s.target_file.to_string()).collect();
+        match super::redact_artifacts::sanitize_all(&project_path, &redact_targets, "pre-agent") {
+            Ok(r) => {
+                if !r.is_empty() {
+                    tracing::warn!(
+                        target: "kronn::invariant", files = r.len(),
+                        "audit: redacted secret literal(s) from existing priors before agent read (pre-agent)"
+                    );
+                }
+            }
+            // FAIL-CLOSED: if we cannot guarantee the priors are clean, abort
+            // before any agent spawns — a literal must never reach the model.
+            Err(e) => {
+                tracing::error!(
+                    target: "kronn::invariant", error = %e,
+                    "audit: PRE-AGENT redaction failed — aborting run, publishing nothing"
+                );
+                let run_id = audit_run_id.clone();
+                match db.with_conn(move |conn| crate::db::audit_runs::mark_failed(conn, &run_id, "secret-redaction failed — run aborted fail-closed")).await {
+                    Ok(()) => drop_guard.disarm(),
+                    Err(e2) => tracing::error!("mark_failed failed for {audit_run_id}: {e2} — drop-guard left armed"),
+                }
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.clear_progress(&project_id);
+                }
+                let ev = serde_json::json!({
+                    "result": "error", "fatal": true,
+                    "error": format!("secret-redaction failed before agent read (pre-agent): {e}"),
+                });
+                yield Event::default().event("error").data(ev.to_string());
+                return;
+            }
+        }
+
         // 0.8.2 — Snapshot the existing `docs/tech-debt/` directory BEFORE
         // Step 8 has a chance to touch it. Used by the reconciliation
         // pass (after the loop) to classify TDs that the agent did NOT
         // re-emit (Fixed / Stale / Missed / Uncertain). Cheap operation
         // — content-hashes a handful of small markdown files. Survives
-        // a fresh project (empty Vec).
+        // a fresh project (empty Vec). Runs AFTER the pre-agent redaction
+        // above so a one-time sanitization doesn't read as spurious drift.
         let pre_audit_td_snapshot = super::reconciliation::snapshot_tech_debt_dir(
             &project_path.join("docs"),
         );
@@ -1105,6 +1149,46 @@ pub async fn full_audit(
                         tracker.running_pids.remove(&project_id);
                     }
 
+                    // PER-ATTEMPT boundary: enforce mode can retry the same
+                    // step immediately. Sweep the complete managed surface
+                    // before cancellation handling, semantic validation, or a
+                    // Retry decision can lead to another agent spawn.
+                    match super::redact_artifacts::sanitize_all(
+                        &project_path,
+                        &redact_targets,
+                        "per-attempt",
+                    ) {
+                        Ok(r) => {
+                            if !r.is_empty() {
+                                tracing::warn!(
+                                    target: "kronn::invariant", step, attempt, files = r.len(),
+                                    "audit: redacted secret literal(s) before validation/retry"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                target: "kronn::invariant", step, attempt, error = %e,
+                                "audit: PER-ATTEMPT redaction failed — aborting before validation/retry"
+                            );
+                            let run_id = audit_run_id.clone();
+                            match db.with_conn(move |conn| crate::db::audit_runs::mark_failed(conn, &run_id, "secret-redaction failed — run aborted fail-closed")).await {
+                                Ok(()) => drop_guard.disarm(),
+                                Err(e2) => tracing::error!("mark_failed failed for {audit_run_id}: {e2} — drop-guard left armed"),
+                            }
+                            if let Ok(mut t) = audit_tracker.lock() {
+                                t.clear_progress(&project_id);
+                                t.cancelled.remove(&project_id);
+                            }
+                            let ev = serde_json::json!({
+                                "result": "error", "fatal": true,
+                                "error": format!("secret-redaction failed after step {step} attempt {attempt}: {e}"),
+                            });
+                            yield Event::default().event("error").data(ev.to_string());
+                            return;
+                        }
+                    }
+
                     // Check if cancelled during this step. Must finalize
                     // exactly like the pre-step branch: persist `Cancelled`
                     // and disarm the drop-guard. Without this the guard's Drop
@@ -1388,6 +1472,48 @@ pub async fn full_audit(
             // The retry path `continue`s before reaching here.
             break 'attempts;
             } // 'attempts: per-step enforce retry loop
+
+            // 0.8.13 security blocker — PER-STEP redaction boundary. The step
+            // just wrote its target (Step 8 also writes docs/tech-debt/*.md
+            // details). Sanitize NOW, before the NEXT step spawns — otherwise a
+            // secret this step emitted would be readable by steps N+1..16
+            // (their agent has full fs access). `sanitize_all` here sweeps this
+            // step's target file + the TD detail dir. FAIL-CLOSED: on any
+            // failure, abort before the next spawn.
+            match super::redact_artifacts::sanitize_all(
+                &project_path,
+                &redact_targets,
+                "per-step",
+            ) {
+                Ok(r) => {
+                    if !r.is_empty() {
+                        tracing::warn!(
+                            target: "kronn::invariant", step, files = r.len(),
+                            "audit: redacted secret literal(s) written by step, before next spawn (per-step)"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "kronn::invariant", step, error = %e,
+                        "audit: PER-STEP redaction failed — aborting before next spawn"
+                    );
+                    let run_id = audit_run_id.clone();
+                    match db.with_conn(move |conn| crate::db::audit_runs::mark_failed(conn, &run_id, "secret-redaction failed — run aborted fail-closed")).await {
+                        Ok(()) => drop_guard.disarm(),
+                        Err(e2) => tracing::error!("mark_failed failed for {audit_run_id}: {e2} — drop-guard left armed"),
+                    }
+                    if let Ok(mut t) = audit_tracker.lock() {
+                        t.clear_progress(&project_id);
+                    }
+                    let ev = serde_json::json!({
+                        "result": "error", "fatal": true,
+                        "error": format!("secret-redaction failed after step {step} (per-step): {e}"),
+                    });
+                    yield Event::default().event("error").data(ev.to_string());
+                    return;
+                }
+            }
         }
 
         // ── Auto-detect project skills ──
@@ -1407,6 +1533,44 @@ pub async fn full_audit(
             }).await;
             detected_skill_ids
         };
+
+        // 0.8.13 security blocker — POST-LOOP redaction backstop. The step loop
+        // sanitized each step's target as it finished (per-step, inside the
+        // loop); this final sweep is the belt-and-braces before EVERY
+        // downstream publication — reconciliation report, F27 baseline, and the
+        // validation discussion all read produced artifacts after this point.
+        match super::redact_artifacts::sanitize_all(&project_path, &redact_targets, "post-loop") {
+            Ok(r) => {
+                if !r.is_empty() {
+                    tracing::warn!(
+                        target: "kronn::invariant", files = r.len(),
+                        "audit: redacted secret literal(s) from produced artifacts before publication (post-loop backstop)"
+                    );
+                }
+            }
+            // FAIL-CLOSED: never publish (reconciliation/baseline/validation) if
+            // we cannot guarantee the produced artifacts are clean.
+            Err(e) => {
+                tracing::error!(
+                    target: "kronn::invariant", error = %e,
+                    "audit: POST-LOOP redaction failed — aborting before publication"
+                );
+                let run_id = audit_run_id.clone();
+                match db.with_conn(move |conn| crate::db::audit_runs::mark_failed(conn, &run_id, "secret-redaction failed — run aborted fail-closed")).await {
+                    Ok(()) => drop_guard.disarm(),
+                    Err(e2) => tracing::error!("mark_failed failed for {audit_run_id}: {e2} — drop-guard left armed"),
+                }
+                if let Ok(mut t) = audit_tracker.lock() {
+                    t.clear_progress(&project_id);
+                }
+                let ev = serde_json::json!({
+                    "result": "error", "fatal": true,
+                    "error": format!("secret-redaction failed before publication (post-loop): {e}"),
+                });
+                yield Event::default().event("error").data(ev.to_string());
+                return;
+            }
+        }
 
         // ── Phase 2.5: Reconciliation pass (0.8.2) ──
         // Only runs for Full audits — specialized kinds emit findings

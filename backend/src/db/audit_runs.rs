@@ -236,6 +236,27 @@ pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str)
     Ok(())
 }
 
+/// Whether `disc_id` is the durable validation discussion of a completed
+/// audit for `project_id`. The streaming path uses this relation instead of
+/// titles, which users can edit and partial audits localize differently.
+pub fn validation_discussion_belongs_to_project(
+    conn: &Connection,
+    disc_id: &str,
+    project_id: &str,
+) -> Result<bool> {
+    let linked: bool = conn.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM audit_runs
+            WHERE validation_discussion_id = ?1
+              AND project_id = ?2
+              AND status = 'Completed'
+        )",
+        params![disc_id, project_id],
+        |row| row.get(0),
+    )?;
+    Ok(linked)
+}
+
 /// Persist the structured per-step outcomes of a (partial) run (076).
 pub fn set_step_outcomes(conn: &Connection, run_id: &str, outcomes_json: &str) -> Result<()> {
     let affected = conn.execute(
@@ -676,6 +697,26 @@ mod tests {
 
         assert!(!has_running_for_project(&conn, "p1").unwrap());
         assert!(has_running_for_project(&conn, "p2").unwrap());
+    }
+
+    #[test]
+    fn validation_discussion_link_is_completed_and_project_scoped() {
+        let conn = fresh_conn();
+        conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'Test 2', '/tmp/test2')", [])
+            .unwrap();
+        let start = Utc::now();
+        insert_running(&conn, "run-v", "p1", "Full", "ClaudeCode", start).unwrap();
+        set_validation_discussion(&conn, "run-v", "disc-v").unwrap();
+
+        assert!(!validation_discussion_belongs_to_project(&conn, "disc-v", "p1").unwrap());
+        complete(
+            &conn, "run-v", start + chrono::Duration::seconds(1), "Completed",
+            0, 0, 0, 0, 0, 0, 0, 100, None, None,
+        ).unwrap();
+
+        assert!(validation_discussion_belongs_to_project(&conn, "disc-v", "p1").unwrap());
+        assert!(!validation_discussion_belongs_to_project(&conn, "disc-v", "p2").unwrap());
+        assert!(!validation_discussion_belongs_to_project(&conn, "other", "p1").unwrap());
     }
 
     #[test]
