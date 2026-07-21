@@ -27,8 +27,8 @@ pub struct McpServer {
     pub transport: McpTransport,
     pub source: McpSource,
     /// When present, the plugin exposes a REST API. Emitted into the agent's
-    /// `--append-system-prompt` as a `=== AVAILABLE APIs ===` block so the
-    /// agent can call it via curl (vs. MCP-style tools). NULL = MCP only.
+    /// `--append-system-prompt` as a secret-free `=== AVAILABLE APIs ===`
+    /// block; authenticated execution goes through `api_call`. NULL = MCP only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_spec: Option<ApiSpec>,
 }
@@ -40,8 +40,8 @@ pub enum McpTransport {
     Sse { url: String },
     Streamable { url: String },
     /// Plugin has no MCP transport — it's API-only. The sync code MUST skip
-    /// these when writing `.mcp.json`; everything relevant lives in
-    /// `api_spec` and gets injected into the prompt instead.
+    /// these when writing `.mcp.json`; capability metadata lives in
+    /// `api_spec` and authenticated execution goes through the API broker.
     ApiOnly,
 }
 
@@ -68,8 +68,8 @@ pub struct ApiSpec {
     pub docs_url: Option<String>,
     /// Additional config keys the user must provide on top of the credential
     /// (e.g. Chartbeat's `host=example.com`). Stored alongside the secret
-    /// in the config's encrypted env, surfaced in the prompt injection so
-    /// the agent has the exact curl arguments to use.
+    /// in the config's encrypted env and surfaced to agents only as
+    /// `${ENV.KEY}` broker references — never as literal prompt values.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub config_keys: Vec<ApiConfigKey>,
 }
@@ -99,13 +99,13 @@ pub enum ApiAuthKind {
     /// OAuth2 client-credentials grant — Kronn exchanges `client_id` +
     /// `client_secret` against `token_url` to get a short-lived
     /// `access_token`, caches it until expiry, and injects a fresh
-    /// `Authorization: Bearer <token>` into the agent's prompt.
+    /// `Authorization: Bearer <token>` server-side in the API broker.
     ///
     /// `extra_headers` lets the spec declare other headers Kronn should
-    /// surface to the agent (e.g. Adobe's `x-api-key: <client_id>` +
+    /// inject server-side (e.g. Adobe's `x-api-key: <client_id>` +
     /// `x-proxy-global-company-id: <company_id>`). Values can reference
-    /// any env key from the config via `{ENV_KEY}` placeholders and are
-    /// substituted at injection time.
+    /// config env keys via `{ENV_KEY}` placeholders, but literal values
+    /// never enter agent prompts.
     OAuth2ClientCredentials {
         token_url: String,
         client_id_env: String,
@@ -199,8 +199,8 @@ pub enum TokenInjection {
     QueryParam { name: String },
 }
 
-/// Static header rendered alongside the `Authorization: Bearer` from an
-/// OAuth2 exchange. Used for providers (Adobe Analytics, some Salesforce
+/// Static header injected server-side alongside the `Authorization: Bearer`
+/// from an OAuth2 exchange. Used for providers (Adobe Analytics, some Salesforce
 /// endpoints) that require extra identification headers beyond the
 /// bearer token. `value_template` supports `{ENV_KEY}` substitution from
 /// the config's env map.
@@ -223,8 +223,8 @@ pub struct ApiEndpoint {
 
 /// A non-secret parameter the plugin instance needs (e.g. host, workspace id).
 /// Stored in the same encrypted env blob as the API key, but the UI renders
-/// these as plain inputs (no mask), and they're surfaced in the prompt
-/// injection alongside the auth so the agent can build full URLs.
+/// these as plain inputs (no mask). Prompts may reference them symbolically;
+/// the broker resolves values server-side when it builds full URLs.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct ApiConfigKey {

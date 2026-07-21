@@ -526,10 +526,10 @@ async fn execute_api_call_step_with_db_inner(
         );
     };
 
-    // Resolve OAuth2 token if needed — writes virtual env keys the
-    // resolver reads. Mirrors the discussion pre-flight in
-    // `api::discussions` exactly, so plugins behave identically whether
-    // called from an agent or from an ApiCall step.
+    // Resolve OAuth2/token-exchange credentials only at broker request time.
+    // Discussion startup deliberately does not mint or render tokens: doing
+    // so would expose them to model context, process argv and durable logs.
+    // The virtual env keys below stay inside this backend call path.
     if let Some(spec) = plugin.api_spec.as_ref() {
         if matches!(spec.auth, ApiAuthKind::OAuth2ClientCredentials { .. }) {
             match crate::core::oauth2_cache::resolve_token(

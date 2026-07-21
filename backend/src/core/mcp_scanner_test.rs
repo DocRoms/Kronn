@@ -1385,7 +1385,7 @@ args = ["@example/old-mcp"]
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    // ─── build_api_context_block (API plugin prompt injection) ───────────
+    // ─── build_api_context_block (secret-free API broker metadata) ───────
 
     fn api_server(id: &str, base: &str) -> (crate::models::McpServer, HashMap<String, String>) {
         use crate::models::*;
@@ -1450,18 +1450,22 @@ args = ["@example/old-mcp"]
         assert!(out.contains("/hello"), "first endpoint shown as example");
         // …but the rest are NOT dumped (this is the whole point).
         assert!(!out.contains("/ping"), "second endpoint must NOT be dumped: {out}");
-        // Auth/config still inlined so direct curl stays possible.
-        assert!(out.contains("apikey=supersecret-123"), "auth still available for curl");
-        assert!(out.contains("test_host=example.com"), "config key still available");
+        // Auth is broker-only: neither the credential nor non-secret config
+        // values are copied into model context. Config stays usable through
+        // the broker's ${ENV.KEY} substitution syntax.
+        assert!(!out.contains("supersecret-123"), "credential leaked into prompt: {out}");
+        assert!(out.contains("injected server-side by `api_call`"));
+        assert!(out.contains("${ENV.TEST_HOST}"), "config reference missing: {out}");
+        assert!(!out.contains("test_host=example.com"), "config value leaked into prompt: {out}");
         assert!(out.contains("https://example.com/api-docs"), "docs link present");
     }
 
     #[test]
-    fn build_api_context_block_marks_missing_credentials() {
+    fn build_api_context_block_never_renders_missing_auth_placeholders() {
         use crate::models::*;
-        // Server with api_spec but an empty env → the example should flag
-        // the missing key so the agent knows to abort rather than call
-        // with `<MISSING>` as the literal key.
+        // Missing auth is diagnosed by the broker when invoked. The prompt
+        // must not expose env-key state or encourage a direct unauthenticated
+        // call with a literal placeholder.
         let server = McpServer {
             id: "api-broken".into(), name: "Broken".into(), description: "".into(),
             transport: McpTransport::ApiOnly, source: McpSource::Registry,
@@ -1474,7 +1478,8 @@ args = ["@example/old-mcp"]
             }),
         };
         let out = build_api_context_block(&[(server, "cfg-1".into(), HashMap::new())]);
-        assert!(out.contains("<MISSING>"), "missing credential flagged");
+        assert!(!out.contains("<MISSING>"), "auth placeholder leaked: {out}");
+        assert!(out.contains("Bearer token injected server-side by `api_call`"));
     }
 
     #[test]
@@ -1484,6 +1489,107 @@ args = ["@example/old-mcp"]
         let out = build_api_context_block(&[(s1, "cfg-1".into(), e1), (s2, "cfg-2".into(), e2)]);
         assert!(out.contains("https://a.example.com"));
         assert!(out.contains("https://b.example.com"));
+    }
+
+    #[test]
+    fn build_api_context_block_never_embeds_any_auth_variant_secret() {
+        use crate::models::*;
+
+        let variants = vec![
+            ApiAuthKind::ApiKeyQuery { param_name: "key".into(), env_key: "SECRET_QUERY".into() },
+            ApiAuthKind::ApiKeyHeader { header_name: "X-Key".into(), env_key: "SECRET_HEADER".into() },
+            ApiAuthKind::Bearer { env_key: "SECRET_BEARER".into() },
+            ApiAuthKind::Basic { user_env: "SECRET_USER".into(), password_env: "SECRET_PASSWORD".into() },
+            ApiAuthKind::BasicApiKey { env_key: "SECRET_BASIC_KEY".into() },
+            ApiAuthKind::OAuth2ClientCredentials {
+                token_url: "https://auth.example/token".into(),
+                client_id_env: "SECRET_CLIENT_ID".into(),
+                client_secret_env: "SECRET_CLIENT_SECRET".into(),
+                scope: "read".into(),
+                extra_headers: vec![OAuth2ExtraHeader {
+                    name: "x-api-key".into(),
+                    value_template: "{SECRET_CLIENT_ID}".into(),
+                }],
+            },
+            ApiAuthKind::TokenExchange {
+                endpoint: "/session".into(),
+                method: "POST".into(),
+                body_template: serde_json::json!({"key": "${ENV.SECRET_QUERY}"}),
+                body_format: TokenExchangeBodyFormat::Json,
+                token_jsonpath: "$.token".into(),
+                ttl_seconds: 60,
+                inject: TokenInjection::CustomHeader { name: "X-Session".into() },
+                creds_env_keys: vec!["SECRET_QUERY".into()],
+            },
+        ];
+        let secret_values = [
+            "query-value-7Qv", "header-value-9Jx", "bearer-value-2Lm",
+            "user-value-8Rw", "password-value-4Tk", "basic-value-6Np",
+            "client-id-value-3Hs", "client-secret-value-5Dz", "access-value-1Fc",
+        ];
+        let mut env = HashMap::new();
+        for (key, value) in [
+            ("SECRET_QUERY", secret_values[0]),
+            ("SECRET_HEADER", secret_values[1]),
+            ("SECRET_BEARER", secret_values[2]),
+            ("SECRET_USER", secret_values[3]),
+            ("SECRET_PASSWORD", secret_values[4]),
+            ("SECRET_BASIC_KEY", secret_values[5]),
+            ("SECRET_CLIENT_ID", secret_values[6]),
+            ("SECRET_CLIENT_SECRET", secret_values[7]),
+            ("__access_token__", secret_values[8]),
+        ] {
+            env.insert(key.to_string(), value.to_string());
+        }
+
+        for (idx, auth) in variants.into_iter().enumerate() {
+            let server = McpServer {
+                id: format!("auth-{idx}"),
+                name: format!("Auth {idx}"),
+                description: String::new(),
+                transport: McpTransport::ApiOnly,
+                source: McpSource::Registry,
+                api_spec: Some(ApiSpec {
+                    base_url: "https://api.example".into(),
+                    auth,
+                    endpoints: vec![ApiEndpoint { path: "/x".into(), method: "GET".into(), description: String::new() }],
+                    docs_url: None,
+                    config_keys: vec![],
+                }),
+            };
+            let out = build_api_context_block(&[(server, format!("cfg-{idx}"), env.clone())]);
+            for secret in secret_values {
+                assert!(!out.contains(secret), "auth variant {idx} leaked {secret}: {out}");
+            }
+        }
+    }
+
+    #[test]
+    fn auth_env_key_cannot_interpolate_into_base_url() {
+        use crate::models::*;
+        let server = McpServer {
+            id: "bad-template".into(), name: "BadTemplate".into(), description: String::new(),
+            transport: McpTransport::ApiOnly, source: McpSource::Registry,
+            api_spec: Some(ApiSpec {
+                base_url: "https://{AUTH_TOKEN}.example".into(),
+                auth: ApiAuthKind::Bearer { env_key: "AUTH_TOKEN".into() },
+                endpoints: vec![ApiEndpoint { path: "/".into(), method: "GET".into(), description: String::new() }],
+                docs_url: None,
+                // A hostile/malformed spec must not launder an auth value by
+                // declaring the same env key as non-secret configuration.
+                config_keys: vec![ApiConfigKey {
+                    env_key: "AUTH_TOKEN".into(),
+                    label: "Token disguised as config".into(),
+                    placeholder: String::new(),
+                    description: String::new(),
+                }],
+            }),
+        };
+        let mut env = HashMap::new();
+        env.insert("AUTH_TOKEN".into(), "must-not-enter-url".into());
+        let out = build_api_context_block(&[(server, "cfg".into(), env)]);
+        assert!(out.contains("<NOT_CONFIGURED:AUTH_TOKEN>"));
+        assert!(!out.contains("must-not-enter-url"), "auth leaked through URL interpolation: {out}");
     }
 
     /// Regression (2026-06-10, ex-`matches_config` TODO P0.5b): TWO configs
@@ -1784,7 +1890,12 @@ args = ["@example/old-mcp"]
                     description: "main".into(),
                 }],
                 docs_url: None,
-                config_keys: vec![],
+                config_keys: vec![crate::models::ApiConfigKey {
+                    env_key: "ADOBE_COMPANY_ID".into(),
+                    label: "Company".into(),
+                    placeholder: "examplecorp".into(),
+                    description: "Tenant id".into(),
+                }],
             }),
         };
         let mut env_with_token = env.clone();
@@ -1793,12 +1904,11 @@ args = ["@example/old-mcp"]
         // Base URL should be interpolated (no remaining `{` from the tpl).
         assert!(out.contains("https://ex.com/api/examplecorp"),
             "base_url interpolation failed: {}", out);
-        // Extra header rendered with the real client_id.
-        assert!(out.contains("x-api-key: abc-client-id"),
-            "extra header template not interpolated: {}", out);
-        // Bearer surfaced from the virtual __access_token__ key.
-        assert!(out.contains("Authorization: Bearer access-xyz"),
-            "access token not surfaced: {}", out);
+        // Auth shape remains useful, but neither the client id nor the
+        // exchanged bearer token may enter model context.
+        assert!(out.contains("`x-api-key`"), "extra-header name missing: {out}");
+        assert!(!out.contains("abc-client-id"), "client id leaked: {out}");
+        assert!(!out.contains("access-xyz"), "access token leaked: {out}");
     }
 
     #[test]
@@ -1829,11 +1939,10 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
-    fn oauth2_block_surfaces_token_error_instead_of_silent_failure() {
-        // If token exchange failed upstream, the virtual __token_error__
-        // key is populated instead of __access_token__. The context must
-        // surface a TOKEN UNAVAILABLE message so the agent doesn't fire
-        // unauthenticated requests.
+    fn oauth2_block_does_not_surface_token_or_exchange_error_details() {
+        // Both access tokens and exchange errors can contain sensitive
+        // provider data. The broker owns diagnostics; model context only
+        // states the server-side auth contract.
         let srv = crate::models::McpServer {
             id: "api-oauth-failed".into(), name: "T".into(), description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
@@ -1857,8 +1966,8 @@ args = ["@example/old-mcp"]
         let mut env = std::collections::HashMap::new();
         env.insert("__token_error__".into(), "token exchange failed (401): invalid_client".into());
         let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
-        assert!(out.contains("TOKEN UNAVAILABLE"));
-        assert!(out.contains("invalid_client"));
+        assert!(out.contains("OAuth2 token injected and refreshed server-side"));
+        assert!(!out.contains("invalid_client"), "provider error leaked: {out}");
     }
 
     #[test]
@@ -1884,11 +1993,9 @@ args = ["@example/old-mcp"]
     }
 
     #[test]
-    fn oauth2_plugin_renders_extra_headers_even_without_config_keys_in_url() {
-        // Ensures the extra_headers rendering is independent from the
-        // base_url templating path — an OAuth2 plugin with a static base
-        // URL but extra headers (no Adobe-style {COMPANY_ID} path) must
-        // still surface `x-api-key: <literal>` in the prompt.
+    fn oauth2_plugin_renders_only_extra_header_names() {
+        // An OAuth2 plugin with a static base URL may surface the header
+        // NAME for debugging, never its templated credential value.
         let srv = crate::models::McpServer {
             id: "api-oauth-static".into(), name: "StaticOAuth".into(), description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
@@ -1916,16 +2023,15 @@ args = ["@example/old-mcp"]
         env.insert("CID".into(), "client-xyz".into());
         env.insert("__access_token__".into(), "tok-123".into());
         let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
-        assert!(out.contains("Authorization: Bearer tok-123"));
-        assert!(out.contains("x-api-key: client-xyz"),
-            "extra_header must render with the interpolated secret: {}", out);
+        assert!(out.contains("`x-api-key`"), "header name must remain discoverable: {out}");
+        assert!(!out.contains("tok-123"), "bearer leaked: {out}");
+        assert!(!out.contains("client-xyz"), "templated secret header leaked: {out}");
     }
 
     #[test]
-    fn oauth2_multiple_plugins_isolated_auth_states() {
-        // When two OAuth2 plugins are active and one has a token error,
-        // the other must still render its token correctly. No cross-
-        // contamination via the virtual keys.
+    fn oauth2_multiple_plugins_never_render_auth_states() {
+        // Neither a healthy token nor a provider error belongs in model
+        // context, including when several plugins have distinct states.
         let mk_srv = |id: &str, base: &str| crate::models::McpServer {
             id: id.into(), name: id.into(), description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
@@ -1955,16 +2061,9 @@ args = ["@example/old-mcp"]
         env_broken.insert("__token_error__".into(), "invalid_client".into());
 
         let out = build_api_context_block(&[(srv_ok, "cfg-1".into(), env_ok), (srv_broken, "cfg-2".into(), env_broken)]);
-        // Healthy plugin renders its bearer normally.
-        assert!(out.contains("Authorization: Bearer valid-token"));
-        // Broken one renders TOKEN UNAVAILABLE WITHOUT leaking the good token.
-        assert!(out.contains("TOKEN UNAVAILABLE"));
-        // Guard: the broken-plugin section must NOT accidentally contain
-        // the other plugin's token. Only one Bearer line per plugin —
-        // `valid-token` must appear exactly once, under the ok-plugin
-        // section. We count occurrences to catch any accidental leak.
-        assert_eq!(out.matches("valid-token").count(), 1,
-            "valid-token should appear exactly once (under ok-plugin). Output:\n{}", out);
+        assert_eq!(out.matches("OAuth2 token injected and refreshed server-side").count(), 2);
+        assert!(!out.contains("valid-token"), "healthy token leaked: {out}");
+        assert!(!out.contains("invalid_client"), "provider error leaked: {out}");
     }
 
     // ─── kronn-internal injection (project-local + global host configs) ───
