@@ -1546,11 +1546,20 @@ pub async fn full_audit(
             // exactly that step.
             let baseline_steps: Vec<super::AnalysisStep> = steps.clone();
             let baseline_written = tokio::task::spawn_blocking(move || -> Result<usize, String> {
+                // Freeze one quiesced source-tree snapshot and reuse it in
+                // every sentinel mapping. Recomputing the whole repository
+                // once per step can capture mutually inconsistent states.
+                let stable_source_tree =
+                    crate::core::checksums::stable_source_tree_fingerprint(&pp)?;
                 let mappings: Vec<crate::core::checksums::ChecksumMapping> = baseline_steps.iter()
                     .enumerate()
                     .filter(|(_, s)| !s.sources.is_empty())
                     .map(|(i, s)| {
-                        let checksums = crate::core::checksums::compute_step_checksums(&pp, s.sources);
+                        let checksums = crate::core::checksums::compute_step_checksums_from_snapshot(
+                            &pp,
+                            s.sources,
+                            stable_source_tree.as_deref(),
+                        );
                         crate::core::checksums::ChecksumMapping {
                             ai_file: s.target_file.to_string(),
                             audit_step: i + 1,
@@ -1559,7 +1568,11 @@ pub async fn full_audit(
                         }
                     })
                     .collect();
-                crate::core::checksums::write_checksums_file(&pp, &mappings)?;
+                crate::core::checksums::write_checksums_file_fail_closed(
+                    &pp,
+                    &mappings,
+                    stable_source_tree.as_deref(),
+                )?;
                 // Best-effort state marker — informational, not contractual.
                 if let Err(e) = crate::core::kronn_state::record_audit(&pp, "full") {
                     tracing::warn!("Failed to record audit in .kronn.json: {}", e);
