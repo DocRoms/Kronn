@@ -20,6 +20,7 @@ pub mod full;
 pub mod helpers;
 pub mod info;
 pub mod reconciliation;
+pub mod redact_artifacts;
 pub mod run;
 pub mod validate;
 pub mod validation;

@@ -340,6 +340,90 @@ pub(crate) async fn make_agent_stream(
         }
     }
 
+    // Validation discussions are a second agent boundary over the audit
+    // artifacts. Detect them through the durable run link, never a mutable or
+    // localized title, and sanitize before prompt construction or spawn.
+    let validation_redaction_scope = if let Some(ref project_id) = disc.project_id {
+        let did = disc.id.clone();
+        let pid = project_id.clone();
+        match state.db.with_conn(move |conn| {
+            crate::db::audit_runs::validation_discussion_belongs_to_project(conn, &did, &pid)
+        }).await {
+            Ok(true) => {
+                let root = crate::core::scanner::resolve_host_path(
+                    workspace_path.as_deref().unwrap_or(&project_path),
+                );
+                let targets: Vec<String> = crate::api::audit::assemble_chained_steps(
+                    crate::models::AuditKind::Full,
+                ).into_iter().map(|step| step.target_file.to_string()).collect();
+                if let Err(error) = crate::api::audit::redact_artifacts::sanitize_all(
+                    &root, &targets, "validation-pre-agent",
+                ) {
+                    tracing::error!(target: "kronn::invariant", disc_id = %discussion_id,
+                        error = %error, "validation artifact redaction failed before agent spawn");
+                    let safe_error = "Validation bloquée : impossible de garantir la suppression des secrets dans les artefacts d’audit.";
+                    let persisted_err = DiscussionMessage {
+                        model: None, lint_report: None, id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System, content: safe_error.to_string(), agent_type: None,
+                        timestamp: Utc::now(), tokens_used: 0, auth_mode: None,
+                        model_tier: None, cost_usd: None, author_pseudo: None,
+                        author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                    };
+                    let did = discussion_id.clone();
+                    if let Err(db_error) = state.db.with_conn(move |conn| {
+                        let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_err);
+                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                        inserted.and(cleared)
+                    }).await {
+                        tracing::error!("Failed to persist validation redaction preflight error: {db_error}");
+                    }
+                    if let Some(ref run_id) = batch_run_id {
+                        bump_batch_progress(&state, run_id, &discussion_id, false).await;
+                    }
+                    let stream: SseStream = Box::pin(futures::stream::once(async move {
+                        Ok::<_, Infallible>(Event::default().event("error").data(
+                            serde_json::json!({ "error": safe_error }).to_string()
+                        ))
+                    }));
+                    return Sse::new(stream);
+                }
+                Some((root, targets))
+            }
+            Ok(false) => None,
+            Err(error) => {
+                tracing::error!(target: "kronn::invariant", disc_id = %discussion_id,
+                    error = %error, "could not resolve durable validation-discussion link");
+                let safe_error = "Impossible de vérifier le périmètre de cette discussion avant le lancement de l’agent.";
+                let persisted_err = DiscussionMessage {
+                    model: None, lint_report: None, id: Uuid::new_v4().to_string(),
+                    role: MessageRole::System, content: safe_error.to_string(), agent_type: None,
+                    timestamp: Utc::now(), tokens_used: 0, auth_mode: None,
+                    model_tier: None, cost_usd: None, author_pseudo: None,
+                    author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                };
+                let did = discussion_id.clone();
+                if let Err(db_error) = state.db.with_conn(move |conn| {
+                    let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_err);
+                    let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                    inserted.and(cleared)
+                }).await {
+                    tracing::error!("Failed to persist validation-link preflight error: {db_error}");
+                }
+                if let Some(ref run_id) = batch_run_id {
+                    bump_batch_progress(&state, run_id, &discussion_id, false).await;
+                }
+                let stream: SseStream = Box::pin(futures::stream::once(async move {
+                    Ok::<_, Infallible>(Event::default().event("error").data(
+                        serde_json::json!({ "error": safe_error }).to_string()
+                    ))
+                }));
+                return Sse::new(stream);
+            }
+        }
+    } else {
+        None
+    };
+
     // For general discussions (no project), write .mcp.json + build MCP context.
     // For project discussions, also ensure the .mcp.json is fresh on disk
     // (covers the case where MCPs were added/toggled since the last sync).
@@ -904,6 +988,11 @@ pub(crate) async fn make_agent_stream(
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
+                let validation_redaction_error = validation_redaction_scope.as_ref().and_then(
+                    |(root, targets)| crate::api::audit::redact_artifacts::sanitize_all(
+                        root, targets, "validation-post-agent",
+                    ).err()
+                );
                 let exit_info = match &status {
                     Ok(s) => format!("exit code: {:?}", s.code()),
                     Err(e) => format!("wait error: {}", e),
@@ -915,13 +1004,25 @@ pub(crate) async fn make_agent_stream(
                 // A user cancel is NOT a success — we want the run to be
                 // flagged as failed so batch counters see it as a failure
                 // and the UI treats the partial response as interrupted.
-                let success = if stopped_on_signal.is_some() {
+                let mut success = if stopped_on_signal.is_some() {
                     true
                 } else if stopped_on_cancel {
                     false
                 } else {
                     !was_interrupted && status.map(|s| s.success()).unwrap_or(false)
                 };
+
+                // A failed post-agent sweep invalidates every terminal signal.
+                // Replace the response so VALIDATION_COMPLETE cannot be
+                // persisted, archived, or accepted by downstream UI logic.
+                let validation_redaction_failed = validation_redaction_error.is_some();
+                if let Some(error) = validation_redaction_error {
+                    tracing::error!(target: "kronn::invariant", disc_id = %disc_id,
+                        error = %error, "validation artifact redaction failed after agent exit");
+                    success = false;
+                    stopped_on_signal = None;
+                    full_response = "Validation bloquée : la suppression des secrets dans les artefacts d’audit a échoué après l’exécution de l’agent. Aucun signal de validation n’a été accepté.".to_string();
+                }
 
                 let stderr_lines = process.captured_stderr_flushed().await;
                 let stderr_text = stderr_lines.join("\n");
@@ -1000,7 +1101,7 @@ pub(crate) async fn make_agent_stream(
                 // Now the hint is the headline; the raw output folds into a
                 // collapsible "détails techniques" card (kronn:context marker,
                 // rendered by MessageBody). No recognised hint → raw as before.
-                if !success && !was_interrupted {
+                if !success && !was_interrupted && !validation_redaction_failed {
                     let all_output = format!("{}\n{}", full_response, stderr_text);
                     if let Some(hint) = detect_agent_error_hint(&all_output, &agent_type) {
                         let raw = full_response.trim();

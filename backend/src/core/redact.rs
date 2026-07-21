@@ -109,6 +109,46 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
         .collect()
 });
 
+/// Apply `patterns` sequentially and count only matches whose expanded
+/// replacement differs from the matched bytes. Counting marker substrings is
+/// unsafe: a secret may itself contain `***REDACTED***`, making a marker delta
+/// zero even though the output changed. Using `Captures::expand` mirrors the
+/// exact back-reference semantics used by `replace_all` while preserving the
+/// important invariant `count > 0` iff the returned text changed.
+fn apply_patterns(input: &str, patterns: &[Pattern]) -> (String, usize) {
+    let mut out = input.to_string();
+    let mut count = 0usize;
+
+    for pat in patterns {
+        let changed = pat
+            .re
+            .captures_iter(&out)
+            .filter(|captures| {
+                let Some(matched) = captures.get(0) else {
+                    return false;
+                };
+                let mut replacement = String::new();
+                captures.expand(pat.replacement, &mut replacement);
+                replacement != matched.as_str()
+            })
+            .count();
+
+        if changed == 0 {
+            continue;
+        }
+        out = pat.re.replace_all(&out, pat.replacement).to_string();
+        count = count.saturating_add(changed);
+    }
+
+    if out == input {
+        (out, 0)
+    } else {
+        // Defensive floor: future pattern changes must never let callers see
+        // changed content with a zero behavioral signal.
+        (out, count.max(1))
+    }
+}
+
 /// Apply every pattern once. Idempotent: running this on its own output
 /// returns the same string (the replacement tokens don't match any
 /// pattern themselves — verified by `redact_is_idempotent` test).
@@ -116,11 +156,7 @@ static PATTERNS: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
 /// UTF-8 safe: `regex_lite::Regex::replace_all` works on `&str` so all
 /// boundary handling is delegated to the regex engine.
 pub fn redact_secrets(input: &str) -> String {
-    let mut out = input.to_string();
-    for pat in PATTERNS.iter() {
-        out = pat.re.replace_all(&out, pat.replacement).to_string();
-    }
-    out
+    apply_patterns(input, PATTERNS.as_slice()).0
 }
 
 /// Boolean version: returns `true` if ANY pattern would match. Used by
@@ -130,6 +166,74 @@ pub fn redact_secrets(input: &str) -> String {
 /// Cheaper than `redact_secrets` because it stops at the first match.
 pub fn looks_like_secret(input: &str) -> bool {
     PATTERNS.iter().any(|pat| pat.re.is_match(input))
+}
+
+// ── Secret-ASSIGNMENT patterns for audit artifacts (0.8.13 blocker) ─────
+//
+// `redact_secrets` above only catches vendor-prefixed (`sk-`, `AIza`…) or
+// JSON-keyword (`"secret": "…"`) shapes. Audit findings leak a different
+// shape: a bare `NAME=value` / `name: value` where the NAME is secret-ish
+// (`APP_SECRET=61cc…`, `apikey=…`) and the value has NO vendor prefix — so
+// none of the patterns above fire. We anchor on the secret-ish NAME: this
+// masks the value while NEVER touching ordinary hex checksums (which are
+// path-keyed, e.g. `"docs/x.md": "<hex>"`, with no secret NAME), so the
+// audit's own `docs/checksums.json` and `content_hash` fields stay intact.
+//
+// Two shapes, applied in order. The NAME alternation is repeated in both
+// (regex_lite has no subroutines). We mask ANY non-empty value — quoted (may
+// contain spaces/specials) or bare — because a short PIN or a symbol-laden
+// password is just as much a leak (Codex review P0#4); no length floor.
+//   1. quoted:   NAME [:=] "…"  → keep the quotes, mask the inside.
+//   2. unquoted: NAME [:=] token → mask the token up to the next whitespace
+//      / quote / separator.
+// Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
+// are never touched. Quoted MUST run before unquoted (the unquoted value class
+// excludes quotes, so it can't consume a quoted value itself).
+const ASSIGNMENT_NAME: &str =
+    r"[a-z0-9_.-]*(?:secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token)";
+
+static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
+    let quoted = format!(r#"(?i)(\b{ASSIGNMENT_NAME}\b\s*[:=]\s*)(["'`])([^"'`]+)(["'`])"#);
+    let unquoted = format!(r#"(?i)(\b{ASSIGNMENT_NAME}\b\s*[:=]\s*)([^\s"'`,;]+)"#);
+    [
+        (quoted, "$1$2***REDACTED***$4"),
+        (unquoted, "$1***REDACTED***"),
+    ]
+    .into_iter()
+    .filter_map(|(src, repl)| {
+        Regex::new(&src)
+            .map(|re| Pattern { re, replacement: repl })
+            .map_err(|e| {
+                tracing::warn!(pattern = %src, error = %e, "core::redact: invalid assignment pattern skipped");
+            })
+            .ok()
+    })
+    .collect()
+});
+
+/// Redact for a Kronn AUDIT ARTIFACT (`docs/tech-debt/TD-*.md`,
+/// `docs/inconsistencies-*.md`, index, reconciliation report). Applies the
+/// vendor/keyword pass ([`redact_secrets`]) PLUS the secret-assignment pass,
+/// so bare `APP_SECRET=…` / `apikey: …` literals — the shape that actually
+/// leaked into TDs — are masked. Returns the redacted text and the number of
+/// match replacements that changed bytes. The count is derived from the
+/// replacements themselves, never from marker deltas, so a secret containing
+/// `***REDACTED***` cannot suppress the write. The behavioral invariant is
+/// `count > 0` iff the returned text differs from the input. Callers must NEVER
+/// log the matched value itself. Re-running on already-redacted text is a no-op
+/// with count 0.
+///
+/// Anchored on the secret NAME, so ordinary hex checksums/digests are left
+/// intact — verified by the `audit_artifact_*` tests.
+pub fn redact_for_audit_artifact(input: &str) -> (String, usize) {
+    let (out, vendor_count) = apply_patterns(input, PATTERNS.as_slice());
+    let (out, assignment_count) = apply_patterns(&out, ASSIGNMENT.as_slice());
+    let count = vendor_count.saturating_add(assignment_count);
+    if out == input {
+        (out, 0)
+    } else {
+        (out, count.max(1))
+    }
 }
 
 #[cfg(test)]
@@ -191,6 +295,117 @@ mod tests {
         let out = redact_secrets("env: OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz12345");
         assert!(out.contains("sk-***REDACTED***"));
         assert!(!out.contains("abcdefghijklmnopqrstuvwxyz12345"));
+    }
+
+    // ── Audit-artifact redaction (0.8.13 blocker) ─────────────────────
+    // The shape that actually leaked into TDs: bare `NAME=value` where the
+    // NAME is secret-ish and the value has NO vendor prefix (so plain
+    // `redact_secrets` misses it). Fake values only — never a real secret.
+
+    #[test]
+    fn audit_artifact_masks_bare_app_secret_assignment() {
+        // `redact_secrets` alone must MISS this (proves why we need the pass)…
+        let plain = "committed 32-hex APP_SECRET=61cc954cdeadbeef0123456789abcdef in .env.dist:7";
+        assert!(
+            redact_secrets(plain).contains("61cc954cdeadbeef0123456789abcdef"),
+            "guard: redact_secrets is not expected to catch a bare NAME=value",
+        );
+        // …and redact_for_audit_artifact must CATCH it.
+        let (out, n) = redact_for_audit_artifact(plain);
+        assert!(!out.contains("61cc954cdeadbeef0123456789abcdef"), "value must be masked: {out}");
+        assert!(out.contains("APP_SECRET=***REDACTED***"), "name kept, value masked: {out}");
+        assert!(n >= 1, "redaction count must be reported, got {n}");
+    }
+
+    #[test]
+    fn audit_artifact_masks_apikey_assignments_various_ops() {
+        for line in [
+            "apikey=Ab3xZ9Qw7Lm2Ns5Pt8Rv",
+            "apiKey: \"Ab3xZ9Qw7Lm2Ns5Pt8Rv\"",
+            "here_api_key = Ab3xZ9Qw7Lm2Ns5Pt8Rv",
+            "?apikey=Ab3xZ9Qw7Lm2Ns5Pt8Rv&lang=fr",
+        ] {
+            let (out, n) = redact_for_audit_artifact(line);
+            assert!(!out.contains("Ab3xZ9Qw7Lm2Ns5Pt8Rv"), "value must be masked in {line:?}: {out}");
+            assert!(n >= 1, "{line:?} should redact");
+        }
+    }
+
+    #[test]
+    fn audit_artifact_masks_short_and_special_and_quoted_values() {
+        // P0#4: no length floor, specials, and quoted values with spaces.
+        for (line, leak) in [
+            ("password=admin", "admin"),
+            ("secret: p@$$w0rd!#%", "p@$$w0rd!#%"),
+            ("secret=99", "99"),
+            ("client_secret: \"my long secret phrase\"", "my long secret phrase"),
+            ("access_token='xyz.123-ABC'", "xyz.123-ABC"),
+            ("signing_key=short!", "short!"),
+            ("encryption-key: `two words`", "two words"),
+            ("PIN=7", "7"),
+        ] {
+            let (out, n) = redact_for_audit_artifact(line);
+            assert!(!out.contains(leak), "value {leak:?} must be masked in {line:?}: {out}");
+            assert!(n >= 1, "{line:?} should redact");
+        }
+    }
+
+    #[test]
+    fn audit_artifact_leaves_ordinary_checksums_intact() {
+        // checksums.json / content_hash: hex keyed by a PATH, no secret NAME.
+        // MUST NOT be masked (would corrupt the F27 baseline).
+        let checksum = r#""docs/inconsistencies-security.md": "3f5a9c2b8e1d4f6a0c7b2e9d1a4f8c3e5b7d9f1a3c5e7b9d1f3a5c7e9b1d3f5a""#;
+        let (out, n) = redact_for_audit_artifact(checksum);
+        assert_eq!(out, checksum, "path-keyed hex checksum must stay intact");
+        assert_eq!(n, 0, "no redaction on ordinary checksums");
+
+        let content_hash = "content_hash: 3f5a9c2b8e1d4f6a0c7b2e9d1a4f8c3e";
+        let (out2, n2) = redact_for_audit_artifact(content_hash);
+        assert_eq!(out2, content_hash, "content_hash is not a secret name");
+        assert_eq!(n2, 0);
+    }
+
+    #[test]
+    fn audit_artifact_still_catches_vendor_keys() {
+        let (out, n) = redact_for_audit_artifact("key AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 here");
+        assert!(out.contains("AIza***REDACTED***"), "vendor pass still applies: {out}");
+        assert!(n >= 1);
+    }
+
+    #[test]
+    fn audit_artifact_is_idempotent_and_clean_text_untouched() {
+        let (once, _) = redact_for_audit_artifact("APP_SECRET=61cc954cdeadbeef0123456789abcdef");
+        let (twice, n2) = redact_for_audit_artifact(&once);
+        assert_eq!(once, twice, "re-running must be a no-op");
+        assert_eq!(n2, 0, "already-redacted text redacts nothing more");
+        // Ordinary prose is left alone.
+        let prose = "The deploy step runs chown -R on /var and rsync excludes node_modules.";
+        let (out, n) = redact_for_audit_artifact(prose);
+        assert_eq!(out, prose);
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn audit_artifact_marker_inside_secret_cannot_zero_the_change_signal() {
+        for (input, leak) in [
+            (
+                "APP_SECRET=prefix***REDACTED***still-secret",
+                "prefix***REDACTED***still-secret",
+            ),
+            (
+                r#"{"password":"prefix***REDACTED***still-secret"}"#,
+                "prefix***REDACTED***still-secret",
+            ),
+        ] {
+            let (out, count) = redact_for_audit_artifact(input);
+            assert_ne!(out, input, "secret-bearing input must change: {input}");
+            assert!(!out.contains(leak), "secret literal must be removed: {out}");
+            assert!(count > 0, "changed output must report a positive count");
+
+            let (again, second_count) = redact_for_audit_artifact(&out);
+            assert_eq!(again, out, "redaction must remain idempotent");
+            assert_eq!(second_count, 0, "already-redacted output is a no-op");
+        }
     }
 
     #[test]
