@@ -1278,17 +1278,11 @@ class StableSessionIdAcrossCallsTests(unittest.TestCase):
             f"host-launched bridge should fall back to adhoc- prefix, got {sid!r}",
         )
 
-    def test_adhoc_id_survives_a_bridge_reload_for_the_same_parent(self):
-        # PR 118 — an MCP reload spawns a NEW bridge process under the
-        # SAME parent CLI. The adhoc id must be identical across the two
-        # module loads, otherwise the backend dedup on (agent_type,
-        # session_id) misses and the header piles up duplicate chips.
-        mod2 = _load_module()
-        self.assertEqual(
-            self.mod._session_id_for_caller(),
-            mod2._session_id_for_caller(),
-            "same parent process ⇒ same adhoc session id across reloads",
-        )
+    # PR 118's "the adhoc id must survive a reload" premise is obsolete as of
+    # 0.8.13 (and was environment-fragile: an unreadable parent start-token
+    # takes the uuid fallback, so two loads legitimately differ). Reload
+    # continuity is now the resume credential's job — covered by
+    # ResumeBindingTests.test_reload_with_new_bridge_id_resumes_same_room.
 
     def test_adhoc_id_differs_for_a_different_parent_instance(self):
         # Two genuinely different CLIs must NOT collapse into one
@@ -4105,6 +4099,249 @@ class OnboardingTests(unittest.TestCase):
         with open(self.mod._ONBOARD_MARKER, "w") as f:
             f.write("not json")
         self.assertFalse(self.mod._onboarding_done_for("ClaudeCode"))
+
+
+class StableIdentityKeyTests(unittest.TestCase):
+    """0.8.13 presence root-fix — the binding key must be STABLE for a given
+    CLI identity (so a reloaded bridge finds its own file) and DISTINCT across
+    identities (so two CLIs never share a resume credential). `_identity_key_from`
+    is pure, so the invariants are testable without spawning a process tree."""
+
+    def setUp(self):
+        self.mod = _load_module()
+
+    def test_same_ancestor_yields_same_key(self):
+        # An MCP reconnect keeps the same CLI ancestor → same key → same file.
+        a = self.mod._identity_key_from((4321, "starttok"))
+        b = self.mod._identity_key_from((4321, "starttok"))
+        self.assertEqual(a, b)
+
+    def test_distinct_ancestors_yield_distinct_keys(self):
+        keys = {
+            self.mod._identity_key_from((100, "t")),
+            self.mod._identity_key_from((101, "t")),   # different pid
+            self.mod._identity_key_from((100, "t2")),  # different start token
+        }
+        self.assertEqual(len(keys), 3, "pid AND start-token must both discriminate")
+
+    def test_no_ancestor_disables_persistence_never_keys_on_cwd(self):
+        # Fail-closed: no durable identity ⇒ no key. Keying on cwd would let
+        # two CLI tabs in the same repo share one resume credential.
+        self.assertIsNone(self.mod._identity_key_from(None))
+
+    def test_key_is_short_hex(self):
+        k = self.mod._identity_key_from((1, "t"))
+        self.assertEqual(len(k), 16)
+        self.assertTrue(all(c in "0123456789abcdef" for c in k))
+
+    def test_ancestor_walk_returns_outermost_match_not_nearest(self):
+        # A reconnect may respawn an intermediate runner whose cmdline also
+        # carries the CLI name; the NEAREST match would then rotate on reload.
+        # The walk must climb to the TOPMOST CLI-looking ancestor and return it.
+        cmd = {100: "node mcp-runner codex", 200: "codex", 300: "/bin/zsh"}
+        ppid = {100: 200, 200: 300, 300: 1}
+        tok = {100: "near", 200: "outer", 300: "shell"}
+        with mock.patch.object(self.mod.os, "getppid", return_value=100), \
+             mock.patch.object(self.mod, "_cmdline_of", side_effect=lambda p: cmd.get(p)), \
+             mock.patch.object(self.mod, "_ppid_of", side_effect=lambda p: ppid.get(p)), \
+             mock.patch.object(self.mod, "_start_token_of", side_effect=lambda p: tok.get(p)):
+            anc = self.mod._cli_ancestor_identity()
+        self.assertEqual(anc, (200, "outer"), "outermost CLI ancestor must win over the nearer runner")
+
+    def test_ancestor_walk_returns_none_when_no_cli_match(self):
+        ppid = {100: 200, 200: 1}
+        with mock.patch.object(self.mod.os, "getppid", return_value=100), \
+             mock.patch.object(self.mod, "_cmdline_of", side_effect=lambda p: "/bin/bash"), \
+             mock.patch.object(self.mod, "_ppid_of", side_effect=lambda p: ppid.get(p)), \
+             mock.patch.object(self.mod, "_start_token_of", side_effect=lambda p: "t"):
+            self.assertIsNone(self.mod._cli_ancestor_identity())
+
+
+class ResumeBindingTests(unittest.TestCase):
+    """0.8.13 presence root-fix — the persisted resume credential: 0600 file,
+    atomic write, and `_attempt_resume` re-attaching after an MCP reload without
+    a fresh kr-join token."""
+
+    def setUp(self):
+        import tempfile
+        self.mod = _load_module()
+        self.mod._CURRENT_DISC_ID = None  # unbound, as after a reload
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        # Isolate the binding to the tempdir (never touch the real ~/.config).
+        self.mod._BINDING_DIR = self._tmp.name
+        self.mod._BINDING_PATH_CACHE["computed"] = True
+        self.mod._BINDING_PATH_CACHE["path"] = os.path.join(self._tmp.name, "binding.json")
+
+    def _envelope(self, data):
+        return {"success": True, "data": data}
+
+    def test_binding_roundtrip_is_0600(self):
+        import stat
+        self.mod._write_binding("d-1", "kr-resume-aaa")
+        got = self.mod._read_binding()
+        self.assertEqual(got, {"disc_id": "d-1", "resume_token": "kr-resume-aaa"})
+        mode = stat.S_IMODE(os.stat(self.mod._binding_path()).st_mode)
+        self.assertEqual(mode, 0o600, "resume credential file must be owner-only")
+
+    def test_write_binding_ignores_empty_inputs(self):
+        self.mod._write_binding("", "tok")
+        self.mod._write_binding("d-1", "")
+        self.assertIsNone(self.mod._read_binding())
+
+    def test_read_binding_none_when_missing_or_corrupt_or_incomplete(self):
+        self.assertIsNone(self.mod._read_binding())  # no file
+        with open(self.mod._binding_path(), "w") as f:
+            f.write("not json")
+        self.assertIsNone(self.mod._read_binding())
+        with open(self.mod._binding_path(), "w") as f:
+            f.write('{"disc_id": "d-1"}')  # no resume_token
+        self.assertIsNone(self.mod._read_binding())
+
+    def test_clear_binding_removes_file(self):
+        self.mod._write_binding("d-1", "kr-resume-aaa")
+        self.mod._clear_binding()
+        self.assertIsNone(self.mod._read_binding())
+        self.mod._clear_binding()  # idempotent, no raise on missing file
+
+    def test_read_binding_refuses_a_symlink(self):
+        # An attacker who plants a symlink at the binding path must not be able
+        # to redirect the credential read (O_NOFOLLOW).
+        target = os.path.join(self._tmp.name, "real.json")
+        with open(target, "w") as f:
+            f.write('{"disc_id": "d", "resume_token": "kr-resume-x"}')
+        os.chmod(target, 0o600)
+        os.symlink(target, self.mod._binding_path())
+        self.assertIsNone(self.mod._read_binding())
+
+    def test_read_binding_refuses_symlink_even_without_o_nofollow(self):
+        # Cross-platform: where O_NOFOLLOW is absent it degrades to 0, so
+        # os.open follows the link — the lstat + (dev,ino) match must still
+        # refuse a symlinked credential path.
+        target = os.path.join(self._tmp.name, "real2.json")
+        with open(target, "w") as f:
+            f.write('{"disc_id": "d", "resume_token": "kr-resume-x"}')
+        os.chmod(target, 0o600)
+        os.symlink(target, self.mod._binding_path())
+        with mock.patch.object(self.mod.os, "O_NOFOLLOW", 0, create=True):
+            self.assertIsNone(self.mod._read_binding())
+
+    def test_read_binding_refuses_group_or_world_readable(self):
+        # A credential file that isn't strictly owner-only is treated as
+        # tampered — refuse it rather than trust it.
+        path = self.mod._binding_path()
+        with open(path, "w") as f:
+            f.write('{"disc_id": "d", "resume_token": "kr-resume-x"}')
+        os.chmod(path, 0o644)
+        self.assertIsNone(self.mod._read_binding())
+
+    def test_write_produces_owner_only_regular_file(self):
+        import stat
+        self.mod._write_binding("d-1", "kr-resume-z")
+        st = os.lstat(self.mod._binding_path())
+        self.assertTrue(stat.S_ISREG(st.st_mode), "must be a regular file, not a symlink")
+        self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
+
+    def test_no_identity_disables_all_persistence(self):
+        # Fail-closed: when no durable identity resolved, `_binding_path` is
+        # None → write/read/clear are no-ops and resume never calls the backend.
+        self.mod._BINDING_PATH_CACHE["computed"] = True
+        self.mod._BINDING_PATH_CACHE["path"] = None
+        self.mod._write_binding("d-1", "kr-resume-x")  # no-op, no crash
+        self.assertIsNone(self.mod._read_binding())
+        http = mock.MagicMock()
+        with mock.patch.object(self.mod, "_http", http):
+            self.assertIsNone(self.mod._attempt_resume())
+        http.assert_not_called()
+
+    def test_attempt_resume_success_rebinds_and_rotates(self):
+        self.mod._write_binding("d-42", "kr-resume-old")
+        http = mock.MagicMock(return_value=self._envelope(
+            {"disc_id": "d-42", "session_pk": 7, "resume_token": "kr-resume-new"}))
+        with mock.patch.object(self.mod, "_http", http):
+            resumed = self.mod._attempt_resume()
+        self.assertEqual(resumed, "d-42")
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-42")
+        # The rotated credential replaced the old one on disk.
+        self.assertEqual(self.mod._read_binding()["resume_token"], "kr-resume-new")
+        # The request went to peer-resume with the OLD credential.
+        method, path = http.call_args.args[0], http.call_args.args[1]
+        body = http.call_args.args[2]
+        self.assertEqual((method, path), ("POST", "/api/discussions/peer-resume"))
+        self.assertEqual(body["resume_token"], "kr-resume-old")
+
+    def test_attempt_resume_failure_keeps_binding_and_returns_none(self):
+        self.mod._write_binding("d-42", "kr-resume-old")
+        with mock.patch.object(self.mod, "_http", side_effect=RuntimeError("backend down")):
+            resumed = self.mod._attempt_resume()
+        self.assertIsNone(resumed)
+        self.assertIsNone(self.mod._CURRENT_DISC_ID)
+        # Binding preserved — a transient outage must not cost the capability.
+        self.assertEqual(self.mod._read_binding()["resume_token"], "kr-resume-old")
+
+    def test_attempt_resume_without_binding_makes_no_call(self):
+        http = mock.MagicMock()
+        with mock.patch.object(self.mod, "_http", http):
+            self.assertIsNone(self.mod._attempt_resume())
+        http.assert_not_called()
+
+    def test_reload_with_new_bridge_id_resumes_same_room(self):
+        # Replaces the obsolete PR118 "adhoc id survives reload" test. A
+        # reconnect legitimately gives a NEW bridge session id; the resume
+        # credential is what re-attaches — _attempt_resume must post the
+        # CURRENT (new) session_id and return the SAME room.
+        self.mod._write_binding("d-room", "kr-resume-1")
+        http = mock.MagicMock(return_value=self._envelope(
+            {"disc_id": "d-room", "session_pk": 5, "resume_token": "kr-resume-2"}))
+        with mock.patch.object(self.mod, "_session_id_for_caller", return_value="bridge-after-reload"), \
+             mock.patch.object(self.mod, "_http", http):
+            resumed = self.mod._attempt_resume()
+        self.assertEqual(resumed, "d-room", "re-attaches to the same room across a reload")
+        body = http.call_args.args[2]
+        self.assertEqual(body["session_id"], "bridge-after-reload",
+                         "resume posts the NEW bridge id so the backend rebinds the row")
+        self.assertEqual(body["resume_token"], "kr-resume-1")
+
+    def test_disc_id_lazily_resumes_after_reload(self):
+        # The end-to-end reload path: unbound + no env, but a binding exists →
+        # `_disc_id()` transparently re-attaches instead of raising.
+        self.mod._write_binding("d-99", "kr-resume-x")
+        http = mock.MagicMock(return_value=self._envelope(
+            {"disc_id": "d-99", "session_pk": 3, "resume_token": "kr-resume-y"}))
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._disc_id(), "d-99")
+
+    def test_disc_id_raises_when_unbound_no_env_no_binding(self):
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                self.mod._disc_id()
+        self.assertIn("no disc bound", str(ctx.exception))
+
+    def test_disc_join_persists_binding_and_hides_credential_from_model(self):
+        http = mock.MagicMock(return_value=self._envelope(
+            {"disc_id": "d-join", "session_pk": 1, "resume_token": "kr-resume-j",
+             "peer_count": 1, "disc_title": "T", "recent_messages": [], "next_steps": ""}))
+        with mock.patch.object(self.mod, "_http", http):
+            returned = self.mod.call_disc_join({"token": "kr-join-abc"})
+        self.assertEqual(self.mod._CURRENT_DISC_ID, "d-join")
+        # Credential persisted 0600…
+        self.assertEqual(self.mod._read_binding(),
+                         {"disc_id": "d-join", "resume_token": "kr-resume-j"})
+        # …but stripped from the value handed to the model.
+        self.assertNotIn("resume_token", returned,
+                         "the resume credential must never reach the model context")
+
+    def test_disc_append_scopes_presence_to_this_session(self):
+        # 0.8.13 — append must carry session_id so the backend heartbeat/clear
+        # touches only THIS (resumed) row, not every same-agent_type session.
+        self.mod._CURRENT_DISC_ID = "d-app"
+        http = mock.MagicMock(return_value=self._envelope({"appended": 1}))
+        with mock.patch.object(self.mod, "_http", http):
+            self.mod.call_disc_append({"content": "hi peers"})
+        method, path, body = http.call_args.args[0], http.call_args.args[1], http.call_args.args[2]
+        self.assertEqual((method, path), ("POST", "/api/disc/append"))
+        self.assertEqual(body["session_id"], self.mod._session_id_for_caller())
 
 
 if __name__ == "__main__":

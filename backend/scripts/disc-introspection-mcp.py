@@ -1989,27 +1989,30 @@ def _infer_agent_type_from_client_name(name):
 # Resolution order, evaluated ONCE at module load :
 #   1. `KRONN_SESSION_ID` env (Kronn-launched agents inherit this)
 #   2. `KRONN_CALLER_SESSION_ID` env (older alias)
-#   3. `adhoc-<ppid>-<parent start token>` — deterministic from the
-#      PARENT CLI process identity, so it survives bridge reloads
-#      (stab PR 118: a per-process uuid meant every MCP reload joined
-#      as a NEW participant; the backend dedup on (agent_type,
-#      session_id) could never match and chips piled up in the header)
+#   3. `adhoc-<ppid>-<parent start token>` — derived from the DIRECT
+#      parent, stable for THIS bridge process's lifetime
 #   4. Random `adhoc-<uuid4>` when the parent identity is unreadable
 #
-# Stays stable for the entire bridge process lifetime so every tool
-# call from the same CLI session uses the same row in
-# `discussion_sessions`.
+# Stays stable for the entire bridge process LIFETIME so every tool call
+# from the same running bridge uses the same `discussion_sessions` row.
+#
+# NB (0.8.13): this id is NOT relied on to survive an MCP reload anymore.
+# A reconnect spawns a new bridge under a (possibly) new ppid, so the
+# adhoc id legitimately changes — the PR 118 assumption that the direct
+# parent's identity survives reloads was fragile (unreadable start-token ⇒
+# uuid fallback) and is now obsolete. Reload continuity is handled by the
+# resume credential (`_attempt_resume`): the bridge re-attaches to its
+# existing room and the backend rebinds the row to the NEW session_id.
 
 
-def _parent_start_token():
-    """Opaque token identifying the parent process INSTANCE — pid reuse
-    alone would alias two different CLIs, the start time disambiguates.
-    Linux/WSL reads /proc, macOS falls back to `ps lstart`. `None` when
-    neither source is available (the caller then keeps the uuid path).
+def _start_token_of(pid):
+    """Opaque token identifying a process INSTANCE — pid reuse alone would
+    alias two different processes, the start time disambiguates. Linux/WSL
+    reads /proc, macOS falls back to `ps lstart`. `None` when neither source
+    is available (callers then take their own fallback path).
     """
-    ppid = os.getppid()
     try:
-        with open(f"/proc/{ppid}/stat", "rb") as fh:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
             raw = fh.read().decode("ascii", errors="replace")
         # comm (field 2) may contain spaces/parens — everything after
         # the LAST ')' is positional. starttime is field 22 overall,
@@ -2019,7 +2022,7 @@ def _parent_start_token():
         pass
     try:
         out = subprocess.check_output(
-            ["ps", "-p", str(ppid), "-o", "lstart="],
+            ["ps", "-p", str(pid), "-o", "lstart="],
             stderr=subprocess.DEVNULL, timeout=2,
         ).strip()
         if out:
@@ -2027,6 +2030,103 @@ def _parent_start_token():
     except Exception:
         pass
     return None
+
+
+def _parent_start_token():
+    """Start token of the DIRECT parent — the pre-077 session-id ingredient."""
+    return _start_token_of(os.getppid())
+
+
+def _ppid_of(pid):
+    """Parent pid of `pid`. Linux/WSL via /proc/<pid>/stat field 4, macOS via
+    `ps -o ppid=`. `None` when unreadable."""
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            raw = fh.read().decode("ascii", errors="replace")
+        # After the last ')' the fields are positional: state(3), ppid(4)…,
+        # so ppid is index 1 once comm is stripped.
+        return int(raw.rsplit(")", 1)[1].split()[1])
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "ppid="],
+            stderr=subprocess.DEVNULL, timeout=2,
+        ).strip()
+        return int(out) if out else None
+    except Exception:
+        return None
+
+
+def _cmdline_of(pid):
+    """Lowercased command line of `pid`, for CLI-ancestor detection. Linux/WSL
+    via /proc/<pid>/cmdline, macOS via `ps -o command=`. `None` if unreadable."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as fh:
+            raw = fh.read()
+        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").lower()
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            stderr=subprocess.DEVNULL, timeout=2,
+        )
+        return out.decode("utf-8", errors="replace").lower()
+    except Exception:
+        return None
+
+
+# Substrings that mark an ancestor as the launching CLI. Same family as
+# `_infer_agent_type_from_client_name`; kept lax on purpose (a node-wrapped
+# `claude` or `codex` still matches on the combined cmdline).
+_CLI_CMDLINE_HINTS = ("claude", "codex", "gemini", "kiro", "copilot", "vibe", "cursor", "cline")
+
+
+def _cli_ancestor_identity():
+    """`(pid, start_token)` of the OUTERMOST ancestor that looks like the CLI
+    the user launched (claude/codex/…). Walk the whole chain up to init and
+    keep the LAST (topmost) CLI-looking match — NOT the first. An MCP
+    reconnect may re-spawn an intermediate runner whose cmdline also carries
+    the CLI name, so the NEAREST match can still rotate on reload; only the
+    outermost CLI process (the one the user actually launched) is durable
+    across reconnects. That identity is also unique per session (distinct
+    terminal tabs are distinct CLI processes), which is what lets a reloaded
+    bridge find its own binding file again.
+
+    `None` when no ancestor matches. The caller then DISABLES persisted resume
+    (fail-closed) rather than key on anything unstable: we deliberately do NOT
+    fall back to the direct parent (its identity is precisely what rotates on
+    reload) nor to the cwd (two CLI tabs in the same repo would then share one
+    resume credential). Fail-closed just means that rare session re-joins with
+    a fresh token — never that it can hijack another session's row.
+    """
+    cur = os.getppid()
+    seen = set()
+    outermost = None
+    for _ in range(24):  # real trees are <10 deep; bound guards a cycle
+        if cur is None or cur <= 1 or cur in seen:
+            break
+        seen.add(cur)
+        cmd = _cmdline_of(cur)
+        if cmd and any(h in cmd for h in _CLI_CMDLINE_HINTS):
+            tok = _start_token_of(cur)
+            if tok is not None:
+                outermost = (cur, tok)  # keep climbing; the last match wins
+        cur = _ppid_of(cur)
+    return outermost
+
+
+def _identity_key_from(ancestor):
+    """Hash a stable CLI identity into a short filesystem-safe binding key.
+    `None` in → `None` out (fail-closed: no durable identity ⇒ no persisted
+    resume). Pure (no I/O) so the stable/distinct invariants are unit-testable:
+    a given ancestor always maps to the same key, distinct ancestors to
+    distinct keys."""
+    if ancestor is None:
+        return None
+    raw = f"pid:{ancestor[0]}:{ancestor[1]}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 def _resolve_bridge_session_id():
@@ -2136,6 +2236,153 @@ def _set_current_disc_id(disc_id):
     _CURRENT_DISC_META_CACHE["value"] = None
 
 
+# 0.8.13 — presence root-fix: reload recovery via a persisted resume
+# credential. An MCP reconnect re-spawns this sidecar (new PPID), wiping the
+# in-memory `_CURRENT_DISC_ID` AND rotating the fallback session_id — the
+# human then had to paste a fresh kr-join token every time. Instead, at join
+# we stash `{disc_id, resume_token}` in a 0600 file keyed by the STABLE CLI
+# identity (`_cli_ancestor_identity`); on the next tool call after a reload,
+# `_disc_id()` re-attaches to the same server row via `/peer-resume` — no
+# token, and the backend rebinds the row in place (no ghost participant).
+# The resume_token is a CREDENTIAL: 0600, never logged, never shown to the model.
+_BINDING_DIR = os.path.expanduser("~/.config/kronn")
+_BINDING_PATH_CACHE = {"computed": False, "path": None}
+
+
+def _binding_path():
+    """Absolute path of this session's binding file, or `None` when no durable
+    CLI identity resolved (fail-closed — persisted resume is then disabled)."""
+    if not _BINDING_PATH_CACHE["computed"]:
+        key = _identity_key_from(_cli_ancestor_identity())
+        _BINDING_PATH_CACHE["path"] = (
+            os.path.join(_BINDING_DIR, f"disc-binding-{key}.json") if key else None
+        )
+        _BINDING_PATH_CACHE["computed"] = True
+    return _BINDING_PATH_CACHE["path"]
+
+
+def _write_binding(disc_id, resume_token):
+    """Persist the reload credential atomically, mode 0600. No-op when there is
+    no durable identity (fail-closed). Best-effort otherwise: a failure just
+    means the next reload needs a manual disc_join."""
+    if not disc_id or not resume_token:
+        return
+    path = _binding_path()
+    if not path:
+        return
+    import tempfile
+    try:
+        os.makedirs(_BINDING_DIR, exist_ok=True)
+        # Random exclusive temp in the SAME dir (mkstemp → O_CREAT|O_EXCL,
+        # 0600, no symlink follow), then atomic rename over `path`. A symlink
+        # pre-placed at a PREDICTABLE temp name can no longer redirect the
+        # truncating write to an arbitrary file.
+        fd, tmp = tempfile.mkstemp(prefix=".disc-binding-", suffix=".tmp", dir=_BINDING_DIR)
+        try:
+            with os.fdopen(fd, "w") as f:
+                json.dump({"disc_id": disc_id, "resume_token": resume_token}, f)
+            os.replace(tmp, path)  # atomic; renames over any symlink at `path`
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+    except Exception as e:
+        # Never surface the token in the error; just note we couldn't persist.
+        print(f"kronn-internal: could not persist resume binding ({e})", file=sys.stderr)
+
+
+def _read_binding():
+    """Read the credential, refusing anything an attacker could have swapped
+    in: a symlink (O_NOFOLLOW), a non-regular file, one not owned by us, or one
+    readable by group/world. Returns the dict or `None`."""
+    import stat as _stat
+    path = _binding_path()
+    if not path:
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None  # missing, or a symlink (O_NOFOLLOW ⇒ ELOOP)
+    try:
+        # Symlink defence that does NOT depend on O_NOFOLLOW (which is 0 on
+        # platforms lacking it, e.g. Windows, so os.open would follow the
+        # link): require the path — statted WITHOUT following its final
+        # component — to be a regular file that is the SAME inode as the fd we
+        # hold. A followed symlink makes lstat(path) a link (or points the fd
+        # at a different (dev, ino)), and we refuse.
+        lst = os.lstat(path)
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(lst.st_mode):
+            return None  # path itself is a symlink / non-regular
+        if (lst.st_dev, lst.st_ino) != (st.st_dev, st.st_ino):
+            return None  # fd is not the inode the path names — refuse
+        if not _stat.S_ISREG(st.st_mode):
+            return None
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            return None  # not our file — refuse a planted credential
+        if st.st_mode & 0o077:
+            return None  # group/world bits set — treat as tampered
+        with os.fdopen(fd, "r") as f:
+            fd = None  # fdopen took ownership; the with-block closes it
+            data = json.load(f)
+    except Exception:
+        return None
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    if isinstance(data, dict) and data.get("disc_id") and data.get("resume_token"):
+        return data
+    return None
+
+
+def _clear_binding():
+    path = _binding_path()
+    if not path:
+        return
+    try:
+        os.remove(path)
+    except Exception:
+        pass
+
+
+def _attempt_resume():
+    """Reload recovery. Re-attach to the disc bound before an MCP reload using
+    the persisted resume credential — no fresh kr-join token. The backend
+    rotates the credential (returns a new one) and rebinds the server row in
+    place; we update the binding file to the rotated value. Returns the
+    disc_id on success, `None` otherwise (missing binding, rotated/invalid
+    credential, or backend unreachable — in which case the agent falls back
+    to a manual disc_join). The binding is kept on failure: a transient
+    backend outage (e.g. a rebuild) must not cost the reload capability."""
+    b = _read_binding()
+    if not b:
+        return None
+    body = {
+        "agent_type": _agent_type_for_session(),
+        "session_id": _session_id_for_caller(),
+        "resume_token": b["resume_token"],
+    }
+    try:
+        result = _unwrap(_http("POST", "/api/discussions/peer-resume", body))
+    except Exception:
+        return None
+    if not isinstance(result, dict):
+        return None
+    disc_id = result.get("disc_id")
+    new_token = result.get("resume_token")
+    if not disc_id:
+        return None
+    _set_current_disc_id(disc_id)
+    if new_token:
+        _write_binding(disc_id, new_token)
+    return disc_id
+
+
 def _disc_id():
     global _CURRENT_DISC_ID
     if not _CURRENT_DISC_ID:
@@ -2148,6 +2395,13 @@ def _disc_id():
         if env_did:
             _CURRENT_DISC_ID = env_did
             return _CURRENT_DISC_ID
+        # Reload recovery (0.8.13): the in-memory binding is lost on every
+        # MCP reconnect. Before failing, try to re-attach to the disc we were
+        # bound to via the persisted resume credential — the whole point is
+        # the human no longer re-pastes a kr-join token after each reload.
+        resumed = _attempt_resume()
+        if resumed:
+            return resumed
         raise RuntimeError(
             "no disc bound — set KRONN_DISCUSSION_ID env (Kronn-launched) "
             "or call disc_join({token: \"kr-join-...\"}) first (host-launched)"
@@ -2386,9 +2640,15 @@ def call_disc_append(args):
             "easiest for multi-agent chat) OR `messages: [{source_msg_id, "
             "role, content}, …]` (bulk transcript import)"
         )
+    # 0.8.13 — carry the caller's session id so the backend scopes the
+    # append heartbeat + activity-clear to THIS (possibly resumed) row only,
+    # never to every session of the same agent_type (multi-machine / sibling
+    # peer safety). A legacy bridge that omits it gets no presence refresh on
+    # append — deliberately conservative, matching disc_wait_for_peer.
     return _unwrap(_http("POST", "/api/disc/append", {
         "disc_id": disc_id,
         "messages": messages,
+        "session_id": _session_id_for_caller(),
     }))
 
 
@@ -2502,7 +2762,16 @@ def call_disc_join(args):
     disc_id = result.get("disc_id") if isinstance(result, dict) else None
     if disc_id:
         _set_current_disc_id(disc_id)
+        # 0.8.13 — stash the resume credential so a later MCP reload can
+        # re-attach to THIS disc via `/peer-resume` without a fresh token.
+        resume_token = result.get("resume_token") if isinstance(result, dict) else None
+        if resume_token:
+            _write_binding(disc_id, resume_token)
 
+    # The resume credential is a secret persisted 0600 — it must NEVER reach
+    # the model's context. Strip it from the value handed back to the agent.
+    if isinstance(result, dict):
+        result.pop("resume_token", None)
     return result
 
 
@@ -2625,8 +2894,12 @@ def call_disc_leave(_args):
         # Backend unreachable — still clear local binding so the agent
         # can rebind via `disc_join` next time.
         _set_current_disc_id(None)
+        _clear_binding()
         raise
     _set_current_disc_id(None)
+    # 0.8.13 — a deliberate leave drops the resume capability: the next
+    # session must join explicitly, not silently reclaim this row.
+    _clear_binding()
     return result
 
 
