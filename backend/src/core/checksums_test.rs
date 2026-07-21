@@ -438,6 +438,104 @@ fn compute_step_checksums_handles_source_tree_sentinel() {
 }
 
 #[test]
+fn stable_fingerprint_rejects_deterministic_between_read_mutation() {
+    let dir = temp_dir("f27_quiescence_mutation");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("src.rs"), "v1").unwrap();
+
+    let result = stable_source_tree_fingerprint_test_hook(&dir, || {
+        fs::write(dir.join("src.rs"), "v2").unwrap();
+    });
+
+    assert!(result.unwrap_err().contains("quiescence"));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn mapping_reuses_frozen_source_tree_without_rescanning() {
+    let dir = temp_dir("f27_snapshot_reuse");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("src.rs"), "before").unwrap();
+    let frozen = git_source_tree_fingerprint(&dir).unwrap();
+    fs::write(dir.join("src.rs"), "after").unwrap();
+    let current = git_source_tree_fingerprint(&dir).unwrap();
+    assert_ne!(current, frozen);
+
+    let checksums = compute_step_checksums_from_snapshot(
+        &dir,
+        &["__GIT_SOURCE_TREE__"],
+        Some(&frozen),
+    );
+
+    assert_eq!(checksums.get("__GIT_SOURCE_TREE__"), Some(&frozen));
+    assert_ne!(checksums.get("__GIT_SOURCE_TREE__"), Some(&current));
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn post_publish_mutation_restores_previous_baseline_byte_exact() {
+    let dir = temp_dir("f27_publish_rollback");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("src.rs"), "stable").unwrap();
+    let frozen = git_source_tree_fingerprint(&dir).unwrap();
+    let old = vec![ChecksumMapping {
+        ai_file: "docs/old.md".into(),
+        audit_step: 1,
+        sources: vec!["src.rs".into()],
+        checksums: BTreeMap::from([("src.rs".into(), "old".into())]),
+    }];
+    write_checksums_file(&dir, &old).unwrap();
+    let path = dir.join("docs/checksums.json");
+    let previous = fs::read(&path).unwrap();
+    let replacement = vec![ChecksumMapping {
+        ai_file: "docs/new.md".into(),
+        audit_step: 2,
+        sources: vec!["__GIT_SOURCE_TREE__".into()],
+        checksums: BTreeMap::from([("__GIT_SOURCE_TREE__".into(), frozen.clone())]),
+    }];
+
+    let error = write_checksums_file_fail_closed_test_hook(
+        &dir,
+        &replacement,
+        Some(&frozen),
+        || fs::write(dir.join("src.rs"), "mutated-after-publish").unwrap(),
+    ).unwrap_err();
+
+    assert!(error.contains("previous baseline restored"));
+    assert_eq!(fs::read(&path).unwrap(), previous);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn post_publish_mutation_never_clobbers_a_concurrent_baseline_writer() {
+    let dir = temp_dir("f27_publish_concurrent_writer");
+    git(&dir, &["init", "-q"]);
+    fs::write(dir.join("src.rs"), "stable").unwrap();
+    let frozen = git_source_tree_fingerprint(&dir).unwrap();
+    let replacement = vec![ChecksumMapping {
+        ai_file: "docs/new.md".into(),
+        audit_step: 2,
+        sources: vec!["__GIT_SOURCE_TREE__".into()],
+        checksums: BTreeMap::from([("__GIT_SOURCE_TREE__".into(), frozen.clone())]),
+    }];
+    let path = dir.join("docs/checksums.json");
+
+    let error = write_checksums_file_fail_closed_test_hook(
+        &dir,
+        &replacement,
+        Some(&frozen),
+        || {
+            fs::write(dir.join("src.rs"), "mutated-after-publish").unwrap();
+            fs::write(&path, "concurrent-writer").unwrap();
+        },
+    ).unwrap_err();
+
+    assert!(error.contains("rollback failed"));
+    assert_eq!(fs::read_to_string(&path).unwrap(), "concurrent-writer");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn empty_sources_returns_empty_checksums() {
     let dir = temp_dir("empty_sources");
     fs::create_dir_all(&dir).unwrap();

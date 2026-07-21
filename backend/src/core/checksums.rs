@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Duration;
 
 use super::cmd::sync_cmd;
 
@@ -181,7 +183,52 @@ fn os_path_from_bytes(bytes: &[u8]) -> std::ffi::OsString {
 /// (newlines/non-UTF-8 legal on Unix); records are NUL-joined into the
 /// hasher (NUL cannot appear in a path). Returns None when git is
 /// unavailable (no repo): the section simply isn't tracked.
-fn git_source_tree_fingerprint(project_path: &Path) -> Option<String> {
+fn manifest_record_path(record: &[u8]) -> &[u8] {
+    if let Some(path) = record.strip_prefix(b"deleted ") {
+        return path;
+    }
+    if let Some(path) = record.strip_prefix(b"gitlink ") {
+        return path;
+    }
+    if record.starts_with(b"normalized:") {
+        return record.splitn(2, |byte| *byte == b' ').nth(1).unwrap_or_default();
+    }
+    record.splitn(3, |byte| *byte == b' ').nth(2).unwrap_or_default()
+}
+
+fn trace_source_tree_manifest(observation: &str, records: &[Vec<u8>], fingerprint: &str) {
+    if std::env::var("KRONN_F27_MANIFEST").ok().as_deref() != Some("1") {
+        return;
+    }
+    // Opaque, per-process salt: a logged per-file digest must not become an
+    // offline oracle for low-entropy secrets accidentally left unignored.
+    // The salt is deliberately never logged; tags remain comparable only
+    // inside this backend process, which is all the diagnostic needs.
+    static SALT: OnceLock<[u8; 16]> = OnceLock::new();
+    let salt = SALT.get_or_init(|| *uuid::Uuid::new_v4().as_bytes());
+    tracing::info!(
+        target: "kronn::f27_manifest",
+        observation,
+        record_count = records.len(),
+        fingerprint,
+        "F27 source-tree manifest"
+    );
+    for record in records {
+        let mut hasher = Sha256::new();
+        hasher.update(salt);
+        hasher.update(record);
+        let opaque_tag: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        tracing::info!(
+            target: "kronn::f27_manifest",
+            observation,
+            path = %String::from_utf8_lossy(manifest_record_path(record)),
+            opaque_tag,
+            "F27 source-tree record"
+        );
+    }
+}
+
+fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option<&str>) -> Option<String> {
     let docs_dir_rel = crate::core::scanner::detect_docs_dir(project_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -270,7 +317,19 @@ fn git_source_tree_fingerprint(project_path: &Path) -> Option<String> {
         }
         hasher.update(record);
     }
-    Some(hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect())
+    let fingerprint: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    if let Some(label) = observation {
+        trace_source_tree_manifest(label, &kept, &fingerprint);
+    }
+    Some(fingerprint)
+}
+
+fn git_source_tree_fingerprint(project_path: &Path) -> Option<String> {
+    // The env gate inside the tracer keeps production silent. When enabled
+    // for an investigative run, ordinary drift checks must emit a comparable
+    // manifest too — baseline-only instrumentation cannot identify the later
+    // divergent record.
+    git_source_tree_fingerprint_observed(project_path, Some("runtime-check"))
 }
 
 /// Run a git command returning RAW stdout bytes. Needed where output can
@@ -303,10 +362,53 @@ fn run_git(project_path: &Path, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+const SOURCE_TREE_QUIET_PERIOD: Duration = Duration::from_millis(250);
+
+fn stable_source_tree_fingerprint_with_between<F>(
+    project_path: &Path,
+    between_reads: F,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce(),
+{
+    let first = git_source_tree_fingerprint_observed(project_path, Some("quiescence-first"));
+    between_reads();
+    let second = git_source_tree_fingerprint_observed(project_path, Some("quiescence-second"));
+    match (first, second) {
+        (Some(a), Some(b)) if a == b => Ok(Some(a)),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(
+            "source-tree fingerprint changed during quiescence window; baseline not frozen"
+                .to_string(),
+        ),
+        _ => Err("source-tree fingerprint availability changed during quiescence window".to_string()),
+    }
+}
+
+/// Freeze a source-tree fingerprint only after a bounded quiet period. This
+/// is a fail-closed guard, not a claim about the root cause of any particular
+/// drift incident.
+pub fn stable_source_tree_fingerprint(project_path: &Path) -> Result<Option<String>, String> {
+    stable_source_tree_fingerprint_with_between(project_path, || {
+        std::thread::sleep(SOURCE_TREE_QUIET_PERIOD);
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn stable_source_tree_fingerprint_test_hook<F>(
+    project_path: &Path,
+    between_reads: F,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce(),
+{
+    stable_source_tree_fingerprint_with_between(project_path, between_reads)
+}
+
 /// Compute checksums for a set of source patterns relative to the project root.
 ///
 /// Special patterns:
-/// - `__GIT_SOURCE_TREE__`: F27 fingerprint of the source tree at HEAD
+/// - `__GIT_SOURCE_TREE__`: F27 fingerprint of the current source worktree
 ///   (content + structure), excluding Kronn outputs — the preferred whole-
 ///   repo signal.
 /// - `__GIT_HEAD__` / `__GIT_LS_FILES__`: legacy whole-repo sentinels, kept
@@ -315,6 +417,25 @@ fn run_git(project_path: &Path, args: &[&str]) -> Option<String> {
 /// - Patterns containing `*`: expanded as simple directory globs.
 /// - Everything else: treated as a plain file path.
 pub fn compute_step_checksums(project_path: &Path, patterns: &[&str]) -> BTreeMap<String, String> {
+    compute_step_checksums_impl(project_path, patterns, None)
+}
+
+/// Compute a mapping while reusing the already-quiesced whole-tree snapshot.
+/// `None` means the project is not a Git repository and the sentinel is
+/// intentionally omitted; it never triggers another repository scan.
+pub fn compute_step_checksums_from_snapshot(
+    project_path: &Path,
+    patterns: &[&str],
+    source_tree_fingerprint: Option<&str>,
+) -> BTreeMap<String, String> {
+    compute_step_checksums_impl(project_path, patterns, Some(source_tree_fingerprint))
+}
+
+fn compute_step_checksums_impl(
+    project_path: &Path,
+    patterns: &[&str],
+    source_tree_override: Option<Option<&str>>,
+) -> BTreeMap<String, String> {
     let mut map = BTreeMap::new();
 
     for &pattern in patterns {
@@ -323,7 +444,11 @@ pub fn compute_step_checksums(project_path: &Path, patterns: &[&str]) -> BTreeMa
                 // F27 — content+structure fingerprint of the source tree,
                 // excluding Kronn outputs. Preferred over the two sentinels
                 // below (kept only for back-compat with pre-F27 baselines).
-                if let Some(fp) = git_source_tree_fingerprint(project_path) {
+                let fingerprint = match source_tree_override {
+                    Some(fixed) => fixed.map(str::to_string),
+                    None => git_source_tree_fingerprint(project_path),
+                };
+                if let Some(fp) = fingerprint {
                     map.insert("__GIT_SOURCE_TREE__".to_string(), fp);
                 }
             }
@@ -369,6 +494,13 @@ pub fn write_checksums_file(
     project_path: &Path,
     mappings: &[ChecksumMapping],
 ) -> Result<(), String> {
+    publish_checksums_file(project_path, mappings).map(|_| ())
+}
+
+fn publish_checksums_file(
+    project_path: &Path,
+    mappings: &[ChecksumMapping],
+) -> Result<(PathBuf, Vec<u8>), String> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     std::fs::create_dir_all(&docs_dir)
         .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
@@ -378,17 +510,112 @@ pub fn write_checksums_file(
         mappings: mappings.to_vec(),
     };
 
-    let json =
-        serde_json::to_string_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
+    let json = serde_json::to_vec_pretty(&file)
+        .map_err(|e| format!("JSON serialize error: {e}"))?;
 
     // Atomic sibling-temp + rename (Codex lot-2 #4): a direct fs::write
     // that fails mid-stream truncates the manifest — read_checksums_file
     // then returns None and the whole drift scope silently DISAPPEARS
     // instead of staying stale. On any failure here the previous valid
     // manifest stays byte-intact.
-    crate::core::mcp_scanner::atomic_write(&docs_dir.join("checksums.json"), &json)?;
+    let path = docs_dir.join("checksums.json");
+    crate::core::mcp_scanner::atomic_write_bytes(&path, &json)?;
 
+    Ok((path, json))
+}
+
+fn restore_checksums_bytes(
+    path: &Path,
+    previous: Option<&[u8]>,
+    published: &[u8],
+) -> Result<(), String> {
+    let current = std::fs::read(path)
+        .map_err(|e| format!("Failed to verify published checksum baseline {}: {e}", path.display()))?;
+    if current != published {
+        return Err(format!(
+            "checksum baseline {} changed concurrently after publication; refusing to overwrite or delete it",
+            path.display()
+        ));
+    }
+    match previous {
+        Some(bytes) => crate::core::mcp_scanner::atomic_write_bytes(path, bytes)
+            .map_err(|e| format!("Failed to restore previous checksum baseline {}: {e}", path.display())),
+        None => match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to remove newly-published checksum baseline {}: {e}", path.display())),
+        },
+    }
+}
+
+fn write_checksums_file_fail_closed_with_after<F>(
+    project_path: &Path,
+    mappings: &[ChecksumMapping],
+    expected_source_tree: Option<&str>,
+    after_publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    let before_publish = git_source_tree_fingerprint_observed(project_path, Some("pre-publish"));
+    if before_publish.as_deref() != expected_source_tree {
+        return Err("source tree changed before checksum baseline publication".to_string());
+    }
+
+    let path = crate::core::scanner::detect_docs_dir(project_path).join("checksums.json");
+    let previous = match std::fs::read(&path) {
+        Ok(bytes) => Some(bytes),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Could not preserve previous checksum baseline {}: {e}", path.display())),
+    };
+
+    let (published_path, published) = publish_checksums_file(project_path, mappings)?;
+    debug_assert_eq!(published_path, path);
+    after_publish();
+    let after = git_source_tree_fingerprint_observed(project_path, Some("post-publish"));
+    if after.as_deref() != expected_source_tree {
+        let rollback = restore_checksums_bytes(&path, previous.as_deref(), &published);
+        return match rollback {
+            Ok(()) => Err("source tree changed during checksum baseline publication; previous baseline restored".to_string()),
+            Err(rollback_error) => Err(format!(
+                "source tree changed during checksum baseline publication AND rollback failed: {rollback_error}"
+            )),
+        };
+    }
     Ok(())
+}
+
+/// Publish a baseline only while the source tree still matches the stable
+/// snapshot, then wait through one more quiet window and roll back on drift.
+pub fn write_checksums_file_fail_closed(
+    project_path: &Path,
+    mappings: &[ChecksumMapping],
+    expected_source_tree: Option<&str>,
+) -> Result<(), String> {
+    write_checksums_file_fail_closed_with_after(
+        project_path,
+        mappings,
+        expected_source_tree,
+        || std::thread::sleep(SOURCE_TREE_QUIET_PERIOD),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn write_checksums_file_fail_closed_test_hook<F>(
+    project_path: &Path,
+    mappings: &[ChecksumMapping],
+    expected_source_tree: Option<&str>,
+    after_publish: F,
+) -> Result<(), String>
+where
+    F: FnOnce(),
+{
+    write_checksums_file_fail_closed_with_after(
+        project_path,
+        mappings,
+        expected_source_tree,
+        after_publish,
+    )
 }
 
 /// Read and parse the checksums file. Returns None if missing or malformed.
@@ -432,10 +659,20 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
 
     let mut stale_sections = Vec::new();
     let mut fresh_sections = Vec::new();
+    let source_tree_snapshot = checksums_file.mappings.iter()
+        .any(|mapping| mapping.sources.iter().any(|source| source == "__GIT_SOURCE_TREE__"))
+        .then(|| git_source_tree_fingerprint(project_path));
 
     for mapping in &checksums_file.mappings {
         let patterns: Vec<&str> = mapping.sources.iter().map(|s| s.as_str()).collect();
-        let current = compute_step_checksums(project_path, &patterns);
+        let current = match &source_tree_snapshot {
+            Some(snapshot) => compute_step_checksums_from_snapshot(
+                project_path,
+                &patterns,
+                snapshot.as_deref(),
+            ),
+            None => compute_step_checksums(project_path, &patterns),
+        };
 
         let mut changed_sources = Vec::new();
 
