@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use crate::core::mcp_scanner::*;
     use serial_test::serial;
 
@@ -110,7 +110,7 @@ mod tests {
     }
 
     #[test]
-    fn write_subpath_overwrites_existing() {
+    fn write_subpath_is_idempotent() {
         let tmp = setup_tmp("overwrite");
         let data = make_test_data();
 
@@ -122,6 +122,261 @@ mod tests {
         let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.mcp_servers.len(), 2, "Should have 2 servers, not duplicated");
 
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn json_merge_preserves_unrelated_settings_and_user_mcp_collisions() {
+        let tmp = setup_tmp("json-preserve-user");
+        let file = tmp.join(".gemini/settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let original = serde_json::json!({
+            "theme": "user-dark",
+            "telemetry": { "enabled": false },
+            "mcpServers": {
+                "github": { "command": "user-github", "env": { "KEEP": "yes" } },
+                "manual-only": { "command": "manual" }
+            }
+        });
+        std::fs::write(&file, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".gemini/settings.json", &make_test_data()).unwrap();
+
+        let merged: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(merged["theme"], "user-dark");
+        assert_eq!(merged["telemetry"]["enabled"], false);
+        assert_eq!(merged["mcpServers"]["github"]["command"], "user-github");
+        assert_eq!(merged["mcpServers"]["manual-only"]["command"], "manual");
+        assert!(merged["mcpServers"].get("context7").is_some());
+        assert!(tmp.join(".kronn/backups/mcp-configs/.gemini__settings.json.backup").exists());
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn invalid_json_is_backed_up_and_never_overwritten() {
+        let tmp = setup_tmp("json-invalid-refuse");
+        let file = tmp.join(".mcp.json");
+        let invalid = "{ user-owned but broken";
+        std::fs::write(&file, invalid).unwrap();
+
+        let error = write_mcp_json(&tmp.to_string_lossy(), &make_test_data()).unwrap_err();
+
+        assert!(error.contains("refusing overwrite"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), invalid);
+        assert_eq!(
+            std::fs::read_to_string(tmp.join(".kronn/backups/mcp-configs/.mcp.json.backup")).unwrap(),
+            invalid
+        );
+        cleanup(&tmp);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_merge_refuses_symlinked_parent_directory() {
+        use std::os::unix::fs::symlink;
+        let tmp = setup_tmp("json-parent-symlink");
+        let outside = setup_tmp("json-parent-symlink-outside");
+        symlink(&outside, tmp.join(".gemini")).unwrap();
+
+        let error = write_mcp_json_to_subpath(
+            &tmp.to_string_lossy(), ".gemini/settings.json", &make_test_data()
+        ).unwrap_err();
+
+        assert!(error.contains("symlink"));
+        assert!(!outside.join("settings.json").exists());
+        cleanup(&tmp);
+        cleanup(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn json_merge_refuses_symlinked_parent_before_creating_nested_directories() {
+        use std::os::unix::fs::symlink;
+        let tmp = setup_tmp("json-parent-symlink-nested");
+        let outside = setup_tmp("json-parent-symlink-nested-outside");
+        symlink(&outside, tmp.join(".kiro")).unwrap();
+
+        let error = write_mcp_json_to_subpath(
+            &tmp.to_string_lossy(), ".kiro/settings/mcp.json", &make_test_data()
+        ).unwrap_err();
+
+        assert!(error.contains("symlink"));
+        assert!(
+            !outside.join("settings").exists(),
+            "refusal must happen before create_dir_all can mutate the symlink target",
+        );
+        cleanup(&tmp);
+        cleanup(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_write_never_follows_the_legacy_predictable_temp_symlink() {
+        use std::os::unix::fs::symlink;
+        let tmp = setup_tmp("atomic-temp-symlink");
+        let target = tmp.join("settings.json");
+        let outside = tmp.join("outside.txt");
+        std::fs::write(&outside, "do-not-touch").unwrap();
+        symlink(&outside, target.with_extension("tmp")).unwrap();
+
+        atomic_write(&target, "safe").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "safe");
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "do-not-touch");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn atomic_merge_write_refuses_changed_or_concurrently_created_target() {
+        let tmp = setup_tmp("atomic-merge-cas");
+        let target = tmp.join("settings.json");
+
+        std::fs::write(&target, "edited-after-read").unwrap();
+        let error = atomic_write_if_unchanged(&target, "kronn", Some(b"original"))
+            .unwrap_err();
+        assert!(error.contains("changed concurrently"));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "edited-after-read");
+
+        let created = tmp.join("created.json");
+        std::fs::write(&created, "created-by-user").unwrap();
+        let error = atomic_write_if_unchanged(&created, "kronn", None).unwrap_err();
+        assert!(error.contains("changed concurrently"));
+        assert_eq!(std::fs::read_to_string(&created).unwrap(), "created-by-user");
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn ownership_sidecar_allows_rotation_and_removal_without_touching_manual_mcps() {
+        let tmp = setup_tmp("json-owned-lifecycle");
+        let path = tmp.to_string_lossy();
+        let mut first = make_test_data();
+        write_owned_mcp_json_to_subpath(&path, ".mcp.json", &first).unwrap();
+
+        first.mcp_servers.get_mut("github").unwrap().env
+            .insert("GITHUB_TOKEN".into(), "rotated-token".into());
+        first.mcp_servers.remove("context7");
+        let file = tmp.join(".mcp.json");
+        let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        raw["mcpServers"]["manual"] = serde_json::json!({"command": "mine"});
+        std::fs::write(&file, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
+
+        write_owned_mcp_json_to_subpath(&path, ".mcp.json", &first).unwrap();
+
+        let merged: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(merged["mcpServers"]["github"]["env"]["GITHUB_TOKEN"], "rotated-token");
+        assert!(merged["mcpServers"].get("context7").is_none());
+        assert_eq!(merged["mcpServers"]["manual"]["command"], "mine");
+        let state: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(tmp.join(".kronn/mcp-managed.json")).unwrap()
+        ).unwrap();
+        assert_eq!(state["files"][".mcp.json"], serde_json::json!(["github"]));
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn invalid_ownership_state_blocks_config_mutation() {
+        let tmp = setup_tmp("ownership-invalid-refuse");
+        std::fs::create_dir_all(tmp.join(".kronn")).unwrap();
+        std::fs::write(tmp.join(".kronn/mcp-managed.json"), "not-json").unwrap();
+        let file = tmp.join(".mcp.json");
+        let original = serde_json::json!({
+            "mcpServers": { "manual": { "command": "mine" } }
+        });
+        std::fs::write(&file, serde_json::to_string_pretty(&original).unwrap()).unwrap();
+
+        let error = write_owned_mcp_json_to_subpath(
+            &tmp.to_string_lossy(), ".mcp.json", &make_test_data()
+        ).unwrap_err();
+
+        assert!(error.contains("Invalid MCP ownership state"));
+        let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(after, original);
+        assert!(tmp.join(".kronn/backups/mcp-configs/.kronn__mcp-managed.json.backup").exists());
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn vibe_merge_preserves_user_settings_and_collisions() {
+        let tmp = setup_tmp("vibe-preserve-user");
+        let file = tmp.join(".vibe/config.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, r#"theme = "solarized"
+
+[[mcp_servers]]
+name = "github"
+transport = "stdio"
+command = "user-github"
+
+[[mcp_servers]]
+name = "manual"
+transport = "stdio"
+command = "manual-command"
+"#).unwrap();
+        let desired = vec![
+            VibeMcpEntry {
+                name: "github".into(), transport: "stdio".into(), command: Some("kronn-github".into()),
+                args: None, url: None, env: HashMap::new(),
+            },
+            VibeMcpEntry {
+                name: "new-kronn".into(), transport: "stdio".into(), command: Some("new-command".into()),
+                args: None, url: None, env: HashMap::new(),
+            },
+        ];
+
+        let owned = merge_vibe_config(&tmp.to_string_lossy(), &file, &desired, &BTreeSet::new()).unwrap();
+
+        let merged: toml::Table = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(merged["theme"].as_str(), Some("solarized"));
+        let servers = merged["mcp_servers"].as_array().unwrap();
+        let command = |name: &str| servers.iter()
+            .find(|entry| entry["name"].as_str() == Some(name))
+            .and_then(|entry| entry["command"].as_str());
+        assert_eq!(command("github"), Some("user-github"));
+        assert_eq!(command("manual"), Some("manual-command"));
+        assert_eq!(command("new-kronn"), Some("new-command"));
+        assert_eq!(owned, BTreeSet::from(["new-kronn".to_string()]));
+        assert!(tmp.join(".kronn/backups/mcp-configs/.vibe__config.toml.backup").exists());
+        cleanup(&tmp);
+    }
+
+    #[test]
+    fn vibe_owned_entries_rotate_and_delete_without_touching_manual_entries() {
+        let tmp = setup_tmp("vibe-owned-lifecycle");
+        let file = tmp.join(".vibe/config.toml");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        let first = vec![
+            VibeMcpEntry {
+                name: "managed-a".into(), transport: "stdio".into(), command: Some("old".into()),
+                args: None, url: None, env: HashMap::new(),
+            },
+            VibeMcpEntry {
+                name: "managed-b".into(), transport: "stdio".into(), command: Some("remove-me".into()),
+                args: None, url: None, env: HashMap::new(),
+            },
+        ];
+        let owned = merge_vibe_config(&tmp.to_string_lossy(), &file, &first, &BTreeSet::new()).unwrap();
+        let mut table: toml::Table = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        table["mcp_servers"].as_array_mut().unwrap().push(toml::Value::try_from(VibeMcpEntry {
+            name: "manual".into(), transport: "stdio".into(), command: Some("mine".into()),
+            args: None, url: None, env: HashMap::new(),
+        }).unwrap());
+        std::fs::write(&file, toml::to_string_pretty(&table).unwrap()).unwrap();
+        let second = vec![VibeMcpEntry {
+            name: "managed-a".into(), transport: "stdio".into(), command: Some("rotated".into()),
+            args: None, url: None, env: HashMap::new(),
+        }];
+
+        let now_owned = merge_vibe_config(&tmp.to_string_lossy(), &file, &second, &owned).unwrap();
+
+        let merged: toml::Table = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let servers = merged["mcp_servers"].as_array().unwrap();
+        let command = |name: &str| servers.iter()
+            .find(|entry| entry["name"].as_str() == Some(name))
+            .and_then(|entry| entry["command"].as_str());
+        assert_eq!(command("managed-a"), Some("rotated"));
+        assert_eq!(command("managed-b"), None);
+        assert_eq!(command("manual"), Some("mine"));
+        assert_eq!(now_owned, BTreeSet::from(["managed-a".to_string()]));
         cleanup(&tmp);
     }
 
@@ -2053,7 +2308,7 @@ args = ["@example/old-mcp"]
         std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &b);
         std::env::set_var("KRONN_DISC_INTROSPECTION_MCP", &b);
 
-        let wrote = write_kronn_internal_only(&tmp.to_string_lossy());
+        let wrote = write_kronn_internal_only(&tmp.to_string_lossy()).unwrap();
 
         std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
         std::env::remove_var("KRONN_DISC_INTROSPECTION_MCP");

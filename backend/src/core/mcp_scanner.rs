@@ -1,8 +1,64 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::models::McpTransport;
+
+const MCP_OWNERSHIP_STATE: &str = ".kronn/mcp-managed.json";
+static MCP_PROJECT_CONFIG_SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_project_config_sync() -> std::sync::MutexGuard<'static, ()> {
+    MCP_PROJECT_CONFIG_SYNC_LOCK.lock().unwrap_or_else(|poisoned| {
+        tracing::error!("MCP project config sync lock was poisoned; recovering serialized access");
+        poisoned.into_inner()
+    })
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct McpOwnershipState {
+    version: u8,
+    #[serde(default)]
+    files: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Default for McpOwnershipState {
+    fn default() -> Self {
+        Self { version: 1, files: BTreeMap::new() }
+    }
+}
+
+fn refuse_symlink(path: &Path, label: &str) -> Result<(), String> {
+    if std::fs::symlink_metadata(path)
+        .map(|meta| meta.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        return Err(format!("{label} {} is a symlink; refusing mutation", path.display()));
+    }
+    Ok(())
+}
+
+fn refuse_project_symlink_chain(project_path: &str, target: &Path, label: &str) -> Result<(), String> {
+    let resolved = resolve_host_path(project_path);
+    let root = Path::new(&resolved);
+    let relative = target.strip_prefix(root)
+        .map_err(|_| format!("{label} {} escapes project root {}; refusing mutation", target.display(), root.display()))?;
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component);
+        refuse_symlink(&current, label)?;
+    }
+    Ok(())
+}
+
+fn ensure_safe_kronn_state_dir(project_path: &str) -> Result<PathBuf, String> {
+    let resolved = resolve_host_path(project_path);
+    let root = Path::new(&resolved);
+    let state_dir = root.join(".kronn");
+    refuse_symlink(&state_dir, "Kronn state directory")?;
+    std::fs::create_dir_all(&state_dir)
+        .map_err(|e| format!("Failed to create Kronn state dir {}: {e}", state_dir.display()))?;
+    Ok(state_dir)
+}
 
 // ─── Codex config.toml format ────────────────────────────────────────────────
 
@@ -168,55 +224,305 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
 /// Returns `false` when the bridge path can't be resolved (host-CLI safety, cf.
 /// [`disc_introspection_mcp_path_for_shared_config`]); the caller then removes
 /// any stale files instead.
-pub(crate) fn write_kronn_internal_only(project_path: &str) -> bool {
+pub(crate) fn write_kronn_internal_only(project_path: &str) -> Result<bool, String> {
     let mut only_internal = McpJsonFile { mcp_servers: HashMap::new() };
     if !inject_kronn_internal(&mut only_internal) {
-        return false;
+        return Ok(false);
     }
-    let _ = write_mcp_json(project_path, &only_internal);
+    write_owned_mcp_json_to_subpath(project_path, ".mcp.json", &only_internal)?;
     ensure_gitignore(project_path, ".mcp.json");
-    sync_claude_enabled_servers(project_path, &only_internal.mcp_servers);
-    if write_mcp_json_to_subpath(project_path, ".kiro/settings/mcp.json", &only_internal).is_ok() {
-        ensure_gitignore(project_path, ".kiro/settings/");
+    let merged = read_mcp_json(project_path).unwrap_or_else(|| only_internal.clone());
+    sync_claude_enabled_servers(project_path, &merged.mcp_servers);
+    for (subpath, ignore) in [
+        (".kiro/settings/mcp.json", ".kiro/settings/"),
+        (".ai/mcp/mcp.json", ".ai/mcp/"),
+        (".gemini/settings.json", ".gemini/"),
+    ] {
+        write_owned_mcp_json_to_subpath(project_path, subpath, &only_internal)?;
+        ensure_gitignore(project_path, ignore);
     }
-    if write_mcp_json_to_subpath(project_path, ".ai/mcp/mcp.json", &only_internal).is_ok() {
-        ensure_gitignore(project_path, ".ai/mcp/");
-    }
-    if write_mcp_json_to_subpath(project_path, ".gemini/settings.json", &only_internal).is_ok() {
-        ensure_gitignore(project_path, ".gemini/");
-    }
-    true
+    Ok(true)
 }
 
-/// Write a McpJsonFile to an arbitrary subpath within a project directory.
-/// Creates parent directories if needed. Used for Claude (.mcp.json),
-/// Kiro (.kiro/settings/mcp.json + .ai/mcp/mcp.json), and Gemini (.gemini/settings.json).
+fn backup_before_refusal(project_path: &str, file: &Path) -> Result<(), String> {
+    if !file.exists() {
+        return Ok(());
+    }
+    refuse_project_symlink_chain(project_path, file, "MCP config path")?;
+    let resolved = resolve_host_path(project_path);
+    let root = Path::new(&resolved);
+    let relative = file.strip_prefix(root).unwrap_or(file);
+    let safe_name = relative.to_string_lossy().replace(['/', '\\'], "__");
+    let state_dir = ensure_safe_kronn_state_dir(project_path)?;
+    let backups_dir = state_dir.join("backups");
+    refuse_symlink(&backups_dir, "MCP backup directory")?;
+    std::fs::create_dir_all(&backups_dir)
+        .map_err(|e| format!("Failed to create backup dir {}: {e}", backups_dir.display()))?;
+    let configs_dir = backups_dir.join("mcp-configs");
+    refuse_symlink(&configs_dir, "MCP backup directory")?;
+    std::fs::create_dir_all(&configs_dir)
+        .map_err(|e| format!("Failed to create backup dir {}: {e}", configs_dir.display()))?;
+    let backup = configs_dir.join(format!("{safe_name}.backup"));
+    refuse_symlink(&backup, "MCP backup file")?;
+    if backup.exists() {
+        return Ok(());
+    }
+    ensure_gitignore(project_path, ".kronn/");
+    std::fs::copy(file, &backup)
+        .map_err(|e| format!("Failed to back up {} to {}: {e}", file.display(), backup.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&backup, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure backup {}: {e}", backup.display()))?;
+    }
+    Ok(())
+}
+
+fn secure_file_0600(file: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("Failed to secure MCP config {}: {e}", file.display()))?;
+    }
+    Ok(())
+}
+
+fn ownership_state_path(project_path: &str) -> PathBuf {
+    let resolved = resolve_host_path(project_path);
+    Path::new(&resolved).join(MCP_OWNERSHIP_STATE)
+}
+
+fn load_mcp_ownership(project_path: &str) -> Result<McpOwnershipState, String> {
+    let path = ownership_state_path(project_path);
+    refuse_project_symlink_chain(project_path, &path, "MCP ownership state")?;
+    if !path.exists() {
+        return Ok(McpOwnershipState::default());
+    }
+    let raw = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read MCP ownership state {}: {e}", path.display()))?;
+    match serde_json::from_str::<McpOwnershipState>(&raw) {
+        Ok(state) if state.version == 1 => Ok(state),
+        Ok(state) => {
+            backup_before_refusal(project_path, &path)?;
+            Err(format!("Unsupported MCP ownership state version {} in {}; refusing config mutation", state.version, path.display()))
+        }
+        Err(e) => {
+            backup_before_refusal(project_path, &path)?;
+            Err(format!("Invalid MCP ownership state {}: {e}; refusing config mutation", path.display()))
+        }
+    }
+}
+
+fn save_mcp_ownership(project_path: &str, state: &McpOwnershipState) -> Result<(), String> {
+    let path = ownership_state_path(project_path);
+    ensure_safe_kronn_state_dir(project_path)?;
+    refuse_project_symlink_chain(project_path, &path, "MCP ownership state")?;
+    ensure_gitignore(project_path, ".kronn/");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create MCP ownership dir {}: {e}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(state)
+        .map_err(|e| format!("Failed to serialize MCP ownership state: {e}"))?;
+    atomic_write(&path, &format!("{content}\n"))?;
+    secure_file_0600(&path)
+}
+
+fn merge_mcp_json_file(
+    project_path: &str,
+    file: &Path,
+    data: &McpJsonFile,
+    previously_owned: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
+    refuse_project_symlink_chain(project_path, file, "MCP JSON config path")?;
+    let existed = file.exists();
+    if !existed && data.mcp_servers.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let observed_content;
+    let mut root = if existed {
+        let raw = std::fs::read_to_string(file)
+            .map_err(|e| format!("Failed to read existing config {}: {e}", file.display()))?;
+        observed_content = Some(raw.as_bytes().to_vec());
+        match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(serde_json::Value::Object(object)) => object,
+            Ok(_) => {
+                backup_before_refusal(project_path, file)?;
+                return Err(format!("Existing config {} is not a JSON object; refusing overwrite", file.display()));
+            }
+            Err(e) => {
+                backup_before_refusal(project_path, file)?;
+                return Err(format!("Invalid existing JSON config {}: {e}; refusing overwrite", file.display()));
+            }
+        }
+    } else {
+        observed_content = None;
+        serde_json::Map::new()
+    };
+
+    let servers = root
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let serde_json::Value::Object(existing) = servers else {
+        backup_before_refusal(project_path, file)?;
+        return Err(format!("Existing config {} has a non-object mcpServers field; refusing overwrite", file.display()));
+    };
+
+    let desired: BTreeMap<String, serde_json::Value> = data.mcp_servers.iter()
+        .map(|(name, entry)| {
+            serde_json::to_value(entry)
+                .map(|value| (name.clone(), value))
+                .map_err(|e| format!("Failed to serialize MCP entry {name}: {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+
+    for name in previously_owned {
+        if !desired.contains_key(name) {
+            existing.remove(name);
+        }
+    }
+
+    let mut now_owned = BTreeSet::new();
+    for (name, wanted) in desired {
+        match existing.get(&name) {
+            Some(current) if previously_owned.contains(&name) || current == &wanted => {
+                existing.insert(name.clone(), wanted);
+                now_owned.insert(name);
+            }
+            Some(_) => {
+                tracing::warn!(
+                    "MCP config collision in {} for '{}': preserving user-owned entry",
+                    file.display(), name
+                );
+            }
+            None => {
+                existing.insert(name.clone(), wanted);
+                now_owned.insert(name);
+            }
+        }
+    }
+
+    if existed {
+        backup_before_refusal(project_path, file)?;
+    }
+    let content = serde_json::to_string_pretty(&serde_json::Value::Object(root))
+        .map_err(|e| format!("JSON serialize error for {}: {e}", file.display()))?;
+    atomic_write_if_unchanged(file, &format!("{content}\n"), observed_content.as_deref())?;
+    secure_file_0600(file)?;
+    Ok(now_owned)
+}
+
+/// Merge an MCP section into an arbitrary project-local JSON config. Existing
+/// top-level settings and colliding user-owned MCP entries are preserved.
 pub fn write_mcp_json_to_subpath(project_path: &str, subpath: &str, data: &McpJsonFile) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
     let file = Path::new(&resolved).join(subpath);
-    // Create parent directories (e.g., .kiro/settings/)
+    // Validate the complete chain before creating a missing nested parent.
+    // Otherwise `create_dir_all(.kiro/settings)` would follow an existing
+    // `.kiro` symlink and mutate a directory outside the project even though
+    // the later merge correctly refuses the final file write.
+    refuse_project_symlink_chain(project_path, &file, "MCP JSON config path")?;
     if let Some(parent) = file.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create dir {}: {}", parent.display(), e))?;
     }
-    let content = serde_json::to_string_pretty(data)
-        .map_err(|e| format!("JSON serialize error: {}", e))?;
-    // Atomic write: write to temp file then rename, so agents never read partial JSON
-    atomic_write(&file, &content)
+    merge_mcp_json_file(project_path, &file, data, &BTreeSet::new()).map(|_| ())
+}
+
+pub(crate) fn write_owned_mcp_json_to_subpath(
+    project_path: &str,
+    subpath: &str,
+    data: &McpJsonFile,
+) -> Result<(), String> {
+    let mut state = load_mcp_ownership(project_path)?;
+    let previous = state.files.get(subpath).cloned().unwrap_or_default();
+    let resolved = resolve_host_path(project_path);
+    let file = Path::new(&resolved).join(subpath);
+    refuse_project_symlink_chain(project_path, &file, "MCP JSON config path")?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create dir {}: {e}", parent.display()))?;
+    }
+    let now_owned = merge_mcp_json_file(project_path, &file, data, &previous)?;
+    if now_owned.is_empty() {
+        state.files.remove(subpath);
+    } else {
+        state.files.insert(subpath.to_string(), now_owned);
+    }
+    save_mcp_ownership(project_path, &state)
 }
 
 /// Write content to a file atomically: write to a temp sibling then rename.
 /// This prevents agents from reading a partially-written config file.
-pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
-    let tmp = target.with_extension("tmp");
-    std::fs::write(&tmp, content)
-        .map_err(|e| format!("Failed to write temp {}: {}", tmp.display(), e))?;
-    std::fs::rename(&tmp, target)
+fn write_atomic_temp(target: &Path, content: &[u8]) -> Result<PathBuf, String> {
+    // A fixed `<target>.tmp` name is unsafe in a user-controlled project: a
+    // pre-created symlink at that path makes `fs::write` follow it and mutate
+    // an arbitrary file outside the project. Use an unpredictable sibling and
+    // `create_new` so an existing filesystem object is never followed.
+    let tmp = target.with_extension(format!("kronn-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut temp_file = options
+        .open(&tmp)
+        .map_err(|e| format!("Failed to create temp {}: {e}", tmp.display()))?;
+    if let Err(e) = std::io::Write::write_all(&mut temp_file, content) {
+        drop(temp_file);
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("Failed to write temp {}: {e}", tmp.display()));
+    }
+    drop(temp_file);
+    Ok(tmp)
+}
+
+fn commit_atomic_temp(tmp: &Path, target: &Path) -> Result<(), String> {
+    std::fs::rename(tmp, target)
         .map_err(|e| {
             // Clean up temp file on rename failure
-            let _ = std::fs::remove_file(&tmp);
+            let _ = std::fs::remove_file(tmp);
             format!("Failed to rename {} → {}: {}", tmp.display(), target.display(), e)
         })
+}
+
+pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
+    atomic_write_bytes(target, content.as_bytes())
+}
+
+pub(crate) fn atomic_write_bytes(target: &Path, content: &[u8]) -> Result<(), String> {
+    let tmp = write_atomic_temp(target, content)?;
+    commit_atomic_temp(&tmp, target)
+}
+
+/// Atomically replace a file only if it is still byte-identical to what the
+/// merge parsed (`Some`) or is still absent (`None`). The temp is fully written
+/// first, keeping the compare→rename window as small as the portable filesystem
+/// API allows. This prevents a normal concurrent CLI/user edit from being
+/// silently lost while Kronn is serializing a merged config.
+pub(crate) fn atomic_write_if_unchanged(
+    target: &Path,
+    content: &str,
+    observed: Option<&[u8]>,
+) -> Result<(), String> {
+    let tmp = write_atomic_temp(target, content.as_bytes())?;
+    let unchanged = match (observed, std::fs::read(target)) {
+        (Some(expected), Ok(current)) => current == expected,
+        (None, Err(e)) if e.kind() == std::io::ErrorKind::NotFound => true,
+        _ => false,
+    };
+    if !unchanged {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "{} changed concurrently while its MCP config was being merged; refusing overwrite",
+            target.display()
+        ));
+    }
+    commit_atomic_temp(&tmp, target)
 }
 
 /// File mtime as of `read_target_mtime` invocation. Returned as
@@ -451,9 +757,11 @@ pub(crate) fn atomic_write_checked(
 /// Ensure Claude Code's settings.local.json has all MCP server names in enabledMcpjsonServers.
 /// Claude Code uses this list as a whitelist — MCPs not listed are silently ignored,
 /// even when enableAllProjectMcpServers is true (known bug #24657).
-/// This function only ADDS missing entries, never removes user-configured ones.
 /// Sync `enabledMcpjsonServers` in `.claude/settings.local.json` to match
-/// the current `.mcp.json` keys exactly. This fixes the naming migration
+/// the fully merged `.mcp.json` keys exactly. Callers must pass the post-merge
+/// file, including manual user MCPs; otherwise this whitelist would silently
+/// disable entries that the safe config merge deliberately preserved.
+/// This fixes the naming migration
 /// issue (TD-20260403-mcp-naming-migration) where old keys (`server.name`)
 /// stayed in the whitelist after we switched to `config.label` as the key.
 ///
@@ -579,6 +887,7 @@ pub fn write_general_mcp_json(
     secret: &str,
     target_dir: &str,
 ) -> Result<(), String> {
+    let _sync_guard = lock_project_config_sync();
     use crate::db;
 
     let configs = db::mcps::list_configs(conn).map_err(|e| e.to_string())?;
@@ -639,7 +948,7 @@ pub fn write_general_mcp_json(
         // (no user MCPs AND the introspection script wasn't found on
         // disk — happens on Docker images that don't ship the script).
         if !data.mcp_servers.is_empty() || injected {
-            write_mcp_json(target_dir, &data)?;
+            write_owned_mcp_json_to_subpath(target_dir, ".mcp.json", &data)?;
         }
 
         // ── Kiro: .kiro/settings/mcp.json + .ai/mcp/mcp.json (filter incompatible) ──
@@ -655,17 +964,17 @@ pub fn write_general_mcp_json(
             .collect();
         let mut kiro_data = McpJsonFile { mcp_servers: kiro_servers };
         inject_kronn_internal(&mut kiro_data);
-        let _ = write_mcp_json_to_subpath(target_dir, ".kiro/settings/mcp.json", &kiro_data);
-        let _ = write_mcp_json_to_subpath(target_dir, ".ai/mcp/mcp.json", &kiro_data);
+        write_owned_mcp_json_to_subpath(target_dir, ".kiro/settings/mcp.json", &kiro_data)?;
+        write_owned_mcp_json_to_subpath(target_dir, ".ai/mcp/mcp.json", &kiro_data)?;
 
         // ── Gemini: .gemini/settings.json (full, no localhost filter for desktop) ──
         let mut full_data = McpJsonFile { mcp_servers: mcp_servers.clone() };
         inject_kronn_internal(&mut full_data);
-        let _ = write_mcp_json_to_subpath(target_dir, ".gemini/settings.json", &full_data);
+        write_owned_mcp_json_to_subpath(target_dir, ".gemini/settings.json", &full_data)?;
 
         // ── Vibe: .vibe/config.toml ──
         let server_map_owned: HashMap<String, &crate::models::McpServer> = server_map;
-        sync_vibe_project_config(target_dir, &general_configs, &server_map_owned, secret);
+        sync_vibe_project_config(target_dir, &general_configs, &server_map_owned, secret, true)?;
     }
     Ok(())
 }
@@ -680,6 +989,7 @@ pub fn sync_project_mcps_to_disk(
     project_id: &str,
     secret: &str,
 ) -> Result<(), String> {
+    let _sync_guard = lock_project_config_sync();
     use crate::db;
 
     // Get project path
@@ -785,26 +1095,18 @@ pub fn sync_project_mcps_to_disk(
         // `write_general_mcp_json` ("always write, even when only the injected
         // bridge is present"). Without this, a project with no other MCPs lost
         // kronn-internal entirely (the file was deleted) — reported 2026-06-26.
-        let resolved = resolve_host_path(&project.path);
-        if write_kronn_internal_only(&project.path) {
+        if write_kronn_internal_only(&project.path)? {
             tracing::info!("Synced kronn-internal-only MCP configs for {} (no user MCPs)", project.path);
         } else {
-            // Bridge path unresolved (host CLI safety) — remove stale JSON files.
+            // Bridge path unresolved: remove only entries whose ownership was
+            // previously recorded by Kronn. User settings and manual MCPs stay.
+            let empty = McpJsonFile { mcp_servers: HashMap::new() };
             for filename in &[".mcp.json", ".kiro/settings/mcp.json", ".gemini/settings.json", ".ai/mcp/mcp.json"] {
-                let file = std::path::Path::new(&resolved).join(filename);
-                if file.exists() {
-                    let _ = std::fs::remove_file(&file);
-                    tracing::info!("Removed {} from {} (no MCPs, bridge unresolved)", filename, project.path);
-                }
+                write_owned_mcp_json_to_subpath(&project.path, filename, &empty)?;
             }
         }
-        // Vibe has no kronn-internal bridge (prompt-injection fallback) — drop
-        // its config when there are no user MCPs.
-        let vibe = std::path::Path::new(&resolved).join(".vibe/config.toml");
-        if vibe.exists() {
-            let _ = std::fs::remove_file(&vibe);
-            tracing::info!("Removed .vibe/config.toml from {} (no MCPs)", project.path);
-        }
+        // Vibe has no kronn-internal bridge. Remove only sidecar-owned entries.
+        sync_vibe_project_config(&project.path, &configs, &server_map, secret, true)?;
     } else {
         // ── Claude Code: .mcp.json ──
         // Claude Code only supports stdio servers in .mcp.json.
@@ -819,12 +1121,13 @@ pub fn sync_project_mcps_to_disk(
         // for project-bound discussions too. Disc id is forwarded via
         // the agent process env (KRONN_DISCUSSION_ID) — see runner.rs.
         inject_kronn_internal(&mut claude_data);
-        write_mcp_json(&project.path, &claude_data)?;
+        write_owned_mcp_json_to_subpath(&project.path, ".mcp.json", &claude_data)?;
         ensure_gitignore(&project.path, ".mcp.json");
         tracing::info!("Synced .mcp.json for {} ({} stdio MCPs)", project.path, claude_data.mcp_servers.len());
 
         // ── Claude Code settings.local.json: keep enabledMcpjsonServers in sync ──
-        sync_claude_enabled_servers(&project.path, &claude_data.mcp_servers);
+        let merged_claude = read_mcp_json(&project.path).unwrap_or_else(|| claude_data.clone());
+        sync_claude_enabled_servers(&project.path, &merged_claude.mcp_servers);
 
         // Full data — but filter out localhost SSE/Streamable (unreachable in Docker)
         let docker_safe: HashMap<String, McpServerEntry> = mcp_servers.into_iter()
@@ -839,7 +1142,7 @@ pub fn sync_project_mcps_to_disk(
         let data = McpJsonFile { mcp_servers: docker_safe };
 
         // ── Vibe: .vibe/config.toml ──
-        sync_vibe_project_config(&project.path, &configs, &server_map, secret);
+        sync_vibe_project_config(&project.path, &configs, &server_map, secret, true)?;
 
         // ── Kiro: filter out incompatible servers ──
         let kiro_servers: HashMap<String, McpServerEntry> = {
@@ -870,32 +1173,22 @@ pub fn sync_project_mcps_to_disk(
         inject_kronn_internal(&mut kiro_data);
 
         // ── Kiro: .kiro/settings/mcp.json ──
-        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &kiro_data) {
-            tracing::warn!("Failed to sync Kiro MCP config: {}", e);
-        } else {
-            ensure_gitignore(&project.path, ".kiro/settings/");
-            tracing::info!("Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
-                project.path, kiro_data.mcp_servers.len(),
-                kiro_excluded_count);
-        }
+        write_owned_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &kiro_data)?;
+        ensure_gitignore(&project.path, ".kiro/settings/");
+        tracing::info!("Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
+            project.path, kiro_data.mcp_servers.len(), kiro_excluded_count);
 
         // ── Gemini CLI: .gemini/settings.json (same JSON format as Claude) ──
         let mut gemini_data = data.clone();
         inject_kronn_internal(&mut gemini_data);
-        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".gemini/settings.json", &gemini_data) {
-            tracing::warn!("Failed to sync Gemini MCP config: {}", e);
-        } else {
-            ensure_gitignore(&project.path, ".gemini/");
-            tracing::info!("Synced .gemini/settings.json for {}", project.path);
-        }
+        write_owned_mcp_json_to_subpath(&project.path, ".gemini/settings.json", &gemini_data)?;
+        ensure_gitignore(&project.path, ".gemini/");
+        tracing::info!("Synced .gemini/settings.json for {}", project.path);
 
         // ── Kiro (new format): .ai/mcp/mcp.json ──
-        if let Err(e) = write_mcp_json_to_subpath(&project.path, ".ai/mcp/mcp.json", &kiro_data) {
-            tracing::warn!("Failed to sync Kiro .ai/mcp config: {}", e);
-        } else {
-            ensure_gitignore(&project.path, ".ai/mcp/");
-            tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
-        }
+        write_owned_mcp_json_to_subpath(&project.path, ".ai/mcp/mcp.json", &kiro_data)?;
+        ensure_gitignore(&project.path, ".ai/mcp/");
+        tracing::info!("Synced .ai/mcp/mcp.json for {}", project.path);
 
         // NOTE: per-MCP usage-context files (`<docs>/operations/mcp-servers/<slug>.md`)
         // are NO LONGER auto-generated here. The plugin's usage knowledge already
@@ -987,13 +1280,109 @@ fn ensure_redirectors(project_path: &str) {
 
 // ─── Vibe per-project sync ────────────────────────────────────────────────────
 
+pub(crate) fn merge_vibe_config(
+    project_path: &str,
+    file: &Path,
+    entries: &[VibeMcpEntry],
+    previously_owned: &BTreeSet<String>,
+) -> Result<BTreeSet<String>, String> {
+    refuse_project_symlink_chain(project_path, file, "Vibe config path")?;
+    let existed = file.exists();
+    if !existed && entries.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let observed_content;
+    let mut root = if existed {
+        let raw = std::fs::read_to_string(file)
+            .map_err(|e| format!("Failed to read existing Vibe config {}: {e}", file.display()))?;
+        observed_content = Some(raw.as_bytes().to_vec());
+        match toml::from_str::<toml::Table>(&raw) {
+            Ok(table) => table,
+            Err(e) => {
+                backup_before_refusal(project_path, file)?;
+                return Err(format!("Invalid existing Vibe config {}: {e}; refusing overwrite", file.display()));
+            }
+        }
+    } else {
+        observed_content = None;
+        toml::Table::new()
+    };
+
+    let rendered = toml::Value::try_from(VibeConfig { mcp_servers: entries.to_vec() })
+        .map_err(|e| format!("Failed to serialize Vibe MCP entries: {e}"))?;
+    let desired: BTreeMap<String, toml::Value> = rendered
+        .get("mcp_servers")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|value| {
+            value.get("name").and_then(toml::Value::as_str)
+                .map(|name| (name.to_string(), value.clone()))
+        })
+        .collect();
+
+    let servers = root
+        .entry("mcp_servers".to_string())
+        .or_insert_with(|| toml::Value::Array(Vec::new()));
+    let Some(existing) = servers.as_array_mut() else {
+        backup_before_refusal(project_path, file)?;
+        return Err(format!("Existing Vibe config {} has a non-array mcp_servers field; refusing overwrite", file.display()));
+    };
+
+    existing.retain(|value| {
+        value.get("name").and_then(toml::Value::as_str)
+            .map(|name| !previously_owned.contains(name) || desired.contains_key(name))
+            .unwrap_or(true)
+    });
+
+    let mut now_owned = BTreeSet::new();
+    for (name, wanted) in desired {
+        let found = existing.iter().position(|value| {
+            value.get("name").and_then(toml::Value::as_str) == Some(name.as_str())
+        });
+        match found {
+            Some(index) if previously_owned.contains(&name) || existing[index] == wanted => {
+                existing[index] = wanted;
+                now_owned.insert(name);
+            }
+            Some(_) => {
+                tracing::warn!(
+                    "Vibe MCP config collision in {} for '{}': preserving user-owned entry",
+                    file.display(), name
+                );
+            }
+            None => {
+                existing.push(wanted);
+                now_owned.insert(name);
+            }
+        }
+    }
+
+    if existed {
+        // TOML serialization cannot preserve comments/formatting. Keep the
+        // exact first pre-merge file in ignored, mode-0600 Kronn state.
+        backup_before_refusal(project_path, file)?;
+    }
+    let content = toml::to_string_pretty(&toml::Value::Table(root))
+        .map_err(|e| format!("Failed to serialize merged Vibe config {}: {e}", file.display()))?;
+    let header = "# MCP section managed by Kronn; unrelated settings and manual MCPs are preserved.\n\n";
+    atomic_write_if_unchanged(
+        file,
+        &format!("{header}{content}"),
+        observed_content.as_deref(),
+    )?;
+    secure_file_0600(file)?;
+    Ok(now_owned)
+}
+
 /// Write .vibe/config.toml for a project with its MCP servers.
 fn sync_vibe_project_config(
     project_path: &str,
     configs: &[crate::models::McpConfig],
     server_map: &HashMap<String, &crate::models::McpServer>,
     secret: &str,
-) {
+    track_ownership: bool,
+) -> Result<(), String> {
     let mut entries = Vec::new();
 
     for config in configs {
@@ -1002,11 +1391,8 @@ fn sync_vibe_project_config(
             None => continue,
         };
 
-        let env = match decrypt_env_strict(config, secret) {
-            Ok(e) => e,
-            // Abort the whole Vibe write — see decrypt_env_strict.
-            Err(_) => return,
-        };
+        // Abort the whole Vibe write on decrypt failure — see decrypt_env_strict.
+        let env = decrypt_env_strict(config, secret)?;
 
         let name = config.label.clone();
 
@@ -1050,31 +1436,30 @@ fn sync_vibe_project_config(
     let vibe_dir = Path::new(&resolved).join(".vibe");
     let vibe_config = vibe_dir.join("config.toml");
 
-    if entries.is_empty() {
-        if vibe_config.exists() {
-            let _ = std::fs::remove_file(&vibe_config);
+    let mut state = if track_ownership {
+        load_mcp_ownership(project_path)?
+    } else {
+        McpOwnershipState::default()
+    };
+    let previous = state.files.get(".vibe/config.toml").cloned().unwrap_or_default();
+    if entries.is_empty() && !vibe_config.exists() && previous.is_empty() {
+        return Ok(());
+    }
+    refuse_project_symlink_chain(project_path, &vibe_config, "Vibe config path")?;
+    std::fs::create_dir_all(&vibe_dir)
+        .map_err(|e| format!("Failed to create .vibe dir at {}: {e}", vibe_dir.display()))?;
+    let now_owned = merge_vibe_config(project_path, &vibe_config, &entries, &previous)?;
+    if track_ownership {
+        if now_owned.is_empty() {
+            state.files.remove(".vibe/config.toml");
+        } else {
+            state.files.insert(".vibe/config.toml".to_string(), now_owned);
         }
-        return;
+        save_mcp_ownership(project_path, &state)?;
     }
-
-    if let Err(e) = std::fs::create_dir_all(&vibe_dir) {
-        tracing::warn!("Failed to create .vibe dir at {}: {}", vibe_dir.display(), e);
-        return;
-    }
-
-    let vibe_cfg = VibeConfig { mcp_servers: entries };
-    match toml::to_string_pretty(&vibe_cfg) {
-        Ok(content) => {
-            let header = "# Vibe MCP config — auto-generated by Kronn\n# Do not edit manually; changes will be overwritten on next sync.\n\n";
-            if let Err(e) = atomic_write(&vibe_config, &format!("{}{}", header, content)) {
-                tracing::warn!("Failed to write Vibe config {}: {}", vibe_config.display(), e);
-            } else {
-                ensure_gitignore(project_path, ".vibe/");
-                tracing::info!("Synced .vibe/config.toml for {}", project_path);
-            }
-        }
-        Err(e) => tracing::warn!("Failed to serialize Vibe config: {}", e),
-    }
+    ensure_gitignore(project_path, ".vibe/");
+    tracing::info!("Safely merged .vibe/config.toml for {}", project_path);
+    Ok(())
 }
 
 // ─── Codex global sync ───────────────────────────────────────────────────────
