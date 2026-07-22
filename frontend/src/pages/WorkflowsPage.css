@@ -35,6 +35,44 @@
   font-size: var(--kr-fs-md);
 }
 
+/* ── Workflow master/detail workspace ─────────────────── */
+.wf-workspace {
+  display: grid;
+  grid-template-columns: 380px minmax(0, 1fr);
+  gap: var(--kr-sp-8);
+  height: max(360px, calc(100dvh - 220px));
+  min-height: 0;
+  align-items: stretch;
+}
+
+.wf-workflow-list-pane,
+.wf-workflow-detail-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.wf-workflow-list-pane {
+  padding-right: var(--kr-sp-2);
+}
+
+.wf-workflow-detail-pane {
+  padding-right: var(--kr-sp-1);
+}
+
+.wf-workspace[data-mobile="true"] {
+  display: block;
+  height: auto;
+}
+
+.wf-workspace[data-mobile="true"] .wf-workflow-list-pane,
+.wf-workspace[data-mobile="true"] .wf-workflow-detail-pane {
+  overflow-y: visible;
+  padding-right: 0;
+}
+
 /* ── Create button ─────────────────────────────────────── */
 .wf-create-btn {
   padding: var(--kr-sp-4) var(--kr-sp-8);
@@ -68,21 +106,51 @@
 }
 .wf-create-ai-btn:hover { opacity: 0.85; }
 
+@media (max-width: 700px) {
+  .automation-page-header {
+    align-items: stretch;
+    flex-direction: column;
+    gap: var(--kr-sp-3);
+  }
+
+  .automation-header-actions {
+    flex-wrap: wrap;
+  }
+
+  .automation-header-actions > button {
+    justify-content: center;
+  }
+}
+
 /* ── Cards ─────────────────────────────────────────────── */
 .wf-card {
-  padding: 14px var(--kr-sp-8);
+  position: relative;
+  padding: var(--kr-sp-6);
   border-radius: var(--kr-r-xl);
-  background: var(--kr-bg-subtle);
+  background: linear-gradient(145deg, var(--kr-bg-subtle), var(--kr-bg-elevated));
   border: 1px solid var(--kr-border-light);
   cursor: pointer;
-  margin-bottom: var(--kr-sp-4);
+  margin-bottom: var(--kr-sp-3);
   margin-top: var(--kr-sp-3);
-  margin-left: var(--kr-sp-4);
+  margin-left: var(--kr-sp-2);
+  overflow: hidden;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.wf-card:hover {
+  border-color: var(--kr-border-strong);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
 }
 
 .wf-card[data-active="true"] {
-  background: var(--kr-accent-bg);
-  border-color: rgba(var(--kr-accent-rgb), 0.15);
+  background: linear-gradient(145deg, var(--kr-accent-bg), var(--kr-bg-elevated));
+  border-color: rgba(var(--kr-accent-rgb), 0.42);
+  box-shadow: inset 3px 0 0 var(--kr-accent);
 }
 
 /* In-flight workflows: subtle cyan glow on the left edge so the user
@@ -91,7 +159,172 @@
    secondary, peripherally-visible one. Stays subtle to avoid stealing
    attention from data-active="true" (current selection). */
 .wf-card[data-running="true"] {
-  border-left: 2px solid var(--kr-cyan);
+  border-color: rgba(var(--kr-cyan-rgb), 0.38);
+}
+
+.wf-card[data-running="true"]:not([data-active="true"]) {
+  box-shadow: inset 3px 0 0 var(--kr-cyan);
+}
+
+.wf-card-head,
+.wf-card-identity,
+.wf-card-controls,
+.wf-card-meta,
+.wf-card-footer,
+.wf-card-run-summary,
+.wf-card-actions {
+  display: flex;
+  align-items: center;
+}
+
+.wf-card-head {
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+}
+
+.wf-card-identity {
+  min-width: 0;
+  gap: var(--kr-sp-3);
+}
+
+.wf-card-identity .wf-spin {
+  flex-shrink: 0;
+  color: var(--kr-cyan);
+}
+
+.wf-card-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-card-controls {
+  flex-shrink: 0;
+  gap: 1px;
+}
+
+.wf-card-controls .wf-icon-btn {
+  border-radius: var(--kr-r-md);
+}
+
+.wf-card-controls .wf-icon-btn:hover {
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-hover);
+}
+
+.wf-card-controls .wf-icon-btn[data-active="true"] {
+  color: var(--kr-accent);
+}
+
+.wf-card-enabled-btn[data-enabled="true"] {
+  color: var(--kr-success);
+}
+
+.wf-card-meta {
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  min-height: 22px;
+  margin-top: var(--kr-sp-4);
+}
+
+.wf-card-step-count,
+.wf-needs-config-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-card-step-count {
+  color: var(--kr-text-muted);
+}
+
+.wf-needs-config-badge {
+  color: var(--kr-warning);
+}
+
+.wf-card-footer {
+  justify-content: space-between;
+  gap: var(--kr-sp-3);
+  min-height: 27px;
+  margin-top: var(--kr-sp-5);
+  padding-top: var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.wf-card-run-summary {
+  min-width: 0;
+  gap: var(--kr-sp-2);
+  overflow: hidden;
+}
+
+.wf-card-run-date,
+.wf-card-run-tokens {
+  overflow: hidden;
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-card-run-tokens {
+  flex-shrink: 0;
+}
+
+.wf-card-actions {
+  flex-shrink: 0;
+  gap: var(--kr-sp-2);
+  margin-left: auto;
+}
+
+.wf-card-run-btn,
+.wf-card-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--kr-r-md);
+  font: inherit;
+  cursor: pointer;
+}
+
+.wf-card-run-btn {
+  gap: var(--kr-sp-2);
+  padding: 4px 9px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.24);
+  color: var(--kr-accent);
+  background: var(--kr-accent-bg);
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+}
+
+.wf-card-run-btn:hover:not(:disabled) {
+  border-color: rgba(var(--kr-accent-rgb), 0.48);
+  background: var(--kr-accent-bg-hover);
+}
+
+.wf-card-run-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.wf-card-delete-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid transparent;
+  color: var(--kr-text-ghost);
+  background: transparent;
+}
+
+.wf-card-delete-btn:hover {
+  border-color: rgba(var(--kr-error-rgb), 0.2);
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.07);
 }
 
 /* ── Small button ──────────────────────────────────────── */
@@ -172,6 +405,36 @@
   border: 1px solid var(--kr-border-light);
 }
 
+.wf-detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-6);
+  margin-bottom: var(--kr-sp-8);
+}
+
+.wf-detail-heading {
+  display: flex;
+  flex: 1 1 260px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  min-width: 0;
+}
+
+.wf-detail-heading h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wf-detail-actions {
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+}
+
 .wf-info-row {
   display: flex;
   align-items: center;
@@ -220,14 +483,60 @@
   color: var(--kr-accent);
 }
 
-/* Inline variant rendered next to "→ Goto" in the on_result recap.
-   Same shape as the row badge so the user reads "Goto (3)" as
-   "jump to step 3", but slightly smaller because it sits inside
-   prose at text-xs size. */
-.wf-step-number-chip {
-  width: 16px;
-  height: 16px;
-  font-size: 10px;
+.wf-step-result-rules {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-2);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-step-result-rule {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-1);
+}
+
+.wf-goto-target-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  max-width: 220px;
+  padding: 2px 8px 2px 3px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.28);
+  border-radius: 999px;
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.wf-goto-target-chip:hover:not(:disabled) {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.14);
+}
+
+.wf-goto-target-chip:disabled {
+  cursor: default;
+}
+
+.wf-goto-target-index,
+.wf-step-origin-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  color: var(--kr-text-on-accent);
+  background: var(--kr-accent);
+  font-size: 9px;
+  font-weight: 800;
 }
 
 .wf-step-prompt-preview {
@@ -2121,8 +2430,11 @@
   font-size: var(--kr-fs-xs);
   outline: none;
 }
-.wf-runs-show-more {
-  display: block;
+.wf-runs-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-2);
   width: 100%;
   margin-top: var(--kr-sp-2);
   padding: 6px;
@@ -2133,15 +2445,37 @@
   border-radius: var(--kr-r-sm);
   cursor: pointer;
 }
-.wf-runs-show-more:hover { background: rgba(var(--kr-accent-rgb), 0.08); }
+.wf-runs-load-more:hover {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+}
+.wf-runs-load-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+.wf-runs-load-action:disabled { cursor: wait; opacity: 0.65; }
+.wf-runs-load-select {
+  padding: 2px 22px 2px 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-xs);
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-input);
+  font: inherit;
+}
 
-/* #15 — read-only branch map (Goto arcs) for branching workflows. */
+/* #15 — read-only workflow map: linear spine always, Goto arcs when present. */
 .wf-branch-map-wrap {
-  margin-bottom: var(--kr-sp-4);
-  padding: var(--kr-sp-3);
-  background: var(--kr-bg-subtle);
+  min-width: 0;
+  margin: 0;
+  padding: var(--kr-sp-4);
+  background: rgba(var(--kr-accent-rgb), 0.025);
   border: 1px solid var(--kr-border-light);
-  border-radius: var(--kr-r-sm);
+  border-radius: var(--kr-r-lg);
   overflow-x: auto;
 }
 .wf-branch-map-title {
@@ -2153,6 +2487,28 @@
 .wf-bm-spine { stroke: var(--kr-border-medium, var(--kr-border)); stroke-width: 2; }
 .wf-bm-node { fill: var(--kr-text-primary); }
 .wf-bm-node-label { fill: var(--kr-text-primary); font-size: 11px; font-family: var(--kr-font-mono, monospace); }
+.wf-bm-node-hit {
+  fill: transparent;
+  stroke: transparent;
+  transition: fill 0.12s, stroke 0.12s;
+}
+.wf-bm-node-g[role='button'] { cursor: pointer; outline: none; }
+.wf-bm-node-g[role='button']:hover .wf-bm-node-hit,
+.wf-bm-node-g[role='button']:focus-visible .wf-bm-node-hit {
+  fill: rgba(var(--kr-accent-rgb), 0.07);
+  stroke: rgba(var(--kr-accent-rgb), 0.22);
+}
+.wf-bm-node-g[data-selected='true'] .wf-bm-node-hit {
+  fill: rgba(var(--kr-accent-rgb), 0.12);
+  stroke: rgba(var(--kr-accent-rgb), 0.35);
+}
+.wf-bm-node-g[data-selected='true'] .wf-bm-node {
+  fill: var(--kr-accent);
+}
+.wf-bm-node-g[data-selected='true'] .wf-bm-node-label {
+  fill: var(--kr-accent);
+  font-weight: 700;
+}
 
 /* Goto arcs — base. Colour = identity (per-arc slot below); dash = backward
    loop (redundant with colour → A11y). Arrowhead inherits the arc's stroke via
@@ -2196,6 +2552,11 @@
   margin-top: var(--kr-sp-2);
   font-size: var(--kr-fs-2xs, 11px);
   color: var(--kr-text-muted);
+}
+
+.wf-bm-legend-linear {
+  color: var(--kr-text-faint);
+  font-style: italic;
 }
 
 /* #14 — parent-tick group accordion wrapping its sub-runs' compact rows. */
@@ -2242,22 +2603,14 @@
 }
 .wf-run-compact:hover { background: var(--kr-bg-subtle); border-color: var(--kr-border-light); }
 .wf-run-compact[aria-expanded="true"] { background: var(--kr-bg-subtle); }
-.wf-run-compact-status { font-weight: 600; color: var(--kr-text-faint); }
 /* Status colour, CSS-driven from data-status (no JS colour map dependency). */
 .wf-run-compact-dot { background: var(--kr-text-faint); }
-.wf-run-compact[data-status="Success"] .wf-run-compact-status,
 .wf-run-compact[data-status="Success"] .wf-run-compact-dot { color: var(--kr-success); background: var(--kr-success); }
-.wf-run-compact[data-status="Failed"] .wf-run-compact-status,
 .wf-run-compact[data-status="Failed"] .wf-run-compact-dot { color: var(--kr-error); background: var(--kr-error); }
-.wf-run-compact[data-status="Running"] .wf-run-compact-status,
 .wf-run-compact[data-status="Running"] .wf-run-compact-dot,
-.wf-run-compact[data-status="Pending"] .wf-run-compact-status,
 .wf-run-compact[data-status="Pending"] .wf-run-compact-dot { color: var(--kr-accent); background: var(--kr-accent); }
-.wf-run-compact[data-status="WaitingApproval"] .wf-run-compact-status,
 .wf-run-compact[data-status="WaitingApproval"] .wf-run-compact-dot,
-.wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-status,
 .wf-run-compact[data-status="StoppedByGuard"] .wf-run-compact-dot { color: var(--kr-warning); background: var(--kr-warning); }
-.wf-run-compact[data-status="Interrupted"] .wf-run-compact-status,
 .wf-run-compact[data-status="Interrupted"] .wf-run-compact-dot { color: var(--kr-text-ghost); background: var(--kr-text-ghost); }
 /* keep the status text coloured but the dot uses background only */
 .wf-run-compact-dot { border-radius: 50%; }
@@ -2491,6 +2844,67 @@
   background: rgba(var(--kr-purple-rgb, 168 85 247), 0.025);
 }
 
+.wf-subworkflow-steps {
+  margin-top: var(--kr-sp-3);
+}
+
+.wf-subworkflow-overview {
+  padding-top: var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.wf-subworkflow-overview-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  margin-bottom: var(--kr-sp-4);
+}
+
+.wf-subworkflow-overview-head > strong {
+  min-width: 0;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.wf-subworkflow-overview-kind,
+.wf-subworkflow-overview-count {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+}
+
+.wf-subworkflow-overview-kind {
+  color: var(--kr-purple);
+  background: rgba(var(--kr-purple-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-purple-rgb), 0.3);
+}
+
+.wf-subworkflow-overview-count {
+  margin-left: auto;
+  color: var(--kr-text-faint);
+  background: var(--kr-bg-elevated);
+  border: 1px solid var(--kr-border-light);
+}
+
+.wf-subworkflow-overview-grid {
+  margin-bottom: var(--kr-sp-4);
+}
+
+.wf-subworkflow-overview .wf-branch-map-wrap,
+.wf-subworkflow-overview > .wf-steps-overview > .wf-steps-pipeline {
+  background-color: var(--kr-bg-elevated);
+}
+
+.wf-subworkflow-inspector {
+  margin-top: 0;
+}
+
 .wf-step-kind-badge {
   display: inline-flex;
   align-items: center;
@@ -2542,7 +2956,12 @@
 
 /* ── Collapsed steps pipeline (WorkflowDetail) ──────────────────────────── */
 .wf-steps-section {
-  margin-bottom: 14px;
+  margin: var(--kr-sp-6) 0 var(--kr-sp-8);
+  padding: var(--kr-sp-5);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-xl);
+  background: var(--kr-bg-elevated);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
 }
 
 .wf-steps-head {
@@ -2550,7 +2969,7 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 16px 0 10px;
+  margin: 0 0 var(--kr-sp-4);
 }
 
 .wf-steps-count {
@@ -2603,10 +3022,31 @@
   align-items: center;
   flex-wrap: wrap;
   gap: 4px;
-  padding: 10px;
+  min-width: 0;
+  padding: var(--kr-sp-4);
   border: 1px solid var(--kr-border-light);
-  border-radius: 10px;
+  border-radius: var(--kr-r-lg);
   background: rgba(var(--kr-accent-rgb), 0.02);
+}
+
+.wf-steps-overview {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.85fr) minmax(340px, 1.15fr);
+  align-items: stretch;
+  gap: var(--kr-sp-4);
+  min-width: 0;
+}
+
+.wf-steps-pipeline[data-layout='index'] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-content: start;
+  gap: var(--kr-sp-2);
+}
+
+.wf-steps-pipeline[data-layout='index'] .wf-pipe-chip {
+  width: 100%;
+  max-width: none;
 }
 
 .wf-pipe-arrow {
@@ -2615,12 +3055,13 @@
 }
 
 .wf-pipe-chip {
+  position: relative;
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 1px;
+  gap: 0;
   max-width: 220px;
-  padding: 4px 11px;
+  padding: 0;
   font-size: var(--kr-fs-xs);
   font-weight: 600;
   color: var(--kr-accent);
@@ -2631,6 +3072,27 @@
   transition: filter 0.12s, transform 0.12s;
 }
 
+/* Every selected/hovered pipeline card creates a stacking context through
+   `transform`. Raise the card that owns an open agent picker, otherwise later
+   step-type chips paint over its popover even though the popover itself has a
+   z-index. */
+.wf-pipe-chip:has(.kr-agent-switch[data-open='true']) {
+  z-index: 30;
+}
+
+.wf-pipe-chip-open {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 4px 11px 2px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  cursor: pointer;
+}
+
 .wf-pipe-chip-row {
   display: inline-flex;
   align-items: center;
@@ -2638,15 +3100,12 @@
   max-width: 100%;
 }
 
-.wf-pipe-chip-agent {
-  font-size: 9.5px;
-  font-weight: 700;
-  line-height: 1.1;
-  padding-left: 19px; /* aligns under the name, past the number + icon */
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.wf-pipe-chip-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   max-width: 100%;
+  padding: 0 11px 4px 19px;
 }
 
 .wf-pipe-chip:hover {
@@ -2654,24 +3113,113 @@
   transform: translateY(-1px);
 }
 
+.wf-pipe-chip[data-selected='true'] {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.16);
+  box-shadow:
+    inset 4px 0 0 var(--kr-accent),
+    0 0 0 2px rgba(var(--kr-accent-rgb), 0.28),
+    0 7px 18px rgba(0, 0, 0, 0.13);
+  transform: translateX(4px);
+}
+
+.wf-pipe-chip[data-selected='true'] .wf-pipe-chip-num {
+  color: var(--kr-text-on-accent);
+  background: var(--kr-accent);
+}
+
 .wf-pipe-chip-num {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
   font-size: 10px;
   font-weight: 800;
-  opacity: 0.85;
+  transition: color 0.15s, background 0.15s;
 }
 
 .wf-pipe-chip-name {
+  flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
 }
 
+.wf-pipe-chip-type {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  font-size: 8.5px;
+  font-weight: 800;
+  letter-spacing: 0.025em;
+  line-height: 1.25;
+  opacity: 0.72;
+  text-transform: uppercase;
+}
+
+.wf-pipe-chip[data-selected='true'] .wf-pipe-chip-type {
+  opacity: 1;
+}
+
+.wf-pipe-chip-type[data-kind='agent'] {
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.1);
+  border-color: rgba(var(--kr-accent-rgb), 0.35);
+}
+
+.wf-pipe-chip-type[data-kind='api'] {
+  color: var(--kr-info);
+  background: rgba(var(--kr-info-rgb), 0.11);
+  border-color: rgba(var(--kr-info-rgb), 0.38);
+}
+
+.wf-pipe-chip-type[data-kind='batch-api'] {
+  color: var(--kr-cyan);
+  background: rgba(var(--kr-cyan-rgb), 0.1);
+  border-color: rgba(var(--kr-cyan-rgb), 0.36);
+}
+
+.wf-pipe-chip-type[data-kind='exec'] {
+  color: var(--kr-pink);
+  background: rgba(var(--kr-pink-rgb), 0.1);
+  border-color: rgba(var(--kr-pink-rgb), 0.36);
+}
+
+.wf-pipe-chip-type[data-kind='gate'] {
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border-color: rgba(var(--kr-warning-rgb), 0.38);
+}
+
+.wf-pipe-chip-type[data-kind='notify'] {
+  color: var(--kr-purple-soft);
+  background: rgba(var(--kr-purple-soft-rgb), 0.1);
+  border-color: rgba(var(--kr-purple-soft-rgb), 0.36);
+}
+
+.wf-pipe-chip-type[data-kind='json-data'] {
+  color: var(--kr-cyan);
+  background: rgba(var(--kr-cyan-rgb), 0.1);
+  border-color: rgba(var(--kr-cyan-rgb), 0.36);
+}
+
+.wf-pipe-chip-type[data-kind='subworkflow'],
+.wf-pipe-chip-type[data-kind='batch-qp'] {
+  color: var(--kr-purple);
+  background: rgba(var(--kr-purple-rgb), 0.1);
+  border-color: rgba(var(--kr-purple-rgb), 0.36);
+}
+
 /* Binary color = the only distinction that matters at a glance: a step
    either runs an LLM (agent → costs tokens) or it's mechanical (0 token).
-   The per-step *type* is carried by the chip's icon, not its color, so the
-   pipeline reads as two clean lanes instead of a 6-color rainbow. Mirrors
-   the agent/determ count chips in the header. */
+   The per-step *type* is carried by its icon + compact label, not its color,
+   so the pipeline reads as two clean lanes instead of a 6-color rainbow.
+   Mirrors the agent/determ count chips in the header. */
 .wf-pipe-chip[data-class='agent'] {
   color: var(--kr-accent);
   background: rgba(var(--kr-accent-rgb), 0.1);
@@ -2684,8 +3232,262 @@
   border-color: rgba(var(--kr-success-rgb), 0.3);
 }
 
-.wf-steps-detail {
-  margin-top: 10px;
+.wf-step-agent-static {
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+}
+
+.wf-pipe-chip-agent {
+  overflow: hidden;
+  max-width: 100%;
+  color: var(--kr-text-faint);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-step-inspector {
+  margin-top: var(--kr-sp-4);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-subtle);
+  overflow: hidden;
+}
+
+.wf-step-inspector-head {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border-bottom: 1px solid var(--kr-border-light);
+  background: rgba(var(--kr-accent-rgb), 0.035);
+}
+
+.wf-step-inspector-title {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wf-step-inspector-kicker {
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.wf-step-inspector-name {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-base);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-step-inspector-nav {
+  display: inline-flex;
+  gap: var(--kr-sp-2);
+}
+
+.wf-step-provenance-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 4px 9px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.28);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.wf-step-provenance-toggle svg:last-child {
+  transition: transform 0.15s;
+}
+
+.wf-step-provenance-toggle[data-expanded='true'] svg:last-child {
+  transform: rotate(180deg);
+}
+
+.wf-step-provenance-toggle:hover {
+  border-color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+}
+
+.wf-step-origins {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-5);
+  padding: var(--kr-sp-4) var(--kr-sp-5);
+  border-bottom: 1px solid var(--kr-border-light);
+  background: rgba(var(--kr-accent-rgb), 0.025);
+}
+
+.wf-step-origins-copy {
+  display: flex;
+  flex: 0 0 170px;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.wf-step-origins-copy strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-step-origins-copy span {
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.35;
+}
+
+.wf-step-origin-list {
+  display: flex;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-2);
+  min-width: 0;
+}
+
+.wf-step-origin-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  max-width: 100%;
+  padding: 3px 9px 3px 3px;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-elevated);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.wf-step-origin-chip:hover {
+  color: var(--kr-accent);
+  border-color: var(--kr-accent-border);
+}
+
+.wf-step-origin-name {
+  overflow: hidden;
+  max-width: 180px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-step-origin-condition {
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-2xs);
+}
+
+.wf-step-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 4px 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  background: var(--kr-bg-elevated);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.wf-step-nav-btn:hover:not(:disabled) {
+  color: var(--kr-accent);
+  border-color: var(--kr-accent-border);
+}
+
+.wf-step-nav-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.wf-step-inspector-body {
+  padding: var(--kr-sp-4);
+}
+
+.wf-step-inspector-body > .wf-step-card {
+  margin: 0;
+  background: transparent;
+  border-color: transparent;
+}
+
+.wf-step-card > .flex-row:first-child {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 1050px) {
+  .wf-steps-overview {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 700px) {
+  .wf-detail-panel {
+    padding: var(--kr-sp-6);
+  }
+
+  .wf-detail-header {
+    flex-direction: column;
+  }
+
+  .wf-detail-heading,
+  .wf-detail-actions {
+    width: 100%;
+  }
+
+  .wf-detail-actions {
+    justify-content: flex-start;
+  }
+
+  .wf-steps-section {
+    padding: var(--kr-sp-4);
+  }
+
+  .wf-step-inspector-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .wf-step-inspector-nav {
+    width: 100%;
+  }
+
+  .wf-step-provenance-toggle {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .wf-step-origins {
+    flex-direction: column;
+  }
+
+  .wf-step-origins-copy {
+    flex-basis: auto;
+  }
+
+  .wf-step-nav-btn {
+    flex: 1;
+    justify-content: center;
+  }
 }
 
 /* B5 (0.7.0 UX pass) — distinct status badge + paused-since counter
@@ -2704,6 +3506,64 @@
   color: var(--kr-bg-base);
   background: var(--kr-warning);
   animation: wf-pulse 2.4s ease-in-out infinite;
+}
+
+.wf-run-status-trail,
+.wf-run-status-transition {
+  display: inline-flex;
+  align-items: center;
+}
+
+.wf-run-status-trail {
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.wf-run-status-transition {
+  gap: 3px;
+}
+
+.wf-run-status-arrow {
+  color: var(--kr-text-ghost);
+}
+
+.wf-run-status-chip {
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--kr-text-ghost);
+  background: var(--kr-bg-elevated);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 700;
+}
+
+.wf-run-status-chip[data-status='Running'] {
+  color: var(--kr-cyan);
+}
+
+.wf-run-status-chip[data-status='Pending'] {
+  color: var(--kr-warning);
+}
+
+.wf-run-status-chip[data-status='Success'] {
+  color: var(--kr-success);
+}
+
+.wf-run-status-chip[data-status='Failed'] {
+  color: var(--kr-error);
+}
+
+.wf-run-status-chip[data-status='Cancelled'],
+.wf-run-status-chip[data-status='StoppedByGuard'] {
+  color: var(--kr-warning);
+}
+
+.wf-run-status-chip[data-status='WaitingApproval'] {
+  color: var(--kr-accent);
+}
+
+.wf-run-status-chip[data-current='false'] {
+  opacity: 0.72;
 }
 
 @keyframes wf-pulse {
@@ -4246,11 +5106,70 @@
   flex-direction: column;
   gap: var(--kr-sp-4);
 }
-.qp-card {
-  padding: var(--kr-sp-5) var(--kr-sp-6);
+
+.automation-list-toolbar {
+  display: flex;
+  justify-content: flex-end;
+  margin-bottom: var(--kr-sp-4);
+}
+
+.automation-filter-empty {
+  padding: var(--kr-sp-8);
+  border: 1px dashed var(--kr-border);
   border-radius: var(--kr-r-lg);
-  background: var(--kr-bg-subtle);
-  border: 1px solid var(--kr-border);
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+  text-align: center;
+}
+
+.quick-api-group-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-top: var(--kr-sp-2);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+}
+
+.quick-api-group-heading::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--kr-border);
+}
+
+.quick-api-group-heading span:last-child {
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+}
+
+.qp-card {
+  position: relative;
+  padding: var(--kr-sp-6);
+  overflow: visible;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-xl);
+  background: linear-gradient(145deg, var(--kr-bg-subtle), var(--kr-bg-elevated));
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.qp-card:hover {
+  border-color: var(--kr-border-strong);
+  box-shadow: 0 5px 18px rgba(0, 0, 0, 0.08);
+  transform: translateY(-1px);
+}
+
+.qp-card[data-kind='prompt'] {
+  box-shadow: inset 3px 0 0 rgba(var(--kr-accent-rgb), 0.72);
+}
+
+.qp-card[data-kind='api'] {
+  box-shadow: inset 3px 0 0 rgba(var(--kr-cyan-rgb), 0.72);
 }
 /* 0.8.5 — post-deploy QP focus flash. Briefly highlights the card the
    user just deployed an improved version of, via a fading accent
@@ -4264,13 +5183,13 @@
 .qp-card-metrics-chip {
   display: inline-flex;
   align-items: center;
-  margin-left: var(--kr-sp-3, 6px);
-  padding: 2px 6px;
-  font-size: 11px;
-  background: var(--kr-bg-raised);
-  border: 1px solid var(--kr-border);
-  border-radius: 4px;
-  color: var(--kr-text-primary);
+  padding: 2px 7px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: 999px;
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-hover);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 600;
   white-space: nowrap;
 }
 .qp-card-metrics-sep {
@@ -4292,39 +5211,157 @@
 .qp-card-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-5);
+}
+
+.qp-card-identity,
+.qp-card-head-controls,
+.qp-card-meta,
+.qp-card-footer,
+.qp-card-tools,
+.qp-card-primary-actions,
+.qp-card-endpoint {
+  display: flex;
+  align-items: center;
+}
+
+.qp-card-identity {
+  min-width: 0;
   gap: var(--kr-sp-4);
 }
+
 .qp-card-icon {
-  font-size: 20px;
-  flex-shrink: 0;
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-hover);
+  font-size: 18px;
 }
+
 .qp-card-name {
-  font-weight: 600;
-  font-size: var(--kr-fs-base);
-  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+  font-weight: 700;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
+
+.qp-card-head-controls {
+  flex: 0 0 auto;
+  gap: var(--kr-sp-3);
+}
+
+.qp-card-head-controls .kr-agent-switch-btn {
+  padding: 3px 7px;
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-hover);
+}
+
+.qp-card-meta {
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  min-height: 22px;
+  margin-top: var(--kr-sp-4);
+}
+
 .qp-card-vars {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
+  border-radius: 999px;
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.07);
   font-size: var(--kr-fs-xs);
-  color: var(--kr-text-muted);
-  padding: 1px var(--kr-sp-3);
-  border-radius: var(--kr-r-sm);
-  background: rgba(var(--kr-accent-rgb), 0.08);
+  font-weight: 600;
 }
+
 /* Card description (QP + QA lists). Was an unstyled <p> → inherited the
  * base paragraph size and rendered BIGGER than the title (.qp-card-name).
  * Secondary text: smaller + muted, under the header. */
 .qp-card-desc {
+  display: -webkit-box;
+  max-width: 920px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   font-size: var(--kr-fs-xs);
   color: var(--kr-text-muted);
-  margin: var(--kr-sp-2) 0 0;
+  margin: var(--kr-sp-3) 0 0 46px;
   line-height: 1.5;
 }
 
-/* Agent identity badge in the QP card header. Color comes from
- * `agentColor()` so a Codex QP is visually distinguishable from a
- * Claude Code QP at a glance. Discreet outline-style — doesn't
- * compete with the variable count or the launch CTA. */
-.qp-card-agent-badge {
+.qp-card-api-plugin {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid rgba(var(--kr-cyan-rgb), 0.24);
+  border-radius: 999px;
+  color: var(--kr-cyan);
+  background: rgba(var(--kr-cyan-rgb), 0.07);
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+}
+
+.qp-card-endpoint {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-hover);
+}
+
+.qp-card-endpoint code {
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 8px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.qp-card-method {
+  align-self: stretch;
+  padding: 2px 7px;
+  border-right: 1px solid var(--kr-border-light);
+  color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.08);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 800;
+}
+
+.qp-card-method[data-method='POST'],
+.qp-card-method[data-method='PATCH'] {
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+}
+
+.qp-card-method[data-method='PUT'] {
+  color: var(--kr-cyan);
+  background: rgba(var(--kr-cyan-rgb), 0.08);
+}
+
+.qp-card-method[data-method='DELETE'] {
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.08);
+}
+
+/* Static identity fallback when only one runnable agent exists and there is
+ * therefore nothing for the shared agent picker to switch to. */
+.qp-card-agent-static {
   font-size: var(--kr-fs-2xs);
   font-weight: 600;
   font-family: var(--kr-font-mono);
@@ -4333,28 +5370,124 @@
   border: 1px solid currentColor;
   background: transparent;
   white-space: nowrap;
-  /* `color` and `borderColor` are set inline via `agentColor()` so
-   * each agent's brand colour reads through. */
 }
-.qp-card-actions {
-  display: flex;
-  align-items: center;
+
+.qp-card-footer {
+  justify-content: space-between;
+  gap: var(--kr-sp-5);
+  min-height: 31px;
+  margin-top: var(--kr-sp-5);
+  padding-top: var(--kr-sp-4);
+  border-top: 1px solid var(--kr-border-light);
+}
+
+.qp-card-tools,
+.qp-card-primary-actions {
+  flex-wrap: wrap;
   gap: var(--kr-sp-2);
 }
-.qp-launch-btn {
-  font-size: var(--kr-fs-sm);
-  font-weight: 700;
-  padding: var(--kr-sp-2) var(--kr-sp-5);
+
+.qp-card-primary-actions {
+  justify-content: flex-end;
+  margin-left: auto;
+}
+
+.qp-card-tool-btn {
+  width: 28px;
+  height: 28px;
+  justify-content: center;
+  border: 1px solid transparent;
   border-radius: var(--kr-r-md);
-  border: none;
-  background: var(--kr-accent);
-  color: var(--kr-text-on-accent);
+}
+
+.qp-card-tool-btn:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-border-light);
+  background: var(--kr-bg-hover);
+}
+
+.qp-card-tool-btn[data-danger='true']:hover:not(:disabled) {
+  color: var(--kr-error);
+  border-color: rgba(var(--kr-error-rgb), 0.2);
+  background: rgba(var(--kr-error-rgb), 0.07);
+}
+
+.qp-card-tools .qph-cta,
+.qp-card-secondary-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-muted);
+  background: transparent;
+  font-family: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
   cursor: pointer;
-  display: flex;
+}
+
+.qp-card-tools .qph-cta:hover,
+.qp-card-secondary-btn:hover:not(:disabled) {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-border-strong);
+  background: var(--kr-bg-hover);
+}
+
+.qp-card-secondary-btn:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.qp-launch-btn {
+  min-height: 28px;
+  padding: 4px 11px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.28);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-accent);
+  background: var(--kr-accent-bg);
+  font-family: inherit;
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  cursor: pointer;
+  display: inline-flex;
   align-items: center;
   gap: 4px;
 }
-.qp-launch-btn:hover { opacity: 0.85; }
+
+.qp-launch-btn:hover:not(:disabled) {
+  border-color: rgba(var(--kr-accent-rgb), 0.48);
+  background: var(--kr-accent-bg-hover);
+}
+
+.qp-launch-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (max-width: 700px) {
+  .qp-card-header {
+    align-items: flex-start;
+  }
+
+  .qp-card-desc {
+    margin-left: 0;
+  }
+
+  .qp-card-footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .qp-card-primary-actions {
+    justify-content: flex-start;
+    margin-left: 0;
+  }
+}
+
 .qp-launch-form {
   margin-top: var(--kr-sp-4);
   padding-top: var(--kr-sp-4);

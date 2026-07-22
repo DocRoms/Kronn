@@ -12,6 +12,15 @@ make test-e2e-ui       # UI Playwright (debug visuel, headed)
 
 Vite dev server est auto-spawné par Playwright (cf. `playwright.config.ts::webServer`). Le backend doit tourner séparément.
 
+Pour valider contre une instance isolée sans toucher au Kronn local sur
+`:3140`/`:5173`, les deux ports sont configurables :
+
+```bash
+VITE_DEV_PORT=5174 \
+KRONN_BACKEND_URL=http://127.0.0.1:3146 \
+pnpm test:e2e
+```
+
 ### Navigateurs Playwright (⚠ après chaque bump de version)
 
 `pnpm test:e2e` installe automatiquement le binaire requis (via

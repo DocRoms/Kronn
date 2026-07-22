@@ -1,4 +1,4 @@
-// 0.9.0 — Global pending-learnings badge + modal trigger. Self-contained so the
+// 0.10.0 — Global pending-learnings badge + modal trigger. Self-contained so the
 // host (ChatHeader) only renders <LearningsBadge t toast />. Polls the pending
 // count; on click opens the LearningsModal with the full pending list and wires
 // Validate/Reject → api.learnings + local refresh. Hidden when count is 0 (so it

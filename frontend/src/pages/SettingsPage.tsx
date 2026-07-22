@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { useKonamiCode } from '../hooks/useKonamiCode';
 import { version as appVersion } from '../../package.json';
 import { ApiCallLogsPage } from './ApiCallLogsPage';
@@ -15,7 +15,7 @@ import {
   Layers, FolderSearch, Filter, FileText,
   Shield, Globe, Copy, Server, Mic, Volume2, HelpCircle, ChevronRight,
   Sun, Moon, Monitor, Terminal, Heart, Key, ExternalLink,
-  Minimize2, Maximize2, Maximize,
+  Minimize2, Maximize2, Maximize, Settings2, BookOpen, BarChart3,
 } from 'lucide-react';
 import { userError } from '../lib/userError';
 import { STT_MODELS, getSttModelId, setSttModelId } from '../lib/stt-models';
@@ -76,6 +76,25 @@ const LANGUAGES: { code: string; label: string; flag: string }[] = [
   { code: 'zh', label: '中文', flag: 'ZH' },
   { code: 'br', label: 'Brezhoneg', flag: 'BR' },
 ];
+
+const SETTINGS_SECTION_IDS = [
+  'settings-appearance',
+  'settings-languages',
+  'settings-voice',
+  'settings-scan',
+  'settings-sourcing',
+  'settings-continual-learning',
+  'settings-agent-config',
+  'settings-identity',
+  'settings-recovery',
+  'settings-user-context',
+  'settings-usage',
+  'settings-server',
+  'settings-debug',
+  'settings-api-audit',
+  'settings-database',
+  'settings-general',
+] as const;
 
 interface SettingsPageProps {
   agents: AgentDetection[];
@@ -201,6 +220,8 @@ export function SettingsPage({
   const [scanIgnore, setScanIgnore] = useState<string[]>([]);
   const [newScanPath, setNewScanPath] = useState('');
   const [newIgnorePattern, setNewIgnorePattern] = useState('');
+  const [activeSettingsSection, setActiveSettingsSection] = useState('settings-appearance');
+  const scrollSpyPausedUntil = useRef(0);
   const [configAccordion, setConfigAccordion] = useState<Set<string>>(() => new Set(['agents']));
   const toggleAccordion = (id: string) => setConfigAccordion(prev => {
     const next = new Set(prev);
@@ -292,48 +313,124 @@ export function SettingsPage({
     directivesApi.list().then(setAvailableDirectives).catch(() => {});
   }, []);
 
-  return (
-    <div>
-      <h1 className="set-h1"><MatrixText text="Configuration" /></h1>
-      <p className="set-meta mb-9">{t('config.subtitle')}</p>
+  // The settings page is intentionally exhaustive. Keep the section index in
+  // sync with the reader's position so the long page still feels navigable.
+  useEffect(() => {
+    let frame = 0;
+    const updateActiveSection = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (Date.now() < scrollSpyPausedUntil.current) return;
+        const available = SETTINGS_SECTION_IDS
+          .map(id => document.getElementById(id))
+          .filter((section): section is HTMLElement => section != null);
+        if (available.length === 0) return;
 
-      {/* Section navigation */}
-      <div className="set-nav">
-        {[
-          { id: 'settings-appearance', label: t('config.appearance') },
-          { id: 'settings-languages', label: 'Languages' },
-          { id: 'settings-voice', label: t('settings.voice') },
-          { id: 'settings-scan', label: 'Scan' },
-          { id: 'settings-agent-config', label: 'Agents & Skills' },
-          { id: 'settings-identity', label: t('settings.identity') },
-          { id: 'settings-recovery', label: t('settings.recovery.title') },
-          { id: 'settings-user-context', label: t('userContext.title') },
-          { id: 'settings-usage', label: t('config.usage') },
-          { id: 'settings-server', label: t('config.server') },
-          { id: 'settings-debug', label: t('settings.debugSection'), live: serverDebugMode },
-          // 0.8.6 — API audit panel. Conditional : only shows if the
-          // user actually has an API plugin configured. Pure debug
-          // surface — sits next to `settings-debug` deliberately.
-          ...(hasConfiguredApi ? [{ id: 'settings-api-audit', label: t('apiCallLogs.title') }] : []),
-          { id: 'settings-database', label: 'Database' },
-        ].map(s => (
+        const marker = window.innerHeight * 0.45;
+        let current = available[0].id;
+        for (const section of available) {
+          if (section.getBoundingClientRect().top <= marker) current = section.id;
+          else break;
+        }
+        const atPageEnd = window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 2;
+        if (atPageEnd) current = available[available.length - 1].id;
+        setActiveSettingsSection(current);
+      });
+    };
+
+    updateActiveSection();
+    window.addEventListener('scroll', updateActiveSection, { passive: true });
+    window.addEventListener('resize', updateActiveSection);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.removeEventListener('scroll', updateActiveSection);
+      window.removeEventListener('resize', updateActiveSection);
+    };
+  }, [hasConfiguredApi]);
+
+  const settingsSections = [
+    { id: 'settings-appearance', label: t('config.appearance'), icon: <Sun size={15} /> },
+    { id: 'settings-languages', label: t('config.languages'), icon: <Globe size={15} /> },
+    { id: 'settings-voice', label: t('settings.voice'), icon: <Mic size={15} /> },
+    { id: 'settings-scan', label: t('config.scan'), icon: <FolderSearch size={15} /> },
+    { id: 'settings-sourcing', label: t('config.sourcing'), icon: <Shield size={15} /> },
+    { id: 'settings-continual-learning', label: t('config.learning'), icon: <BookOpen size={15} /> },
+    { id: 'settings-agent-config', label: t('config.agentsAndSkills'), icon: <Cpu size={15} /> },
+    { id: 'settings-identity', label: t('settings.identity'), icon: <MessageSquare size={15} /> },
+    { id: 'settings-recovery', label: t('settings.recovery.title'), icon: <Key size={15} /> },
+    { id: 'settings-user-context', label: t('userContext.title'), icon: <FileText size={15} /> },
+    { id: 'settings-usage', label: t('config.usage'), icon: <BarChart3 size={15} /> },
+    { id: 'settings-server', label: t('config.server'), icon: <Server size={15} /> },
+    { id: 'settings-debug', label: t('settings.debugSection'), icon: <Terminal size={15} />, live: serverDebugMode },
+    ...(hasConfiguredApi
+      ? [{ id: 'settings-api-audit', label: t('apiCallLogs.title'), icon: <Globe size={15} /> }]
+      : []),
+    { id: 'settings-database', label: t('config.database'), icon: <HardDrive size={15} /> },
+    { id: 'settings-general', label: t('config.general'), icon: <Settings2 size={15} /> },
+  ];
+
+  return (
+    <div className="settings-page">
+      <header className="set-page-header">
+        <div>
+          <div className="set-page-eyebrow">
+            <Settings2 size={13} />
+            {t('config.controlCenter')}
+          </div>
+          <h1 className="set-h1"><MatrixText text="Configuration" /></h1>
+          <p className="set-meta">{t('config.subtitle')}</p>
+        </div>
+        <div className="set-page-summary" aria-label={t('config.summary')}>
+          <span className="set-summary-chip">
+            <Cpu size={13} />
+            {t('config.agentSummary', agents.filter(agent => agent.installed && agent.enabled).length, agents.length)}
+          </span>
+          <span className="set-summary-chip">
+            <FolderSearch size={13} />
+            {t(scanPaths.length === 1 ? 'config.scanSummaryOne' : 'config.scanSummary', scanPaths.length)}
+          </span>
+        </div>
+      </header>
+
+      <div className="set-layout">
+        {/* Persistent section index on desktop; compact horizontal rail on mobile. */}
+        <nav className="set-nav" aria-label={t('config.sections')}>
+          <div className="set-nav-title">
+            <Settings2 size={13} />
+            {t('config.sections')}
+          </div>
+          {settingsSections.map(s => (
           <button
             key={s.id}
             className="set-nav-btn"
+            aria-current={activeSettingsSection === s.id ? 'location' : undefined}
             data-live={s.live ? 'true' : undefined}
-            onClick={() => document.getElementById(s.id)?.scrollIntoView({ behavior: 'smooth' })}
+            onClick={() => {
+              setActiveSettingsSection(s.id);
+              const target = document.getElementById(s.id);
+              if (!target) return;
+              const farAway = Math.abs(target.getBoundingClientRect().top) > window.innerHeight * 2;
+              scrollSpyPausedUntil.current = Date.now() + (farAway ? 250 : 900);
+              target.scrollIntoView?.({
+                behavior: farAway ? 'auto' : 'smooth',
+                block: farAway ? 'center' : 'start',
+              });
+            }}
           >
+            <span className="set-nav-icon">{s.icon}</span>
             {s.label}
             {s.live && <span className="set-nav-live-dot" aria-hidden="true" />}
           </button>
         ))}
-      </div>
+        </nav>
+
+        <div className="set-content">
 
       {/* Appearance / Theme */}
       <div id="settings-appearance" className="set-card">
         <div className="set-section">
           {/* Card header (lg) — common to all `set-card` blocks. */}
-          <div className="flex-row gap-4 mb-4">
+          <div className="flex-row gap-4 set-section-header-lg">
             <Sun size={14} className="text-accent" />
             <span className="font-semibold text-lg">{t('config.appearance')}</span>
           </div>
@@ -449,7 +546,7 @@ export function SettingsPage({
       {/* UI Language */}
       <div id="settings-languages" className="set-card">
         <div className="set-section">
-          <div className="flex-row gap-4 mb-4">
+          <div className="flex-row gap-4 set-section-header-lg">
             <MessageSquare size={14} className="text-accent" />
             <span className="font-semibold text-lg">{t('config.uiLanguage')}</span>
           </div>
@@ -474,7 +571,7 @@ export function SettingsPage({
       {/* Output Language */}
       <div className="set-card">
         <div className="set-section">
-          <div className="flex-row gap-4 mb-4">
+          <div className="flex-row gap-4 set-section-header-lg">
             <MessageSquare size={14} className="text-accent" />
             <span className="font-semibold text-lg">{t('config.outputLanguage')}</span>
           </div>
@@ -755,7 +852,7 @@ export function SettingsPage({
           frames how agents document, not an agent-level toggle. */}
       <AntiHallucSection toast={toast} t={t} />
 
-      {/* 0.9.0 — Continual Learning master toggle (beta, default OFF). Sits next
+      {/* 0.10.0 — Continual Learning master toggle (beta, default OFF). Sits next
           to anti-hallu: it's the upstream quality gate the learnings rely on. */}
       <ContinualLearningSection toast={toast} t={t} />
 
@@ -1312,7 +1409,7 @@ export function SettingsPage({
 
       <div id="settings-server" className="set-card">
         <div className="set-section">
-          <div className="flex-row gap-4 mb-8">
+          <div className="flex-row gap-4 set-section-header-lg">
             <Server size={14} className="text-accent" />
             <span className="font-semibold text-lg">{t('config.server')}</span>
           </div>
@@ -1636,9 +1733,13 @@ export function SettingsPage({
       </div>
 
       {/* General */}
-      <div className="set-card mt-8">
+      <div id="settings-general" className="set-card mt-8">
         <div className="set-section">
-          <p className="text-muted text-md mb-8">
+          <div className="flex-row gap-4 set-section-header-lg">
+            <Settings2 size={14} className="text-accent" />
+            <span className="font-semibold text-lg">{t('config.general')}</span>
+          </div>
+          <p className="text-muted text-md mb-8 set-general-config-path">
             {t('config.configFile')} : <code className="set-code">~/.config/kronn/config.toml</code>
           </p>
           <div className="set-inner-divider" style={{ paddingTop: 16 }}>
@@ -1660,6 +1761,8 @@ export function SettingsPage({
               <Trash2 size={12} /> {t('config.reset')}
             </button>
           </div>
+        </div>
+      </div>
         </div>
       </div>
       <div className="set-footer">

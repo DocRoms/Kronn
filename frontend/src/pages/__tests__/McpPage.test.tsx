@@ -118,6 +118,89 @@ describe('McpPage', () => {
     expect(container.textContent).toContain('GitHub Secondary');
   });
 
+  it('uses the shared identity, metadata, and action hierarchy on plugin cards', () => {
+    const configs = [
+      makeConfig('c1', 'github', 'GitHub', {
+        label: 'GitHub Main',
+        env_keys: ['GITHUB_TOKEN'],
+        project_ids: ['p1'],
+        project_names: ['my-app'],
+        host_sync: 'GlobalOnly',
+      }),
+    ];
+    const overview: McpOverview = {
+      servers: [makeServer('github', 'GitHub')],
+      configs,
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const { container } = wrap(
+      <McpPage projects={[makeProject('p1', 'my-app')]} mcpOverview={overview} mcpRegistry={[]} refetchMcps={noop} />,
+    );
+
+    const card = screen.getByRole('button', { name: 'GitHub Main — Voir les détails' });
+    expect(card).toHaveAttribute('data-kind', 'mcp');
+    expect(card.querySelector('.mcp-plugin-card-identity')).toHaveTextContent('GitHub MainGitHub');
+    expect(card.querySelector('.mcp-plugin-card-meta')).toHaveTextContent(/1 projet\s+1/);
+    expect(card.querySelector('.mcp-plugin-card-footer')).toHaveTextContent('MCP');
+    expect(container.querySelector('[data-config-id="c1"]')).toBe(card);
+  });
+
+  it('combines plugin type filtering with criterion and direction sorting', () => {
+    const mcpServer = makeServer('mcp', 'MCP server');
+    const apiServer: McpServer = {
+      ...makeServer('api', 'API server'),
+      transport: 'ApiOnly',
+    };
+    const cliServer = makeServer('cli', 'CLI server');
+    const cliDefinition: McpDefinition = {
+      id: 'cli',
+      name: 'CLI server',
+      description: 'CLI server',
+      transport: cliServer.transport,
+      env_keys: [],
+      tags: ['cli'],
+      token_url: null,
+      token_help: null,
+      publisher: 'Kronn',
+      official: false,
+    };
+    const overview: McpOverview = {
+      servers: [mcpServer, apiServer, cliServer],
+      configs: [
+        makeConfig('mcp-config', 'mcp', 'MCP server', { label: 'Zulu MCP' }),
+        makeConfig('api-config', 'api', 'API server', { label: 'Alpha API' }),
+        makeConfig('cli-config', 'cli', 'CLI server', { label: 'Beta CLI' }),
+      ],
+      customized_contexts: [],
+      incompatibilities: [],
+      incomplete_configs: [],
+    };
+    const { container } = wrap(
+      <McpPage projects={[]} mcpOverview={overview} mcpRegistry={[cliDefinition]} refetchMcps={noop} />,
+    );
+    const cardOrder = () => Array.from(
+      container.querySelectorAll<HTMLElement>('.mcp-installed-card'),
+      card => card.dataset.configId,
+    );
+
+    expect(cardOrder()).toEqual(['api-config', 'cli-config', 'mcp-config']);
+    fireEvent.change(screen.getByLabelText('Trier les plugins'), {
+      target: { value: 'kind' },
+    });
+    expect(cardOrder()).toEqual(['mcp-config', 'api-config', 'cli-config']);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
+    expect(cardOrder()).toEqual(['cli-config', 'api-config', 'mcp-config']);
+
+    fireEvent.change(screen.getByLabelText('Filtrer les plugins par type'), {
+      target: { value: 'api' },
+    });
+    expect(cardOrder()).toEqual(['api-config']);
+    expect(screen.queryByTestId('mcp-kronn-internal-card')).not.toBeInTheDocument();
+  });
+
   it('shows global scope badge on global config', () => {
     const configs = [
       makeConfig('c1', 'github', 'GitHub', { is_global: true }),

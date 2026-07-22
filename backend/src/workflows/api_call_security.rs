@@ -26,7 +26,10 @@ use std::net::IpAddr;
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum SecurityError {
     #[error("Refusing to call {target_host}: plugin base URL is {expected_host}")]
-    CrossHost { target_host: String, expected_host: String },
+    CrossHost {
+        target_host: String,
+        expected_host: String,
+    },
     #[error("Target URL has no host component")]
     NoHost,
     #[error("Target URL cannot be parsed: {reason}")]
@@ -45,8 +48,14 @@ pub fn assert_host_matches_base(target: &Url, plugin_base_url: &str) -> Result<(
     let base = Url::parse(plugin_base_url).map_err(|e| SecurityError::InvalidUrl {
         reason: format!("plugin base_url invalid: {e}"),
     })?;
-    let target_host = target.host_str().ok_or(SecurityError::NoHost)?.to_ascii_lowercase();
-    let base_host = base.host_str().ok_or(SecurityError::NoHost)?.to_ascii_lowercase();
+    let target_host = target
+        .host_str()
+        .ok_or(SecurityError::NoHost)?
+        .to_ascii_lowercase();
+    let base_host = base
+        .host_str()
+        .ok_or(SecurityError::NoHost)?
+        .to_ascii_lowercase();
     if target_host != base_host {
         return Err(SecurityError::CrossHost {
             target_host,
@@ -94,7 +103,12 @@ pub async fn assert_public_ip(target: &Url) -> Result<(), SecurityError> {
     let addr_key = (host.clone(), port);
     let lookup = match tokio::net::lookup_host(addr_key).await {
         Ok(iter) => iter,
-        Err(e) => return Err(SecurityError::ResolutionFailed { host, reason: e.to_string() }),
+        Err(e) => {
+            return Err(SecurityError::ResolutionFailed {
+                host,
+                reason: e.to_string(),
+            })
+        }
     };
     for sock in lookup {
         let ip = sock.ip();
@@ -116,7 +130,7 @@ fn is_disallowed_ip(ip: &IpAddr) -> bool {
                 || v4.is_broadcast()
                 || v4.is_multicast()
                 || v4.is_unspecified()
-                || v4.is_documentation()  // 192.0.2.*, 198.51.100.*, 203.0.113.*
+                || v4.is_documentation() // 192.0.2.*, 198.51.100.*, 203.0.113.*
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()
@@ -147,16 +161,38 @@ pub struct ResolvedAuth {
 
 impl std::fmt::Debug for ResolvedAuth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let bearer_view = self.bearer.as_deref().map(mask_secret).unwrap_or_else(|| "None".into());
+        let bearer_view = self
+            .bearer
+            .as_deref()
+            .map(mask_secret)
+            .unwrap_or_else(|| "None".into());
         let header_view: HashMap<_, _> = self
             .headers
             .iter()
-            .map(|(k, v)| (k.as_str(), if looks_like_secret_key(k) { mask_secret(v) } else { v.clone() }))
+            .map(|(k, v)| {
+                (
+                    k.as_str(),
+                    if looks_like_secret_key(k) {
+                        mask_secret(v)
+                    } else {
+                        v.clone()
+                    },
+                )
+            })
             .collect();
         let query_view: HashMap<_, _> = self
             .query
             .iter()
-            .map(|(k, v)| (k.as_str(), if looks_like_secret_key(k) { mask_secret(v) } else { v.clone() }))
+            .map(|(k, v)| {
+                (
+                    k.as_str(),
+                    if looks_like_secret_key(k) {
+                        mask_secret(v)
+                    } else {
+                        v.clone()
+                    },
+                )
+            })
             .collect();
         f.debug_struct("ResolvedAuth")
             .field("bearer", &bearer_view)
@@ -180,7 +216,7 @@ pub fn looks_like_secret_key(key: &str) -> bool {
         || k == "x-api-key"
         || k == "x-cb-ak"          // Chartbeat
         || k == "x-auth-email"     // Cloudflare legacy
-        || k == "x-auth-key"       // Cloudflare legacy
+        || k == "x-auth-key" // Cloudflare legacy
 }
 
 /// Masks a secret to `"***({len} chars)"` — length enough to spot a
@@ -204,7 +240,11 @@ pub fn redact_url_query(url: &Url) -> String {
         .query_pairs()
         .map(|(k, v)| {
             let key = k.into_owned();
-            let value = if looks_like_secret_key(&key) { "***".into() } else { v.into_owned() };
+            let value = if looks_like_secret_key(&key) {
+                "***".into()
+            } else {
+                v.into_owned()
+            };
             (key, value)
         })
         .collect();
@@ -251,7 +291,10 @@ mod tests {
         let target = Url::parse("https://attacker.com/api").unwrap();
         let err = assert_host_matches_base(&target, "https://api.jira.com").unwrap_err();
         match err {
-            SecurityError::CrossHost { target_host, expected_host } => {
+            SecurityError::CrossHost {
+                target_host,
+                expected_host,
+            } => {
                 assert_eq!(target_host, "attacker.com");
                 assert_eq!(expected_host, "api.jira.com");
             }
@@ -328,7 +371,14 @@ mod tests {
 
     #[test]
     fn is_disallowed_ip_covers_v4_ranges() {
-        for blocked in ["127.0.0.1", "10.0.0.1", "172.16.0.1", "192.168.1.1", "169.254.1.1", "0.0.0.0"] {
+        for blocked in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "0.0.0.0",
+        ] {
             let ip: IpAddr = blocked.parse().unwrap();
             assert!(is_disallowed_ip(&ip), "expected {blocked} to be disallowed");
         }
@@ -364,10 +414,20 @@ mod tests {
         let mut query = HashMap::new();
         query.insert("apikey".into(), "google-secret-api-key".into());
         query.insert("q".into(), "cats".into());
-        let auth = ResolvedAuth { bearer: None, headers, query };
+        let auth = ResolvedAuth {
+            bearer: None,
+            headers,
+            query,
+        };
         let dbg = format!("{auth:?}");
-        assert!(!dbg.contains("chartbeat-secret-key"), "header secret leaked: {dbg}");
-        assert!(!dbg.contains("google-secret-api-key"), "query secret leaked: {dbg}");
+        assert!(
+            !dbg.contains("chartbeat-secret-key"),
+            "header secret leaked: {dbg}"
+        );
+        assert!(
+            !dbg.contains("google-secret-api-key"),
+            "query secret leaked: {dbg}"
+        );
         // Non-secret fields must survive intact to keep debug useful.
         assert!(dbg.contains("Kronn/0.5.2"));
         assert!(dbg.contains("cats"));
@@ -393,15 +453,28 @@ mod tests {
 
     #[test]
     fn looks_like_secret_key_catches_common_names() {
-        for key in ["Authorization", "X-Api-Key", "api_key", "APIKEY", "access_token", "client_secret"] {
-            assert!(looks_like_secret_key(key), "{key} should look like a secret");
+        for key in [
+            "Authorization",
+            "X-Api-Key",
+            "api_key",
+            "APIKEY",
+            "access_token",
+            "client_secret",
+        ] {
+            assert!(
+                looks_like_secret_key(key),
+                "{key} should look like a secret"
+            );
         }
     }
 
     #[test]
     fn looks_like_secret_key_leaves_benign_keys_alone() {
         for key in ["User-Agent", "Content-Type", "Accept", "q", "limit"] {
-            assert!(!looks_like_secret_key(key), "{key} should be considered benign");
+            assert!(
+                !looks_like_secret_key(key),
+                "{key} should be considered benign"
+            );
         }
     }
 
@@ -413,7 +486,10 @@ mod tests {
             "https://api.chartbeat.com/live/toppages/v4?apikey=supersecret&host=euronews.com&limit=5",
         ).unwrap();
         let redacted = redact_url_query(&url);
-        assert!(!redacted.contains("supersecret"), "apikey leaked: {redacted}");
+        assert!(
+            !redacted.contains("supersecret"),
+            "apikey leaked: {redacted}"
+        );
         assert!(redacted.contains("apikey=***"));
         assert!(redacted.contains("host=euronews.com"));
         assert!(redacted.contains("limit=5"));

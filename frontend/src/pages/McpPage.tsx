@@ -13,11 +13,12 @@ import { Dropdown } from '../components/Dropdown';
 import { SecretField } from '../components/SecretField';
 import {
   Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
-  X, Key, Pencil, FileText, ExternalLink, Save, Search, ArrowDownAZ, ArrowDownZA,
-  Plug, Globe, Info, Sparkles, Upload, Download,
+  X, Key, Pencil, FileText, ExternalLink, Save, Search,
+  Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
+import { ListControls } from '../components/ListControls';
 
 /**
  * Compact "what kind of plugin is this" badge — shown on each installed
@@ -38,9 +39,9 @@ function PluginKindBadge({ kind }: { kind: PluginKind }) {
     : { label: '🔌 MCP', tooltip: 'MCP plugin — tools synced to `.mcp.json` and friends. The "Portée CLI locale" toggle controls whether this entry is mirrored into ~/.claude.json, ~/.gemini/settings.json, etc.' };
   return (
     <span
-      className="mcp-scope-badge"
+      className="mcp-scope-badge mcp-kind-badge"
+      data-kind={kind}
       title={meta.tooltip}
-      style={{ fontSize: '0.75em' }}
     >
       {meta.label}
     </span>
@@ -241,15 +242,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [contextSaving, setContextSaving] = useState(false);
   // Search & detail panel
   const [mcpSearch, setMcpSearch] = useState('');
-  const [mcpSort, setMcpSort] = useState<'az' | 'za'>(() => {
+  const [mcpSort, setMcpSort] = useState<'name' | 'kind' | 'scope'>('name');
+  const [mcpSortReversed, setMcpSortReversed] = useState(() => {
     try {
       const saved = localStorage.getItem('kronn:mcpSort');
-      return saved === 'za' ? 'za' : 'az';
-    } catch { return 'az'; }
+      return saved === 'za';
+    } catch { return false; }
   });
+  const [mcpKindFilter, setMcpKindFilter] = useState<'all' | 'mcp' | 'api' | 'cli'>('all');
   useEffect(() => {
-    try { localStorage.setItem('kronn:mcpSort', mcpSort); } catch { /* localStorage disabled (incognito / quota) — sort defaults to az on next load */ }
-  }, [mcpSort]);
+    try {
+      localStorage.setItem('kronn:mcpSort', mcpSortReversed ? 'za' : 'az');
+    } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
+  }, [mcpSortReversed]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
 
   // Open a specific config when navigated from another page (e.g. ProjectCard)
@@ -949,6 +954,51 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const { servers, configs } = mcpOverview;
   const totalConfigs = configs.length;
   const globalConfigs = configs.filter(c => c.is_global);
+  const serverById = new Map(servers.map(server => [server.id, server]));
+  const registryById = new Map(mcpRegistry.map(definition => [definition.id, definition]));
+  const kindForServer = (serverId: string): PluginKind => {
+    const descriptor = registryById.get(serverId) ?? serverById.get(serverId);
+    return descriptor ? pluginKind(descriptor) : 'mcp';
+  };
+  const visibleConfigs = [...configs]
+    .filter(cfg => {
+      const kind = kindForServer(cfg.server_id);
+      const matchesKind = mcpKindFilter === 'all'
+        || (mcpKindFilter === 'mcp' && (kind === 'mcp' || kind === 'hybrid'))
+        || (mcpKindFilter === 'api' && (kind === 'api' || kind === 'hybrid'))
+        || (mcpKindFilter === 'cli' && kind === 'cli');
+      if (!matchesKind) return false;
+      if (!mcpSearch) return true;
+      const search = mcpSearch.toLowerCase();
+      return cfg.label.toLowerCase().includes(search)
+        || cfg.server_name.toLowerCase().includes(search)
+        || cfg.project_names.some(name => name.toLowerCase().includes(search));
+    })
+    .sort((a, b) => {
+      const aKind = kindForServer(a.server_id);
+      const bKind = kindForServer(b.server_id);
+      const byName = a.label.localeCompare(b.label, undefined, {
+        sensitivity: 'base',
+        numeric: true,
+      });
+      let result: number;
+      if (mcpSort === 'kind') {
+        const order: Record<PluginKind, number> = {
+          mcp: 0,
+          hybrid: 1,
+          api: 2,
+          cli: 3,
+        };
+        result = order[aKind] - order[bKind] || byName;
+      } else if (mcpSort === 'scope') {
+        const aScope = a.is_global ? Number.MAX_SAFE_INTEGER : a.project_ids.length;
+        const bScope = b.is_global ? Number.MAX_SAFE_INTEGER : b.project_ids.length;
+        result = bScope - aScope || byName;
+      } else {
+        result = byName;
+      }
+      return mcpSortReversed ? -result : result;
+    });
 
   const configsByServer = new Map<string, { serverId: string; serverName: string; configs: McpConfigDisplay[] }>();
   for (const c of configs) {
@@ -1507,7 +1557,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
             {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
           </p>
         </div>
-        <div className="flex-row gap-4">
+        <div className="flex-row gap-4 mcp-header-actions">
           <button className="mcp-btn-action mcp-btn-action-primary" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
@@ -1985,33 +2035,55 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         </div>
       )}
 
-      {/* ── Search bar ── */}
-      {totalConfigs > 3 && (
-        <div className="mcp-search-wrap">
-          <Search size={14} className="mcp-search-icon" />
-          <input
-            className="input mcp-search-input"
-            placeholder={t('mcp.search')}
-            value={mcpSearch}
-            onChange={(e) => setMcpSearch(e.target.value)}
-          />
-          {mcpSearch && (
-            <button
-              className="mcp-search-clear"
-              onClick={() => setMcpSearch('')}
-              aria-label="Clear search"
-            >
-              <X size={12} />
-            </button>
+      {/* ── Shared search / filter / sort toolbar ── */}
+      {totalConfigs > 1 && (
+        <div className="mcp-list-toolbar">
+          {totalConfigs > 3 && (
+            <div className="mcp-search-wrap">
+              <Search size={14} className="mcp-search-icon" />
+              <input
+                className="input mcp-search-input"
+                placeholder={t('mcp.search')}
+                value={mcpSearch}
+                onChange={(e) => setMcpSearch(e.target.value)}
+              />
+              {mcpSearch && (
+                <button
+                  className="mcp-search-clear"
+                  onClick={() => setMcpSearch('')}
+                  aria-label={t('mcp.clearSearch')}
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
           )}
-          <button
-            className="mcp-btn-action mcp-sort-toggle"
-            onClick={() => setMcpSort(mcpSort === 'az' ? 'za' : 'az')}
-            title={mcpSort === 'az' ? t('mcp.sortAz') : t('mcp.sortZa')}
-            aria-label={mcpSort === 'az' ? t('mcp.sortAz') : t('mcp.sortZa')}
-          >
-            {mcpSort === 'az' ? <ArrowDownAZ size={14} /> : <ArrowDownZA size={14} />}
-          </button>
+          <ListControls
+            filterLabel={t('automation.filter.label')}
+            filterAriaLabel={t('mcp.filterKind')}
+            filterValue={mcpKindFilter}
+            filterOptions={[
+              { value: 'all', label: t('mcp.kindFilter.all') },
+              { value: 'mcp', label: t('mcp.kindFilter.mcp') },
+              { value: 'api', label: t('mcp.kindFilter.api') },
+              { value: 'cli', label: t('mcp.kindFilter.cli') },
+            ]}
+            onFilterChange={setMcpKindFilter}
+            sortLabel={t('automation.sort.label')}
+            sortAriaLabel={t('mcp.sortLabel')}
+            sortValue={mcpSort}
+            sortOptions={[
+              { value: 'name', label: t('automation.sort.name') },
+              { value: 'kind', label: t('mcp.sortKind') },
+              { value: 'scope', label: t('mcp.sortScope') },
+            ]}
+            onSortChange={setMcpSort}
+            reversed={mcpSortReversed}
+            onToggleDirection={() => setMcpSortReversed(value => !value)}
+            directionLabel={t(mcpSortReversed
+              ? 'automation.sort.restoreDirection'
+              : 'automation.sort.reverseDirection')}
+          />
         </div>
       )}
 
@@ -2021,35 +2093,35 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       {/* ── Built-in system MCP: kronn-internal (discussion introspection) is
              auto-injected into every project, not user-installable. Shown as a
              read-only card in the main view (no add/config/link flow). ── */}
-      {!showAddMcp && (
-        <div className="mcp-card" data-testid="mcp-kronn-internal-card" title={t('mcp.builtin.tooltip')}>
-          <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
-            <Plug size={18} className="text-accent" />
-            <div className="flex-1">
-              <div className="flex-row gap-3" style={{ alignItems: 'center' }}>
-                <span className="font-semibold">{t('mcp.builtin.tileTitle')}</span>
-                <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>
-              </div>
-              <div className="text-xs text-faint mt-2">{t('mcp.builtin.tileDesc')}</div>
+      {!showAddMcp
+        && (mcpKindFilter === 'all' || mcpKindFilter === 'mcp')
+        && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()))
+        && (
+        <div
+          className="mcp-card mcp-builtin-card"
+          data-kind="mcp"
+          data-testid="mcp-kronn-internal-card"
+          title={t('mcp.builtin.tooltip')}
+        >
+          <div className="mcp-plugin-card-header">
+            <span className="mcp-plugin-card-icon"><Plug size={17} /></span>
+            <div className="mcp-plugin-card-identity">
+              <span className="mcp-installed-name">{t('mcp.builtin.tileTitle')}</span>
+              <span className="mcp-plugin-card-server">{t('mcp.builtin.tileCat')}</span>
             </div>
+            <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>
           </div>
+          <p className="mcp-builtin-desc">{t('mcp.builtin.tileDesc')}</p>
         </div>
       )}
 
       {/* ── Installed plugins grid (detail expands inline) ── */}
       {totalConfigs > 0 ? (
         <div className="mcp-installed-grid">
-          {[...configs]
-            .sort((a, b) => {
-              const cmp = a.label.localeCompare(b.label, undefined, { sensitivity: 'base' });
-              return mcpSort === 'az' ? cmp : -cmp;
-            })
-            .filter(cfg => {
-              if (!mcpSearch) return true;
-              const s = mcpSearch.toLowerCase();
-              return cfg.label.toLowerCase().includes(s) || cfg.server_name.toLowerCase().includes(s) || cfg.project_names.some(n => n.toLowerCase().includes(s));
-            })
-            .flatMap(cfg => {
+          {visibleConfigs.length === 0 && (
+            <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>
+          )}
+          {visibleConfigs.flatMap(cfg => {
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
               // 0.7.0 — derive plugin kind from the server registry so
@@ -2057,34 +2129,53 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
               // injected into prompts, never written to ~/.claude.json
               // & co — showing a "Sync CLI" toggle on them was a UX bug).
               const cfgServer = mcpOverview.servers.find(s => s.id === cfg.server_id);
-              const cfgKind: PluginKind = cfgServer ? pluginKind(cfgServer) : 'mcp';
+              const cfgKind = kindForServer(cfg.server_id);
               const supportsHostSync = cfgKind !== 'api';
 
               const card = (
-                <div
+                <button
+                  type="button"
                   key={cfg.id}
                   className={`mcp-installed-card${isSelected ? ' mcp-installed-card-selected' : ''}`}
+                  data-kind={cfgKind}
+                  data-config-id={cfg.id}
                   onClick={() => setSelectedConfigId(isSelected ? null : cfg.id)}
+                  aria-label={`${cfg.label} — ${t('mcp.openDetails')}`}
                 >
-                  <div className="mcp-installed-top">
-                    <div className="mcp-registry-card-icon"><Puzzle size={16} /></div>
-                    <div className="flex-1" style={{ minWidth: 0 }}>
-                      <div className="mcp-installed-name">{cfg.label}</div>
-                      <div className="mcp-installed-scope">
-                        {cfg.is_global
-                          ? <span className="mcp-scope-badge mcp-scope-global">Global</span>
-                          : linkedProjects > 0
-                            ? <span className="mcp-scope-badge mcp-scope-projects">{linkedProjects} {linkedProjects > 1 ? t('mcp.projectPlural') : t('mcp.project')}</span>
-                            : <span className="mcp-scope-badge mcp-scope-none">{t('wiz.noProject')}</span>
-                        }
-                        {cfg.env_keys.length > 0 && <span className="mcp-installed-keys"><Key size={9} /> {cfg.env_keys.length}</span>}
-                        {cfg.secrets_broken && <span className="mcp-scope-badge" style={{ color: 'var(--kr-warning)', borderColor: 'rgba(var(--kr-warning-rgb), 0.3)' }} title={t('mcp.secretsBroken')}>⚠ {t('mcp.secretsBrokenShort')}</span>}
-                        <PluginKindBadge kind={cfgKind} />
-                        {supportsHostSync && <HostSyncChip mode={cfg.host_sync} />}
-                      </div>
+                  <div className="mcp-plugin-card-header">
+                    <span className="mcp-plugin-card-icon"><Puzzle size={16} /></span>
+                    <div className="mcp-plugin-card-identity">
+                      <span className="mcp-installed-name">{cfg.label}</span>
+                      {cfg.server_name !== cfg.label && (
+                        <span className="mcp-plugin-card-server">{cfg.server_name}</span>
+                      )}
                     </div>
+                    <ChevronRight size={15} className="mcp-plugin-card-chevron" />
                   </div>
-                </div>
+
+                  <div className="mcp-plugin-card-meta">
+                    {cfg.is_global
+                      ? <span className="mcp-scope-badge mcp-scope-global">Global</span>
+                      : linkedProjects > 0
+                        ? <span className="mcp-scope-badge mcp-scope-projects">{linkedProjects} {linkedProjects > 1 ? t('mcp.projectPlural') : t('mcp.project')}</span>
+                        : <span className="mcp-scope-badge mcp-scope-none">{t('wiz.noProject')}</span>
+                    }
+                    {cfg.env_keys.length > 0 && (
+                      <span className="mcp-installed-keys"><Key size={10} /> {cfg.env_keys.length}</span>
+                    )}
+                    {cfg.secrets_broken && (
+                      <span className="mcp-scope-badge mcp-scope-broken" title={t('mcp.secretsBroken')}>
+                        ⚠ {t('mcp.secretsBrokenShort')}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mcp-plugin-card-footer">
+                    <PluginKindBadge kind={cfgKind} />
+                    {supportsHostSync && <HostSyncChip mode={cfg.host_sync} />}
+                    <span className="mcp-plugin-card-open">{t('mcp.openDetails')}</span>
+                  </div>
+                </button>
               );
 
               if (!isSelected) return [card];

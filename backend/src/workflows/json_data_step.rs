@@ -71,11 +71,7 @@ pub async fn execute_json_data_step(step: &WorkflowStep) -> StepOutcome {
     // and the run-log viewer see the same structure regardless of
     // which step type produced the data. Cf.
     // [[project_step_output_homogenisation_0_9_0]].
-    let output = super::step_output_format::format_step_output_simple(
-        payload,
-        "OK",
-        &summary,
-    );
+    let output = super::step_output_format::format_step_output_simple(payload, "OK", &summary);
 
     // 2026-06-10 audit P1 — honour `on_result` rules here too (the runner
     // only acts on `outcome.condition_action`; None = declared rules dead).

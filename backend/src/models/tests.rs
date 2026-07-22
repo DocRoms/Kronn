@@ -9,8 +9,20 @@ fn active_key_for_finds_active() {
         openai: None,
         google: None,
         keys: vec![
-            ApiKey { id: "1".into(), name: "k1".into(), provider: "anthropic".into(), value: "sk-ant-123".into(), active: true },
-            ApiKey { id: "2".into(), name: "k2".into(), provider: "openai".into(), value: "sk-oai-456".into(), active: false },
+            ApiKey {
+                id: "1".into(),
+                name: "k1".into(),
+                provider: "anthropic".into(),
+                value: "sk-ant-123".into(),
+                active: true,
+            },
+            ApiKey {
+                id: "2".into(),
+                name: "k2".into(),
+                provider: "openai".into(),
+                value: "sk-oai-456".into(),
+                active: false,
+            },
         ],
         disabled_overrides: vec![],
     };
@@ -22,7 +34,9 @@ fn active_key_for_finds_active() {
 #[test]
 fn active_key_for_empty_keys() {
     let config = TokensConfig {
-        anthropic: None, openai: None, google: None,
+        anthropic: None,
+        openai: None,
+        google: None,
         keys: vec![],
         disabled_overrides: vec![],
     };
@@ -32,10 +46,24 @@ fn active_key_for_empty_keys() {
 #[test]
 fn active_key_for_multiple_same_provider() {
     let config = TokensConfig {
-        anthropic: None, openai: None, google: None,
+        anthropic: None,
+        openai: None,
+        google: None,
         keys: vec![
-            ApiKey { id: "1".into(), name: "old".into(), provider: "anthropic".into(), value: "old-key".into(), active: false },
-            ApiKey { id: "2".into(), name: "new".into(), provider: "anthropic".into(), value: "new-key".into(), active: true },
+            ApiKey {
+                id: "1".into(),
+                name: "old".into(),
+                provider: "anthropic".into(),
+                value: "old-key".into(),
+                active: false,
+            },
+            ApiKey {
+                id: "2".into(),
+                name: "new".into(),
+                provider: "anthropic".into(),
+                value: "new-key".into(),
+                active: true,
+            },
         ],
         disabled_overrides: vec![],
     };
@@ -63,8 +91,14 @@ fn agent_type_roundtrip() {
 
 #[test]
 fn agent_type_json_format() {
-    assert_eq!(serde_json::to_string(&AgentType::ClaudeCode).unwrap(), "\"ClaudeCode\"");
-    assert_eq!(serde_json::to_string(&AgentType::GeminiCli).unwrap(), "\"GeminiCli\"");
+    assert_eq!(
+        serde_json::to_string(&AgentType::ClaudeCode).unwrap(),
+        "\"ClaudeCode\""
+    );
+    assert_eq!(
+        serde_json::to_string(&AgentType::GeminiCli).unwrap(),
+        "\"GeminiCli\""
+    );
 }
 
 // ─── WorkflowTrigger serialization ───────────────────────────────────────
@@ -79,7 +113,9 @@ fn workflow_trigger_manual_roundtrip() {
 
 #[test]
 fn workflow_trigger_cron_roundtrip() {
-    let trigger = WorkflowTrigger::Cron { schedule: "0 * * * *".into() };
+    let trigger = WorkflowTrigger::Cron {
+        schedule: "0 * * * *".into(),
+    };
     let json = serde_json::to_string(&trigger).unwrap();
     let parsed: WorkflowTrigger = serde_json::from_str(&json).unwrap();
     match parsed {
@@ -136,12 +172,18 @@ fn workflow_step_without_step_type_defaults_to_agent() {
 
 #[test]
 fn condition_action_goto_roundtrip() {
-    let action = ConditionAction::Goto { step_name: "step2".into(), max_iterations: None };
+    let action = ConditionAction::Goto {
+        step_name: "step2".into(),
+        max_iterations: None,
+    };
     let json = serde_json::to_string(&action).unwrap();
     assert!(json.contains("Goto"));
     let parsed: ConditionAction = serde_json::from_str(&json).unwrap();
     match parsed {
-        ConditionAction::Goto { step_name, max_iterations } => {
+        ConditionAction::Goto {
+            step_name,
+            max_iterations,
+        } => {
             assert_eq!(step_name, "step2");
             assert_eq!(max_iterations, None);
         }
@@ -160,7 +202,10 @@ fn condition_action_goto_with_max_iterations_roundtrip() {
     assert!(json.contains("5"));
     let parsed: ConditionAction = serde_json::from_str(&json).unwrap();
     match parsed {
-        ConditionAction::Goto { step_name, max_iterations } => {
+        ConditionAction::Goto {
+            step_name,
+            max_iterations,
+        } => {
             assert_eq!(step_name, "implement");
             assert_eq!(max_iterations, Some(5));
         }
@@ -176,7 +221,10 @@ fn condition_action_goto_back_compat_no_max() {
     let json = r#"{"type":"Goto","step_name":"implement"}"#;
     let parsed: ConditionAction = serde_json::from_str(json).unwrap();
     match parsed {
-        ConditionAction::Goto { step_name, max_iterations } => {
+        ConditionAction::Goto {
+            step_name,
+            max_iterations,
+        } => {
             assert_eq!(step_name, "implement");
             assert_eq!(max_iterations, None);
         }
@@ -207,8 +255,12 @@ fn api_response_err() {
 #[test]
 fn run_status_roundtrip() {
     let statuses = vec![
-        RunStatus::Pending, RunStatus::Running, RunStatus::Success,
-        RunStatus::Failed, RunStatus::Cancelled, RunStatus::WaitingApproval,
+        RunStatus::Pending,
+        RunStatus::Running,
+        RunStatus::Success,
+        RunStatus::Failed,
+        RunStatus::Cancelled,
+        RunStatus::WaitingApproval,
     ];
     for s in &statuses {
         let json = serde_json::to_string(s).unwrap();
@@ -237,7 +289,11 @@ fn tokens_config_legacy_fields_not_serialized() {
     };
     let toml_str = toml::to_string(&config).unwrap();
     // Legacy fields have skip_serializing, should NOT appear in output
-    assert!(!toml_str.contains("anthropic"), "Legacy field 'anthropic' should not be serialized: {}", toml_str);
+    assert!(
+        !toml_str.contains("anthropic"),
+        "Legacy field 'anthropic' should not be serialized: {}",
+        toml_str
+    );
 }
 
 #[test]
@@ -256,9 +312,13 @@ fn tokens_config_keys_toml_roundtrip() {
         anthropic: None,
         openai: None,
         google: None,
-        keys: vec![
-            ApiKey { id: "1".into(), name: "My Key".into(), provider: "openai".into(), value: "sk-test-123".into(), active: true },
-        ],
+        keys: vec![ApiKey {
+            id: "1".into(),
+            name: "My Key".into(),
+            provider: "openai".into(),
+            value: "sk-test-123".into(),
+            active: true,
+        }],
         disabled_overrides: vec!["google".into()],
     };
     let toml_str = toml::to_string_pretty(&config).unwrap();
@@ -292,7 +352,9 @@ fn mcp_transport_stdio_roundtrip() {
 
 #[test]
 fn mcp_transport_sse_roundtrip() {
-    let t = McpTransport::Sse { url: "https://mcp.linear.app/sse".into() };
+    let t = McpTransport::Sse {
+        url: "https://mcp.linear.app/sse".into(),
+    };
     let json = serde_json::to_string(&t).unwrap();
     let parsed: McpTransport = serde_json::from_str(&json).unwrap();
     match parsed {
@@ -306,13 +368,34 @@ fn mcp_transport_sse_roundtrip() {
 #[test]
 fn full_access_for_returns_per_agent_setting() {
     let config = AgentsConfig {
-        claude_code: AgentConfig { full_access: true, ..Default::default() },
-        codex: AgentConfig { full_access: false, ..Default::default() },
-        gemini_cli: AgentConfig { full_access: true, ..Default::default() },
-        kiro: AgentConfig { full_access: false, ..Default::default() },
-        vibe: AgentConfig { full_access: true, ..Default::default() },
-        copilot_cli: AgentConfig { full_access: false, ..Default::default() },
-        ollama: AgentConfig { full_access: true, ..Default::default() },
+        claude_code: AgentConfig {
+            full_access: true,
+            ..Default::default()
+        },
+        codex: AgentConfig {
+            full_access: false,
+            ..Default::default()
+        },
+        gemini_cli: AgentConfig {
+            full_access: true,
+            ..Default::default()
+        },
+        kiro: AgentConfig {
+            full_access: false,
+            ..Default::default()
+        },
+        vibe: AgentConfig {
+            full_access: true,
+            ..Default::default()
+        },
+        copilot_cli: AgentConfig {
+            full_access: false,
+            ..Default::default()
+        },
+        ollama: AgentConfig {
+            full_access: true,
+            ..Default::default()
+        },
         model_tiers: Default::default(),
     };
     assert!(config.full_access_for(&AgentType::ClaudeCode));
@@ -338,7 +421,11 @@ fn ws_message_presence_round_trip() {
     assert!(json.contains("PeerAlpha"));
     let parsed: WsMessage = serde_json::from_str(&json).unwrap();
     match parsed {
-        WsMessage::Presence { from_pseudo, online, .. } => {
+        WsMessage::Presence {
+            from_pseudo,
+            online,
+            ..
+        } => {
             assert_eq!(from_pseudo, "PeerAlpha");
             assert!(online);
         }
@@ -348,7 +435,9 @@ fn ws_message_presence_round_trip() {
 
 #[test]
 fn ws_message_ping_pong_round_trip() {
-    let ping = WsMessage::Ping { timestamp: 1711000000 };
+    let ping = WsMessage::Ping {
+        timestamp: 1711000000,
+    };
     let json = serde_json::to_string(&ping).unwrap();
     assert!(json.contains(r#""type":"ping""#));
     let parsed: WsMessage = serde_json::from_str(&json).unwrap();
@@ -357,7 +446,9 @@ fn ws_message_ping_pong_round_trip() {
         _ => panic!("Expected Ping variant"),
     }
 
-    let pong = WsMessage::Pong { timestamp: 1711000001 };
+    let pong = WsMessage::Pong {
+        timestamp: 1711000001,
+    };
     let json = serde_json::to_string(&pong).unwrap();
     assert!(json.contains(r#""type":"pong""#));
     let parsed: WsMessage = serde_json::from_str(&json).unwrap();
@@ -377,7 +468,11 @@ fn ws_message_presence_offline() {
     let json = serde_json::to_string(&msg).unwrap();
     let parsed: WsMessage = serde_json::from_str(&json).unwrap();
     match parsed {
-        WsMessage::Presence { from_pseudo, online, .. } => {
+        WsMessage::Presence {
+            from_pseudo,
+            online,
+            ..
+        } => {
             assert_eq!(from_pseudo, "PeerBeta");
             assert!(!online);
         }
@@ -403,7 +498,14 @@ fn ws_message_workflow_run_updated_round_trip() {
     assert!(json.contains(r#""step_index":2"#));
     let parsed: WsMessage = serde_json::from_str(&json).unwrap();
     match parsed {
-        WsMessage::WorkflowRunUpdated { run_id, workflow_id, status, step_index, total_steps, current_step } => {
+        WsMessage::WorkflowRunUpdated {
+            run_id,
+            workflow_id,
+            status,
+            step_index,
+            total_steps,
+            current_step,
+        } => {
             assert_eq!(run_id, "run_test_001");
             assert_eq!(workflow_id, "wf_test_001");
             assert_eq!(status, "WaitingApproval");
@@ -457,9 +559,16 @@ fn extract_spec_roundtrip_full() {
 fn extract_spec_roundtrip_minimal_omits_fallback() {
     // `fallback: None` should serialize as absent (skip_serializing_if),
     // not as explicit `null`. Keeps the wire format clean for users.
-    let spec = ExtractSpec { path: "$.total".into(), fallback: None, fail_on_empty: false };
+    let spec = ExtractSpec {
+        path: "$.total".into(),
+        fallback: None,
+        fail_on_empty: false,
+    };
     let json = serde_json::to_string(&spec).unwrap();
-    assert!(!json.contains("fallback"), "expected fallback absent from output, got {json}");
+    assert!(
+        !json.contains("fallback"),
+        "expected fallback absent from output, got {json}"
+    );
     let parsed: ExtractSpec = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed, spec);
 }
@@ -485,11 +594,19 @@ fn extract_spec_deserializes_when_fail_on_empty_absent() {
 fn pagination_spec_none_and_auto_roundtrip() {
     for (spec, expected_substring) in [
         (PaginationSpec::None, r#""type":"None""#),
-        (PaginationSpec::Auto { max_pages: Some(25) }, r#""type":"Auto""#),
+        (
+            PaginationSpec::Auto {
+                max_pages: Some(25),
+            },
+            r#""type":"Auto""#,
+        ),
         (PaginationSpec::Auto { max_pages: None }, r#""type":"Auto""#),
     ] {
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains(expected_substring), "serialized {spec:?} as {json}");
+        assert!(
+            json.contains(expected_substring),
+            "serialized {spec:?} as {json}"
+        );
         let parsed: PaginationSpec = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, spec);
     }
@@ -607,9 +724,9 @@ fn workflow_step_api_call_roundtrip() {
         exec_command: None,
         exec_args: vec![],
         exec_timeout_secs: None,
-            exec_setup_command: None,
-            exec_setup_args: vec![],
-            exec_stdin: None,
+        exec_setup_command: None,
+        exec_setup_args: vec![],
+        exec_stdin: None,
         quick_prompt_id: None,
         json_data_payload: None,
         sub_workflow_id: None,
@@ -619,7 +736,10 @@ fn workflow_step_api_call_roundtrip() {
     let json = serde_json::to_string(&step).unwrap();
     let parsed: WorkflowStep = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.api_plugin_slug.as_deref(), Some("jira"));
-    assert_eq!(parsed.api_endpoint_path.as_deref(), Some("/rest/api/3/search"));
+    assert_eq!(
+        parsed.api_endpoint_path.as_deref(),
+        Some("/rest/api/3/search")
+    );
     assert_eq!(parsed.api_output_var.as_deref(), Some("issues"));
     let extract = parsed.api_extract.unwrap();
     assert_eq!(extract.path, "$.issues[*].key");
@@ -700,7 +820,7 @@ fn api_error_code_strings_are_stable_snake_case() {
 
 #[test]
 fn api_response_err_coded_serializes_error_code_and_plain_err_omits_it() {
-    use super::{ApiResponse, ApiErrorCode};
+    use super::{ApiErrorCode, ApiResponse};
     let coded = ApiResponse::<()>::err_coded(ApiErrorCode::NotFound, "Workflow not found");
     let j = serde_json::to_value(&coded).unwrap();
     assert_eq!(j["success"], false);
@@ -710,7 +830,10 @@ fn api_response_err_coded_serializes_error_code_and_plain_err_omits_it() {
     // Legacy plain err() must NOT emit error_code (back-compatible wire).
     let plain = ApiResponse::<()>::err("boom");
     let jp = serde_json::to_value(&plain).unwrap();
-    assert!(jp.get("error_code").is_none(), "plain err omits error_code, got: {jp}");
+    assert!(
+        jp.get("error_code").is_none(),
+        "plain err omits error_code, got: {jp}"
+    );
 
     // ok() likewise has no error_code.
     let ok = ApiResponse::ok(42);

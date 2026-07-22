@@ -26,7 +26,11 @@ pub async fn check_drift(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<DriftCheckResponse>> {
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -34,19 +38,23 @@ pub async fn check_drift(
 
     let project_path = scanner::resolve_host_path(&project.path);
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::core::checksums::check_drift(&project_path)
-    }).await;
+    let result =
+        tokio::task::spawn_blocking(move || crate::core::checksums::check_drift(&project_path))
+            .await;
 
     match result {
         Ok(drift) => {
             let response = DriftCheckResponse {
                 audit_date: drift.audit_date,
-                stale_sections: drift.stale_sections.into_iter().map(|s| DriftSection {
-                    ai_file: s.ai_file,
-                    audit_step: s.audit_step,
-                    changed_sources: s.changed_sources,
-                }).collect(),
+                stale_sections: drift
+                    .stale_sections
+                    .into_iter()
+                    .map(|s| DriftSection {
+                        ai_file: s.ai_file,
+                        audit_step: s.audit_step,
+                        changed_sources: s.changed_sources,
+                    })
+                    .collect(),
                 fresh_sections: drift.fresh_sections,
                 total_sections: drift.total_sections,
             };
@@ -64,15 +72,22 @@ pub async fn partial_audit(
     Json(req): Json<PartialAuditRequest>,
 ) -> Sse<SseStream> {
     // Look up project
-    let project = state.db.with_conn({
-        let id = id.clone();
-        move |conn| crate::db::projects::get_project(conn, &id)
-    }).await.ok().flatten();
+    let project = state
+        .db
+        .with_conn({
+            let id = id.clone();
+            move |conn| crate::db::projects::get_project(conn, &id)
+        })
+        .await
+        .ok()
+        .flatten();
 
     if project.is_none() {
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(
-                Event::default().event("error").data("{\"error\":\"Project not found\"}")
+                Event::default()
+                    .event("error")
+                    .data("{\"error\":\"Project not found\"}"),
             )
         }));
         return Sse::new(stream);
@@ -82,17 +97,19 @@ pub async fn partial_audit(
     let project = project.expect("project is Some after early return");
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
-    let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
-    let linked_repos_block = crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    let briefing_notes =
+        crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let linked_repos_block =
+        crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
     let pid_for_universe = project.id.clone();
-    let kronn_projects_universe_block = match state
-        .db
-        .with_conn(crate::db::projects::list_projects)
-        .await
-    {
-        Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
-        Err(_) => None,
-    };
+    let kronn_projects_universe_block =
+        match state.db.with_conn(crate::db::projects::list_projects).await {
+            Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(
+                &all,
+                &pid_for_universe,
+            ),
+            Err(_) => None,
+        };
 
     // Validate requested step numbers against the FULL chained pipeline
     // (foundation 1..9 + chained sub-audits 10..16), not just the 9
@@ -155,9 +172,10 @@ pub async fn partial_audit(
         let read = tokio::task::spawn_blocking(move || {
             crate::core::checksums::read_checksums_file_strict(&pp)
                 .map(|f| f.map(|f| f.mappings).unwrap_or_default())
-        }).await
-            .map_err(|e| format!("baseline read task failed: {e}"))
-            .and_then(|r| r);
+        })
+        .await
+        .map_err(|e| format!("baseline read task failed: {e}"))
+        .and_then(|r| r);
         match read {
             Ok(mappings) => mappings,
             Err(e) => {
@@ -189,7 +207,9 @@ pub async fn partial_audit(
                             )
                         });
                         let stream: SseStream = Box::pin(futures::stream::once(async move {
-                            Ok::<_, Infallible>(Event::default().event("error").data(msg.to_string()))
+                            Ok::<_, Infallible>(
+                                Event::default().event("error").data(msg.to_string()),
+                            )
                         }));
                         return Sse::new(stream);
                     }
@@ -943,7 +963,8 @@ pub(crate) fn compute_merged_baseline(
     succeeded_steps: &[usize],
     chain: &[super::AnalysisStep],
 ) -> Result<Vec<crate::core::checksums::ChecksumMapping>, String> {
-    let fresh_mappings: Vec<crate::core::checksums::ChecksumMapping> = succeeded_steps.iter()
+    let fresh_mappings: Vec<crate::core::checksums::ChecksumMapping> = succeeded_steps
+        .iter()
         .filter_map(|&step_num| {
             let s = &chain[step_num - 1];
             if s.sources.is_empty() {
@@ -958,13 +979,16 @@ pub(crate) fn compute_merged_baseline(
             })
         })
         .collect();
-    let refreshed: std::collections::HashSet<&str> = fresh_mappings
-        .iter().map(|m| m.ai_file.as_str()).collect();
+    let refreshed: std::collections::HashSet<&str> =
+        fresh_mappings.iter().map(|m| m.ai_file.as_str()).collect();
     let mut merged: Vec<crate::core::checksums::ChecksumMapping> =
         crate::core::checksums::read_checksums_file_strict(project_path)?
-            .map(|f| f.mappings.into_iter()
-                .filter(|m| !refreshed.contains(m.ai_file.as_str()))
-                .collect())
+            .map(|f| {
+                f.mappings
+                    .into_iter()
+                    .filter(|m| !refreshed.contains(m.ai_file.as_str()))
+                    .collect()
+            })
             .unwrap_or_default();
     merged.extend(fresh_mappings);
     merged.sort_by_key(|m| m.audit_step);
@@ -1053,27 +1077,55 @@ mod partial_finalize_tests {
     fn mini_disc(id: &str, project: &str) -> (Discussion, DiscussionMessage) {
         let now = chrono::Utc::now();
         let msg = DiscussionMessage {
-            model: None, lint_report: None, id: format!("{id}-m"),
-            role: MessageRole::User, content: "validate".into(), agent_type: None,
-            timestamp: now, tokens_used: 0, auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None,
-            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            model: None,
+            lint_report: None,
+            id: format!("{id}-m"),
+            role: MessageRole::User,
+            content: "validate".into(),
+            agent_type: None,
+            timestamp: now,
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
         };
         let disc = Discussion {
-            awaiting_agent: false, id: id.into(), project_id: Some(project.into()),
+            awaiting_agent: false,
+            id: id.into(),
+            project_id: Some(project.into()),
             title: "Validation audit partiel (1 section)".into(),
-            agent: crate::models::AgentType::ClaudeCode, language: "fr".into(),
+            agent: crate::models::AgentType::ClaudeCode,
+            language: "fr".into(),
             participants: vec![crate::models::AgentType::ClaudeCode],
-            messages: vec![msg.clone()], message_count: 1, non_system_message_count: 1,
-            skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-            tier: crate::models::ModelTier::Default, model: None,
-            pin_first_message: true, archived: false, pinned: false,
-            workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
-            summary_cache: None, summary_up_to_msg_idx: None,
+            messages: vec![msg.clone()],
+            message_count: 1,
+            non_system_message_count: 1,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            tier: crate::models::ModelTier::Default,
+            model: None,
+            pin_first_message: true,
+            archived: false,
+            pinned: false,
+            workspace_mode: "Direct".into(),
+            workspace_path: None,
+            worktree_branch: None,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
             summary_strategy: crate::models::SummaryStrategy::Auto,
-            introspection_call_count: 0, shared_id: None, shared_with: vec![],
-            workflow_run_id: None, test_mode_restore_branch: None, test_mode_stash_ref: None,
-            created_at: now, updated_at: now,
+            introspection_call_count: 0,
+            shared_id: None,
+            shared_with: vec![],
+            workflow_run_id: None,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
+            created_at: now,
+            updated_at: now,
         };
         (disc, msg)
     }
@@ -1087,9 +1139,16 @@ mod partial_finalize_tests {
                 rusqlite::params![now],
             )?;
             crate::db::audit_runs::insert_running(
-                conn, "run-p", "p1", "Partial", "ClaudeCode", chrono::Utc::now(),
+                conn,
+                "run-p",
+                "p1",
+                "Partial",
+                "ClaudeCode",
+                chrono::Utc::now(),
             )
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1098,14 +1157,24 @@ mod partial_finalize_tests {
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
         finalize_partial_run(
-            &db, "run-p".into(), tmp.path().to_path_buf(),
+            &db,
+            "run-p".into(),
+            tmp.path().to_path_buf(),
             PartialTerminal::Success(Box::new(mini_disc("d-scoped", "p1"))),
             r#"{"requested":[3],"succeeded":[3],"failed":[],"unchanged":[]}"#.into(),
-        ).await.unwrap();
-        let run = db.with_conn(|conn| Ok(crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap())).await.unwrap();
+        )
+        .await
+        .unwrap();
+        let run = db
+            .with_conn(|conn| Ok(crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap()))
+            .await
+            .unwrap();
         assert_eq!(run.status, "Completed");
         assert_eq!(run.validation_discussion_id.as_deref(), Some("d-scoped"));
-        assert!(run.step_outcomes_json.unwrap().contains("\"succeeded\":[3]"));
+        assert!(run
+            .step_outcomes_json
+            .unwrap()
+            .contains("\"succeeded\":[3]"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1114,18 +1183,31 @@ mod partial_finalize_tests {
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
         finalize_partial_run(
-            &db, "run-p".into(), tmp.path().to_path_buf(),
-            PartialTerminal::Interrupted { failed_steps: vec![8] },
+            &db,
+            "run-p".into(),
+            tmp.path().to_path_buf(),
+            PartialTerminal::Interrupted {
+                failed_steps: vec![8],
+            },
             r#"{"requested":[3,8],"succeeded":[3],"failed":[8],"unchanged":[]}"#.into(),
-        ).await.unwrap();
-        let (run, disc_count) = db.with_conn(|conn| {
-            let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
-            let n: i64 = conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
-            Ok((run, n))
-        }).await.unwrap();
+        )
+        .await
+        .unwrap();
+        let (run, disc_count) = db
+            .with_conn(|conn| {
+                let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
+                let n: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
+                Ok((run, n))
+            })
+            .await
+            .unwrap();
         assert_eq!(run.status, "Interrupted");
         assert!(run.validation_discussion_id.is_none());
-        assert_eq!(disc_count, 0, "an interrupted partial creates no discussion");
+        assert_eq!(
+            disc_count, 0,
+            "an interrupted partial creates no discussion"
+        );
         assert!(run.report_path.unwrap().contains("failed steps: [8]"));
     }
 
@@ -1140,17 +1222,29 @@ mod partial_finalize_tests {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
         let err = finalize_partial_run(
-            &db, "run-ghost".into(), tmp.path().to_path_buf(),
+            &db,
+            "run-ghost".into(),
+            tmp.path().to_path_buf(),
             PartialTerminal::Success(Box::new(mini_disc("d-x", "p1"))),
             "{}".into(),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("terminal write failed"), "{err}");
-        assert!(!tmp.path().join("docs/checksums.json").exists(),
-            "no baseline may exist after a failed terminal write");
-        let orphan: i64 = db.with_conn(|conn| {
-            Ok(conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?)
-        }).await.unwrap();
-        assert_eq!(orphan, 0, "the scoped discussion rolls back with the failure");
+        assert!(
+            !tmp.path().join("docs/checksums.json").exists(),
+            "no baseline may exist after a failed terminal write"
+        );
+        let orphan: i64 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            orphan, 0,
+            "the scoped discussion rolls back with the failure"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1161,19 +1255,32 @@ mod partial_finalize_tests {
         seed_run(&db).await;
         let tmp = tempfile::TempDir::new().unwrap();
         finalize_partial_run(
-            &db, "run-p".into(), tmp.path().to_path_buf(),
-            PartialTerminal::NoChange { unchanged_steps: vec![3, 8] },
+            &db,
+            "run-p".into(),
+            tmp.path().to_path_buf(),
+            PartialTerminal::NoChange {
+                unchanged_steps: vec![3, 8],
+            },
             r#"{"requested":[3,8],"succeeded":[],"failed":[],"unchanged":[3,8]}"#.into(),
-        ).await.unwrap();
-        let (run, disc_count) = db.with_conn(|conn| {
-            let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
-            let n: i64 = conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
-            Ok((run, n))
-        }).await.unwrap();
+        )
+        .await
+        .unwrap();
+        let (run, disc_count) = db
+            .with_conn(|conn| {
+                let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
+                let n: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
+                Ok((run, n))
+            })
+            .await
+            .unwrap();
         assert_eq!(run.status, "Failed");
         assert!(run.report_path.unwrap().contains("wrote nothing"));
         assert_eq!(disc_count, 0);
-        assert!(run.step_outcomes_json.unwrap().contains("\"unchanged\":[3,8]"));
+        assert!(run
+            .step_outcomes_json
+            .unwrap()
+            .contains("\"unchanged\":[3,8]"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1184,28 +1291,50 @@ mod partial_finalize_tests {
         // terminal the DB does not carry.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
-        db.with_conn(|conn| {
-            crate::db::audit_runs::mark_cancelled(conn, "run-p")
-        }).await.unwrap();
+        db.with_conn(|conn| crate::db::audit_runs::mark_cancelled(conn, "run-p"))
+            .await
+            .unwrap();
         for terminal in [
             PartialTerminal::Success(Box::new(mini_disc("d-refused", "p1"))),
-            PartialTerminal::Interrupted { failed_steps: vec![1] },
-            PartialTerminal::NoChange { unchanged_steps: vec![1] },
+            PartialTerminal::Interrupted {
+                failed_steps: vec![1],
+            },
+            PartialTerminal::NoChange {
+                unchanged_steps: vec![1],
+            },
         ] {
             let err = finalize_partial_run(
-                &db, "run-p".into(), std::path::PathBuf::from("/tmp"),
-                terminal, r#"{"marker":"must-not-persist"}"#.into(),
-            ).await.unwrap_err();
+                &db,
+                "run-p".into(),
+                std::path::PathBuf::from("/tmp"),
+                terminal,
+                r#"{"marker":"must-not-persist"}"#.into(),
+            )
+            .await
+            .unwrap_err();
             assert!(err.contains("terminal write failed"), "{err}");
         }
-        let (run, disc_count) = db.with_conn(|conn| {
-            let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
-            let n: i64 = conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
-            Ok((run, n))
-        }).await.unwrap();
-        assert_eq!(run.status, "Cancelled", "the terminal status must be untouched");
-        assert!(run.step_outcomes_json.is_none(), "outcomes must roll back with the refused transition");
-        assert_eq!(disc_count, 0, "the scoped discussion rolls back with the refused Success");
+        let (run, disc_count) = db
+            .with_conn(|conn| {
+                let run = crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap();
+                let n: i64 =
+                    conn.query_row("SELECT COUNT(*) FROM discussions", [], |r| r.get(0))?;
+                Ok((run, n))
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            run.status, "Cancelled",
+            "the terminal status must be untouched"
+        );
+        assert!(
+            run.step_outcomes_json.is_none(),
+            "outcomes must roll back with the refused transition"
+        );
+        assert_eq!(
+            disc_count, 0,
+            "the scoped discussion rolls back with the refused Success"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1216,30 +1345,50 @@ mod partial_finalize_tests {
         // written exactly once.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db).await;
-        db.with_conn(|conn| {
-            crate::db::audit_runs::mark_interrupted_strict(conn, "run-p", "first")
-        }).await.unwrap();
+        db.with_conn(|conn| crate::db::audit_runs::mark_interrupted_strict(conn, "run-p", "first"))
+            .await
+            .unwrap();
         let err = finalize_partial_run(
-            &db, "run-p".into(), std::path::PathBuf::from("/tmp"),
-            PartialTerminal::Interrupted { failed_steps: vec![2] },
+            &db,
+            "run-p".into(),
+            std::path::PathBuf::from("/tmp"),
+            PartialTerminal::Interrupted {
+                failed_steps: vec![2],
+            },
             r#"{"marker":"second-write"}"#.into(),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("terminal write failed"), "{err}");
 
         let db2 = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         seed_run(&db2).await;
         db2.with_conn(|conn| {
             crate::db::audit_runs::mark_failed_strict(conn, "run-p", "first no-change")
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let err = finalize_partial_run(
-            &db2, "run-p".into(), std::path::PathBuf::from("/tmp"),
-            PartialTerminal::NoChange { unchanged_steps: vec![1] },
+            &db2,
+            "run-p".into(),
+            std::path::PathBuf::from("/tmp"),
+            PartialTerminal::NoChange {
+                unchanged_steps: vec![1],
+            },
             r#"{"marker":"second-write"}"#.into(),
-        ).await.unwrap_err();
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("terminal write failed"), "{err}");
         for d in [&db, &db2] {
-            let run = d.with_conn(|conn| Ok(crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap())).await.unwrap();
-            assert!(run.step_outcomes_json.is_none(), "the second write must leave no trace");
+            let run = d
+                .with_conn(|conn| Ok(crate::db::audit_runs::get_by_id(conn, "run-p")?.unwrap()))
+                .await
+                .unwrap();
+            assert!(
+                run.step_outcomes_json.is_none(),
+                "the second write must leave no trace"
+            );
         }
     }
 
@@ -1248,13 +1397,22 @@ mod partial_finalize_tests {
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
         for terminal in [
             PartialTerminal::Success(Box::new(mini_disc("d-ghost", "p1"))),
-            PartialTerminal::Interrupted { failed_steps: vec![1] },
-            PartialTerminal::NoChange { unchanged_steps: vec![1] },
+            PartialTerminal::Interrupted {
+                failed_steps: vec![1],
+            },
+            PartialTerminal::NoChange {
+                unchanged_steps: vec![1],
+            },
         ] {
             let err = finalize_partial_run(
-                &db, "run-ghost".into(), std::path::PathBuf::from("/tmp"),
-                terminal, "{}".into(),
-            ).await.unwrap_err();
+                &db,
+                "run-ghost".into(),
+                std::path::PathBuf::from("/tmp"),
+                terminal,
+                "{}".into(),
+            )
+            .await
+            .unwrap_err();
             assert!(err.contains("terminal write failed"), "{err}");
         }
     }
@@ -1275,13 +1433,20 @@ mod partial_finalize_tests {
 
         static SOURCES: &[&str] = &["src.rs"];
         let chain = vec![super::super::AnalysisStep {
-            target_file: "docs/repo-map.md", prompt: "", sources: SOURCES,
+            target_file: "docs/repo-map.md",
+            prompt: "",
+            sources: SOURCES,
         }];
         let merged = compute_merged_baseline(tmp.path(), &[1], &chain).unwrap();
         let files: Vec<&str> = merged.iter().map(|m| m.ai_file.as_str()).collect();
-        assert!(files.contains(&"docs/repo-map.md"), "the refreshed mapping is present");
-        assert!(files.contains(&"docs/other-section.md"),
-            "a mapping outside the refreshed scope must survive the merge");
+        assert!(
+            files.contains(&"docs/repo-map.md"),
+            "the refreshed mapping is present"
+        );
+        assert!(
+            files.contains(&"docs/other-section.md"),
+            "a mapping outside the refreshed scope must survive the merge"
+        );
     }
 
     #[test]
@@ -1293,7 +1458,9 @@ mod partial_finalize_tests {
 
         static SOURCES: &[&str] = &["src.rs"];
         let chain = vec![super::super::AnalysisStep {
-            target_file: "docs/repo-map.md", prompt: "", sources: SOURCES,
+            target_file: "docs/repo-map.md",
+            prompt: "",
+            sources: SOURCES,
         }];
         let err = compute_merged_baseline(tmp.path(), &[1], &chain).unwrap_err();
         assert!(err.contains("malformed"), "{err}");
@@ -1308,11 +1475,17 @@ mod partial_finalize_tests {
     fn strict_read_distinguishes_missing_from_corrupt() {
         let tmp = tempfile::TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
-        assert!(crate::core::checksums::read_checksums_file_strict(tmp.path())
-            .unwrap().is_none(), "missing manifest is a legitimate None");
+        assert!(
+            crate::core::checksums::read_checksums_file_strict(tmp.path())
+                .unwrap()
+                .is_none(),
+            "missing manifest is a legitimate None"
+        );
         std::fs::write(tmp.path().join("docs/checksums.json"), "[broken").unwrap();
-        assert!(crate::core::checksums::read_checksums_file_strict(tmp.path()).is_err(),
-            "a corrupt manifest must be an error, never an empty baseline");
+        assert!(
+            crate::core::checksums::read_checksums_file_strict(tmp.path()).is_err(),
+            "a corrupt manifest must be an error, never an empty baseline"
+        );
     }
 
     #[test]
@@ -1326,11 +1499,15 @@ mod partial_finalize_tests {
             "complete"
         );
         assert_eq!(
-            done_status_of(&PartialTerminal::Interrupted { failed_steps: vec![1] }),
+            done_status_of(&PartialTerminal::Interrupted {
+                failed_steps: vec![1]
+            }),
             "interrupted"
         );
         assert_eq!(
-            done_status_of(&PartialTerminal::NoChange { unchanged_steps: vec![1] }),
+            done_status_of(&PartialTerminal::NoChange {
+                unchanged_steps: vec![1]
+            }),
             "no_change"
         );
     }
@@ -1340,11 +1517,15 @@ mod partial_finalize_tests {
         // Codex lot-2 #3 — a synthetic step passes the validator on exit
         // code 0 alone; it must be refused at selection time.
         let review = super::super::AnalysisStep {
-            target_file: "REVIEW", prompt: "", sources: &[],
+            target_file: "REVIEW",
+            prompt: "",
+            sources: &[],
         };
         assert!(!super::super::partial_selectable(&review));
         let real = super::super::AnalysisStep {
-            target_file: "docs/repo-map.md", prompt: "", sources: &[],
+            target_file: "docs/repo-map.md",
+            prompt: "",
+            sources: &[],
         };
         assert!(super::super::partial_selectable(&real));
     }

@@ -2,6 +2,8 @@
 
 - **ID**: TD-20260629-e2e-seed-vs-real-db
 - **Area**: CI / Frontend (E2E)
+- **Status**: PARTIAL — isolated local runs are now first-class; state-relative
+  baselines and preconditions remain open.
 - **Problem (fact)**: Several Playwright E2E specs are **calibrated on a freshly-seeded DB** (fixed baselines / preconditions / time budgets), so they produce **false reds when run against a real, rich, stateful DB**. Observed on the macOS-PR WSL validation (8/72 failed, all reproduced identically on `main` → not code-related):
   - **a11y contrast baselines** (`a11y-baseline.json`): the seed assumes a small element count; a real DB (20 projects · 42 skills · 7 agents) renders more elements → violation counts exceed the pinned baseline (e.g. Projects `64 > 51`, Settings `112 > 36`) even when the PR changes **zero** color styles.
   - **`audit-banner-lifecycle`**: precondition "no audit in progress" is violated when a project happens to be mid-audit in the DB.
@@ -16,6 +18,15 @@
   - **audit-banner**: force a known state in the spec setup (cancel/await any in-progress audit, or stub `/api/projects/:id/audit-status`) rather than assuming the DB is idle.
   - **introspection budget**: bump the cold-first-call timeout to ~20 s (or warm the MCP before asserting).
 - **Next step**: create ticket.
+
+## Shipped mitigation (0.9.0)
+
+`playwright.config.ts` now honours `VITE_DEV_PORT`, while both Vite and the
+direct-backend E2E calls honour `KRONN_BACKEND_URL`. A developer can therefore
+run Playwright against a fresh backend/data directory on parallel ports without
+stopping or mutating the real Kronn instance. This removes the main operational
+friction that caused accidental rich-DB runs; it does not make the absolute
+accessibility baselines or audit preconditions state-relative.
 
 ## Notes
 

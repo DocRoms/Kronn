@@ -1,27 +1,21 @@
-use std::collections::HashMap;
-use std::sync::Mutex;
-use std::time::Instant;
-use anyhow::Result;
 use crate::core::cmd::async_cmd;
 #[cfg(target_os = "windows")]
 use crate::core::cmd::sync_cmd;
 use crate::models::{AgentDetection, AgentType};
+use anyhow::Result;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::Instant;
 
 /// Run a shell command cross-platform (sh on Unix, cmd on Windows)
 async fn run_shell_cmd(cmd: &str) -> Result<std::process::Output> {
     #[cfg(unix)]
     {
-        Ok(async_cmd("sh")
-            .args(["-c", cmd])
-            .output()
-            .await?)
+        Ok(async_cmd("sh").args(["-c", cmd]).output().await?)
     }
     #[cfg(windows)]
     {
-        Ok(async_cmd("cmd")
-            .args(["/C", cmd])
-            .output()
-            .await?)
+        Ok(async_cmd("cmd").args(["/C", cmd]).output().await?)
     }
 }
 
@@ -44,13 +38,55 @@ struct AgentDef {
 }
 
 const KNOWN_AGENTS: &[AgentDef] = &[
-    AgentDef { name: "Claude Code", agent_type: AgentType::ClaudeCode, binary: "claude", origin: "US", install_cmd: "npm install -g @anthropic-ai/claude-code" },
-    AgentDef { name: "Codex", agent_type: AgentType::Codex, binary: "codex", origin: "US", install_cmd: "npm install -g @openai/codex" },
-    AgentDef { name: "Vibe", agent_type: AgentType::Vibe, binary: "vibe", origin: "EU", install_cmd: "uv tool install mistral-vibe" },
-    AgentDef { name: "Gemini CLI", agent_type: AgentType::GeminiCli, binary: "gemini", origin: "US", install_cmd: "npm install -g @google/gemini-cli" },
-    AgentDef { name: "Kiro", agent_type: AgentType::Kiro, binary: "kiro-cli", origin: "US", install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash" },
-    AgentDef { name: "GitHub Copilot", agent_type: AgentType::CopilotCli, binary: "copilot", origin: "US", install_cmd: "npm install -g @github/copilot" },
-    AgentDef { name: "Ollama", agent_type: AgentType::Ollama, binary: "ollama", origin: "US", install_cmd: "curl -fsSL https://ollama.com/install.sh | sh" },
+    AgentDef {
+        name: "Claude Code",
+        agent_type: AgentType::ClaudeCode,
+        binary: "claude",
+        origin: "US",
+        install_cmd: "npm install -g @anthropic-ai/claude-code",
+    },
+    AgentDef {
+        name: "Codex",
+        agent_type: AgentType::Codex,
+        binary: "codex",
+        origin: "US",
+        install_cmd: "npm install -g @openai/codex",
+    },
+    AgentDef {
+        name: "Vibe",
+        agent_type: AgentType::Vibe,
+        binary: "vibe",
+        origin: "EU",
+        install_cmd: "uv tool install mistral-vibe",
+    },
+    AgentDef {
+        name: "Gemini CLI",
+        agent_type: AgentType::GeminiCli,
+        binary: "gemini",
+        origin: "US",
+        install_cmd: "npm install -g @google/gemini-cli",
+    },
+    AgentDef {
+        name: "Kiro",
+        agent_type: AgentType::Kiro,
+        binary: "kiro-cli",
+        origin: "US",
+        install_cmd: "curl -fsSL https://cli.kiro.dev/install | bash",
+    },
+    AgentDef {
+        name: "GitHub Copilot",
+        agent_type: AgentType::CopilotCli,
+        binary: "copilot",
+        origin: "US",
+        install_cmd: "npm install -g @github/copilot",
+    },
+    AgentDef {
+        name: "Ollama",
+        agent_type: AgentType::Ollama,
+        binary: "ollama",
+        origin: "US",
+        install_cmd: "curl -fsSL https://ollama.com/install.sh | sh",
+    },
 ];
 
 /// Binaries that must NEVER be resolved from the host-mounted bin directory
@@ -61,13 +97,8 @@ const KNOWN_AGENTS: &[AgentDef] = &[
 /// Keep this list in sync with `entrypoint.sh`. The
 /// `cross_agent_macos_skip_covers_npm_agents` test enforces that every
 /// `npm install`-style agent is present here.
-pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] = &[
-    "claude",
-    "codex",
-    "gemini",
-    "copilot",
-    "kiro-cli",
-];
+pub(crate) const MACOS_HOST_BIN_SKIP: &[&str] =
+    &["claude", "codex", "gemini", "copilot", "kiro-cli"];
 
 /// Pure: should a *resolved* binary be ignored because it is a Darwin host
 /// binary that cannot `exec()` in this Linux container?
@@ -137,8 +168,7 @@ fn host_is_macos() -> bool {
     if let Ok(os) = std::env::var("KRONN_HOST_OS") {
         return os.eq_ignore_ascii_case("macos");
     }
-    cfg!(target_os = "macos")
-        || detect_host_label() == "macOS"
+    cfg!(target_os = "macos") || detect_host_label() == "macOS"
 }
 
 /// Detect all known agents on the system
@@ -166,14 +196,25 @@ pub async fn detect_all() -> Vec<AgentDetection> {
 
     // Summary — lets the user grep `kronn::agent_detect` and see in one
     // place which agents the container found and which are missing.
-    let summary: Vec<String> = agents.iter()
-        .map(|a| format!("{:?}={}{}",
-            a.agent_type,
-            if a.installed { "installed" }
-            else if a.runtime_available { "runtime" }
-            else { "missing" },
-            a.path.as_ref().map(|p| format!(" ({})", p)).unwrap_or_default(),
-        ))
+    let summary: Vec<String> = agents
+        .iter()
+        .map(|a| {
+            format!(
+                "{:?}={}{}",
+                a.agent_type,
+                if a.installed {
+                    "installed"
+                } else if a.runtime_available {
+                    "runtime"
+                } else {
+                    "missing"
+                },
+                a.path
+                    .as_ref()
+                    .map(|p| format!(" ({})", p))
+                    .unwrap_or_default(),
+            )
+        })
         .collect();
     tracing::info!(target: "kronn::agent_detect", "sweep done: {}", summary.join(", "));
 
@@ -279,7 +320,9 @@ async fn detect_agent(def: &AgentDef) -> AgentDetection {
         let version = match tokio::time::timeout(
             std::time::Duration::from_secs(3),
             get_version_from(&loc.path),
-        ).await {
+        )
+        .await
+        {
             Ok(Ok(v)) => Some(v),
             _ => None,
         };
@@ -385,8 +428,8 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         AgentType::Codex => Some("@openai/codex"),
         AgentType::GeminiCli => Some("@google/gemini-cli"),
         AgentType::CopilotCli => Some("@github/copilot"),
-        AgentType::Vibe => None, // uvx, handled differently
-        AgentType::Kiro => None, // Native binary, no npx package
+        AgentType::Vibe => None,   // uvx, handled differently
+        AgentType::Kiro => None,   // Native binary, no npx package
         AgentType::Ollama => None, // Native binary, own installer
         AgentType::Custom => None,
     };
@@ -410,10 +453,7 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        cmd.output()
-    ).await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(15), cmd.output()).await;
 
     let available = match result {
         Ok(Ok(output)) => output.status.success(),
@@ -425,7 +465,11 @@ async fn probe_runtime(def: &AgentDef) -> bool {
         cache.insert(cache_key, (available, Instant::now()));
     }
 
-    tracing::info!("Runtime probe for {}: {}", def.name, if available { "OK" } else { "unavailable" });
+    tracing::info!(
+        "Runtime probe for {}: {}",
+        def.name,
+        if available { "OK" } else { "unavailable" }
+    );
     available
 }
 
@@ -462,9 +506,7 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         let resolved = path.to_string_lossy().to_string();
         // If the binary resolved by `which` lives under a KRONN_HOST_BIN directory,
         // it is host-managed (mounted from the host into the container).
-        let host_managed = host_dirs.iter().any(|dir| {
-            path.starts_with(dir)
-        });
+        let host_managed = host_dirs.iter().any(|dir| path.starts_with(dir));
         // A Darwin host binary reachable via PATH (the container mounts the
         // host `~/.local/bin` onto PATH) must NOT be returned — it can't exec
         // here. Fall through to the host-dir scan / Linux-package probes /
@@ -481,7 +523,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
                 "find_binary('{}'): resolved via PATH -> {} (host_managed={})",
                 name, resolved, host_managed,
             );
-            return Some(BinaryLocation { path: resolved, host_managed, via_wsl: false });
+            return Some(BinaryLocation {
+                path: resolved,
+                host_managed,
+                via_wsl: false,
+            });
         }
     }
 
@@ -537,8 +583,14 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             std::path::PathBuf::from("/run/current-system/sw/bin"),
         ];
         if let Ok(home) = std::env::var("HOME") {
-            linux_dirs.push(std::path::PathBuf::from(format!("{}/.local/share/flatpak/exports/bin", home)));
-            linux_dirs.push(std::path::PathBuf::from(format!("{}/.nix-profile/bin", home)));
+            linux_dirs.push(std::path::PathBuf::from(format!(
+                "{}/.local/share/flatpak/exports/bin",
+                home
+            )));
+            linux_dirs.push(std::path::PathBuf::from(format!(
+                "{}/.nix-profile/bin",
+                home
+            )));
             linux_dirs.push(std::path::PathBuf::from(format!("{}/.asdf/shims", home)));
             linux_dirs.push(std::path::PathBuf::from(format!("{}/.local/bin", home)));
         }
@@ -565,7 +617,10 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
         // that isn't a plain executable identifier so a future caller can never
         // turn this into a command-injection sink. Agent names are static
         // strings (claude, codex, gemini, …) so this is purely defensive.
-        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
             tracing::warn!("Refusing WSL binary lookup for suspicious name: {:?}", name);
             return None;
         }
@@ -579,7 +634,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             if output.status.success() {
                 let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !wsl_path.is_empty() {
-                    return Some(BinaryLocation { path: wsl_path, host_managed: true, via_wsl: true });
+                    return Some(BinaryLocation {
+                        path: wsl_path,
+                        host_managed: true,
+                        via_wsl: true,
+                    });
                 }
             }
         }
@@ -594,7 +653,8 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             format!("\"/usr/local/bin/{}\"", name),
             format!("\"$HOME/.npm-global/bin/{}\"", name),
         ];
-        let test_script = probe_paths.iter()
+        let test_script = probe_paths
+            .iter()
             .map(|p| format!("test -x {} && echo {}", p, p))
             .collect::<Vec<_>>()
             .join(" || ");
@@ -604,7 +664,11 @@ pub fn find_binary(name: &str) -> Option<BinaryLocation> {
             if output.status.success() {
                 let wsl_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !wsl_path.is_empty() {
-                    return Some(BinaryLocation { path: wsl_path, host_managed: true, via_wsl: true });
+                    return Some(BinaryLocation {
+                        path: wsl_path,
+                        host_managed: true,
+                        via_wsl: true,
+                    });
                 }
             }
         }
@@ -628,19 +692,15 @@ async fn get_version_from(binary_path: &str) -> Result<String> {
                 // WSL path — run via wsl.exe with login shell for correct PATH
                 async_cmd("wsl.exe")
                     .args(["-e", "bash", "-lc", &format!("{} --version", binary_path)])
-                    .output().await?
+                    .output()
+                    .await?
             } else {
-                async_cmd(binary_path)
-                    .arg("--version")
-                    .output().await?
+                async_cmd(binary_path).arg("--version").output().await?
             }
         }
         #[cfg(not(target_os = "windows"))]
         {
-            async_cmd(binary_path)
-                .arg("--version")
-                .output()
-                .await?
+            async_cmd(binary_path).arg("--version").output().await?
         }
     };
 
@@ -675,16 +735,23 @@ fn check_prerequisite(cmd: &str) -> bool {
 /// Prerequisite needed for each agent's install command
 fn install_prerequisite(agent_type: &AgentType) -> Option<(&'static str, &'static str)> {
     match agent_type {
-        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli | AgentType::CopilotCli =>
-            Some(("npm", "Node.js is required. Install it from https://nodejs.org")),
-        AgentType::Vibe =>
-            Some(("uv", "uv is required. Install it from https://docs.astral.sh/uv")),
+        AgentType::ClaudeCode | AgentType::Codex | AgentType::GeminiCli | AgentType::CopilotCli => {
+            Some((
+                "npm",
+                "Node.js is required. Install it from https://nodejs.org",
+            ))
+        }
+        AgentType::Vibe => Some((
+            "uv",
+            "uv is required. Install it from https://docs.astral.sh/uv",
+        )),
         AgentType::Kiro | AgentType::Ollama | AgentType::Custom => None,
     }
 }
 
 pub async fn install_agent(agent_type: &AgentType) -> Result<String> {
-    let def = KNOWN_AGENTS.iter()
+    let def = KNOWN_AGENTS
+        .iter()
         .find(|d| std::mem::discriminant(&d.agent_type) == std::mem::discriminant(agent_type))
         .ok_or_else(|| anyhow::anyhow!("Unknown agent type"))?;
 
@@ -709,7 +776,8 @@ pub async fn install_agent(agent_type: &AgentType) -> Result<String> {
 
 /// Uninstall an agent
 pub async fn uninstall_agent(agent_type: &AgentType) -> Result<String> {
-    let def = KNOWN_AGENTS.iter()
+    let def = KNOWN_AGENTS
+        .iter()
         .find(|d| std::mem::discriminant(&d.agent_type) == std::mem::discriminant(agent_type))
         .ok_or_else(|| anyhow::anyhow!("Unknown agent type"))?;
 
@@ -794,9 +862,15 @@ mod tests {
 
     #[tokio::test]
     async fn run_shell_cmd_echo_hello() {
-        let output = super::run_shell_cmd("echo hello").await.expect("run_shell_cmd should succeed");
+        let output = super::run_shell_cmd("echo hello")
+            .await
+            .expect("run_shell_cmd should succeed");
         let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("hello"), "stdout should contain 'hello', got: {}", stdout);
+        assert!(
+            stdout.contains("hello"),
+            "stdout should contain 'hello', got: {}",
+            stdout
+        );
     }
 
     // ─── detect_all cache (boot-hang fix) ────────────────────────────────────
@@ -812,7 +886,10 @@ mod tests {
             *g = Some((Vec::new(), Instant::now()));
         }
         let hit = detect_all_cached(false).await;
-        assert!(hit.is_empty(), "within TTL the cached sweep must be served as-is (no re-probe)");
+        assert!(
+            hit.is_empty(),
+            "within TTL the cached sweep must be served as-is (no re-probe)"
+        );
         invalidate_detect_cache(); // leave the static clean for other tests
     }
 
@@ -834,13 +911,18 @@ mod tests {
 
     #[test]
     fn check_prerequisite_sh_exists() {
-        assert!(super::check_prerequisite("sh"), "sh should be available on unix");
+        assert!(
+            super::check_prerequisite("sh"),
+            "sh should be available on unix"
+        );
     }
 
     #[test]
     fn check_prerequisite_nonexistent_binary() {
-        assert!(!super::check_prerequisite("nonexistent_binary_xyz"),
-            "nonexistent binary should not be found");
+        assert!(
+            !super::check_prerequisite("nonexistent_binary_xyz"),
+            "nonexistent binary should not be found"
+        );
     }
 
     // ─── install_prerequisite ────────────────────────────────────────────────
@@ -988,16 +1070,24 @@ mod tests {
 
     #[test]
     fn copilot_agent_is_in_known_agents() {
-        let found = KNOWN_AGENTS.iter().any(|a| matches!(a.agent_type, AgentType::CopilotCli));
+        let found = KNOWN_AGENTS
+            .iter()
+            .any(|a| matches!(a.agent_type, AgentType::CopilotCli));
         assert!(found, "CopilotCli should be in KNOWN_AGENTS");
-        let def = KNOWN_AGENTS.iter().find(|a| matches!(a.agent_type, AgentType::CopilotCli)).unwrap();
+        let def = KNOWN_AGENTS
+            .iter()
+            .find(|a| matches!(a.agent_type, AgentType::CopilotCli))
+            .unwrap();
         assert_eq!(def.binary, "copilot");
         assert_eq!(def.origin, "US");
     }
 
     #[test]
     fn copilot_npx_package_in_probe_runtime() {
-        let def = KNOWN_AGENTS.iter().find(|a| matches!(a.agent_type, AgentType::CopilotCli)).unwrap();
+        let def = KNOWN_AGENTS
+            .iter()
+            .find(|a| matches!(a.agent_type, AgentType::CopilotCli))
+            .unwrap();
         let pkg = match def.agent_type {
             AgentType::CopilotCli => Some("@github/copilot"),
             _ => None,
@@ -1027,23 +1117,49 @@ mod tests {
             AgentType::Ollama,
         ];
         for agent_type in &all_types {
-            let found = KNOWN_AGENTS.iter().any(|a| std::mem::discriminant(&a.agent_type) == std::mem::discriminant(agent_type));
-            assert!(found, "AgentType::{:?} is missing from KNOWN_AGENTS — add an AgentDef entry", agent_type);
+            let found = KNOWN_AGENTS.iter().any(|a| {
+                std::mem::discriminant(&a.agent_type) == std::mem::discriminant(agent_type)
+            });
+            assert!(
+                found,
+                "AgentType::{:?} is missing from KNOWN_AGENTS — add an AgentDef entry",
+                agent_type
+            );
         }
         // Reverse: every KNOWN_AGENTS entry must map to a real AgentType
-        assert_eq!(KNOWN_AGENTS.len(), all_types.len(),
+        assert_eq!(
+            KNOWN_AGENTS.len(),
+            all_types.len(),
             "KNOWN_AGENTS has {} entries but we expect {} (one per non-Custom AgentType)",
-            KNOWN_AGENTS.len(), all_types.len());
+            KNOWN_AGENTS.len(),
+            all_types.len()
+        );
     }
 
     /// Every KNOWN_AGENTS entry must have a non-empty binary name and install command.
     #[test]
     fn cross_agent_definitions_are_complete() {
         for def in KNOWN_AGENTS {
-            assert!(!def.binary.is_empty(), "{:?} has empty binary name", def.agent_type);
-            assert!(!def.install_cmd.is_empty(), "{:?} has empty install_cmd", def.agent_type);
-            assert!(!def.name.is_empty(), "{:?} has empty display name", def.agent_type);
-            assert!(!def.origin.is_empty(), "{:?} has empty origin", def.agent_type);
+            assert!(
+                !def.binary.is_empty(),
+                "{:?} has empty binary name",
+                def.agent_type
+            );
+            assert!(
+                !def.install_cmd.is_empty(),
+                "{:?} has empty install_cmd",
+                def.agent_type
+            );
+            assert!(
+                !def.name.is_empty(),
+                "{:?} has empty display name",
+                def.agent_type
+            );
+            assert!(
+                !def.origin.is_empty(),
+                "{:?} has empty origin",
+                def.agent_type
+            );
         }
     }
 
@@ -1054,8 +1170,10 @@ mod tests {
     #[test]
     fn cross_agent_no_custom_in_known_agents() {
         for def in KNOWN_AGENTS {
-            assert!(!matches!(def.agent_type, AgentType::Custom),
-                "KNOWN_AGENTS must not contain Custom — it has no CLI binary");
+            assert!(
+                !matches!(def.agent_type, AgentType::Custom),
+                "KNOWN_AGENTS must not contain Custom — it has no CLI binary"
+            );
         }
     }
 
@@ -1068,7 +1186,8 @@ mod tests {
         // is present in the macOS skip list. If this test fails after adding
         // a new npm agent, update BOTH `MACOS_HOST_BIN_SKIP` and
         // `backend/entrypoint.sh`.
-        let npm_agents: Vec<&str> = KNOWN_AGENTS.iter()
+        let npm_agents: Vec<&str> = KNOWN_AGENTS
+            .iter()
             .filter(|d| d.install_cmd.starts_with("npm "))
             .map(|d| d.binary)
             .collect();
@@ -1094,10 +1213,14 @@ mod tests {
     /// from the skip list despite being npm-installed.
     #[test]
     fn macos_skip_list_includes_gemini_and_copilot() {
-        assert!(MACOS_HOST_BIN_SKIP.contains(&"gemini"),
-            "regression: gemini dropped from macOS skip list");
-        assert!(MACOS_HOST_BIN_SKIP.contains(&"copilot"),
-            "regression: copilot dropped from macOS skip list");
+        assert!(
+            MACOS_HOST_BIN_SKIP.contains(&"gemini"),
+            "regression: gemini dropped from macOS skip list"
+        );
+        assert!(
+            MACOS_HOST_BIN_SKIP.contains(&"copilot"),
+            "regression: copilot dropped from macOS skip list"
+        );
     }
 
     /// The Darwin-host skip decision must fire for a host-managed skip-listed
@@ -1107,8 +1230,10 @@ mod tests {
     /// fallback dir-scan, never on the primary PATH resolution.
     #[test]
     fn should_skip_darwin_host_binary_fires_on_macos_host_managed() {
-        assert!(should_skip_darwin_host_binary("claude", true, true),
-            "host-managed claude on a macOS host must be skipped");
+        assert!(
+            should_skip_darwin_host_binary("claude", true, true),
+            "host-managed claude on a macOS host must be skipped"
+        );
     }
 
     /// Must NOT skip when the binary is not host-managed: a Linux `claude`
@@ -1116,27 +1241,36 @@ mod tests {
     /// runnable and must be returned even on a macOS host.
     #[test]
     fn should_skip_darwin_host_binary_keeps_container_linux_copy() {
-        assert!(!should_skip_darwin_host_binary("claude", false, true),
-            "a non-host-managed (in-container Linux) claude must be kept");
+        assert!(
+            !should_skip_darwin_host_binary("claude", false, true),
+            "a non-host-managed (in-container Linux) claude must be kept"
+        );
     }
 
     /// Must NOT skip on a non-macOS host: a host-mounted binary on Linux/WSL is
     /// a Linux binary and runs fine in the container.
     #[test]
     fn should_skip_darwin_host_binary_inert_off_macos() {
-        assert!(!should_skip_darwin_host_binary("claude", true, false),
-            "host-managed claude on a non-macOS host must NOT be skipped");
+        assert!(
+            !should_skip_darwin_host_binary("claude", true, false),
+            "host-managed claude on a non-macOS host must NOT be skipped"
+        );
     }
 
     /// Must NOT skip a binary that isn't in the skip list, even on macOS.
     #[test]
     fn should_skip_darwin_host_binary_only_for_listed_names() {
-        assert!(!should_skip_darwin_host_binary("ollama", true, true),
-            "ollama is not in MACOS_HOST_BIN_SKIP and must not be skipped");
+        assert!(
+            !should_skip_darwin_host_binary("ollama", true, true),
+            "ollama is not in MACOS_HOST_BIN_SKIP and must not be skipped"
+        );
         // Every listed agent is covered when host-managed on macOS.
         for name in MACOS_HOST_BIN_SKIP {
-            assert!(should_skip_darwin_host_binary(name, true, true),
-                "{} is in the skip list but was not skipped", name);
+            assert!(
+                should_skip_darwin_host_binary(name, true, true),
+                "{} is in the skip list but was not skipped",
+                name
+            );
         }
     }
 }

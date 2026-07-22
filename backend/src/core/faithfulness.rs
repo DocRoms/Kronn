@@ -39,7 +39,7 @@ impl FaithfulnessBackend {
 /// Score `claim ⊨ evidence_quote`. Returns `None` when the backend is `Off`
 /// (the pipeline then stores `faithfulness = NULL` and the modal shows no Gate-2
 /// chip). `Nli`/`Llm` are deferred — wired as `None` so the call site is stable
-/// (0.9.0 ships with the gate off; the LLM-judge impl lands in PR4a-bis).
+/// (0.10.0 ships with the gate off; the LLM-judge impl lands in PR4a-bis).
 pub fn check(
     backend: FaithfulnessBackend,
     _claim: &str,
@@ -57,10 +57,22 @@ mod tests {
 
     #[test]
     fn backend_parse_defaults_to_off() {
-        assert_eq!(FaithfulnessBackend::from_str_lenient("llm"), FaithfulnessBackend::Llm);
-        assert_eq!(FaithfulnessBackend::from_str_lenient("NLI"), FaithfulnessBackend::Nli);
-        assert_eq!(FaithfulnessBackend::from_str_lenient(""), FaithfulnessBackend::Off);
-        assert_eq!(FaithfulnessBackend::from_str_lenient("garbage"), FaithfulnessBackend::Off);
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient("llm"),
+            FaithfulnessBackend::Llm
+        );
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient("NLI"),
+            FaithfulnessBackend::Nli
+        );
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient(""),
+            FaithfulnessBackend::Off
+        );
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient("garbage"),
+            FaithfulnessBackend::Off
+        );
     }
 
     #[test]

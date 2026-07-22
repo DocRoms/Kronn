@@ -41,23 +41,42 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
     let docs_dir = scanner::detect_docs_dir(&project_path);
 
     if !docs_dir.is_dir() {
-        return AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        return AuditInfo {
+            files: vec![],
+            todos: vec![],
+            tech_debt_items: vec![],
+        };
     }
 
     let mut files = Vec::new();
     let mut todos = Vec::new();
 
-    for entry in walkdir::WalkDir::new(&docs_dir).max_depth(4).into_iter().filter_map(|e| e.ok()) {
+    for entry in walkdir::WalkDir::new(&docs_dir)
+        .max_depth(4)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if !entry.file_type().is_file() || entry.path().extension().is_none_or(|ext| ext != "md") {
             continue;
         }
-        let rel = entry.path().strip_prefix(&project_path).unwrap_or(entry.path());
+        let rel = entry
+            .path()
+            .strip_prefix(&project_path)
+            .unwrap_or(entry.path());
         let rel_str = rel.to_string_lossy().to_string();
 
         if let Ok(content) = std::fs::read_to_string(entry.path()) {
-            let is_empty = content.lines()
-                .filter(|l| !l.trim().is_empty() && !l.starts_with('#') && !l.starts_with('>') && !l.starts_with("---") && !l.starts_with('|'))
-                .count() < 3;
+            let is_empty = content
+                .lines()
+                .filter(|l| {
+                    !l.trim().is_empty()
+                        && !l.starts_with('#')
+                        && !l.starts_with('>')
+                        && !l.starts_with("---")
+                        && !l.starts_with('|')
+                })
+                .count()
+                < 3;
 
             files.push(AuditFileInfo {
                 path: rel_str.clone(),
@@ -86,7 +105,11 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
         // Parse markdown table rows: | ID | Problem | Area | Severity |
         for line in content.lines() {
             let trimmed = line.trim();
-            if !trimmed.starts_with('|') || trimmed.starts_with("| ID") || trimmed.starts_with("|--") || trimmed.contains("{{") {
+            if !trimmed.starts_with('|')
+                || trimmed.starts_with("| ID")
+                || trimmed.starts_with("|--")
+                || trimmed.contains("{{")
+            {
                 continue;
             }
             let cols: Vec<&str> = trimmed.split('|').map(|c| c.trim()).collect();
@@ -112,7 +135,11 @@ pub(super) fn compute_audit_info_sync(project_path_str: &str) -> AuditInfo {
         }
     }
 
-    AuditInfo { files, todos, tech_debt_items }
+    AuditInfo {
+        files,
+        todos,
+        tech_debt_items,
+    }
 }
 
 /// Validation prompt for a PARTIAL refresh (Codex A5 v3): the writable
@@ -128,7 +155,11 @@ pub(crate) fn build_partial_validation_prompt(
     language: &str,
 ) -> String {
     let mut allowlist: Vec<String> = refreshed_files.to_vec();
-    allowlist.extend(run_td_ids.iter().map(|id| format!("docs/tech-debt/{id}.md")));
+    allowlist.extend(
+        run_td_ids
+            .iter()
+            .map(|id| format!("docs/tech-debt/{id}.md")),
+    );
     let allow = allowlist.join("`, `");
     let has_tds = !run_td_ids.is_empty();
 
@@ -226,14 +257,17 @@ pub(crate) fn build_sub_audit_validation_prompt(
 ) -> String {
     use crate::models::AuditKind;
     let (kind_label, index_file) = match kind {
-        AuditKind::Security      => ("sécurité",      "docs/inconsistencies-security.md"),
-        AuditKind::Docker        => ("Docker",        "docs/inconsistencies-docker.md"),
-        AuditKind::Performance   => ("performance",   "docs/inconsistencies-performance.md"),
-        AuditKind::Accessibility => ("accessibility (WCAG 2.1)", "docs/inconsistencies-accessibility.md"),
-        AuditKind::Rgaa          => ("RGAA 4.1",      "docs/inconsistencies-rgaa.md"),
-        AuditKind::Database      => ("base de données", "docs/inconsistencies-database.md"),
-        AuditKind::ApiDesign     => ("design d'API",  "docs/inconsistencies-api.md"),
-        AuditKind::CodeQuality   => ("qualité de code", "docs/inconsistencies-code-quality.md"),
+        AuditKind::Security => ("sécurité", "docs/inconsistencies-security.md"),
+        AuditKind::Docker => ("Docker", "docs/inconsistencies-docker.md"),
+        AuditKind::Performance => ("performance", "docs/inconsistencies-performance.md"),
+        AuditKind::Accessibility => (
+            "accessibility (WCAG 2.1)",
+            "docs/inconsistencies-accessibility.md",
+        ),
+        AuditKind::Rgaa => ("RGAA 4.1", "docs/inconsistencies-rgaa.md"),
+        AuditKind::Database => ("base de données", "docs/inconsistencies-database.md"),
+        AuditKind::ApiDesign => ("design d'API", "docs/inconsistencies-api.md"),
+        AuditKind::CodeQuality => ("qualité de code", "docs/inconsistencies-code-quality.md"),
         // Defensive: Full + Drift + Custom should never reach this path
         // (gated by `kind.is_sub_audit()` in `full_audit`). Keep a sane
         // fallback so a future variant added without updating this match
@@ -345,7 +379,12 @@ pub(crate) fn build_sub_audit_validation_prompt(
 
 /// Build the validation discussion prompt with file/TODO/tech-debt enrichment.
 /// The prompt follows a strict 4-phase protocol to ensure thorough validation.
-pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issue_tracker_mcp: bool, run_td_ids: &[String]) -> String {
+pub(crate) fn build_validation_prompt(
+    language: &str,
+    info: &AuditInfo,
+    has_issue_tracker_mcp: bool,
+    run_td_ids: &[String],
+) -> String {
     let base = match language {
         "en" => {
             let mut s = String::from(concat!(
@@ -408,7 +447,7 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "All phases done → end with exact phrase: \"KRONN:VALIDATION_COMPLETE\". Never emit early.",
             ));
             s
-        },
+        }
         "es" => {
             let mut s = String::from(concat!(
                 "Estas ejecutando la VALIDACION del contexto AI (carpeta docs/ — legacy ai/): la fase FINAL del pipeline — todas las etapas de analisis (fundacion + sub-auditorias encadenadas) YA terminaron. Sigue este protocolo de 4 fases y anuncia siempre \"Fase X/4 de la validacion\" (nunca \"de la auditoria\"). ",
@@ -469,7 +508,7 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "Todas las fases completas → termina con: \"KRONN:VALIDATION_COMPLETE\". Nunca antes.",
             ));
             s
-        },
+        }
         _ => {
             let mut s = String::from(concat!(
                 "Tu conduis la VALIDATION du contexte AI (dossier docs/ — legacy ai/ sur les vieux projets) : la phase FINALE du pipeline — toutes les etapes d'analyse (fondation + sous-audits chaines) sont DEJA terminees. Suis ce protocole en 4 phases et annonce toujours \"Phase X/4 de la validation\" (jamais \"de l'audit\" — l'utilisateur croit que l'audit redemarre). ",
@@ -530,7 +569,7 @@ pub(crate) fn build_validation_prompt(language: &str, info: &AuditInfo, has_issu
                 "Toutes les phases terminees → termine par : \"KRONN:VALIDATION_COMPLETE\". Jamais avant.",
             ));
             s
-        },
+        }
     };
 
     // 0.8.7 anti-hallu: prepend the doc-writer discipline reminder so
@@ -631,7 +670,11 @@ pub(crate) fn detect_project_skills(project_path: &std::path::Path) -> Vec<Strin
     // Security: auth configs, security headers
     if project_path.join(".env.example").exists()
         || project_path.join("security.yaml").exists()
-        || project_path.join("config").join("packages").join("security.yaml").exists()
+        || project_path
+            .join("config")
+            .join("packages")
+            .join("security.yaml")
+            .exists()
     {
         skills.push("security".into());
     }
@@ -655,11 +698,16 @@ pub(crate) fn detect_project_skills(project_path: &std::path::Path) -> Vec<Strin
     }
 
     // Filter to only keep skills that actually exist in the system
-    let valid: Vec<String> = skills.into_iter()
+    let valid: Vec<String> = skills
+        .into_iter()
         .filter(|id| crate::core::skills::get_skill(id).is_some())
         .collect();
 
-    tracing::info!("Auto-detected skills for {}: {:?}", project_path.display(), valid);
+    tracing::info!(
+        "Auto-detected skills for {}: {:?}",
+        project_path.display(),
+        valid
+    );
     valid
 }
 
@@ -667,9 +715,12 @@ pub(super) fn detect_issue_tracker_mcp(project_path: &std::path::Path) -> bool {
     let mcp_file = project_path.join(".mcp.json");
     if let Ok(content) = std::fs::read_to_string(&mcp_file) {
         let lower = content.to_lowercase();
-        return lower.contains("github") || lower.contains("gitlab")
-            || lower.contains("jira") || lower.contains("atlassian")
-            || lower.contains("linear") || lower.contains("youtrack");
+        return lower.contains("github")
+            || lower.contains("gitlab")
+            || lower.contains("jira")
+            || lower.contains("atlassian")
+            || lower.contains("linear")
+            || lower.contains("youtrack");
     }
     false
 }
@@ -942,7 +993,9 @@ mod compute_audit_info_tests {
     #[test]
     fn real_todo_markers_counted_template_instructions_ignored() {
         // Raw marker in content → real.
-        assert!(line_has_real_todo_marker("Deploy target unknown <!-- TODO: ask user -->"));
+        assert!(line_has_real_todo_marker(
+            "Deploy target unknown <!-- TODO: ask user -->"
+        ));
         // The template QUOTES the marker inside backticks to teach the
         // grammar — those lines polluted every fresh project's todo list.
         assert!(!line_has_real_todo_marker(
@@ -988,8 +1041,11 @@ mod compute_audit_info_tests {
 
         let info = compute_audit_info_sync(dir.path().to_str().unwrap());
         let ids: Vec<&str> = info.tech_debt_items.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["TD-20260512-keeper"],
-            "phantom TD whose detail file was removed must not leak into validation prompt");
+        assert_eq!(
+            ids,
+            vec!["TD-20260512-keeper"],
+            "phantom TD whose detail file was removed must not leak into validation prompt"
+        );
     }
 
     #[test]
@@ -1031,8 +1087,10 @@ mod compute_audit_info_tests {
         fs::write(dir.path().join("package.json"), "{}").unwrap();
         // NO tsconfig.json → should NOT add typescript.
         let skills = detect_project_skills(dir.path());
-        assert!(!skills.contains(&"typescript".into()),
-            "package.json alone must not imply typescript");
+        assert!(
+            !skills.contains(&"typescript".into()),
+            "package.json alone must not imply typescript"
+        );
     }
 
     #[test]

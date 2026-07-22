@@ -9,7 +9,10 @@
 //! - `GET    /api/quick-apis/:id/export` self-contained JSON download
 //! - `POST   /api/quick-apis/import`     import an exported envelope
 //! - `POST   /api/quick-apis/:id/run`    standalone run with variables
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -20,10 +23,12 @@ const QA_EXPORT_KIND: &str = "kronn.quick_api";
 const QA_EXPORT_VERSION: u32 = 1;
 
 /// GET /api/quick-apis
-pub async fn list(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<QuickApi>>> {
-    match state.db.with_conn(crate::db::quick_apis::list_quick_apis).await {
+pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickApi>>> {
+    match state
+        .db
+        .with_conn(crate::db::quick_apis::list_quick_apis)
+        .await
+    {
         Ok(items) => Json(ApiResponse::ok(items)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -74,7 +79,11 @@ pub async fn create(
     };
 
     let q = qa.clone();
-    match state.db.with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &q)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &q))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(qa)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -87,7 +96,11 @@ pub async fn update(
     Json(req): Json<CreateQuickApiRequest>,
 ) -> Json<ApiResponse<QuickApi>> {
     let qa_id = id.clone();
-    let existing = match state.db.with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id)).await {
+    let existing = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return Json(ApiResponse::err("Quick API not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -95,15 +108,31 @@ pub async fn update(
 
     let updated = QuickApi {
         id: existing.id,
-        name: if req.name.is_empty() { existing.name } else { req.name },
+        name: if req.name.is_empty() {
+            existing.name
+        } else {
+            req.name
+        },
         icon: req.icon.unwrap_or(existing.icon),
         // Description is taken from the request even if empty — that's how the user clears it.
         description: req.description,
         project_id: req.project_id,
         // API fields require the user to re-supply them; partial PUT is intentional.
-        api_plugin_slug: if req.api_plugin_slug.is_empty() { existing.api_plugin_slug } else { req.api_plugin_slug },
-        api_config_id: if req.api_config_id.is_empty() { existing.api_config_id } else { req.api_config_id },
-        api_endpoint_path: if req.api_endpoint_path.is_empty() { existing.api_endpoint_path } else { req.api_endpoint_path },
+        api_plugin_slug: if req.api_plugin_slug.is_empty() {
+            existing.api_plugin_slug
+        } else {
+            req.api_plugin_slug
+        },
+        api_config_id: if req.api_config_id.is_empty() {
+            existing.api_config_id
+        } else {
+            req.api_config_id
+        },
+        api_endpoint_path: if req.api_endpoint_path.is_empty() {
+            existing.api_endpoint_path
+        } else {
+            req.api_endpoint_path
+        },
         api_method: req.api_method.or(existing.api_method),
         api_query: req.api_query.or(existing.api_query),
         api_path_params: req.api_path_params.or(existing.api_path_params),
@@ -121,7 +150,11 @@ pub async fn update(
     };
 
     let q = updated.clone();
-    match state.db.with_conn(move |conn| crate::db::quick_apis::update_quick_api(conn, &q)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::update_quick_api(conn, &q))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(updated)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -132,7 +165,11 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    match state.db.with_conn(move |conn| crate::db::quick_apis::delete_quick_api(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::delete_quick_api(conn, &id))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -147,10 +184,20 @@ pub async fn export_qa(
     use axum::response::IntoResponse;
 
     let qa_id = id.clone();
-    let qa = match state.db.with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id)).await {
+    let qa = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return (StatusCode::NOT_FOUND, "Quick API not found").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     let envelope = QuickApiExportEnvelope {
@@ -160,23 +207,41 @@ pub async fn export_qa(
         quick_api: qa.clone(),
     };
 
-    let safe_name: String = qa.name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+    let safe_name: String = qa
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let filename = format!("{}.kronn-qa.json", safe_name);
 
     let body = match serde_json::to_string_pretty(&envelope) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Serialization error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     (
         [
             (header::CONTENT_TYPE, "application/json".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
         ],
         body,
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// POST /api/quick-apis/import
@@ -204,10 +269,14 @@ pub async fn import_qa(
 
     let mut qa = envelope.quick_api;
     if qa.name.trim().is_empty() {
-        return Json(ApiResponse::err("Le Quick API importé n'a pas de nom — fichier corrompu ?"));
+        return Json(ApiResponse::err(
+            "Le Quick API importé n'a pas de nom — fichier corrompu ?",
+        ));
     }
     if qa.api_endpoint_path.trim().is_empty() {
-        return Json(ApiResponse::err("Le Quick API importé n'a pas d'endpoint — fichier corrompu ?"));
+        return Json(ApiResponse::err(
+            "Le Quick API importé n'a pas d'endpoint — fichier corrompu ?",
+        ));
     }
 
     let now = Utc::now();
@@ -217,7 +286,11 @@ pub async fn import_qa(
     qa.updated_at = now;
 
     let q = qa.clone();
-    match state.db.with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &q)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &q))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(qa)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -236,7 +309,11 @@ pub async fn run_qa(
     Json(req): Json<RunQuickApiRequest>,
 ) -> Json<ApiResponse<RunQuickApiResponse>> {
     let qa_id = id.clone();
-    let qa = match state.db.with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id)).await {
+    let qa = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return Json(ApiResponse::err("Quick API not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -345,8 +422,8 @@ pub async fn run_qa(
     let envelope: Option<serde_json::Value> = if success {
         crate::workflows::template::extract_step_envelope(&outcome.result.output)
             .map(|e| {
-                let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
-                    .unwrap_or(serde_json::Value::Null);
+                let data_value: serde_json::Value =
+                    serde_json::from_str(&e.data_json).unwrap_or(serde_json::Value::Null);
                 serde_json::json!({
                     "data": data_value,
                     "status": e.status,
@@ -355,7 +432,9 @@ pub async fn run_qa(
             })
             // Last-resort fallback: pre-0.8.5 bare-JSON envelopes.
             .or_else(|| {
-                let json_part = outcome.result.output
+                let json_part = outcome
+                    .result
+                    .output
                     .split("\n[SIGNAL:")
                     .next()
                     .unwrap_or(&outcome.result.output);
@@ -364,7 +443,11 @@ pub async fn run_qa(
     } else {
         None
     };
-    let error = if success { None } else { Some(outcome.result.output) };
+    let error = if success {
+        None
+    } else {
+        Some(outcome.result.output)
+    };
 
     Json(ApiResponse::ok(RunQuickApiResponse {
         success,
@@ -386,7 +469,11 @@ pub async fn batch_run_qa(
     Json(req): Json<BatchRunQuickApiRequest>,
 ) -> Json<ApiResponse<BatchRunQuickApiResponse>> {
     let qa_id = id.clone();
-    let qa = match state.db.with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id)).await {
+    let qa = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_apis::get_quick_api(conn, &qa_id))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return Json(ApiResponse::err("Quick API not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -396,7 +483,11 @@ pub async fn batch_run_qa(
     // before we waste time spawning a no-op batch.
     let items_arr = match &req.items {
         serde_json::Value::Array(arr) => arr,
-        _ => return Json(ApiResponse::err("`items` must be a JSON array (of strings or objects).")),
+        _ => {
+            return Json(ApiResponse::err(
+                "`items` must be a JSON array (of strings or objects).",
+            ))
+        }
     };
     if items_arr.is_empty() {
         return Json(ApiResponse::err("`items` is empty — nothing to run."));
@@ -417,7 +508,12 @@ pub async fn batch_run_qa(
     // contain `{{` placeholders. No template variables in standalone runs.
     let items_literal = match serde_json::to_string(&normalized_items) {
         Ok(s) => s,
-        Err(e) => return Json(ApiResponse::err(format!("Could not serialize items: {}", e))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "Could not serialize items: {}",
+                e
+            )))
+        }
     };
 
     // Build an ephemeral BatchApiCall step that references the saved QA.
@@ -450,13 +546,30 @@ pub async fn batch_run_qa(
         batch_concurrent_limit: req.concurrent_limit,
         quick_api_id: Some(qa.id.clone()),
         notify_config: None,
-        api_plugin_slug: None, api_config_id: None, api_endpoint_path: None,
-        api_method: None, api_query: None, api_path_params: None, api_headers: None,
-        api_body: None, api_extract: None, api_pagination: None,
-        api_timeout_ms: None, api_max_retries: None, api_output_var: None,
-        gate_message: None, gate_request_changes_target: None, gate_notify_url: None, gate_checkpoint_before: None, gate_auto_approve_after_secs: None,
-        exec_command: None, exec_args: vec![], exec_timeout_secs: None,
-        exec_setup_command: None, exec_setup_args: vec![], exec_stdin: None,
+        api_plugin_slug: None,
+        api_config_id: None,
+        api_endpoint_path: None,
+        api_method: None,
+        api_query: None,
+        api_path_params: None,
+        api_headers: None,
+        api_body: None,
+        api_extract: None,
+        api_pagination: None,
+        api_timeout_ms: None,
+        api_max_retries: None,
+        api_output_var: None,
+        gate_message: None,
+        gate_request_changes_target: None,
+        gate_notify_url: None,
+        gate_checkpoint_before: None,
+        gate_auto_approve_after_secs: None,
+        exec_command: None,
+        exec_args: vec![],
+        exec_timeout_secs: None,
+        exec_setup_command: None,
+        exec_setup_args: vec![],
+        exec_stdin: None,
         quick_prompt_id: None,
         json_data_payload: None,
         sub_workflow_id: None,
@@ -473,34 +586,43 @@ pub async fn batch_run_qa(
         &state,
         &ctx,
         crate::workflows::api_call_executor::ApiCallLogContext::manual_test(),
-    ).await;
+    )
+    .await;
 
     // 0.8.6 fix — canonical envelope extraction (same fix as
     // /test-api-call and /run). Pre-fix split-by-`\n[SIGNAL:` returned
     // the `---STEP_OUTPUT---` marker block, not the JSON.
-    let envelope: Option<serde_json::Value> = crate::workflows::template::extract_step_envelope(&outcome.result.output)
-        .map(|e| {
-            let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
-                .unwrap_or(serde_json::Value::Null);
-            serde_json::json!({
-                "data": data_value,
-                "status": e.status,
-                "summary": e.summary,
+    let envelope: Option<serde_json::Value> =
+        crate::workflows::template::extract_step_envelope(&outcome.result.output)
+            .map(|e| {
+                let data_value: serde_json::Value =
+                    serde_json::from_str(&e.data_json).unwrap_or(serde_json::Value::Null);
+                serde_json::json!({
+                    "data": data_value,
+                    "status": e.status,
+                    "summary": e.summary,
+                })
             })
-        })
-        .or_else(|| {
-            let json_part = outcome.result.output
-                .split("\n[SIGNAL:")
-                .next()
-                .unwrap_or(&outcome.result.output);
-            serde_json::from_str(json_part).ok()
-        });
+            .or_else(|| {
+                let json_part = outcome
+                    .result
+                    .output
+                    .split("\n[SIGNAL:")
+                    .next()
+                    .unwrap_or(&outcome.result.output);
+                serde_json::from_str(json_part).ok()
+            });
     // Pull the "status" field from the envelope (OK/PARTIAL/ERROR). Falls
     // back to the run status when the envelope didn't parse.
-    let status = envelope.as_ref()
+    let status = envelope
+        .as_ref()
         .and_then(|v| v.get("status"))
         .and_then(|v| v.as_str())
-        .unwrap_or(if outcome.result.status == RunStatus::Success { "OK" } else { "ERROR" })
+        .unwrap_or(if outcome.result.status == RunStatus::Success {
+            "OK"
+        } else {
+            "ERROR"
+        })
         .to_string();
     let error = if envelope.is_none() && outcome.result.status != RunStatus::Success {
         Some(outcome.result.output)
@@ -529,8 +651,9 @@ fn normalize_batch_items(
     items: &[serde_json::Value],
     first_var_name: Option<&str>,
 ) -> Vec<serde_json::Value> {
-    items.iter().map(|item| {
-        match item {
+    items
+        .iter()
+        .map(|item| match item {
             serde_json::Value::String(s) => match first_var_name {
                 Some(name) => {
                     let mut obj = serde_json::Map::new();
@@ -540,8 +663,8 @@ fn normalize_batch_items(
                 None => item.clone(),
             },
             _ => item.clone(),
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -583,10 +706,7 @@ mod tests {
         // A QA with zero variables (rare but legal — a static call). The
         // executor falls back to `{{batch.item}}` for strings, so we
         // intentionally don't wrap them.
-        let items = vec![
-            serde_json::json!("ping1"),
-            serde_json::json!("ping2"),
-        ];
+        let items = vec![serde_json::json!("ping1"), serde_json::json!("ping2")];
         let out = normalize_batch_items(&items, None);
         assert_eq!(out, items);
     }
@@ -619,7 +739,11 @@ mod tests {
     fn normalize_batch_items_number_passes_through_unchanged() {
         // Numbers / bools / null are passed through unchanged — they aren't
         // strings, so the wrap-into-object logic doesn't kick in.
-        let items = vec![serde_json::json!(42), serde_json::json!(true), serde_json::json!(null)];
+        let items = vec![
+            serde_json::json!(42),
+            serde_json::json!(true),
+            serde_json::json!(null),
+        ];
         let out = normalize_batch_items(&items, Some("host"));
         assert_eq!(out, items);
     }

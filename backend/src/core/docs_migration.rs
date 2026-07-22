@@ -19,9 +19,9 @@
 //! No DB writes — purely filesystem. Caller (UI / API endpoint) is
 //! expected to commit the result via the operator's normal git flow.
 
+use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
-use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationOutcome {
@@ -57,10 +57,7 @@ pub enum MigrationOutcome {
 /// scripts that hardcode `ai/` paths.
 ///
 /// Returns the outcome — caller surfaces in UI / logs.
-pub async fn migrate_project(
-    project_path: &Path,
-    create_symlink: bool,
-) -> MigrationOutcome {
+pub async fn migrate_project(project_path: &Path, create_symlink: bool) -> MigrationOutcome {
     if !project_path.is_dir() {
         return MigrationOutcome::Failed {
             reason: format!("Project path does not exist: {}", project_path.display()),
@@ -253,8 +250,9 @@ async fn merge_ai_into_docs(project_path: &Path) -> Result<(), String> {
         if !git_ok {
             // Fallback : plain rename. Loses git history on this one
             // file, but the merge still completes.
-            std::fs::rename(ai_dir.join(&rel), &dest)
-                .map_err(|e| format!("merge {} → {}: {}", src_rel.display(), dst_rel.display(), e))?;
+            std::fs::rename(ai_dir.join(&rel), &dest).map_err(|e| {
+                format!("merge {} → {}: {}", src_rel.display(), dst_rel.display(), e)
+            })?;
         }
     }
 
@@ -371,8 +369,7 @@ pub(crate) fn ensure_docs_index(project_root: &Path, docs_dir: &Path) -> Result<
     // check docs_dir itself — a symlinked docs/ would route the write
     // outside the project. A guard refusal PROPAGATES — best-effort is the
     // callers' decision (warn vs debug), not a silent success channel.
-    crate::core::fs_guard::guarded_write_new(project_root, &index_path, body.as_bytes())
-        .map(|_| ())
+    crate::core::fs_guard::guarded_write_new(project_root, &index_path, body.as_bytes()).map(|_| ())
 }
 
 fn build_docs_index_body(docs_dir: &Path) -> String {
@@ -393,14 +390,29 @@ fn build_docs_index_body(docs_dir: &Path) -> String {
     // hint per known role. Unknown folders are listed too — better to
     // mention than to hide.
     let known: &[(&str, &str)] = &[
-        ("conventions", "Coding conventions, lint rules, naming choices."),
-        ("gotchas", "Footguns, surprising behaviors, things to remember."),
+        (
+            "conventions",
+            "Coding conventions, lint rules, naming choices.",
+        ),
+        (
+            "gotchas",
+            "Footguns, surprising behaviors, things to remember.",
+        ),
         ("people", "Who does what, contact points, decision owners."),
-        ("architecture", "High-level diagrams and component overviews."),
+        (
+            "architecture",
+            "High-level diagrams and component overviews.",
+        ),
         ("operations", "Runbooks, on-call notes, deploy procedures."),
-        ("tech-debt", "Known debts, planned removals, deprecation notes."),
+        (
+            "tech-debt",
+            "Known debts, planned removals, deprecation notes.",
+        ),
         ("decisions", "Architecture Decision Records (ADRs)."),
-        ("templates", "Skeletons used by tooling — do not edit ad-hoc."),
+        (
+            "templates",
+            "Skeletons used by tooling — do not edit ad-hoc.",
+        ),
     ];
 
     let mut subfolders: Vec<String> = Vec::new();
@@ -502,9 +514,8 @@ pub(crate) fn rewrite_refs_in_text(text: &str) -> String {
     // Then any `ai/X.md` → `docs/X.md` where X is path-shaped. Use a
     // regex to avoid touching the literal word "ai" in prose ("the ai
     // directory was..." stays untouched).
-    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"\bai/([\w/.\-]+)").unwrap()
-    });
+    static RE: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r"\bai/([\w/.\-]+)").unwrap());
     t = RE.replace_all(&t, "docs/$1").to_string();
     t
 }
@@ -684,13 +695,28 @@ impl StackSignals {
     /// "Rust + TypeScript + Python" style. None when no signal is found.
     fn summary(&self) -> Option<String> {
         let mut parts: Vec<&'static str> = Vec::new();
-        if self.rust { parts.push("Rust"); }
-        if self.typescript { parts.push("TypeScript"); }
-        else if self.javascript { parts.push("JavaScript"); }
-        if self.python { parts.push("Python"); }
-        if self.go { parts.push("Go"); }
-        if self.php { parts.push("PHP"); }
-        if parts.is_empty() { None } else { Some(parts.join(" + ")) }
+        if self.rust {
+            parts.push("Rust");
+        }
+        if self.typescript {
+            parts.push("TypeScript");
+        } else if self.javascript {
+            parts.push("JavaScript");
+        }
+        if self.python {
+            parts.push("Python");
+        }
+        if self.go {
+            parts.push("Go");
+        }
+        if self.php {
+            parts.push("PHP");
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" + "))
+        }
     }
 
     /// Best-effort `test` command(s) chained with `&&`. Conservative on
@@ -698,21 +724,35 @@ impl StackSignals {
     /// supports given the lockfile / config evidence.
     fn test_cmd(&self) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
-        if self.rust { parts.push("cargo test".into()); }
+        if self.rust {
+            parts.push("cargo test".into());
+        }
         if let Some(pm) = self.js_pm {
             if self.typescript || self.javascript {
                 parts.push(format!("{} test", pm));
             }
         }
-        if self.python { parts.push("pytest".into()); }
-        if self.go { parts.push("go test ./...".into()); }
-        if self.php { parts.push("phpunit".into()); }
-        if parts.is_empty() { None } else { Some(parts.join(" && ")) }
+        if self.python {
+            parts.push("pytest".into());
+        }
+        if self.go {
+            parts.push("go test ./...".into());
+        }
+        if self.php {
+            parts.push("phpunit".into());
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" && "))
+        }
     }
 
     fn lint_cmd(&self) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
-        if self.rust { parts.push("cargo clippy --all-targets -- -D warnings".into()); }
+        if self.rust {
+            parts.push("cargo clippy --all-targets -- -D warnings".into());
+        }
         if let Some(pm) = self.js_pm {
             if self.typescript {
                 parts.push(format!("{} tsc --noEmit && {} lint", pm, pm));
@@ -720,10 +760,20 @@ impl StackSignals {
                 parts.push(format!("{} lint", pm));
             }
         }
-        if self.python { parts.push("ruff check".into()); }
-        if self.go { parts.push("go vet ./...".into()); }
-        if self.php { parts.push("phpcs".into()); }
-        if parts.is_empty() { None } else { Some(parts.join(" && ")) }
+        if self.python {
+            parts.push("ruff check".into());
+        }
+        if self.go {
+            parts.push("go vet ./...".into());
+        }
+        if self.php {
+            parts.push("phpcs".into());
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(" && "))
+        }
     }
 }
 
@@ -744,10 +794,18 @@ fn detect_stack_signals(project_path: &Path) -> StackSignals {
                     let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
                     !matches!(
                         name,
-                        ".git" | "node_modules" | "target" | "vendor" | ".kronn"
-                            | "dist" | "build" | "docs" | "doc" | "ai"
+                        ".git"
+                            | "node_modules"
+                            | "target"
+                            | "vendor"
+                            | ".kronn"
+                            | "dist"
+                            | "build"
+                            | "docs"
+                            | "doc"
+                            | "ai"
                     )
-                })
+                }),
         )
         .collect();
     for p in &candidates {
@@ -819,13 +877,22 @@ mod tests {
             walk_md_files(&docs, &mut |p| files.push(p.to_path_buf()));
         }
         for rel in [
-            "README.md", "CLAUDE.md", "AGENTS.md", "GEMINI.md",
-            ".cursorrules", ".windsurfrules", ".clinerules",
-            ".kiro/steering/instructions.md", ".vibe/instructions.md",
-            ".github/copilot-instructions.md", ".cursor/rules/repo-instructions.mdc",
+            "README.md",
+            "CLAUDE.md",
+            "AGENTS.md",
+            "GEMINI.md",
+            ".cursorrules",
+            ".windsurfrules",
+            ".clinerules",
+            ".kiro/steering/instructions.md",
+            ".vibe/instructions.md",
+            ".github/copilot-instructions.md",
+            ".cursor/rules/repo-instructions.mdc",
         ] {
             let p = root.join(rel);
-            if p.is_file() { files.push(p); }
+            if p.is_file() {
+                files.push(p);
+            }
         }
         prefill_files(root, &files)
     }
@@ -888,20 +955,41 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
         // Init git so `git mv` works.
-        let _ = crate::core::cmd::async_cmd("git").args(["init", "-q", "-b", "main"]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.email", "test@kronn.local"]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.name", "test"]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["config", "user.email", "test@kronn.local"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["config", "user.name", "test"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
         // Build a minimal legacy ai/ tree.
         std::fs::create_dir_all(root.join("ai/architecture")).unwrap();
         std::fs::write(
             root.join("ai/index.md"),
             "# AI context\nRead `ai/architecture/overview.md` and ai/glossary.md.\n",
-        ).unwrap();
-        std::fs::write(root.join("ai/glossary.md"), "# Glossary\nSee ai/index.md.\n").unwrap();
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ai/glossary.md"),
+            "# Glossary\nSee ai/index.md.\n",
+        )
+        .unwrap();
         std::fs::write(
             root.join("ai/architecture/overview.md"),
             "# Architecture\nFolder structure: ai/repo-map.md.\n",
-        ).unwrap();
+        )
+        .unwrap();
         // Add a root redirector that references ai/.
         std::fs::write(root.join("CLAUDE.md"), "Read ai/index.md for context.\n").unwrap();
         // README is the most common home for the AI-entry pointer — it MUST be
@@ -909,10 +997,21 @@ mod tests {
         std::fs::write(
             root.join("README.md"),
             "# Project\n> For AI agents: you MUST read `ai/index.md` first.\n",
-        ).unwrap();
+        )
+        .unwrap();
         // Commit so git mv works on tracked files.
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "init"]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
         (tmp, root)
     }
 
@@ -921,15 +1020,26 @@ mod tests {
         let (_tmp, root) = make_legacy_project().await;
         let outcome = migrate_project(&root, false).await;
         match outcome {
-            MigrationOutcome::Migrated { files_moved, refs_rewritten, symlink_created } => {
+            MigrationOutcome::Migrated {
+                files_moved,
+                refs_rewritten,
+                symlink_created,
+            } => {
                 assert!(files_moved >= 3, "expected ≥ 3 files, got {}", files_moved);
-                assert!(refs_rewritten >= 1, "expected ≥ 1 ref rewritten, got {}", refs_rewritten);
+                assert!(
+                    refs_rewritten >= 1,
+                    "expected ≥ 1 ref rewritten, got {}",
+                    refs_rewritten
+                );
                 assert!(!symlink_created, "no symlink requested");
             }
             other => panic!("expected Migrated, got {:?}", other),
         }
         // ai/ should be gone, docs/AGENTS.md should exist with rewritten refs.
-        assert!(!root.join("ai").exists() || root.join("ai").is_symlink(), "ai/ should be removed");
+        assert!(
+            !root.join("ai").exists() || root.join("ai").is_symlink(),
+            "ai/ should be removed"
+        );
         let agents = root.join("docs/AGENTS.md");
         assert!(agents.is_file(), "docs/AGENTS.md should exist");
         let agents_content = std::fs::read_to_string(&agents).unwrap();
@@ -943,8 +1053,14 @@ mod tests {
         // README — the AI-entry pointer must be remapped to the canonical
         // `docs/AGENTS.md`, NOT left at `ai/index.md` (regression guard).
         let readme = std::fs::read_to_string(root.join("README.md")).unwrap();
-        assert!(readme.contains("docs/AGENTS.md"), "README should point to docs/AGENTS.md, got: {readme}");
-        assert!(!readme.contains("ai/index.md"), "README must not keep the stale ai/index.md pointer");
+        assert!(
+            readme.contains("docs/AGENTS.md"),
+            "README should point to docs/AGENTS.md, got: {readme}"
+        );
+        assert!(
+            !readme.contains("ai/index.md"),
+            "README must not keep the stale ai/index.md pointer"
+        );
     }
 
     #[tokio::test]
@@ -953,10 +1069,17 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path();
         std::fs::create_dir_all(root.join("docs")).unwrap();
-        std::fs::write(root.join("docs/AGENTS.md"), "# already there\nSee `docs/glossary.md`.").unwrap();
+        std::fs::write(
+            root.join("docs/AGENTS.md"),
+            "# already there\nSee `docs/glossary.md`.",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("ai")).unwrap();
         let outcome = migrate_project(root, false).await;
-        assert_eq!(outcome, MigrationOutcome::AlreadyMigrated { refs_rewritten: 0 });
+        assert_eq!(
+            outcome,
+            MigrationOutcome::AlreadyMigrated { refs_rewritten: 0 }
+        );
     }
 
     #[tokio::test]
@@ -970,25 +1093,36 @@ mod tests {
         std::fs::write(
             root.join("docs/AGENTS.md"),
             "# Index\nSee `ai/glossary.md` for terms and `ai/repo-map.md` for layout.\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             root.join("docs/glossary.md"),
             "Refer back to `ai/AGENTS.md` for context.\n",
-        ).unwrap();
+        )
+        .unwrap();
         let outcome = migrate_project(root, false).await;
         match outcome {
             MigrationOutcome::AlreadyMigrated { refs_rewritten } => {
                 // 2 files touched (AGENTS.md + glossary.md). The counter
                 // is "files changed", not "individual refs rewritten",
                 // mirroring how migrate-from-scratch counts.
-                assert_eq!(refs_rewritten, 2, "expected 2 files cleaned, got {refs_rewritten}");
+                assert_eq!(
+                    refs_rewritten, 2,
+                    "expected 2 files cleaned, got {refs_rewritten}"
+                );
             }
             other => panic!("expected AlreadyMigrated, got {other:?}"),
         }
         // Verify the rewrite actually happened on disk.
         let agents = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
-        assert!(agents.contains("docs/glossary.md"), "ref not rewritten: {agents}");
-        assert!(!agents.contains("ai/glossary.md"), "stale ref leaked: {agents}");
+        assert!(
+            agents.contains("docs/glossary.md"),
+            "ref not rewritten: {agents}"
+        );
+        assert!(
+            !agents.contains("ai/glossary.md"),
+            "stale ref leaked: {agents}"
+        );
         let glossary = std::fs::read_to_string(root.join("docs/glossary.md")).unwrap();
         assert!(glossary.contains("docs/AGENTS.md"));
         assert!(!glossary.contains("ai/AGENTS.md"));
@@ -1010,8 +1144,18 @@ mod tests {
         let (_tmp, root) = make_legacy_project().await;
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(root.join("docs/handbook.md"), "# Handbook (human)").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "human docs"]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "human docs"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
 
         let outcome = migrate_project(&root, false).await;
         match outcome {
@@ -1025,8 +1169,10 @@ mod tests {
         // and the agents entry-point exists.
         assert!(!root.join("ai").exists() || root.join("ai").is_symlink());
         assert!(root.join("docs/AGENTS.md").is_file());
-        assert!(root.join("docs/handbook.md").is_file(),
-            "human docs file must survive the merge");
+        assert!(
+            root.join("docs/handbook.md").is_file(),
+            "human docs file must survive the merge"
+        );
     }
 
     #[tokio::test]
@@ -1038,14 +1184,27 @@ mod tests {
         // ai/glossary.md is "# Glossary\n..."; create a docs/glossary.md
         // with different content to trigger the conflict.
         std::fs::write(root.join("docs/glossary.md"), "# Different glossary\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "conflict"]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "conflict"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
 
         let outcome = migrate_project(&root, false).await;
         match outcome {
             MigrationOutcome::Failed { reason } => {
-                assert!(reason.contains("glossary.md"),
-                    "reason should name the conflicting file: {}", reason);
+                assert!(
+                    reason.contains("glossary.md"),
+                    "reason should name the conflicting file: {}",
+                    reason
+                );
             }
             other => panic!("expected Failed, got {:?}", other),
         }
@@ -1069,8 +1228,10 @@ mod tests {
 
         backfill_docs_index(root);
 
-        assert!(root.join("docs/index.md").is_file(),
-            "self-heal should generate the missing index.md");
+        assert!(
+            root.join("docs/index.md").is_file(),
+            "self-heal should generate the missing index.md"
+        );
     }
 
     #[test]
@@ -1240,8 +1401,14 @@ mod tests {
 
         // Both AGENTS.md (LLM entry) and index.md (human entry) must
         // exist after the migration completes.
-        assert!(root.join("docs/AGENTS.md").is_file(), "AGENTS.md missing post-migration");
-        assert!(root.join("docs/index.md").is_file(), "index.md missing post-migration");
+        assert!(
+            root.join("docs/AGENTS.md").is_file(),
+            "AGENTS.md missing post-migration"
+        );
+        assert!(
+            root.join("docs/index.md").is_file(),
+            "index.md missing post-migration"
+        );
         let index = std::fs::read_to_string(root.join("docs/index.md")).unwrap();
         assert!(index.contains("AGENTS.md"));
     }
@@ -1255,8 +1422,18 @@ mod tests {
         std::fs::create_dir_all(root.join("docs")).unwrap();
         let dup = "# Glossary\nSee ai/index.md.\n";
         std::fs::write(root.join("docs/glossary.md"), dup).unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "dup"]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "dup"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
 
         let outcome = migrate_project(&root, false).await;
         assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
@@ -1268,13 +1445,18 @@ mod tests {
         let (_tmp, root) = make_legacy_project().await;
         let outcome = migrate_project(&root, true).await;
         match outcome {
-            MigrationOutcome::Migrated { symlink_created, .. } => {
+            MigrationOutcome::Migrated {
+                symlink_created, ..
+            } => {
                 assert!(symlink_created, "expected symlink to be created");
             }
             other => panic!("expected Migrated, got {:?}", other),
         }
         let ai = root.join("ai");
-        assert!(ai.is_symlink() || ai.exists(), "ai → docs symlink should exist");
+        assert!(
+            ai.is_symlink() || ai.exists(),
+            "ai → docs symlink should exist"
+        );
     }
 
     // ─── prefill_template_placeholders ────────────────────────────────
@@ -1284,8 +1466,11 @@ mod tests {
     fn write_rust_with_placeholders() -> (tempfile::TempDir, std::path::PathBuf) {
         let tmp = tempfile::TempDir::new().unwrap();
         let root = tmp.path().to_path_buf();
-        std::fs::write(root.join("Cargo.toml"),
-            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"foo\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(
             root.join("docs/AGENTS.md"),
@@ -1294,7 +1479,8 @@ mod tests {
              Test: {{TEST_CMD}}\n\
              Lint: {{LINT_CMD}}\n\
              ## Rules\n- {{DO_NOT_1}}\n- {{DO_NOT_2}}\n",
-        ).unwrap();
+        )
+        .unwrap();
         (tmp, root)
     }
 
@@ -1315,8 +1501,14 @@ mod tests {
         assert!(modified >= 1, "at least the AGENTS.md should be touched");
 
         let body = std::fs::read_to_string(renamed.join("docs/AGENTS.md")).unwrap();
-        assert!(body.contains("Amp Easy Backo"), "PROJECT_NAME pretty-formatted");
-        assert!(body.contains("# Amp Easy Backo — Rust"), "STACK_SUMMARY filled");
+        assert!(
+            body.contains("Amp Easy Backo"),
+            "PROJECT_NAME pretty-formatted"
+        );
+        assert!(
+            body.contains("# Amp Easy Backo — Rust"),
+            "STACK_SUMMARY filled"
+        );
         assert!(body.contains("Test: cargo test"));
         assert!(body.contains("Lint: cargo clippy --all-targets -- -D warnings"));
         assert!(body.contains("Working language: English"));
@@ -1347,19 +1539,27 @@ mod tests {
         std::fs::create_dir_all(root.join("frontend")).unwrap();
         std::fs::write(root.join("frontend/package.json"), "{}").unwrap();
         std::fs::write(root.join("frontend/tsconfig.json"), "{}").unwrap();
-        std::fs::write(root.join("frontend/pnpm-lock.yaml"), "lockfileVersion: 9.0\n").unwrap();
+        std::fs::write(
+            root.join("frontend/pnpm-lock.yaml"),
+            "lockfileVersion: 9.0\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(
             root.join("docs/AGENTS.md"),
             "Stack: {{STACK_SUMMARY}}\nTest: {{TEST_CMD}}\nLint: {{LINT_CMD}}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         prefill_all_for_tests(root);
 
         let body = std::fs::read_to_string(root.join("docs/AGENTS.md")).unwrap();
         assert!(body.contains("Stack: TypeScript"), "got: {body}");
         assert!(body.contains("Test: pnpm test"), "got: {body}");
-        assert!(body.contains("Lint: pnpm tsc --noEmit && pnpm lint"), "got: {body}");
+        assert!(
+            body.contains("Lint: pnpm tsc --noEmit && pnpm lint"),
+            "got: {body}"
+        );
     }
 
     #[test]
@@ -1374,7 +1574,8 @@ mod tests {
         std::fs::write(
             root.join("docs/AGENTS.md"),
             "Stack: {{STACK_SUMMARY}}\nTest: {{TEST_CMD}}\nLint: {{LINT_CMD}}\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         prefill_all_for_tests(root);
 
@@ -1395,7 +1596,11 @@ mod tests {
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
         std::fs::create_dir_all(root.join("docs")).unwrap();
         std::fs::write(root.join("docs/AGENTS.md"), "stub\n").unwrap();
-        std::fs::write(root.join("CLAUDE.md"), "Project: {{PROJECT_NAME}} ({{STACK_SUMMARY}})").unwrap();
+        std::fs::write(
+            root.join("CLAUDE.md"),
+            "Project: {{PROJECT_NAME}} ({{STACK_SUMMARY}})",
+        )
+        .unwrap();
         std::fs::write(root.join(".cursorrules"), "Stack: {{STACK_SUMMARY}}").unwrap();
 
         prefill_all_for_tests(root);
@@ -1428,10 +1633,21 @@ mod tests {
         std::fs::write(
             root.join("ai/agents.md"),
             "{{PROJECT_NAME}} — Test: {{TEST_CMD}}\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&root).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "+placeholders"]).current_dir(&root).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "+placeholders"])
+            .current_dir(&root)
+            .output()
+            .await
+            .unwrap();
 
         let outcome = migrate_project(&root, false).await;
         assert!(matches!(outcome, MigrationOutcome::Migrated { .. }));
@@ -1440,9 +1656,13 @@ mod tests {
         // Codex A2 — the migration moves the USER's documents: their
         // placeholders are user content and must survive byte-level.
         // Prefill only ever runs on files a template install created.
-        assert!(body.contains("{{PROJECT_NAME}}"),
-            "migration must NOT prefill user placeholders — got: {body}");
-        assert!(body.contains("{{TEST_CMD}}"),
-            "migration must NOT prefill user placeholders — got: {body}");
+        assert!(
+            body.contains("{{PROJECT_NAME}}"),
+            "migration must NOT prefill user placeholders — got: {body}"
+        );
+        assert!(
+            body.contains("{{TEST_CMD}}"),
+            "migration must NOT prefill user placeholders — got: {body}"
+        );
     }
 }

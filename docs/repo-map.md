@@ -23,7 +23,7 @@ Kronn/
 │       │   ├── setup.rs        # Setup wizard + config endpoints (tokens, language, agents, server config, auth token, ui_language/stt_model/tts_voices for Tauri persistence)
 │       │   ├── projects.rs     # Project CRUD (~1396L) + scan + bootstrap + clone + template install + git ops + defaults
 │       │   ├── audit.rs        # AI audit pipeline (~1848L) — SSE audit, full_audit, drift, validation, briefing, cancel, skill detection
-│       │   ├── ai_docs.rs      # Project doc file browser (~184L) — list/search/read docs/ files
+│       │   ├── ai_docs.rs      # Read-only docs/source browsers — bounded UTF-8 tree/read/search, per-project folder exclusions + Git metadata
 │       │   ├── discover.rs     # Remote repo discovery (~426L) — GitHub/GitLab multi-source with token from MCPs
 │       │   ├── discussions.rs  # Discussion CRUD + SSE streaming + orchestration (~2880L). make_agent_stream checkpoints partial_response every 30s/100 chunks. /stop cancels via cancel_registry. /dismiss-partial force-recovers (shared path with boot recovery)
 │       │   ├── disc_helpers.rs # Pure agent/text helpers (~320L, 15 tests): agent_prompt_budget, auth_mode_for, agent_display_name, smart_truncate, summary_threshold/cooldown, is_compact_agent, language_instruction, estimate_extra_context_len
@@ -41,7 +41,7 @@ Kronn/
 │       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
 │       │   ├── docs.rs         # Kronn Docs proxy (post-0.5.0) — 5 endpoints POST /api/docs/{pdf,docx,xlsx,csv,pptx} + GET /api/docs/file/:disc/:filename. All POSTs go through proxy_to_sidecar() helper. Filename sanitization (alphanumerics + -_ space, UUID suffix, extension forced) + canonicalize check against path traversal. Output dir: ~/.kronn/generated/<discussion_id>/. Graceful update/reinstall error when no sidecar runtime is available.
-│       │   └── git_ops.rs      # Shared git helpers (838L) — used by projects + discussions
+│       │   └── git_ops.rs      # Shared git helpers — status/diff/blame/commit/push used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN (with .cmd/.exe extension matching) → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache). 6 agents: Claude, Codex, Vibe, Gemini, Kiro, Copilot
 │       │   └── runner.rs       # Spawns agent CLIs, streams stdout as SSE. Two output modes: Text (line-by-line) and StreamJson (Claude Code stream-json with token tracking). Cross-platform HOME resolution (KRONN_HOST_HOME → HOME → USERPROFILE). COPILOT_HOME for Copilot CLI auth. MCP contexts injected into prompts
@@ -175,8 +175,9 @@ Kronn/
 │       │   │   └── Tour.css              # Spotlight, pulse animation, tooltip, backdrop dimming, reduced-motion
 │       │   ├── GitPanel.tsx      # Git file/branch panel
 │       │   ├── AiDocViewer.tsx   # AI doc viewer
-│       │   ├── ProjectList.tsx   # Project list with search, filter, group-by-org (234L)
-│       │   ├── ProjectCard.tsx   # Single project accordion card — discussions, AI docs, MCPs, workflows, skills, audit (707L)
+│       │   ├── SourceCodeViewer.tsx # Text-source tree/read/search, reversible folder exclusions, syntax/occurrence navigation, branch + blame
+│       │   ├── ProjectList.tsx   # Compact filterable/sortable project master list + responsive detail selection
+│       │   ├── ProjectCard.tsx   # Project detail views — overview, discussions, docs/audit, code and resources
 │       │   └── settings/
 │       │       ├── AgentsSection.tsx  # Agent config (tokens, keys, model tiers, install/uninstall)
 │       │       ├── UsageSection.tsx   # Usage dashboard (summary cards, provider bar, project bars, daily chart, top-5 lists, tokens/cost toggle, disc/wf filter)

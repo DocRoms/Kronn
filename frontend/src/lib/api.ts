@@ -65,8 +65,12 @@ import type {
   CreateDirectiveRequest,
   ServerConfigPublic,
   AiFileNode,
+  SourceFileNode,
   AiFileContent,
   AiSearchResult,
+  GitBlameResponse,
+  GitStatusResponse,
+  DependencyUpdateSummary,
   ModelTier,
   ModelTiersConfig,
   DriftCheckResponse,
@@ -823,7 +827,20 @@ export const projects = {
   listAiFiles: (id: string) => api<AiFileNode[]>('GET', `/projects/${id}/ai-files`),
   readAiFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/ai-file?path=${encodeURIComponent(path)}`),
   searchAiFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/ai-search?q=${encodeURIComponent(q)}`),
-  gitStatus: (id: string) => api<{ branch: string; default_branch: string; is_default_branch: boolean; files: { path: string; status: string; staged: boolean }[]; ahead: number; behind: number; has_upstream: boolean; provider: string; pr_url?: string | null }>('GET', `/projects/${id}/git-status`),
+  listSourceFiles: (id: string, shallow = false) => api<SourceFileNode[]>(
+    'GET',
+    `/projects/${id}/source-files${shallow ? '?shallow=true' : ''}`,
+  ),
+  readSourceFile: (id: string, path: string) => api<AiFileContent>('GET', `/projects/${id}/source-file?path=${encodeURIComponent(path)}`),
+  searchSourceFiles: (id: string, q: string) => api<AiSearchResult[]>('GET', `/projects/${id}/source-search?q=${encodeURIComponent(q)}`),
+  getSourceExclusions: (id: string) => api<string[]>('GET', `/projects/${id}/source-exclusions`),
+  setSourceExclusions: (id: string, paths: string[]) =>
+    api<string[]>('PUT', `/projects/${id}/source-exclusions`, paths),
+  gitBlame: (id: string, path: string) => api<GitBlameResponse>('GET', `/projects/${id}/git-blame?path=${encodeURIComponent(path)}`),
+  gitStatus: (id: string, refreshLanguages = false) =>
+    api<GitStatusResponse>('GET', `/projects/${id}/git-status${refreshLanguages ? '?refresh=true' : ''}`),
+  dependencyUpdates: (id: string, refresh = false) =>
+    api<DependencyUpdateSummary>('GET', `/projects/${id}/dependency-updates${refresh ? '?refresh=true' : ''}`),
   gitDiff: (id: string, path: string, committed = false) => api<{ path: string; diff: string }>('GET', `/projects/${id}/git-diff?path=${encodeURIComponent(path)}${committed ? '&committed=true' : ''}`),
   gitCreateBranch: (id: string, req: { name: string }) => api<{ branch: string }>('POST', `/projects/${id}/git-branch`, req),
   gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }) => api<{ hash: string; message: string }>('POST', `/projects/${id}/git-commit`, req),
@@ -1292,7 +1309,7 @@ export const discussions = {
   },
 
   // ── Discussion-scoped git operations ──
-  gitStatus: (id: string) => api<{ branch: string; default_branch: string; is_default_branch: boolean; files: { path: string; status: string; staged: boolean }[]; ahead: number; behind: number; has_upstream: boolean; provider: string; pr_url?: string | null }>('GET', `/discussions/${id}/git-status`),
+  gitStatus: (id: string) => api<GitStatusResponse>('GET', `/discussions/${id}/git-status`),
   gitDiff: (id: string, path: string, committed = false) => api<{ path: string; diff: string }>('GET', `/discussions/${id}/git-diff?path=${encodeURIComponent(path)}${committed ? '&committed=true' : ''}`),
   gitCommit: (id: string, req: { files: string[]; message: string; amend?: boolean; sign?: boolean }) => api<{ hash: string; message: string }>('POST', `/discussions/${id}/git-commit`, req),
   gitPush: (id: string) => api<{ success: boolean; message: string }>('POST', `/discussions/${id}/git-push`, {}),
@@ -1548,7 +1565,13 @@ export const workflows = {
     }
   },
 
-  listRuns: (id: string) => api<WorkflowRun[]>('GET', `/workflows/${id}/runs`),
+  listRuns: (id: string, limit?: number, offset?: number, completeGroup = false) => {
+    const query = limit == null
+      ? ''
+      : `?limit=${encodeURIComponent(limit)}&offset=${encodeURIComponent(offset ?? 0)}${completeGroup ? '&complete_group=true' : ''}`;
+    return api<WorkflowRun[]>('GET', `/workflows/${id}/runs${query}`);
+  },
+  countRuns: (id: string) => api<number>('GET', `/workflows/${id}/runs/count`),
   getRun: (id: string, runId: string) => api<WorkflowRun>('GET', `/workflows/${id}/runs/${runId}`),
   deleteRun: (id: string, runId: string) => api<void>('DELETE', `/workflows/${id}/runs/${runId}`),
   deleteAllRuns: (id: string) => api<void>('DELETE', `/workflows/${id}/runs`),
@@ -2068,7 +2091,7 @@ export const userContext = {
     api<void>('DELETE', `/user-context/${encodeURIComponent(name)}`),
 };
 
-// ─── Continual Learning (0.9.0) ───────────────────────────────────────────────
+// ─── Continual Learning (0.10.0) ───────────────────────────────────────────────
 export const learnings = {
   /** Run the validation pipeline (spec §6). Returns accept/reject + per-evidence
    *  Gate-1 checks + warnings. The agent path is the MCP tool; this is the HTTP face. */

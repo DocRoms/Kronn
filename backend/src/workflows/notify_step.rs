@@ -27,10 +27,7 @@ const NOTIFY_TIMEOUT: Duration = Duration::from_secs(30);
 /// Size of the response snippet recorded in the step output (bytes).
 const RESPONSE_EXCERPT_LIMIT: usize = 512;
 
-pub async fn execute_notify_step(
-    step: &WorkflowStep,
-    ctx: &TemplateContext,
-) -> StepOutcome {
+pub async fn execute_notify_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutcome {
     execute_notify_step_with_policy(step, ctx, true).await
 }
 
@@ -57,9 +54,16 @@ pub async fn execute_notify_step_with_policy(
         "POST" => reqwest::Method::POST,
         "PUT" => reqwest::Method::PUT,
         "GET" => reqwest::Method::GET,
-        other => return fail(step, start, format!(
-            "Notify step: unsupported method `{}` (allowed: POST, PUT, GET)", other
-        )),
+        other => {
+            return fail(
+                step,
+                start,
+                format!(
+                    "Notify step: unsupported method `{}` (allowed: POST, PUT, GET)",
+                    other
+                ),
+            )
+        }
     };
 
     // ── Render URL + body via the template engine ───────────────────────
@@ -79,7 +83,13 @@ pub async fn execute_notify_step_with_policy(
     // Notify fired unchecked. Same public-IP assertion, same loud failure.
     let parsed_url = match reqwest::Url::parse(&url) {
         Ok(u) => u,
-        Err(e) => return fail(step, start, format!("Notify: invalid URL after templating: {e}")),
+        Err(e) => {
+            return fail(
+                step,
+                start,
+                format!("Notify: invalid URL after templating: {e}"),
+            )
+        }
     };
     if enforce_public_ip {
         if let Err(e) = super::api_call_security::assert_public_ip(&parsed_url).await {
@@ -92,10 +102,7 @@ pub async fn execute_notify_step_with_policy(
     let redacted_url = redact_notify_url(&parsed_url);
 
     // ── Build and fire the request ──────────────────────────────────────
-    let client = match reqwest::Client::builder()
-        .timeout(NOTIFY_TIMEOUT)
-        .build()
-    {
+    let client = match reqwest::Client::builder().timeout(NOTIFY_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => return fail(step, start, format!("HTTP client build failed: {}", e)),
     };
@@ -156,7 +163,11 @@ pub async fn execute_notify_step_with_policy(
     StepOutcome {
         result: StepResult {
             step_name: step.name.clone(),
-            status: if is_success { RunStatus::Success } else { RunStatus::Failed },
+            status: if is_success {
+                RunStatus::Success
+            } else {
+                RunStatus::Failed
+            },
             output,
             tokens_used: 0,
             duration_ms: start.elapsed().as_millis() as u64,
@@ -298,8 +309,10 @@ mod tests {
     #[tokio::test]
     async fn notify_rejects_missing_config() {
         let mut step = make_step(NotifyConfig {
-            url: "http://x".into(), method: "POST".into(),
-            headers: HashMap::new(), body_template: String::new(),
+            url: "http://x".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: String::new(),
         });
         step.notify_config = None;
         let ctx = TemplateContext::new();
@@ -311,8 +324,10 @@ mod tests {
     #[tokio::test]
     async fn notify_rejects_empty_url() {
         let step = make_step(NotifyConfig {
-            url: "".into(), method: "POST".into(),
-            headers: HashMap::new(), body_template: String::new(),
+            url: "".into(),
+            method: "POST".into(),
+            headers: HashMap::new(),
+            body_template: String::new(),
         });
         let ctx = TemplateContext::new();
         let out = execute_notify_step_with_policy(&step, &ctx, false).await;
@@ -323,8 +338,10 @@ mod tests {
     #[tokio::test]
     async fn notify_rejects_unsupported_method() {
         let step = make_step(NotifyConfig {
-            url: "http://x".into(), method: "DELETE".into(),
-            headers: HashMap::new(), body_template: String::new(),
+            url: "http://x".into(),
+            method: "DELETE".into(),
+            headers: HashMap::new(),
+            body_template: String::new(),
         });
         let ctx = TemplateContext::new();
         let out = execute_notify_step_with_policy(&step, &ctx, false).await;
@@ -344,8 +361,9 @@ mod tests {
         let body_clone = received_body.clone();
         let path_clone = received_path.clone();
 
-        let app = axum::Router::new()
-            .route("/hook/{stage}", axum::routing::post(
+        let app = axum::Router::new().route(
+            "/hook/{stage}",
+            axum::routing::post(
                 move |axum::extract::Path(stage): axum::extract::Path<String>, body: String| {
                     let body_store = body_clone.clone();
                     let path_store = path_clone.clone();
@@ -354,8 +372,9 @@ mod tests {
                         *path_store.lock().await = stage;
                         axum::Json(serde_json::json!({"received": true}))
                     }
-                }
-            ));
+                },
+            ),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -378,16 +397,28 @@ mod tests {
         });
 
         let out = execute_notify_step_with_policy(&step, &ctx, false).await;
-        assert_eq!(out.result.status, RunStatus::Success, "unexpected failure: {}", out.result.output);
-        assert_eq!(out.result.tokens_used, 0, "Notify must never consume tokens");
+        assert_eq!(
+            out.result.status,
+            RunStatus::Success,
+            "unexpected failure: {}",
+            out.result.output
+        );
+        assert_eq!(
+            out.result.tokens_used, 0,
+            "Notify must never consume tokens"
+        );
 
         // URL template expanded
         assert_eq!(received_path.lock().await.as_str(), "plan_ready");
         // Body template expanded
-        assert!(received_body.lock().await.contains(r#""stage":"plan_ready""#));
+        assert!(received_body
+            .lock()
+            .await
+            .contains(r#""stage":"plan_ready""#));
 
         // Structured output carries http_status + summary for downstream chaining
-        let parsed = crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
+        let parsed =
+            crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
         assert_eq!(parsed["status"], "OK");
         assert_eq!(parsed["data"]["http_status"], 200);
         assert!(parsed["summary"].as_str().unwrap().contains("200"));
@@ -396,10 +427,12 @@ mod tests {
     #[tokio::test]
     async fn notify_marks_non_2xx_as_failed_with_excerpt() {
         // 0.8.6 (#58) — same race fix as notify_renders_templates_in_url_and_body.
-        let app = axum::Router::new()
-            .route("/fail", axum::routing::post(|| async {
+        let app = axum::Router::new().route(
+            "/fail",
+            axum::routing::post(|| async {
                 (axum::http::StatusCode::BAD_REQUEST, "nope, bad payload")
-            }));
+            }),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move {
@@ -415,10 +448,14 @@ mod tests {
         });
         let out = execute_notify_step_with_policy(&step, &TemplateContext::new(), false).await;
         assert_eq!(out.result.status, RunStatus::Failed);
-        let parsed = crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
+        let parsed =
+            crate::workflows::step_output_format::parse_envelope_for_test(&out.result.output);
         assert_eq!(parsed["status"], "ERROR");
         assert_eq!(parsed["data"]["http_status"], 400);
-        assert!(parsed["data"]["response_excerpt"].as_str().unwrap().contains("nope, bad payload"));
+        assert!(parsed["data"]["response_excerpt"]
+            .as_str()
+            .unwrap()
+            .contains("nope, bad payload"));
     }
 
     /// 2026-06-10 audit P1 — webhook secrets often live in the URL PATH
@@ -426,7 +463,10 @@ mod tests {
     /// scheme + host + first segment.
     #[test]
     fn redact_notify_url_keeps_only_first_path_segment() {
-        let url = reqwest::Url::parse("https://hooks.slack.com/services/T0001/B0002/supersecrettoken?x=1").unwrap();
+        let url = reqwest::Url::parse(
+            "https://hooks.slack.com/services/T0001/B0002/supersecrettoken?x=1",
+        )
+        .unwrap();
         let red = redact_notify_url(&url);
         assert_eq!(red, "https://hooks.slack.com/services/…");
         assert!(!red.contains("supersecrettoken"));
@@ -448,6 +488,10 @@ mod tests {
         });
         let out = execute_notify_step(&step, &TemplateContext::new()).await;
         assert_eq!(out.result.status, RunStatus::Failed);
-        assert!(out.result.output.contains("Security"), "got: {}", out.result.output);
+        assert!(
+            out.result.output.contains("Security"),
+            "got: {}",
+            out.result.output
+        );
     }
 }

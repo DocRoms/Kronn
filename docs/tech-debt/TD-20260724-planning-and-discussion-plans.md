@@ -8,10 +8,10 @@
   repeated across discussions. Agents cannot retrieve or update a common task
   view through `kronn-internal`; the current introspection family only exposes
   discussion metadata, messages and summaries. `[src: file: docs/operations/mcp-servers/kronn-internal.md:9-17]`
-- **Why we can't fix now (constraint)**: the product shape is validated, but the
-  maintainer deliberately ordered delivery as quick wins → branch/deploy/merge
-  → remaining audit work → release → Planning. Starting the schema and UI now
-  would mix a cross-cutting feature with release stabilization. `[src: user: 2026-07-24: validated delivery order]`
+- **Why we can't fix now (constraint)**: the product shape is validated, but
+  this cross-cutting feature is intentionally deferred until the dedicated
+  0.9.1 implementation cycle, immediately after the 0.9.0 release.
+  `[src: user: 2026-07-24: release roadmap renumbering]`
 - **Impact**: product usability | agent context cost | cross-discussion
   traceability | prioritization
 - **Where (pointers)**:
@@ -28,7 +28,5 @@
   `later`). Build compact MCP reads before agent writes; use one global backlog
   plus a Git-like discussion side panel over the same data. Keep automatic
   prompt injection delta-only.
-- **Next step**: after the audit follow-up and release are complete, turn the
-  design's implementation slices into tickets and begin with the domain schema
-  plus compact read API.
-
+- **Next step (0.9.1)**: turn the design's implementation slices into tickets
+  and begin with the domain schema plus compact read API.

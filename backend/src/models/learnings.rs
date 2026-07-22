@@ -1,10 +1,10 @@
-//! 0.9.0 — Continual Learning data model.
+//! 0.10.0 — Continual Learning data model.
 //!
 //! A `Learning` is an agent-proposed durable fact / preference / inference,
 //! emitted via the typed MCP tool `learning_propose`, gated by evidence
 //! verification (Gate-1 existence + Gate-2 faithfulness) + a human, then
 //! promoted into a dedicated learnings file. See
-//! `docs/research/continual-learning-0.9.0-spec.md`.
+//! `docs/research/continual-learning-0.10.0-spec.md`.
 //!
 //! Enums serialize to the exact lowercase strings stored in the DB (snake_case)
 //! so the row<->struct mapping in `db/learnings.rs` is a 1:1 string round-trip.

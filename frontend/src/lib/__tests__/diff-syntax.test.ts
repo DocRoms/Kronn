@@ -11,8 +11,12 @@ describe('languageForPath', () => {
     expect(languageForPath('App.tsx')).toBe('typescript');
     expect(languageForPath('main.rs')).toBe('rust');
     expect(languageForPath('handler.py')).toBe('python');
+    expect(languageForPath('Controller.php')).toBe('php');
     expect(languageForPath('server.go')).toBe('go');
     expect(languageForPath('Pet.java')).toBe('java');
+    expect(languageForPath('native.c')).toBe('c');
+    expect(languageForPath('native.cpp')).toBe('cpp');
+    expect(languageForPath('Program.cs')).toBe('csharp');
     expect(languageForPath('config.json')).toBe('json');
     expect(languageForPath('docker-compose.yml')).toBe('yaml');
     expect(languageForPath('Cargo.toml')).toBe('ini');

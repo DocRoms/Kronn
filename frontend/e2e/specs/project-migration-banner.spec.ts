@@ -90,16 +90,13 @@ test.describe('Project — docs migration banner', () => {
     await dashboard.goto();
     await dashboard.clickProjects();
 
-    // ProjectList only allows one expanded card at a time (isOpen ===
-    // expandedId), so we assert the modern-no-banner case FIRST while
-    // it's the only one open, then switch to legacy.
-    const modernHeader = page.locator('#project-p-modern .dash-card-header');
-    await modernHeader.click();
+    // The project workspace is now master/detail: selecting a compact list
+    // item mounts the full ProjectCard in the right-hand detail pane.
+    await page.getByTestId('project-list-item-p-modern').click();
     await expect(page.getByTestId('migration-banner-p-modern')).toHaveCount(0);
 
-    // Now expand legacy — this auto-collapses modern. Banner appears.
-    const legacyHeader = page.locator('#project-p-legacy .dash-card-header');
-    await legacyHeader.click();
+    // Switch the detail pane to the legacy project. Banner appears.
+    await page.getByTestId('project-list-item-p-legacy').click();
     const legacyBanner = page.getByTestId('migration-banner-p-legacy');
     await expect(legacyBanner).toBeVisible();
 
@@ -139,7 +136,7 @@ test.describe('Project — docs migration banner', () => {
     await dashboard.goto();
     await dashboard.clickProjects();
 
-    await page.locator('#project-p-legacy .dash-card-header').click();
+    await page.getByTestId('project-list-item-p-legacy').click();
     await page.getByTestId('migrate-docs-btn-p-legacy').click();
 
     const banner = page.getByTestId('migration-banner-p-legacy');

@@ -6,7 +6,7 @@ import { I18nProvider } from '../../lib/I18nContext';
 vi.mock('../../lib/api', () => ({
   setAuthToken: vi.fn(),
   config: {
-    // 0.9.0 — SettingsPage renders <ContinualLearningSection> which reads this.
+    // 0.10.0 — SettingsPage renders <ContinualLearningSection> which reads this.
     getContinualLearningEnabled: vi.fn().mockResolvedValue(false),
     saveContinualLearningEnabled: vi.fn().mockResolvedValue(undefined),
     getTokens: vi.fn().mockResolvedValue({ keys: [], overrides: {} }),
@@ -205,6 +205,27 @@ describe('SettingsPage', () => {
     expect(body).toContain('Directives');
     // Profiles section
     expect(body).toContain('Profils agent');
+  });
+
+  it('renders a persistent section index and marks the selected destination', async () => {
+    await wrap(<SettingsPage {...defaultProps} agents={[sampleAgent]} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    expect(nav).toBeTruthy();
+    expect(document.querySelector('.set-layout')).toBeTruthy();
+    expect(document.body.textContent).toContain('Centre de contrôle');
+    expect(document.body.textContent).toContain('1/1 agents actifs');
+    expect(document.body.textContent).toContain('1 racine scannée');
+
+    const buttons = [...nav.querySelectorAll<HTMLButtonElement>('.set-nav-btn')];
+    const appearance = buttons.find(button => button.textContent?.includes('Apparence'));
+    const database = buttons.find(button => button.textContent?.includes('Base de données'));
+    expect(buttons.filter(button => button.getAttribute('aria-current') === 'location')).toHaveLength(1);
+    expect(database).toBeTruthy();
+
+    fireEvent.click(database!);
+    expect(database!.getAttribute('aria-current')).toBe('location');
+    expect(appearance?.hasAttribute('aria-current')).toBe(false);
   });
 
   it('renders skill cards after opening accordion', async () => {

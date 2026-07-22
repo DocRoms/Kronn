@@ -23,7 +23,11 @@ pub async fn validate_audit(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AiAuditStatus>> {
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -42,12 +46,20 @@ pub async fn validate_audit(
     //      UI — a POST fired before the validation finished is refused).
     // The project lease is held from the gate through mark_validated so no
     // concurrent run can mutate docs between the check and the write.
-    if !state.audit_tracker.lock().map(|mut t| t.try_acquire_lease(&project.id)).unwrap_or(false) {
+    if !state
+        .audit_tracker
+        .lock()
+        .map(|mut t| t.try_acquire_lease(&project.id))
+        .unwrap_or(false)
+    {
         return Json(ApiResponse::err(
             "An audit is currently running on this project — validate once it has finished.",
         ));
     }
-    struct LeaseGuard(std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>, String);
+    struct LeaseGuard(
+        std::sync::Arc<std::sync::Mutex<crate::AuditTracker>>,
+        String,
+    );
     impl Drop for LeaseGuard {
         fn drop(&mut self) {
             if let Ok(mut t) = self.0.lock() {
@@ -58,15 +70,22 @@ pub async fn validate_audit(
     let _lease = LeaseGuard(state.audit_tracker.clone(), project.id.clone());
 
     let pid = project.id.clone();
-    let gate = state.db.with_conn(move |conn| {
-        let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
-            .into_iter().next();
-        let disc = match latest.as_ref().and_then(|r| r.validation_discussion_id.clone()) {
-            Some(disc_id) => crate::db::discussions::get_discussion(conn, &disc_id)?,
-            None => None,
-        };
-        Ok((latest, disc))
-    }).await;
+    let gate = state
+        .db
+        .with_conn(move |conn| {
+            let latest = crate::db::audit_runs::list_recent(conn, &pid, 1)?
+                .into_iter()
+                .next();
+            let disc = match latest
+                .as_ref()
+                .and_then(|r| r.validation_discussion_id.clone())
+            {
+                Some(disc_id) => crate::db::discussions::get_discussion(conn, &disc_id)?,
+                None => None,
+            };
+            Ok((latest, disc))
+        })
+        .await;
     match gate {
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
         Ok((latest, linked_disc)) => {
@@ -91,11 +110,17 @@ pub async fn validate_audit(
                     "The linked validation discussion belongs to another project — refusing.",
                 ));
             }
-            let finished = disc.messages.iter().rev()
+            let finished = disc
+                .messages
+                .iter()
+                .rev()
                 .find(|m| matches!(m.role, crate::models::MessageRole::Agent))
-                .map(|m| crate::api::discussions::ends_with_terminal_signal(
-                    &m.content, "KRONN:VALIDATION_COMPLETE",
-                ))
+                .map(|m| {
+                    crate::api::discussions::ends_with_terminal_signal(
+                        &m.content,
+                        "KRONN:VALIDATION_COMPLETE",
+                    )
+                })
                 .unwrap_or(false);
             if !finished {
                 return Json(ApiResponse::err(
@@ -115,7 +140,9 @@ pub async fn validate_audit(
         }
 
         kronn_state::mark_validated(&project_path)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = validate_result {
         return Json(ApiResponse::err(e));
@@ -131,7 +158,11 @@ pub async fn mark_bootstrapped(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AiAuditStatus>> {
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -148,7 +179,9 @@ pub async fn mark_bootstrapped(
         }
 
         kronn_state::mark_bootstrapped(&project_path)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = result {
         return Json(ApiResponse::err(e));
@@ -226,19 +259,29 @@ mod validate_gate_tests {
     }
 
     async fn call(state: &AppState) -> ApiResponse<AiAuditStatus> {
-        validate_audit(State(state.clone()), AxPath("p1".to_string())).await.0
+        validate_audit(State(state.clone()), AxPath("p1".to_string()))
+            .await
+            .0
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn happy_path_latest_completed_linked_and_finished() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d1"),
-             Some("Tout est validé.\nKRONN:VALIDATION_COMPLETE")).await;
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("Tout est validé.\nKRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
         let resp = call(&state).await;
         assert!(resp.success, "gate must pass: {:?}", resp.error);
-        assert!(!state.audit_tracker.lock().unwrap().leased.contains("p1"),
-            "the lease must be released after validation");
+        assert!(
+            !state.audit_tracker.lock().unwrap().leased.contains("p1"),
+            "the lease must be released after validation"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -258,15 +301,24 @@ mod validate_gate_tests {
         }).await.unwrap();
         let resp = call(&state).await;
         assert!(!resp.success);
-        assert!(resp.error.unwrap().contains("no linked validation discussion"));
+        assert!(resp
+            .error
+            .unwrap()
+            .contains("no linked validation discussion"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn linked_but_unfinished_or_midtext_signal_is_refused() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d1"),
-             Some("mentioning KRONN:VALIDATION_COMPLETE mid-sentence and going on")).await;
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("mentioning KRONN:VALIDATION_COMPLETE mid-sentence and going on"),
+        )
+        .await;
         let resp = call(&state).await;
         assert!(!resp.success);
         assert!(resp.error.unwrap().contains("has not finished"));
@@ -290,21 +342,37 @@ mod validate_gate_tests {
         // made the old validation stale).
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d1"),
-             Some("KRONN:VALIDATION_COMPLETE")).await;
-        state.db.with_conn(|conn| {
-            crate::db::audit_runs::insert_running(
-                conn, "r2", "p1", "Full", "ClaudeCode",
-                chrono::Utc::now() + chrono::Duration::minutes(5),
-            )?;
-            crate::db::audit_runs::update_last_completed_step(conn, "r2", 2)?;
-            crate::db::audit_runs::mark_interrupted(conn, "r2", "cut")?;
-            Ok(())
-        }).await.unwrap();
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::audit_runs::insert_running(
+                    conn,
+                    "r2",
+                    "p1",
+                    "Full",
+                    "ClaudeCode",
+                    chrono::Utc::now() + chrono::Duration::minutes(5),
+                )?;
+                crate::db::audit_runs::update_last_completed_step(conn, "r2", 2)?;
+                crate::db::audit_runs::mark_interrupted(conn, "r2", "cut")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
         let resp = call(&state).await;
         assert!(!resp.success);
-        assert!(resp.error.unwrap().contains("only a Completed run"),
-            "the newer Interrupted attempt must gate out the stale Completed");
+        assert!(
+            resp.error.unwrap().contains("only a Completed run"),
+            "the newer Interrupted attempt must gate out the stale Completed"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -341,8 +409,14 @@ mod validate_gate_tests {
     async fn held_lease_is_refused() {
         let tmp = tempfile::TempDir::new().unwrap();
         let state = test_state();
-        seed(&state, tmp.path(), "Completed", Some("d1"),
-             Some("KRONN:VALIDATION_COMPLETE")).await;
+        seed(
+            &state,
+            tmp.path(),
+            "Completed",
+            Some("d1"),
+            Some("KRONN:VALIDATION_COMPLETE"),
+        )
+        .await;
         assert!(state.audit_tracker.lock().unwrap().try_acquire_lease("p1"));
         let resp = call(&state).await;
         assert!(!resp.success);

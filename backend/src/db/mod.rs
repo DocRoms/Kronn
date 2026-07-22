@@ -17,11 +17,11 @@ pub mod workflows;
 #[path = "tests.rs"]
 mod tests;
 
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Connection;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use crate::core::config;
 
@@ -67,8 +67,7 @@ impl Database {
 
     /// Open an in-memory database (useful for testing).
     pub fn open_in_memory() -> Result<Self> {
-        let conn = Connection::open_in_memory()
-            .context("Failed to open in-memory database")?;
+        let conn = Connection::open_in_memory().context("Failed to open in-memory database")?;
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         migrations::run(&conn)?;
         Ok(Self {
@@ -99,11 +98,9 @@ impl Database {
             // backing filesystem cannot support WAL (NFS, SMB, iCloud Drive,
             // some FUSE mounts). If we don't notice we lose concurrent-write
             // safety without ever telling the user — verify and warn loudly.
-            let actual_mode: String = conn.query_row(
-                "PRAGMA journal_mode=WAL;",
-                [],
-                |row| row.get(0),
-            ).context("Failed to set WAL journal mode")?;
+            let actual_mode: String = conn
+                .query_row("PRAGMA journal_mode=WAL;", [], |row| row.get(0))
+                .context("Failed to set WAL journal mode")?;
             conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
 
             wal_effective = actual_mode.eq_ignore_ascii_case("wal");
@@ -121,7 +118,9 @@ impl Database {
             }
         } else {
             tracing::warn!("WAL mode disabled (KRONN_DB_WAL=0); using DELETE journal mode");
-            conn.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+            conn.execute_batch(
+                "PRAGMA journal_mode=DELETE; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+            )?;
         }
 
         // Run migrations before wrapping in Mutex (avoids blocking_lock inside async runtime).
@@ -278,7 +277,9 @@ impl Database {
             let guard = match conn.lock() {
                 Ok(g) => g,
                 Err(poisoned) => {
-                    tracing::error!("DB mutex was poisoned by a previous panic — recovering the lock");
+                    tracing::error!(
+                        "DB mutex was poisoned by a previous panic — recovering the lock"
+                    );
                     // Clear the flag or every later lock() re-enters this
                     // error path (log spam on each DB call, forever).
                     conn.clear_poison();

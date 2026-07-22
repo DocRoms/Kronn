@@ -71,8 +71,8 @@ pub struct RtkActivateRequest {
 fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--hook-only"]),
-        AgentType::Codex      => Some(vec!["init", "-g", "--codex"]),
-        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--auto-patch"]),
+        AgentType::Codex => Some(vec!["init", "-g", "--codex"]),
+        AgentType::GeminiCli => Some(vec!["init", "-g", "--gemini", "--auto-patch"]),
         // RTK's `--copilot` targets VS Code Copilot Chat (writes to the
         // editor's settings.json), not the @github/copilot standalone
         // CLI that Kronn detects as `CopilotCli`. Treating it as
@@ -93,10 +93,16 @@ fn rtk_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
 fn rtk_uninstall_args_for(agent_type: &AgentType) -> Option<Vec<&'static str>> {
     match agent_type {
         AgentType::ClaudeCode => Some(vec!["init", "-g", "--auto-patch", "--uninstall"]),
-        AgentType::Codex      => Some(vec!["init", "-g", "--codex", "--uninstall"]),
+        AgentType::Codex => Some(vec!["init", "-g", "--codex", "--uninstall"]),
         // `--auto-patch` mirrors install: avoids the settings.json prompt
         // that would otherwise leave the entry orphaned in the file.
-        AgentType::GeminiCli  => Some(vec!["init", "-g", "--gemini", "--auto-patch", "--uninstall"]),
+        AgentType::GeminiCli => Some(vec![
+            "init",
+            "-g",
+            "--gemini",
+            "--auto-patch",
+            "--uninstall",
+        ]),
         AgentType::CopilotCli
         | AgentType::Kiro
         | AgentType::Vibe
@@ -138,7 +144,9 @@ pub async fn activate(
     // it ourselves sidesteps that.
     let rtk_config_dir = format!("{home}/.config/rtk");
     if let Err(e) = std::fs::create_dir_all(&rtk_config_dir) {
-        tracing::warn!("Failed to pre-create {rtk_config_dir}: {e}. Continuing — rtk may handle it.");
+        tracing::warn!(
+            "Failed to pre-create {rtk_config_dir}: {e}. Continuing — rtk may handle it."
+        );
     }
 
     let mut per_agent: Vec<RtkAgentActivation> = Vec::new();
@@ -148,7 +156,9 @@ pub async fn activate(
     let mut any_ran = false;
 
     for agent in &req.agents {
-        let Some(args) = rtk_args_for(agent) else { continue; };
+        let Some(args) = rtk_args_for(agent) else {
+            continue;
+        };
         any_ran = true;
 
         tracing::info!("Spawning: rtk {:?} (agent={:?}, HOME={home})", args, agent);
@@ -162,8 +172,12 @@ pub async fn activate(
                 if success {
                     tracing::info!("rtk hook activated for {:?}", agent);
                 } else {
-                    tracing::warn!("rtk hook activation failed for {:?} (status={:?}): {}",
-                        agent, out.status.code(), stderr.trim());
+                    tracing::warn!(
+                        "rtk hook activation failed for {:?} (status={:?}): {}",
+                        agent,
+                        out.status.code(),
+                        stderr.trim()
+                    );
                     any_failure = true;
                 }
 
@@ -200,7 +214,9 @@ pub async fn activate(
         return Json(ApiResponse::ok(RtkActivateResponse {
             success: false,
             stdout: String::new(),
-            stderr: "No RTK-supported agent in the request. Supported: Claude Code, Codex, Gemini CLI.".into(),
+            stderr:
+                "No RTK-supported agent in the request. Supported: Claude Code, Codex, Gemini CLI."
+                    .into(),
             per_agent,
         }));
     }
@@ -234,10 +250,16 @@ pub async fn deactivate(
     let mut any_ran = false;
 
     for agent in &req.agents {
-        let Some(args) = rtk_uninstall_args_for(agent) else { continue; };
+        let Some(args) = rtk_uninstall_args_for(agent) else {
+            continue;
+        };
         any_ran = true;
 
-        tracing::info!("Spawning: rtk {:?} (agent={:?}, HOME={home}, mode=uninstall)", args, agent);
+        tracing::info!(
+            "Spawning: rtk {:?} (agent={:?}, HOME={home}, mode=uninstall)",
+            args,
+            agent
+        );
 
         match async_cmd("rtk").args(&args).output().await {
             Ok(out) => {
@@ -247,8 +269,12 @@ pub async fn deactivate(
                 if success {
                     tracing::info!("rtk hook uninstalled for {:?}", agent);
                 } else {
-                    tracing::warn!("rtk uninstall failed for {:?} (status={:?}): {}",
-                        agent, out.status.code(), stderr.trim());
+                    tracing::warn!(
+                        "rtk uninstall failed for {:?} (status={:?}): {}",
+                        agent,
+                        out.status.code(),
+                        stderr.trim()
+                    );
                     any_failure = true;
                 }
                 if !stdout.trim().is_empty() {
@@ -258,7 +284,10 @@ pub async fn deactivate(
                     combined_stderr.push_str(&format!("[{:?}] {}\n", agent, stderr.trim()));
                 }
                 per_agent.push(RtkAgentActivation {
-                    agent_type: agent.clone(), success, stdout, stderr,
+                    agent_type: agent.clone(),
+                    success,
+                    stdout,
+                    stderr,
                 });
             }
             Err(e) => {
@@ -267,8 +296,10 @@ pub async fn deactivate(
                 any_failure = true;
                 combined_stderr.push_str(&format!("{msg}\n"));
                 per_agent.push(RtkAgentActivation {
-                    agent_type: agent.clone(), success: false,
-                    stdout: String::new(), stderr: msg,
+                    agent_type: agent.clone(),
+                    success: false,
+                    stdout: String::new(),
+                    stderr: msg,
                 });
             }
         }
@@ -410,7 +441,12 @@ pub async fn savings() -> Json<ApiResponse<RtkSavings>> {
     let summary = json.get("summary");
     let total_tokens_saved = summary
         .and_then(|s| s.get("total_saved").and_then(|v| v.as_u64()))
-        .unwrap_or_else(|| pick_u64(&json, &["tokens_saved", "total_tokens_saved", "savings", "gain"]));
+        .unwrap_or_else(|| {
+            pick_u64(
+                &json,
+                &["tokens_saved", "total_tokens_saved", "savings", "gain"],
+            )
+        });
     let sample_count = summary
         .and_then(|s| s.get("total_commands").and_then(|v| v.as_u64()))
         .unwrap_or_else(|| pick_u64(&json, &["sample_count", "samples", "n", "count"]));
@@ -473,8 +509,14 @@ mod tests {
         // patch to authorize.
         let args = rtk_args_for(&AgentType::Codex).expect("Codex is supported");
         assert_eq!(args, vec!["init", "-g", "--codex"]);
-        assert!(!args.contains(&"--auto-patch"), "Codex flow must not pass --auto-patch");
-        assert!(!args.contains(&"--hook-only"), "Codex flow must not pass --hook-only");
+        assert!(
+            !args.contains(&"--auto-patch"),
+            "Codex flow must not pass --auto-patch"
+        );
+        assert!(
+            !args.contains(&"--hook-only"),
+            "Codex flow must not pass --hook-only"
+        );
     }
 
     #[test]
@@ -487,7 +529,10 @@ mod tests {
         // combination (older versions errored — this is the rtk-0.37 matrix).
         let args = rtk_args_for(&AgentType::GeminiCli).expect("Gemini is supported");
         assert_eq!(args, vec!["init", "-g", "--gemini", "--auto-patch"]);
-        assert!(!args.contains(&"--hook-only"), "Gemini flow must not pass --hook-only");
+        assert!(
+            !args.contains(&"--hook-only"),
+            "Gemini flow must not pass --hook-only"
+        );
     }
 
     #[test]
@@ -497,11 +542,17 @@ mod tests {
         // unsupported avoids miswiring. Kiro / Vibe / Ollama / Custom
         // aren't in RTK's upstream list either.
         for agent in [
-            AgentType::CopilotCli, AgentType::Kiro,
-            AgentType::Vibe, AgentType::Ollama, AgentType::Custom,
+            AgentType::CopilotCli,
+            AgentType::Kiro,
+            AgentType::Vibe,
+            AgentType::Ollama,
+            AgentType::Custom,
         ] {
-            assert!(rtk_args_for(&agent).is_none(),
-                "{:?} must be unsupported by RTK", agent);
+            assert!(
+                rtk_args_for(&agent).is_none(),
+                "{:?} must be unsupported by RTK",
+                agent
+            );
         }
     }
 
@@ -578,9 +629,18 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(raw).unwrap();
         let summary = json.get("summary").unwrap();
 
-        let total = summary.get("total_saved").and_then(|v| v.as_u64()).unwrap_or(0);
-        let count = summary.get("total_commands").and_then(|v| v.as_u64()).unwrap_or(0);
-        let ratio = summary.get("avg_savings_pct").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+        let total = summary
+            .get("total_saved")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let count = summary
+            .get("total_commands")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let ratio = summary
+            .get("avg_savings_pct")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0) as f32;
 
         assert_eq!(total, 689_089);
         assert_eq!(count, 203);

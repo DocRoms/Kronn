@@ -144,13 +144,13 @@ pub struct ServerConfig {
     /// See `core::anti_halluc`. Mirrored into the process-global flag at load + save.
     #[serde(default = "default_anti_hallucination_mode")]
     pub anti_hallucination_mode: String,
-    /// 0.9.0 — Continual Learning master toggle. **Default OFF (beta)**: the
+    /// 0.10.0 — Continual Learning master toggle. **Default OFF (beta)**: the
     /// feature writes agent-proposed learnings into injected truth files
     /// (`docs/learnings.md` / user-context), so it ships opt-in to avoid a bug
     /// polluting a user's docs. Gates capture (`learning_propose`), the
     /// `kronn:section name="learnings"` doc pointer, and the UI badge/modal.
     /// Validating/rejecting EXISTING pending candidates stays allowed when off
-    /// (drain, don't capture). See docs/research/continual-learning-0.9.0-spec.md §0.
+    /// (drain, don't capture). See docs/research/continual-learning-0.10.0-spec.md §0.
     #[serde(default)]
     pub continual_learning_enabled: bool,
     /// Debug mode — when true, the tracing subscriber is initialized at
@@ -200,17 +200,29 @@ fn default_summary_strategy_off() -> crate::models::SummaryStrategy {
     crate::models::SummaryStrategy::Off
 }
 
-fn default_global_context_mode() -> String { "always".to_string() }
-fn default_anti_hallucination_mode() -> String { crate::core::anti_halluc::DEFAULT_MODE_STR.to_string() }
-fn default_max_agents() -> usize { 5 }
-fn default_agent_stall_timeout() -> u32 { 5 }
+fn default_global_context_mode() -> String {
+    "always".to_string()
+}
+fn default_anti_hallucination_mode() -> String {
+    crate::core::anti_halluc::DEFAULT_MODE_STR.to_string()
+}
+fn default_max_agents() -> usize {
+    5
+}
+fn default_agent_stall_timeout() -> u32 {
+    5
+}
 
 /// Default output language. Used by `AppConfig.language` AND by API
 /// request types deserialized from the frontend (where the user may
 /// omit the field). `pub(crate)` so other model sub-modules can keep
 /// the `default = "..."` attribute working after extraction.
-pub(crate) fn default_language() -> String { "fr".into() }
-pub(crate) fn default_ui_language() -> String { "fr".into() }
+pub(crate) fn default_language() -> String {
+    "fr".into()
+}
+pub(crate) fn default_ui_language() -> String {
+    "fr".into()
+}
 
 // ─── Tokens / API keys ────────────────────────────────────────────────────
 
@@ -234,7 +246,8 @@ pub struct TokensConfig {
 impl TokensConfig {
     /// Get the active key value for a provider, or None
     pub fn active_key_for(&self, provider: &str) -> Option<&str> {
-        self.keys.iter()
+        self.keys
+            .iter()
             .find(|k| k.provider == provider && k.active)
             .map(|k| k.value.as_str())
     }
@@ -305,7 +318,9 @@ pub struct ScanConfig {
     pub scan_depth: usize,
 }
 
-fn default_scan_depth() -> usize { 4 }
+fn default_scan_depth() -> usize {
+    4
+}
 
 // ─── Agents ───────────────────────────────────────────────────────────────
 
@@ -497,7 +512,9 @@ pub struct AgentDetection {
     pub runtime_warning: Option<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
 #[ts(export)]

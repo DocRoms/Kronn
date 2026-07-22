@@ -31,16 +31,18 @@ use std::path::{Path, PathBuf};
 pub fn rtk_binary_available() -> bool {
     if crate::core::env::is_docker() {
         return std::env::var("KRONN_HOST_BIN")
-            .map(|hb| std::env::split_paths(&hb).any(|dir| {
-                let p = dir.join("rtk");
-                // `exists()` follows symlinks. A Homebrew-installed `rtk` is a
-                // symlink into `../Cellar/rtk/<v>/bin/rtk`, and the host Cellar
-                // is NOT mounted in the container — so the link is dangling here
-                // and `exists()` is false even though rtk IS on the host. Also
-                // accept a symlink ENTRY (`symlink_metadata` doesn't follow).
-                // Same trap as the Mach-O host-launcher symlinks.
-                p.exists() || p.symlink_metadata().is_ok()
-            }))
+            .map(|hb| {
+                std::env::split_paths(&hb).any(|dir| {
+                    let p = dir.join("rtk");
+                    // `exists()` follows symlinks. A Homebrew-installed `rtk` is a
+                    // symlink into `../Cellar/rtk/<v>/bin/rtk`, and the host Cellar
+                    // is NOT mounted in the container — so the link is dangling here
+                    // and `exists()` is false even though rtk IS on the host. Also
+                    // accept a symlink ENTRY (`symlink_metadata` doesn't follow).
+                    // Same trap as the Mach-O host-launcher symlinks.
+                    p.exists() || p.symlink_metadata().is_ok()
+                })
+            })
             .unwrap_or(false);
     }
     which::which("rtk").is_ok()
@@ -51,7 +53,9 @@ pub fn rtk_binary_available() -> bool {
 /// config (Ollama) always return false: the frontend renders those as "not
 /// applicable" rather than "not configured".
 pub fn rtk_hook_configured_for(agent_type: &AgentType) -> bool {
-    let Some(home) = resolve_home() else { return false; };
+    let Some(home) = resolve_home() else {
+        return false;
+    };
     // Gemini: the most authoritative signal is the hook script file RTK
     // drops at `~/.gemini/hooks/rtk-hook-gemini.sh` — it exists post-install
     // and is removed on `--uninstall`. We fall back to scanning GEMINI.md
@@ -64,7 +68,9 @@ pub fn rtk_hook_configured_for(agent_type: &AgentType) -> bool {
     if matches!(agent_type, AgentType::GeminiCli) {
         return gemini_hook_present(&home);
     }
-    let Some(rel_path) = agent_config_relpath(agent_type) else { return false; };
+    let Some(rel_path) = agent_config_relpath(agent_type) else {
+        return false;
+    };
     let path = home.join(rel_path);
     config_mentions_rtk(&path)
 }
@@ -88,11 +94,11 @@ fn agent_config_relpath(agent_type: &AgentType) -> Option<&'static Path> {
         // Codex hook lives in AGENTS.md, NOT config.toml. Caught the wrong
         // path on the first pass because `config.toml` felt more natural;
         // RTK `--codex` actually injects into AGENTS.md.
-        AgentType::Codex      => Some(Path::new(".codex/AGENTS.md")),
+        AgentType::Codex => Some(Path::new(".codex/AGENTS.md")),
         // Gemini CLI hook is detected via the hook-script file existence
         // + GEMINI.md scan — see `gemini_hook_present`. No per-file
         // relpath because we need a 2-source check, not a substring scan.
-        AgentType::GeminiCli  => None,
+        AgentType::GeminiCli => None,
         // Not in RTK's supported list.
         AgentType::Kiro | AgentType::CopilotCli => None,
         // API-only or hookless.
@@ -193,18 +199,28 @@ mod tests {
         std::env::set_var("KRONN_IN_DOCKER", "1"); // → is_docker() == true
         std::env::set_var("KRONN_HOST_BIN", tmp.path());
 
-        assert!(!rtk_binary_available(), "Docker + no host rtk → unavailable");
+        assert!(
+            !rtk_binary_available(),
+            "Docker + no host rtk → unavailable"
+        );
 
         fs::write(tmp.path().join("rtk"), "#!/bin/sh\n").unwrap();
-        assert!(rtk_binary_available(), "Docker + host rtk present → available");
+        assert!(
+            rtk_binary_available(),
+            "Docker + host rtk present → available"
+        );
 
         // Homebrew case: rtk is a symlink into ../Cellar (not mounted in the
         // container → dangling here). Must STILL count as available.
         #[cfg(unix)]
         {
             fs::remove_file(tmp.path().join("rtk")).unwrap();
-            std::os::unix::fs::symlink("/no/such/Cellar/rtk/bin/rtk", tmp.path().join("rtk")).unwrap();
-            assert!(rtk_binary_available(), "Docker + dangling host symlink (brew) → still available");
+            std::os::unix::fs::symlink("/no/such/Cellar/rtk/bin/rtk", tmp.path().join("rtk"))
+                .unwrap();
+            assert!(
+                rtk_binary_available(),
+                "Docker + dangling host symlink (brew) → still available"
+            );
         }
 
         match prev_data {
@@ -224,7 +240,8 @@ mod tests {
             fs::write(
                 home.join(".claude/settings.json"),
                 r#"{"hooks":{"PreToolUse":[{"command":"rtk preprocess"}]}}"#,
-            ).unwrap();
+            )
+            .unwrap();
             assert!(rtk_hook_configured_for(&AgentType::ClaudeCode));
         });
     }
@@ -236,7 +253,8 @@ mod tests {
             fs::write(
                 home.join(".claude/settings.json"),
                 r#"{"hooks":{"PreToolUse":[]}}"#,
-            ).unwrap();
+            )
+            .unwrap();
             assert!(!rtk_hook_configured_for(&AgentType::ClaudeCode));
         });
     }
@@ -248,7 +266,8 @@ mod tests {
             fs::write(
                 home.join(".codex/AGENTS.md"),
                 "# Codex AGENTS\n\nRun `RTK filter git status` before shelling out.\n",
-            ).unwrap();
+            )
+            .unwrap();
             assert!(rtk_hook_configured_for(&AgentType::Codex));
         });
     }
@@ -279,7 +298,8 @@ mod tests {
             fs::write(
                 home.join(".gemini/hooks/rtk-hook-gemini.sh"),
                 "#!/bin/bash\nexec rtk hook gemini\n",
-            ).unwrap();
+            )
+            .unwrap();
             assert!(rtk_hook_configured_for(&AgentType::GeminiCli));
         });
     }

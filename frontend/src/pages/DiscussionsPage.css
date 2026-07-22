@@ -1188,63 +1188,6 @@
   width: 260px;
 }
 
-/* ── Agent switch popover ─────────────────────────────── */
-.disc-agent-switch-btn {
-  background: none;
-  border: none;
-  padding: 1px 4px;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: var(--kr-fs-sm);
-  font-weight: 600;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-
-.disc-agent-switch-btn:disabled {
-  cursor: default;
-  opacity: 0.5;
-}
-
-.disc-agent-switch-popover {
-  position: absolute;
-  top: 100%;
-  left: 0;
-  margin-top: 4px;
-  z-index: 20;
-  background: var(--kr-bg-input);
-  border: 1px solid rgba(var(--kr-accent-rgb), 0.2);
-  border-radius: var(--kr-r-lg);
-  overflow: hidden;
-  box-shadow: var(--kr-shadow-lg);
-  min-width: 160px;
-}
-
-.disc-agent-switch-item {
-  display: flex;
-  align-items: center;
-  gap: var(--kr-sp-4);
-  width: 100%;
-  padding: 8px 12px;
-  border: none;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: var(--kr-fs-sm);
-  text-align: left;
-}
-
-.disc-agent-switch-item[data-current="true"] {
-  background: rgba(var(--kr-accent-rgb), 0.08);
-  color: var(--kr-accent);
-  opacity: 0.5;
-}
-
-.disc-agent-switch-item[data-current="false"] {
-  background: transparent;
-  color: var(--kr-text-primary);
-}
-
 /* ── Worktree badge ───────────────────────────────────── */
 .disc-worktree-badge {
   font-size: var(--kr-fs-xs);

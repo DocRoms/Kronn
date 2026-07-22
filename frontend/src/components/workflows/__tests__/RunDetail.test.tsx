@@ -16,7 +16,7 @@ import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/gener
 
 vi.mock('../../../lib/api', () => buildApiMock());
 
-import { RunDetail, tryParseTriageManifest } from '../RunDetail';
+import { RunDetail, runStatusTimeline, tryParseTriageManifest } from '../RunDetail';
 
 const t = (key: string, ...args: (string | number)[]) =>
   args.length > 0 ? `${key}:${args.join(',')}` : key;
@@ -244,6 +244,42 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     // so the row degrades gracefully to "step name + duration only".
     expect(screen.queryByText('API')).not.toBeInTheDocument();
     expect(screen.queryByText('NOTIFY')).not.toBeInTheDocument();
+  });
+});
+
+describe('RunDetail — status chips and interrupted resume trail', () => {
+  it('keeps the interruption visible after the resumed run succeeds', () => {
+    const run = mkRun({
+      status: 'Success',
+      state: {
+        '__kronn.resume_history': JSON.stringify({
+          v: 1,
+          events: [
+            { status: 'Interrupted', at: '2026-04-26T12:00:01Z' },
+            { status: 'Running', at: '2026-04-26T12:01:00Z' },
+          ],
+        }),
+      },
+    });
+
+    render(<RunDetail run={run} onDelete={() => {}} />);
+
+    const trail = screen.getByTestId('wf-run-status-trail');
+    expect(within(trail).getAllByText(/Interrupted|Running|Success/).map(node => node.textContent))
+      .toEqual(['Interrupted', 'Running', 'Success']);
+    expect(trail.querySelector('[data-status="Success"]')).toHaveAttribute('data-current', 'true');
+  });
+
+  it('falls back to the current status when resume metadata is malformed', () => {
+    const run = mkRun({
+      status: 'Failed',
+      state: { '__kronn.resume_history': '{not-json' },
+    });
+
+    expect(runStatusTimeline(run)).toEqual(['Failed']);
+    render(<RunDetail run={run} onDelete={() => {}} />);
+    const trail = screen.getByTestId('wf-run-status-trail');
+    expect(within(trail).getByText('Failed')).toHaveAttribute('data-current', 'true');
   });
 });
 

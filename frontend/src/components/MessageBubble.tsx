@@ -49,6 +49,13 @@ export function splitMessageSeed(content: string): { visible: string; seed: stri
   return { visible, seed: m[1].trim() };
 }
 
+const RE_AGENT_HANDOFF = /^<!-- KRONN_AGENT_HANDOFF:[\s\S]*?-->\s*/;
+
+/** The handoff is agent-facing metadata carried by the first real user turn. */
+export function stripAgentHandoff(content: string): string {
+  return content.replace(RE_AGENT_HANDOFF, '');
+}
+
 /** Same short-id label used by discussion and workflow header pills. */
 function messageShortLabel(id: string): string {
   return `#${id.slice(0, 8)}`;
@@ -153,6 +160,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     prevUserTs, defaultAgent, summaryCache, language, sending, editingText, hasFullAccess,
     onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, t } = props;
   const isUser = msg.role === 'User';
+  const visibleContent = isUser ? stripAgentHandoff(msg.content) : msg.content;
   const agentType = msg.agent_type ?? defaultAgent;
   const [isMessageIdCopied, setIsMessageIdCopied] = useState(false);
   const messageIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -202,7 +210,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     <button
       className="disc-copy-btn"
       data-copied={isCopied}
-      onClick={() => onCopy(msg.id, msg.content)}
+      onClick={() => onCopy(msg.id, visibleContent)}
       title={t('disc.copyMessage')}
     >
       {isCopied ? <><Check size={size} /> {t('disc.copied')}</> : <><Copy size={size} /> {showLabel && t('disc.copy')}</>}
@@ -441,7 +449,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           // flipping to Markdown. Markdown parse is skipped during
           // decode — fewer re-renders through ReactMarkdown.
           <div className="matrix-text" data-decoding="true" style={{ whiteSpace: 'pre-wrap' }}>
-            <MatrixText text={msg.content} />
+            <MatrixText text={visibleContent} />
           </div>
         ) : (
           (() => {
@@ -451,7 +459,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             // and stripping those would corrupt the agent prompt. Splitting first
             // keeps the agent-bound full content intact in the DB while the UI
             // only renders the visible prefix.
-            const { visible, seed } = splitMessageSeed(msg.content);
+            const { visible, seed } = splitMessageSeed(visibleContent);
             const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY|CHAIN_QP:[0-9a-fA-F-]+)/gi, '').trim();
             return (
               <>
@@ -475,7 +483,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         {msg.role === 'Agent' && (
           <button
             className="disc-tts-btn"
-            onClick={() => onTts(msg.id, msg.content, language)}
+            onClick={() => onTts(msg.id, visibleContent, language)}
             title={isTtsActive ? (tts === 'loading' ? 'Chargement...' : tts === 'playing' ? 'Pause' : tts === 'paused' ? 'Reprendre' : 'Lire') : 'Lire \u00e0 voix haute'}
           >
             {isTtsActive && tts === 'loading' ? <><Loader2 size={9} style={{ animation: 'spin 1s linear infinite' }} /> TTS</>
@@ -614,7 +622,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             {!sending && !isEditing && (isLastUser || isLastAgent) && (
               <div className="flex-row gap-2">
                 {isLastUser && (
-                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={() => onEditStart(msg.id, msg.content)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
+                  <button className="disc-icon-btn" style={{ padding: '2px 6px', fontSize: 10, color: 'var(--kr-text-dim)' }} onClick={() => onEditStart(msg.id, visibleContent)} title={t('disc.editResend')} aria-label={t('disc.editResend')}>
                     <Pencil size={10} />
                   </button>
                 )}

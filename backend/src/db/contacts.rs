@@ -7,31 +7,34 @@ use crate::models::Contact;
 pub fn list_contacts(conn: &Connection) -> Result<Vec<Contact>> {
     let mut stmt = conn.prepare(
         "SELECT id, pseudo, avatar_email, kronn_url, invite_code, status, created_at, updated_at
-         FROM contacts ORDER BY pseudo"
+         FROM contacts ORDER BY pseudo",
     )?;
-    let contacts = stmt.query_map([], |row| {
-        Ok(Contact {
-            id: row.get(0)?,
-            pseudo: row.get(1)?,
-            avatar_email: row.get::<_, Option<String>>(2).unwrap_or(None),
-            kronn_url: row.get(3)?,
-            invite_code: row.get(4)?,
-            status: row.get(5)?,
-            created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-            updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
-                .map(|dt| dt.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now()),
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    let contacts = stmt
+        .query_map([], |row| {
+            Ok(Contact {
+                id: row.get(0)?,
+                pseudo: row.get(1)?,
+                avatar_email: row.get::<_, Option<String>>(2).unwrap_or(None),
+                kronn_url: row.get(3)?,
+                invite_code: row.get(4)?,
+                status: row.get(5)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(6)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                updated_at: chrono::DateTime::parse_from_rfc3339(&row.get::<_, String>(7)?)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(contacts)
 }
 
 pub fn get_contact(conn: &Connection, id: &str) -> Result<Option<Contact>> {
     let mut stmt = conn.prepare(
         "SELECT id, pseudo, avatar_email, kronn_url, invite_code, status, created_at, updated_at
-         FROM contacts WHERE id = ?1"
+         FROM contacts WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], |row| {
         Ok(Contact {
@@ -66,15 +69,21 @@ pub enum InviteAuth {
 pub fn authenticate_invite_code(conn: &Connection, invite_code: &str) -> Result<InviteAuth> {
     Ok(match find_contact_by_invite_code(conn, invite_code)? {
         Some(c) if c.status == "accepted" => InviteAuth::Accepted(c),
-        Some(c) => InviteAuth::NotAccepted { pseudo: c.pseudo, status: c.status },
+        Some(c) => InviteAuth::NotAccepted {
+            pseudo: c.pseudo,
+            status: c.status,
+        },
         None => InviteAuth::Unknown,
     })
 }
 
-pub fn find_contact_by_invite_code(conn: &Connection, invite_code: &str) -> Result<Option<Contact>> {
+pub fn find_contact_by_invite_code(
+    conn: &Connection,
+    invite_code: &str,
+) -> Result<Option<Contact>> {
     let mut stmt = conn.prepare(
         "SELECT id, pseudo, avatar_email, kronn_url, invite_code, status, created_at, updated_at
-         FROM contacts WHERE invite_code = ?1"
+         FROM contacts WHERE invite_code = ?1",
     )?;
     let mut rows = stmt.query_map(params![invite_code], |row| {
         Ok(Contact {
@@ -157,18 +166,24 @@ mod tests {
         // status so callers can log it without re-implementing the rule.
         let conn = test_conn();
         for (id, code, status) in [
-            ("a", "kr-a", "accepted"), ("b", "kr-b", "pending"), ("c", "kr-c", "refused"),
+            ("a", "kr-a", "accepted"),
+            ("b", "kr-b", "pending"),
+            ("c", "kr-c", "refused"),
         ] {
-            insert_contact(&conn, &crate::models::Contact {
-                id: id.into(),
-                pseudo: format!("p-{id}"),
-                avatar_email: None,
-                kronn_url: "http://x".into(),
-                invite_code: code.into(),
-                status: status.into(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            }).unwrap();
+            insert_contact(
+                &conn,
+                &crate::models::Contact {
+                    id: id.into(),
+                    pseudo: format!("p-{id}"),
+                    avatar_email: None,
+                    kronn_url: "http://x".into(),
+                    invite_code: code.into(),
+                    status: status.into(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: chrono::Utc::now(),
+                },
+            )
+            .unwrap();
         }
         assert!(matches!(authenticate_invite_code(&conn, "kr-a").unwrap(),
             InviteAuth::Accepted(c) if c.id == "a"));
@@ -176,7 +191,10 @@ mod tests {
             InviteAuth::NotAccepted { ref status, .. } if status == "pending"));
         assert!(matches!(authenticate_invite_code(&conn, "kr-c").unwrap(),
             InviteAuth::NotAccepted { ref status, .. } if status == "refused"));
-        assert!(matches!(authenticate_invite_code(&conn, "kr-ghost").unwrap(), InviteAuth::Unknown));
+        assert!(matches!(
+            authenticate_invite_code(&conn, "kr-ghost").unwrap(),
+            InviteAuth::Unknown
+        ));
     }
 
     #[test]

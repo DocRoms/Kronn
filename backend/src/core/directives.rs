@@ -19,14 +19,38 @@ struct BuiltinDirective {
 
 const BUILTIN_DIRECTIVES: &[BuiltinDirective] = &[
     // Output
-    BuiltinDirective { id: "token-saver", content: include_str!("../directives/token-saver.md") },
-    BuiltinDirective { id: "json-output", content: include_str!("../directives/json-output.md") },
-    BuiltinDirective { id: "code-only", content: include_str!("../directives/code-only.md") },
-    BuiltinDirective { id: "markdown-report", content: include_str!("../directives/markdown-report.md") },
-    BuiltinDirective { id: "step-by-step", content: include_str!("../directives/step-by-step.md") },
-    BuiltinDirective { id: "verbose", content: include_str!("../directives/verbose.md") },
-    BuiltinDirective { id: "diff-only", content: include_str!("../directives/diff-only.md") },
-    BuiltinDirective { id: "caveman", content: include_str!("../directives/caveman.md") },
+    BuiltinDirective {
+        id: "token-saver",
+        content: include_str!("../directives/token-saver.md"),
+    },
+    BuiltinDirective {
+        id: "json-output",
+        content: include_str!("../directives/json-output.md"),
+    },
+    BuiltinDirective {
+        id: "code-only",
+        content: include_str!("../directives/code-only.md"),
+    },
+    BuiltinDirective {
+        id: "markdown-report",
+        content: include_str!("../directives/markdown-report.md"),
+    },
+    BuiltinDirective {
+        id: "step-by-step",
+        content: include_str!("../directives/step-by-step.md"),
+    },
+    BuiltinDirective {
+        id: "verbose",
+        content: include_str!("../directives/verbose.md"),
+    },
+    BuiltinDirective {
+        id: "diff-only",
+        content: include_str!("../directives/diff-only.md"),
+    },
+    BuiltinDirective {
+        id: "caveman",
+        content: include_str!("../directives/caveman.md"),
+    },
 ];
 
 // ─── Frontmatter parsing ────────────────────────────────────────────────────
@@ -68,7 +92,11 @@ fn parse_directive_markdown(id: &str, raw: &str, is_builtin: bool) -> Option<Dir
             let val = val.trim();
             if val != "[]" && !val.is_empty() {
                 let inner = val.trim_start_matches('[').trim_end_matches(']');
-                conflicts = inner.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                conflicts = inner
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
             }
         } else if let Some(val) = line.strip_prefix("source_url:") {
             let val = val.trim();
@@ -123,9 +151,13 @@ pub fn list_all_directives() -> Vec<Directive> {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                        let id = format!("custom-{}", path.file_stem().unwrap_or_default().to_string_lossy());
+                        let id = format!(
+                            "custom-{}",
+                            path.file_stem().unwrap_or_default().to_string_lossy()
+                        );
                         if let Ok(content) = std::fs::read_to_string(&path) {
-                            if let Some(directive) = parse_directive_markdown(&id, &content, false) {
+                            if let Some(directive) = parse_directive_markdown(&id, &content, false)
+                            {
                                 directives.push(directive);
                             }
                         }
@@ -161,7 +193,10 @@ pub fn build_directives_prompt(directive_ids: &[String]) -> String {
 
     let mut prompt = String::from("=== Active Directives ===\n\n");
     for directive in &directives {
-        prompt.push_str(&format!("--- {} ---\n{}\n\n", directive.name, directive.content));
+        prompt.push_str(&format!(
+            "--- {} ---\n{}\n\n",
+            directive.name, directive.content
+        ));
     }
     prompt
 }
@@ -202,7 +237,8 @@ pub fn save_custom_directive(
     let dir = custom_directives_dir().ok_or("Cannot determine config directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create directives dir: {}", e))?;
 
-    let slug: String = name.to_lowercase()
+    let slug: String = name
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
@@ -221,7 +257,11 @@ pub fn save_custom_directive(
         format!("[{}]", conflicts.join(", "))
     };
 
-    let desc_line = if description.is_empty() { String::new() } else { format!("description: {}\n", description) };
+    let desc_line = if description.is_empty() {
+        String::new()
+    } else {
+        format!("description: {}\n", description)
+    };
     let file_content = format!(
         "---\nname: {}\n{}category: {}\nicon: {}\nbuiltin: false\nconflicts: {}\n---\n{}",
         name, desc_line, cat_str, icon, conflicts_str, content
@@ -257,7 +297,11 @@ mod tests {
     #[test]
     fn parse_builtin_directives() {
         let directives = list_all_directives();
-        assert!(directives.len() >= 8, "Expected at least 8 builtin directives, got {}", directives.len());
+        assert!(
+            directives.len() >= 8,
+            "Expected at least 8 builtin directives, got {}",
+            directives.len()
+        );
 
         let token_saver = directives.iter().find(|d| d.id == "token-saver").unwrap();
         assert_eq!(token_saver.name, "Token Saver");
@@ -302,7 +346,11 @@ mod tests {
         for d in &directives {
             assert!(!d.name.is_empty(), "Directive '{}' has empty name", d.id);
             assert!(!d.icon.is_empty(), "Directive '{}' has empty icon", d.id);
-            assert!(!d.content.is_empty(), "Directive '{}' has empty content", d.id);
+            assert!(
+                !d.content.is_empty(),
+                "Directive '{}' has empty content",
+                d.id
+            );
         }
     }
 
@@ -319,19 +367,37 @@ mod tests {
     #[test]
     fn output_category_represented() {
         let directives = list_all_directives();
-        assert!(directives.iter().any(|d| d.category == DirectiveCategory::Output), "No output directives");
+        assert!(
+            directives
+                .iter()
+                .any(|d| d.category == DirectiveCategory::Output),
+            "No output directives"
+        );
     }
 
     #[test]
     fn language_directives_removed() {
         let directives = list_all_directives();
         let ids: Vec<&str> = directives.iter().map(|d| d.id.as_str()).collect();
-        assert!(!ids.contains(&"repondre-en-francais"), "French language directive should be removed");
-        assert!(!ids.contains(&"reply-in-english"), "English language directive should be removed");
-        assert!(!ids.contains(&"responder-en-espanol"), "Spanish language directive should be removed");
+        assert!(
+            !ids.contains(&"repondre-en-francais"),
+            "French language directive should be removed"
+        );
+        assert!(
+            !ids.contains(&"reply-in-english"),
+            "English language directive should be removed"
+        );
+        assert!(
+            !ids.contains(&"responder-en-espanol"),
+            "Spanish language directive should be removed"
+        );
         // No builtin language directives should remain
-        assert!(!directives.iter().any(|d| d.category == DirectiveCategory::Language && d.is_builtin),
-            "No builtin language directives should exist");
+        assert!(
+            !directives
+                .iter()
+                .any(|d| d.category == DirectiveCategory::Language && d.is_builtin),
+            "No builtin language directives should exist"
+        );
     }
 
     #[test]
@@ -384,9 +450,11 @@ mod tests {
     #[test]
     fn validate_no_conflicts_detects_conflict() {
         let conflicts = validate_no_conflicts(&["token-saver".into(), "verbose".into()]);
-        assert!(!conflicts.is_empty(), "token-saver and verbose should conflict");
+        assert!(
+            !conflicts.is_empty(),
+            "token-saver and verbose should conflict"
+        );
     }
-
 
     #[test]
     fn parse_frontmatter_valid() {
@@ -408,7 +476,8 @@ mod tests {
 
     #[test]
     fn parse_frontmatter_with_conflicts() {
-        let raw = "---\nname: X\nicon: I\ncategory: output\nbuiltin: false\nconflicts: [a, b]\n---\nc";
+        let raw =
+            "---\nname: X\nicon: I\ncategory: output\nbuiltin: false\nconflicts: [a, b]\n---\nc";
         let d = parse_directive_markdown("x", raw, false).unwrap();
         assert_eq!(d.conflicts, vec!["a", "b"]);
     }

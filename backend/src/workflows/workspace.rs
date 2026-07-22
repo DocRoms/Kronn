@@ -4,8 +4,8 @@
 //! interfere with the main working tree. Lifecycle hooks are executed
 //! at each stage.
 
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 
 use crate::core::cmd::async_cmd;
 use crate::models::WorkspaceHooks;
@@ -97,7 +97,13 @@ pub struct CleanupOutcome {
 /// Keeps alphanumeric, dash, and underscore; replaces everything else with `-`.
 pub(crate) fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -109,17 +115,15 @@ pub(crate) fn sanitize_name(name: &str) -> String {
 /// salvage). On total failure (no base ref found, or git errors) we return
 /// `Some` with `ahead=0` to err on the side of preservation — losing real
 /// work is much worse than leaving a stale empty branch behind.
-async fn check_branch_for_preservation(
-    worktree: &Path,
-    branch: &str,
-) -> Option<PreservedBranch> {
+async fn check_branch_for_preservation(worktree: &Path, branch: &str) -> Option<PreservedBranch> {
     // HEAD sha is the anchor we want to be able to recover via the branch.
     let head_sha = git_text_output(worktree, &["rev-parse", "HEAD"]).await?;
 
     // Was an upstream set on the worktree's branch ? Tells us whether the
     // agent tried to push at all. `@{u}` resolves only when set.
-    let pushed_upstream =
-        git_text_output(worktree, &["rev-parse", "--abbrev-ref", "@{u}"]).await.is_some();
+    let pushed_upstream = git_text_output(worktree, &["rev-parse", "--abbrev-ref", "@{u}"])
+        .await
+        .is_some();
 
     // Walk through plausible bases in order of relevance. The first one
     // that resolves wins — count commits ahead.
@@ -161,7 +165,12 @@ async fn check_branch_for_preservation(
 
 /// Run `git <args>` in `cwd`, return trimmed stdout if exit was 0.
 async fn git_text_output(cwd: &Path, args: &[&str]) -> Option<String> {
-    let out = async_cmd("git").args(args).current_dir(cwd).output().await.ok()?;
+    let out = async_cmd("git")
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .await
+        .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -205,11 +214,23 @@ impl Workspace {
         // Mark the repo and worktree as safe directories (needed in Docker where
         // the mounted volume owner differs from the container user)
         let _ = async_cmd("git")
-            .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
+            .args([
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                &repo_path.to_string_lossy(),
+            ])
             .output()
             .await;
         let _ = async_cmd("git")
-            .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
+            .args([
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                &worktree_path.to_string_lossy(),
+            ])
             .output()
             .await;
 
@@ -227,7 +248,11 @@ impl Workspace {
             anyhow::bail!("git worktree add failed: {}", stderr);
         }
 
-        tracing::info!("Created worktree at {} (branch: {})", worktree_path.display(), branch);
+        tracing::info!(
+            "Created worktree at {} (branch: {})",
+            worktree_path.display(),
+            branch
+        );
 
         let ws = Self {
             path: worktree_path,
@@ -304,30 +329,36 @@ impl Workspace {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!("git worktree remove failed (will try manual cleanup): {}", stderr);
+            tracing::warn!(
+                "git worktree remove failed (will try manual cleanup): {}",
+                stderr
+            );
             // Fallback: remove directory manually
             if self.path.exists() {
                 let _ = std::fs::remove_dir_all(&self.path);
             }
         }
 
-        let outcome = if let Some(info) = preserve {
-            // Keep the branch alive in the parent repo.
-            tracing::info!(
+        let outcome =
+            if let Some(info) = preserve {
+                // Keep the branch alive in the parent repo.
+                tracing::info!(
                 "Preserved branch '{}' (HEAD={}, {} commit(s) ahead of base, upstream_set={}) — \
                  the worktree had local commits the operator may want to recover.",
                 info.branch_name, info.head_sha, info.ahead, info.pushed_upstream
             );
-            CleanupOutcome { preserved: Some(info) }
-        } else {
-            // Fully synced — safe to drop the branch ref.
-            let _ = async_cmd("git")
-                .args(["branch", "-D", &self.branch])
-                .current_dir(&self.repo_path)
-                .output()
-                .await;
-            CleanupOutcome::default()
-        };
+                CleanupOutcome {
+                    preserved: Some(info),
+                }
+            } else {
+                // Fully synced — safe to drop the branch ref.
+                let _ = async_cmd("git")
+                    .args(["branch", "-D", &self.branch])
+                    .current_dir(&self.repo_path)
+                    .output()
+                    .await;
+                CleanupOutcome::default()
+            };
 
         tracing::info!("Cleaned up worktree: {}", self.path.display());
         Ok(outcome)
@@ -360,11 +391,13 @@ impl Workspace {
                 Err(_) => {
                     tracing::warn!(
                         "Hook '{}' timed out after {}s — killing it",
-                        hook_name, HOOK_TIMEOUT.as_secs()
+                        hook_name,
+                        HOOK_TIMEOUT.as_secs()
                     );
                     return Err(anyhow::anyhow!(
                         "Failed to run {} hook: timed out after {}s",
-                        hook_name, HOOK_TIMEOUT.as_secs()
+                        hook_name,
+                        HOOK_TIMEOUT.as_secs()
                     ));
                 }
             };
@@ -392,7 +425,11 @@ mod tests {
         let b = dir_b.path().to_string_lossy().to_string();
         let g1 = MainTreeGuard::acquire(&a, "run-1").expect("first acquire");
         let denied = MainTreeGuard::acquire(&a, "run-2");
-        assert_eq!(denied.err().as_deref(), Some("run-1"), "second run must be refused, naming the holder");
+        assert_eq!(
+            denied.err().as_deref(),
+            Some("run-1"),
+            "second run must be refused, naming the holder"
+        );
         // A different project is unaffected.
         let _other = MainTreeGuard::acquire(&b, "run-3").expect("other project free");
         drop(g1);
@@ -486,7 +523,10 @@ mod tests {
     fn worktree_base_is_inside_repo() {
         let repo = PathBuf::from("/home/user/project");
         let base = repo.join(".kronn/worktrees");
-        assert_eq!(base.to_str().unwrap(), "/home/user/project/.kronn/worktrees");
+        assert_eq!(
+            base.to_str().unwrap(),
+            "/home/user/project/.kronn/worktrees"
+        );
     }
 
     #[test]
@@ -495,7 +535,10 @@ mod tests {
         let base = repo.join(".kronn/worktrees");
         let dir_name = build_worktree_dir_name("audit", "aabbccdd-1234");
         let full = base.join(&dir_name);
-        assert_eq!(full.to_str().unwrap(), "/repos/myapp/.kronn/worktrees/audit-aabbccdd");
+        assert_eq!(
+            full.to_str().unwrap(),
+            "/repos/myapp/.kronn/worktrees/audit-aabbccdd"
+        );
     }
 
     // ─── check_branch_for_preservation (P3 — preserve commits cleanup
@@ -511,12 +554,37 @@ mod tests {
         let repo = dir.path().to_path_buf();
 
         // Init + minimal user config (commit -m needs an identity).
-        let _ = crate::core::cmd::async_cmd("git").args(["init", "-q", "-b", "main"]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.email", "test@kronn.local"]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.name", "test"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["config", "user.email", "test@kronn.local"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["config", "user.name", "test"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
         std::fs::write(repo.join("README.md"), "test\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "init"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
 
         (dir, repo)
     }
@@ -534,10 +602,25 @@ mod tests {
         // Mirror the production scenario: a worktree branched off main
         // gets its own commit, leaving main behind by 1.
         let (_dir, repo) = make_test_repo().await;
-        let _ = crate::core::cmd::async_cmd("git").args(["checkout", "-q", "-b", "kronn/test"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["checkout", "-q", "-b", "kronn/test"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
         std::fs::write(repo.join("CHANGELOG.md"), "v1\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "feat: changelog"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "feat: changelog"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
 
         let result = check_branch_for_preservation(&repo, "kronn/test").await;
         let preserved = result.expect("branch ahead of main should be preserved");
@@ -554,12 +637,37 @@ mod tests {
         // None (preferring "preserve too much" over "lose work").
         let dir = tempfile::TempDir::new().unwrap();
         let repo = dir.path().to_path_buf();
-        let _ = crate::core::cmd::async_cmd("git").args(["init", "-q", "-b", "weird-default"]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.email", "test@kronn.local"]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["config", "user.name", "test"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["init", "-q", "-b", "weird-default"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["config", "user.email", "test@kronn.local"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["config", "user.name", "test"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
         std::fs::write(repo.join("README.md"), "x\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&repo).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "init"]).current_dir(&repo).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "init"])
+            .current_dir(&repo)
+            .output()
+            .await
+            .unwrap();
 
         let result = check_branch_for_preservation(&repo, "test-branch").await;
         let preserved = result.expect("no resolvable base → defensive preserve");
@@ -581,7 +689,10 @@ mod tests {
 
         // No new commits → cleanup() should NOT preserve.
         let outcome = ws.cleanup().await.expect("cleanup");
-        assert!(outcome.preserved.is_none(), "synced branch should not be preserved");
+        assert!(
+            outcome.preserved.is_none(),
+            "synced branch should not be preserved"
+        );
     }
 
     #[tokio::test]
@@ -607,7 +718,9 @@ mod tests {
             .unwrap();
 
         let outcome = ws.cleanup().await.expect("cleanup");
-        let preserved = outcome.preserved.expect("branch with new commit must be preserved");
+        let preserved = outcome
+            .preserved
+            .expect("branch with new commit must be preserved");
         assert_eq!(preserved.branch_name, "kronn/preservetest/ffeeddcc");
         assert_eq!(preserved.ahead, 1, "exactly one commit beyond main");
         assert!(!preserved.head_sha.is_empty());
@@ -644,24 +757,51 @@ mod tests {
         // Child ATTACHES the same path (different run_id → cosmetic branch
         // field; commits land on the branch actually checked out in `path`,
         // i.e. the parent's branch).
-        let child_ws = Workspace::attach(path.clone(), repo.clone(), "implement-verify", "99887766-child", None);
+        let child_ws = Workspace::attach(
+            path.clone(),
+            repo.clone(),
+            "implement-verify",
+            "99887766-child",
+            None,
+        );
         std::fs::write(child_ws.path.join("IMPL.md"), "child implementation\n").unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["add", "."]).current_dir(&child_ws.path).output().await.unwrap();
-        let _ = crate::core::cmd::async_cmd("git").args(["commit", "-q", "-m", "feat: child work"]).current_dir(&child_ws.path).output().await.unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["add", "."])
+            .current_dir(&child_ws.path)
+            .output()
+            .await
+            .unwrap();
+        let _ = crate::core::cmd::async_cmd("git")
+            .args(["commit", "-q", "-m", "feat: child work"])
+            .current_dir(&child_ws.path)
+            .output()
+            .await
+            .unwrap();
 
         // The child is dropped WITHOUT cleanup (the inherited-workspace path
         // in execute_run skips `ws.cleanup()`). No async Drop → no removal.
         drop(child_ws);
 
         // Worktree + the child's file must still be there for the parent.
-        assert!(path.exists(), "inherited child must NOT remove the shared worktree");
-        assert!(path.join("IMPL.md").exists(), "child's commit/files must survive for the parent");
+        assert!(
+            path.exists(),
+            "inherited child must NOT remove the shared worktree"
+        );
+        assert!(
+            path.join("IMPL.md").exists(),
+            "child's commit/files must survive for the parent"
+        );
 
         // The PARENT owns cleanup → its branch is preserved WITH the child's commit.
         let outcome = parent_ws.cleanup().await.expect("parent cleanup");
-        let preserved = outcome.preserved.expect("parent branch carries the child's commit → preserved");
+        let preserved = outcome
+            .preserved
+            .expect("parent branch carries the child's commit → preserved");
         assert_eq!(preserved.branch_name, "kronn/ticket-to-pr/11223344");
-        assert_eq!(preserved.ahead, 1, "the single child commit is one ahead of main");
+        assert_eq!(
+            preserved.ahead, 1,
+            "the single child commit is one ahead of main"
+        );
     }
 
     #[tokio::test]
@@ -681,7 +821,10 @@ mod tests {
         // The hook should have written to the sentinel.
         let _ = ws.before_run().await;
         let _ = ws.after_run().await;
-        assert!(sentinel.exists(), "after_create hook should have created sentinel");
+        assert!(
+            sentinel.exists(),
+            "after_create hook should have created sentinel"
+        );
         let outcome = ws.cleanup().await.expect("cleanup");
         // No new commits committed → no preserve.
         assert!(outcome.preserved.is_none());

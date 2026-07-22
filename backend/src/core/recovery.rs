@@ -48,8 +48,8 @@ pub struct RecoveryBlob {
 /// lane / 32-byte output — the OWASP baseline, fast enough on modest hardware
 /// (WSL/Docker) for an infrequent boot/recovery op.
 fn kdf() -> argon2::Argon2<'static> {
-    let params = argon2::Params::new(19_456, 2, 1, Some(32))
-        .expect("pinned Argon2 params are valid");
+    let params =
+        argon2::Params::new(19_456, 2, 1, Some(32)).expect("pinned Argon2 params are valid");
     argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params)
 }
 
@@ -74,7 +74,10 @@ pub fn wrap_key(key_hex: &str, passphrase: &str) -> Result<RecoveryBlob, String>
     let mut kek = derive_kek(passphrase, &salt)?;
     let wrapped = crypto::encrypt(key_hex, &kek);
     kek.zeroize();
-    Ok(RecoveryBlob { salt, wrapped: wrapped? })
+    Ok(RecoveryBlob {
+        salt,
+        wrapped: wrapped?,
+    })
 }
 
 /// Recover the key hex from a blob + passphrase. A wrong passphrase (or a
@@ -83,7 +86,8 @@ pub fn unwrap_key(blob: &RecoveryBlob, passphrase: &str) -> Result<String, Strin
     let mut kek = derive_kek(passphrase, &blob.salt)?;
     let result = crypto::decrypt(&blob.wrapped, &kek);
     kek.zeroize();
-    let key_hex = result.map_err(|_| "Wrong recovery passphrase or corrupt recovery data".to_string())?;
+    let key_hex =
+        result.map_err(|_| "Wrong recovery passphrase or corrupt recovery data".to_string())?;
     // The unwrapped value must itself be a valid key (defense in depth).
     crypto::parse_secret(&key_hex)?;
     Ok(key_hex)
@@ -102,16 +106,24 @@ pub fn from_code(code: &str) -> Result<RecoveryBlob, String> {
     if parts.len() != 3 || parts[0] != CODE_PREFIX {
         return Err("Invalid recovery code format".into());
     }
-    let salt_bytes = B64.decode(parts[1]).map_err(|e| format!("Invalid recovery code salt: {e}"))?;
+    let salt_bytes = B64
+        .decode(parts[1])
+        .map_err(|e| format!("Invalid recovery code salt: {e}"))?;
     if salt_bytes.len() != SALT_LEN {
-        return Err(format!("Invalid recovery code salt length: {}", salt_bytes.len()));
+        return Err(format!(
+            "Invalid recovery code salt length: {}",
+            salt_bytes.len()
+        ));
     }
     if parts[2].is_empty() {
         return Err("Invalid recovery code: empty payload".into());
     }
     let mut salt = [0u8; SALT_LEN];
     salt.copy_from_slice(&salt_bytes);
-    Ok(RecoveryBlob { salt, wrapped: parts[2].to_string() })
+    Ok(RecoveryBlob {
+        salt,
+        wrapped: parts[2].to_string(),
+    })
 }
 
 /// Persist the recovery code to the `0600` sidecar in `dir` (atomic temp+rename
@@ -161,7 +173,10 @@ mod tests {
         let key = a_key();
         let blob = wrap_key(&key, "right-pass").unwrap();
         let err = unwrap_key(&blob, "wrong-pass").unwrap_err();
-        assert!(err.contains("Wrong recovery passphrase"), "unexpected: {err}");
+        assert!(
+            err.contains("Wrong recovery passphrase"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -225,7 +240,10 @@ mod tests {
         let key = a_key();
         let good = wrap_key(&key, "pp").unwrap();
         let other = wrap_key(&key, "pp").unwrap();
-        let frankenstein = RecoveryBlob { salt: other.salt, wrapped: good.wrapped };
+        let frankenstein = RecoveryBlob {
+            salt: other.salt,
+            wrapped: good.wrapped,
+        };
         assert!(unwrap_key(&frankenstein, "pp").is_err());
     }
 
@@ -252,9 +270,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         save_blob(dir.path(), &wrap_key(&a_key(), "pp").unwrap()).unwrap();
         let mode = std::fs::metadata(dir.path().join(RECOVERY_FILENAME))
-            .unwrap().permissions().mode() & 0o777;
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(mode, 0o600);
-        let has_tmp = std::fs::read_dir(dir.path()).unwrap()
+        let has_tmp = std::fs::read_dir(dir.path())
+            .unwrap()
             .filter_map(|e| e.ok())
             .any(|e| e.file_name().to_string_lossy().ends_with(".tmp"));
         assert!(!has_tmp);

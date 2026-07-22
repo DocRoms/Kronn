@@ -65,6 +65,17 @@ function renderList(projects: Project[]) {
 }
 
 describe('ProjectList — missing-path banner', () => {
+  it('mounts one detail card while keeping every project in the compact list', () => {
+    renderList([
+      proj('p1', 'Alpha', '/repos/alpha', true),
+      proj('p2', 'Beta', '/repos/beta', true),
+      proj('p3', 'Gamma', '/repos/gamma', true),
+    ]);
+
+    expect(screen.getAllByTestId(/^project-list-item-/)).toHaveLength(3);
+    expect(screen.getAllByTestId(/^card-/)).toHaveLength(1);
+  });
+
   it('hides the banner when every path resolves', () => {
     renderList([
       proj('p1', 'Alpha', '/repos/alpha', true),
@@ -96,15 +107,16 @@ describe('ProjectList — missing-path banner', () => {
       proj('p1', 'Alpha', '/repos/alpha', true),
       proj('p2', 'Beta', '/repos/beta', false),
     ]);
-    // Both cards visible initially.
-    expect(screen.getByTestId('card-p1')).toBeInTheDocument();
-    expect(screen.getByTestId('card-p2')).toBeInTheDocument();
+    // Both compact list entries are visible initially. Only one heavy detail
+    // card is mounted at a time by the master/detail layout.
+    expect(screen.getByTestId('project-list-item-p1')).toBeInTheDocument();
+    expect(screen.getByTestId('project-list-item-p2')).toBeInTheDocument();
 
     fireEvent.click(screen.getByText('projects.missingBanner.showOnly'));
 
     // Now only the missing one remains; the toggle flips to "show all".
-    expect(screen.queryByTestId('card-p1')).not.toBeInTheDocument();
-    expect(screen.getByTestId('card-p2')).toBeInTheDocument();
+    expect(screen.queryByTestId('project-list-item-p1')).not.toBeInTheDocument();
+    expect(screen.getByTestId('project-list-item-p2')).toBeInTheDocument();
     expect(screen.getByText('projects.missingBanner.showAll')).toBeInTheDocument();
   });
 });

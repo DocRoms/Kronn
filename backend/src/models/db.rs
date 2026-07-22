@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 use super::{
-    AgentProfile, Contact, Directive, Discussion, Learning, McpConfig, McpServer, Project,
-    LearningRejection, QuickApi, QuickPrompt, QuickPromptVersion, Skill, Workflow,
+    AgentProfile, Contact, Directive, Discussion, Learning, LearningRejection, McpConfig,
+    McpServer, Project, QuickApi, QuickPrompt, QuickPromptVersion, Skill, Workflow,
 };
 
 #[derive(Debug, Serialize, TS)]

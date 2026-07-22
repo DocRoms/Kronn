@@ -1,16 +1,14 @@
-use axum::{Json, extract::State};
-use crate::models::*;
 use crate::agents;
+use crate::models::*;
 use crate::AppState;
+use axum::{extract::State, Json};
 
 /// GET /api/agents
 /// Detect all agents on the system, with enabled/disabled status from config.
 /// Non-installed agents that are only runtime_available require a configured
 /// API key (or env var) to be considered enabled — this prevents phantom agents
 /// from appearing usable when they were never set up (fixes #6, #2, #10).
-pub async fn detect(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<AgentDetection>>> {
+pub async fn detect(State(state): State<AppState>) -> Json<ApiResponse<Vec<AgentDetection>>> {
     let mut detected = agents::detect_all_cached(false).await;
     let config = state.config.read().await;
     for agent in &mut detected {
@@ -75,7 +73,8 @@ pub async fn uninstall(
     // Check if the agent is host-managed (binary found in KRONN_HOST_BIN)
     let is_host_managed = {
         let detected = agents::detect_all_cached(false).await;
-        detected.iter()
+        detected
+            .iter()
             .find(|a| a.agent_type == agent_type)
             .map(|a| a.host_managed)
             .unwrap_or(false)
@@ -83,7 +82,10 @@ pub async fn uninstall(
 
     let result = if is_host_managed {
         // Can't uninstall from Docker — just disable instead
-        tracing::info!("Agent {:?} is host-managed, disabling instead of uninstalling", agent_type);
+        tracing::info!(
+            "Agent {:?} is host-managed, disabling instead of uninstalling",
+            agent_type
+        );
         Ok("Agent is installed on the host system — disabled in Kronn (uninstall manually on host if needed)".to_string())
     } else {
         agents::uninstall_agent(&agent_type).await
@@ -114,7 +116,10 @@ pub async fn uninstall(
                 }
             }
             tracing::warn!("Uninstall command failed (agent disabled anyway): {}", e);
-            Json(ApiResponse::ok(format!("Uninstall failed but agent disabled: {}", e)))
+            Json(ApiResponse::ok(format!(
+                "Uninstall failed but agent disabled: {}",
+                e
+            )))
         }
     }
 }

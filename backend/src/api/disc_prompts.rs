@@ -45,9 +45,18 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
         String::new()
     } else {
         match ctx.lang {
-            "fr" => format!("Contexte de la conversation precedente (ne pas repeter) :\n\n{}\n\n", ctx.conversation_context),
-            "es" => format!("Contexto de la conversacion anterior (no repetir) :\n\n{}\n\n", ctx.conversation_context),
-            _ => format!("Previous conversation context (do not repeat) :\n\n{}\n\n", ctx.conversation_context),
+            "fr" => format!(
+                "Contexte de la conversation precedente (ne pas repeter) :\n\n{}\n\n",
+                ctx.conversation_context
+            ),
+            "es" => format!(
+                "Contexto de la conversacion anterior (no repetir) :\n\n{}\n\n",
+                ctx.conversation_context
+            ),
+            _ => format!(
+                "Previous conversation context (do not repeat) :\n\n{}\n\n",
+                ctx.conversation_context
+            ),
         }
     };
 
@@ -61,7 +70,10 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
                 Concentre-toi sur ton expertise specifique.\n\
                 Reponds en francais.\n\n\
                 Question : {}",
-                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
+                agent_name,
+                ctx.all_agents.join(", "),
+                conv_section,
+                ctx.question
             ),
             "es" => format!(
                 "Eres {} en un debate tecnico entre agentes IA ({}).\n\
@@ -70,7 +82,10 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
                 Se conciso y preciso (max 200 palabras). NO repitas la pregunta.\n\
                 Responde en espanol.\n\n\
                 Pregunta: {}",
-                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
+                agent_name,
+                ctx.all_agents.join(", "),
+                conv_section,
+                ctx.question
             ),
             _ => format!(
                 "You are {} in a technical debate between AI agents ({}).\n\
@@ -80,7 +95,10 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
                 Focus on your specific expertise and what you uniquely bring.\n\
                 Respond in English.\n\n\
                 Question: {}",
-                agent_name, ctx.all_agents.join(", "), conv_section, ctx.question
+                agent_name,
+                ctx.all_agents.join(", "),
+                conv_section,
+                ctx.question
             ),
         }
     } else {
@@ -88,17 +106,26 @@ pub fn build_orchestration_prompt(ctx: &OrchestrationContext) -> String {
             "fr" => format!(
                 "Tu es {} au round {}/{} d'un debat technique ({}).\n\
                 Voici les echanges precedents :\n\n",
-                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
+                agent_name,
+                ctx.round,
+                ctx.max_rounds,
+                ctx.all_agents.join(", ")
             ),
             "es" => format!(
                 "Eres {} en la ronda {}/{} de un debate tecnico ({}).\n\
                 Intercambios anteriores:\n\n",
-                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
+                agent_name,
+                ctx.round,
+                ctx.max_rounds,
+                ctx.all_agents.join(", ")
             ),
             _ => format!(
                 "You are {} in round {}/{} of a technical debate ({}).\n\
                 Here are the previous exchanges:\n\n",
-                agent_name, ctx.round, ctx.max_rounds, ctx.all_agents.join(", ")
+                agent_name,
+                ctx.round,
+                ctx.max_rounds,
+                ctx.all_agents.join(", ")
             ),
         };
 
@@ -208,21 +235,21 @@ pub fn build_synthesis_prompt(
             1. Points d'ACCORD (convergences entre tous les agents)\n\
             2. DESACCORDS restants (s'il y en a)\n\
             3. RECOMMANDATION FINALE\n\
-            Sois concis et structure. Reponds en francais."
+            Sois concis et structure. Reponds en francais.",
         ),
         "es" => ctx.push_str(
             "Produce una sintesis clara y accionable:\n\
             1. Puntos de ACUERDO (convergencias entre todos los agentes)\n\
             2. DESACUERDOS restantes (si los hay)\n\
             3. RECOMENDACION FINAL\n\
-            Se conciso y estructurado. Responde en espanol."
+            Se conciso y estructurado. Responde en espanol.",
         ),
         _ => ctx.push_str(
             "Produce a clear, actionable synthesis:\n\
             1. Points of AGREEMENT (what all agents converge on)\n\
             2. Remaining DISAGREEMENTS (if any)\n\
             3. FINAL RECOMMENDATION\n\
-            Be concise and structured. Respond in English."
+            Be concise and structured. Respond in English.",
         ),
     }
     ctx
@@ -338,10 +365,7 @@ pub fn build_agent_prompt(
     // MCP tool calls in 0.121. Confirmed live by a `tools/call` smoke
     // test through Codex itself. The TD-20260510-codex-mcp-sandbox-
     // block is closed.
-    let agent_speaks_mcp = !matches!(
-        agent_type,
-        AgentType::Vibe | AgentType::Ollama,
-    );
+    let agent_speaks_mcp = !matches!(agent_type, AgentType::Vibe | AgentType::Ollama,);
     let introspection_notice = match disc.language.as_str() {
         "fr" => "Outils d'historique disponibles via le MCP `kronn-internal` : \
             `disc_meta()` (compte de messages, agent, tier — gratuit), \
@@ -390,12 +414,28 @@ pub fn build_agent_prompt(
         .iter()
         .filter(|m| matches!(m.role, MessageRole::User))
         .collect();
+    let latest_is_peer_agent = disc
+        .messages
+        .iter()
+        .rev()
+        .find(|m| !matches!(m.role, MessageRole::System))
+        .is_some_and(|m| matches!(m.role, MessageRole::Agent));
 
-    if user_msgs.len() <= 1 {
-        let content = user_msgs.last().map(|m| m.content.clone()).unwrap_or_default();
+    // The single-user-message short form intentionally omits history. A peer
+    // agent may already have answered that first user message, though: in that
+    // case the native principal must see and answer the peer, not replay the
+    // original human prompt.
+    if user_msgs.len() <= 1 && !latest_is_peer_agent {
+        let content = user_msgs
+            .last()
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
-        return format!("{}{}{}\n\n{}", title_ctx, worktree_notice, content, lang_instr);
+        return format!(
+            "{}{}{}\n\n{}",
+            title_ctx, worktree_notice, content, lang_instr
+        );
     }
 
     // Fixed overhead: header + footer (localized by discussion language)
@@ -404,12 +444,17 @@ pub fn build_agent_prompt(
         "es" => "Conversación anterior:\n\n",
         _ => "Previous conversation:\n\n",
     };
-    let footer = match disc.language.as_str() {
-        "fr" => "Répondez au dernier message ci-dessus. Reponds en francais.",
-        "es" => "Responda al último mensaje anterior. Responda en español.",
-        "zh" => "请回复上面的最新用户消息。请用中文回答。",
-        "br" => "Respontet d'ar c'hemenn diwezhañ a-us. Respont e brezhoneg.",
-        _ => "Please respond to the latest user message above. Respond in English.",
+    let footer = match (disc.language.as_str(), latest_is_peer_agent) {
+        ("fr", true) => "Réponds au dernier message de l'agent ci-dessus. Reponds en francais.",
+        ("es", true) => "Responda al último mensaje del agente anterior. Responda en español.",
+        ("zh", true) => "请回复上面的最新代理消息。请用中文回答。",
+        ("br", true) => "Respont d'ar c'hemenn diwezhañ eus an agent a-us. Respont e brezhoneg.",
+        ("fr", false) => "Répondez au dernier message ci-dessus. Reponds en francais.",
+        ("es", false) => "Responda al último mensaje anterior. Responda en español.",
+        ("zh", false) => "请回复上面的最新用户消息。请用中文回答。",
+        ("br", false) => "Respontet d'ar c'hemenn diwezhañ a-us. Respont e brezhoneg.",
+        (_, true) => "Please respond to the latest agent message above. Respond in English.",
+        (_, false) => "Please respond to the latest user message above. Respond in English.",
     };
     // For agents that think they're in non-interactive mode (Gemini -p, Codex exec),
     // clarify that this IS a multi-turn conversation managed by Kronn.
@@ -417,9 +462,9 @@ pub fn build_agent_prompt(
     // agents like Gemini detect -p mode and refuse to interact on the first message.
     let interactive_hint = if user_msgs.len() > 1 || disc.pin_first_message {
         match disc.language.as_str() {
-            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque message te sera transmis avec l'historique complet.\n\n",
-            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada mensaje te sera transmitido con el historial completo.\n\n",
-            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each message will be sent to you with the full history.\n\n",
+            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque tour inclut la fenetre d'historique disponible ; si les outils d'historique sont indiques plus haut, utilise-les seulement lorsqu'un contexte plus ancien te manque.\n\n",
+            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada turno incluye la ventana de historial disponible; si las herramientas de historial aparecen arriba, úsalas solo cuando te falte contexto anterior.\n\n",
+            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each turn includes the available history window; when history tools are listed above, use them only when older context is missing.\n\n",
         }
     } else {
         ""
@@ -434,10 +479,7 @@ pub fn build_agent_prompt(
     //     parser in `slash_markers.rs` resolves them into System
     //     messages on the next turn).
     //   - Codex is an MCP speaker again since 0.8.6 / Codex 0.132.
-    let agent_uses_slash_markers = matches!(
-        agent_type,
-        AgentType::Vibe | AgentType::Ollama,
-    );
+    let agent_uses_slash_markers = matches!(agent_type, AgentType::Vibe | AgentType::Ollama,);
     let intro_block: &str = if user_msgs.len() >= 3 {
         if agent_speaks_mcp {
             introspection_notice
@@ -449,7 +491,10 @@ pub fn build_agent_prompt(
     } else {
         ""
     };
-    let header = format!("{}{}{}{}{}", title_ctx, worktree_notice, intro_block, interactive_hint, prev_conv_label);
+    let header = format!(
+        "{}{}{}{}{}",
+        title_ctx, worktree_notice, intro_block, interactive_hint, prev_conv_label
+    );
     let overhead = header.len() + footer.len() + 100; // 100 = notice template space
 
     // If pin_first_message is set, extract and pin the first non-system message
@@ -477,15 +522,25 @@ pub fn build_agent_prompt(
     let summary_block = if let Some(ref summary) = disc.summary_cache {
         let idx = disc.summary_up_to_msg_idx.unwrap_or(0) as usize;
         match disc.language.as_str() {
-            "fr" => format!("Résumé de la conversation précédente (messages 1-{}) :\n{}\n\n", idx, summary),
-            "es" => format!("Resumen de la conversación anterior (mensajes 1-{}):\n{}\n\n", idx, summary),
-            _ => format!("Summary of earlier conversation (messages 1-{}):\n{}\n\n", idx, summary),
+            "fr" => format!(
+                "Résumé de la conversation précédente (messages 1-{}) :\n{}\n\n",
+                idx, summary
+            ),
+            "es" => format!(
+                "Resumen de la conversación anterior (mensajes 1-{}):\n{}\n\n",
+                idx, summary
+            ),
+            _ => format!(
+                "Summary of earlier conversation (messages 1-{}):\n{}\n\n",
+                idx, summary
+            ),
         }
     } else {
         String::new()
     };
 
-    let remaining_budget = budget.saturating_sub(overhead + pinned_block.len() + summary_block.len());
+    let remaining_budget =
+        budget.saturating_sub(overhead + pinned_block.len() + summary_block.len());
 
     // Format messages (skip System). When a summary exists, skip messages already covered.
     // When pin_first_message is set, skip index 0 (it's already pinned above).
@@ -550,21 +605,33 @@ pub fn build_agent_prompt(
                  CONTEXTE LIMITE : {} messages anterieurs non inclus{}\n\
                  ════════════════════════════════════════\n\n",
                 omitted_count,
-                if has_summary { " (resume ci-dessus)" } else { " — demandez a l'utilisateur si besoin" }
+                if has_summary {
+                    " (resume ci-dessus)"
+                } else {
+                    " — demandez a l'utilisateur si besoin"
+                }
             ),
             "es" => format!(
                 "════════════════════════════════════════\n\
                  CONTEXTO LIMITADO: {} mensajes anteriores no incluidos{}\n\
                  ════════════════════════════════════════\n\n",
                 omitted_count,
-                if has_summary { " (resumen arriba)" } else { " — pregunte al usuario si necesario" }
+                if has_summary {
+                    " (resumen arriba)"
+                } else {
+                    " — pregunte al usuario si necesario"
+                }
             ),
             _ => format!(
                 "════════════════════════════════════════\n\
                  CONTEXT LIMITED: {} earlier messages not included{}\n\
                  ════════════════════════════════════════\n\n",
                 omitted_count,
-                if has_summary { " (see summary above)" } else { " — ask user to recap if needed" }
+                if has_summary {
+                    " (see summary above)"
+                } else {
+                    " — ask user to recap if needed"
+                }
             ),
         };
         prompt.push_str(&omitted_notice);
@@ -600,7 +667,8 @@ mod tests {
             language: language.into(),
             participants: vec![],
             messages,
-            message_count: 0, non_system_message_count: 0,
+            message_count: 0,
+            non_system_message_count: 0,
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
@@ -614,7 +682,8 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
+            summary_strategy: crate::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: None,
@@ -639,7 +708,29 @@ mod tests {
             model_tier: None,
             cost_usd: None,
             author_pseudo: None,
-            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+        }
+    }
+
+    fn agent_msg(content: &str, agent_type: AgentType) -> DiscussionMessage {
+        DiscussionMessage {
+            model: None,
+            lint_report: None,
+            id: uuid::Uuid::new_v4().to_string(),
+            role: MessageRole::Agent,
+            content: content.into(),
+            agent_type: Some(agent_type),
+            timestamp: chrono::Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: Some("peer-turn".into()),
+            duration_ms: None,
         }
     }
 
@@ -655,16 +746,30 @@ mod tests {
 
     #[test]
     fn agent_prompt_multi_message_includes_history_and_footer() {
-        let msgs = vec![
-            user_msg("first question"),
-            user_msg("follow-up question"),
-        ];
+        let msgs = vec![user_msg("first question"), user_msg("follow-up question")];
         let disc = disc_with_messages(msgs, "en");
         let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
         assert!(prompt.contains("Previous conversation"));
         assert!(prompt.contains("first question"));
         assert!(prompt.contains("follow-up question"));
         assert!(prompt.contains("Please respond to the latest user message"));
+    }
+
+    #[test]
+    fn agent_prompt_answers_a_peer_even_after_only_one_human_message() {
+        let msgs = vec![
+            user_msg("Can one of you investigate?"),
+            agent_msg(
+                "I found the failing route; can Codex verify it?",
+                AgentType::ClaudeCode,
+            ),
+        ];
+        let disc = disc_with_messages(msgs, "en");
+        let prompt = build_agent_prompt(&disc, &AgentType::Codex, 0);
+
+        assert!(prompt.contains("Can one of you investigate?"));
+        assert!(prompt.contains("Claude Code: I found the failing route"));
+        assert!(prompt.contains("Please respond to the latest agent message"));
     }
 
     #[test]
@@ -698,8 +803,16 @@ mod tests {
         disc.workspace_mode = "Isolated".into();
         disc.worktree_branch = Some("kronn/add-feature".into());
         let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
-        assert!(prompt.contains("GIT ISOLATION"), "notice heading missing: {}", prompt);
-        assert!(prompt.contains("kronn/add-feature"), "branch name missing: {}", prompt);
+        assert!(
+            prompt.contains("GIT ISOLATION"),
+            "notice heading missing: {}",
+            prompt
+        );
+        assert!(
+            prompt.contains("kronn/add-feature"),
+            "branch name missing: {}",
+            prompt
+        );
         assert!(prompt.contains("git commit"), "commit instruction missing");
     }
 
@@ -716,7 +829,10 @@ mod tests {
         // Notice must precede the conversation history to set expectations early.
         let notice_pos = prompt.find("ISOLATION GIT").unwrap();
         let conv_pos = prompt.find("Conversation précédente").unwrap();
-        assert!(notice_pos < conv_pos, "worktree notice should precede conversation");
+        assert!(
+            notice_pos < conv_pos,
+            "worktree notice should precede conversation"
+        );
     }
 
     #[test]
@@ -812,7 +928,10 @@ mod tests {
     #[test]
     fn synthesis_prompt_includes_initial_and_final_positions() {
         let r1 = vec![("A".into(), "init-a".into()), ("B".into(), "init-b".into())];
-        let r2 = vec![("A".into(), "final-a".into()), ("B".into(), "final-b".into())];
+        let r2 = vec![
+            ("A".into(), "final-a".into()),
+            ("B".into(), "final-b".into()),
+        ];
         let prompt = build_synthesis_prompt("Q?", &[r1, r2], "en");
         assert!(prompt.contains("Initial positions"));
         assert!(prompt.contains("Final positions (round 2)"));

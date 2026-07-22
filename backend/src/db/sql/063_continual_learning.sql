@@ -1,7 +1,7 @@
--- 0.9.0 — Continual Learning. A `learning` is an agent-proposed durable fact /
+-- 0.10.0 — Continual Learning. A `learning` is an agent-proposed durable fact /
 -- preference / inference, emitted via the typed MCP tool `learning_propose`,
 -- gated by evidence verification + a human, then promoted into a dedicated
--- learnings file. See docs/research/continual-learning-0.9.0-spec.md.
+-- learnings file. See docs/research/continual-learning-0.10.0-spec.md.
 --
 -- `faithfulness` = the Gate-2 verdict (claim ⊨ evidence): NULL when the checker
 -- is `off`, else 'entailment'|'neutral'|'contradiction'. Posture B: informative,

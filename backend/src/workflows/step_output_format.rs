@@ -121,8 +121,7 @@ pub fn format_step_output_simple(data: Value, status: &str, summary: &str) -> St
 pub fn parse_envelope_for_test(output: &str) -> Value {
     let env = crate::workflows::template::extract_step_envelope(output)
         .expect("output must contain a parseable Kronn envelope (---STEP_OUTPUT--- markers or strategy-2 JSON)");
-    let data: Value = serde_json::from_str(&env.data_json)
-        .unwrap_or(Value::Null);
+    let data: Value = serde_json::from_str(&env.data_json).unwrap_or(Value::Null);
     serde_json::json!({
         "data": data,
         "status": env.status,

@@ -110,7 +110,10 @@ fn not_found_missing_file() {
         c.status,
         c.detail
     );
-    assert!(c.status.is_fabricated(), "NotFound must count as fabricated (RED)");
+    assert!(
+        c.status.is_fabricated(),
+        "NotFound must count as fabricated (RED)"
+    );
     cleanup(&root);
 }
 
@@ -126,7 +129,10 @@ fn out_of_bounds_single_line_past_eof() {
         c.status,
         c.detail
     );
-    assert!(c.status.is_fabricated(), "OutOfBounds must count as fabricated (RED)");
+    assert!(
+        c.status.is_fabricated(),
+        "OutOfBounds must count as fabricated (RED)"
+    );
     cleanup(&root);
 }
 
@@ -226,7 +232,10 @@ fn empty_ref_file_prefix_only() {
         c.status,
         c.detail
     );
-    assert!(c.status.is_fabricated(), "EmptyRef must count as fabricated (RED)");
+    assert!(
+        c.status.is_fabricated(),
+        "EmptyRef must count as fabricated (RED)"
+    );
     cleanup(&root);
 }
 
@@ -255,7 +264,11 @@ fn analyze_empty_file_ref_counts_fabricated() {
     let root = temp_project();
     let text = "The config [src: file: ] lives somewhere.";
     let report = analyze(text, Some(root.as_path()));
-    assert_eq!(report.sources.len(), 1, "exactly one [src:] marker extracted");
+    assert_eq!(
+        report.sources.len(),
+        1,
+        "exactly one [src:] marker extracted"
+    );
     assert_eq!(
         report.sources[0].status,
         SourceStatus::EmptyRef,
@@ -314,17 +327,17 @@ fn determinism_same_input_same_report() {
 fn no_panic_on_malformed_line_specs() {
     let root = temp_project();
     let probes = [
-        "file: src/foo.rs:",          // trailing colon, empty spec
-        "file: src/foo.rs:-",         // bare dash
-        "file: src/foo.rs:1-",        // open-ended range
-        "file: src/foo.rs:-5",        // negative-looking
-        "file: src/foo.rs:abc",       // non-numeric
+        "file: src/foo.rs:",                           // trailing colon, empty spec
+        "file: src/foo.rs:-",                          // bare dash
+        "file: src/foo.rs:1-",                         // open-ended range
+        "file: src/foo.rs:-5",                         // negative-looking
+        "file: src/foo.rs:abc",                        // non-numeric
         "file: src/foo.rs:99999999999999999999999999", // overflow usize
         "file: src/foo.rs:1-99999999999999999999999999",
-        "file: src/foo.rs:🦀",         // emoji spec
-        "file: src/foo.rs:2:3",       // double colon
-        "file: ",                     // empty
-        "file: ::::",                 // colon soup
+        "file: src/foo.rs:🦀",  // emoji spec
+        "file: src/foo.rs:2:3", // double colon
+        "file: ",               // empty
+        "file: ::::",           // colon soup
     ];
     for p in probes {
         let c = verify_source_marker(p, Some(root.as_path()));

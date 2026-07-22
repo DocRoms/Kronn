@@ -7,11 +7,22 @@ use axum::{
     extract::{Path, Query, State},
     Json,
 };
+use serde::Deserialize;
+use std::time::{Duration, Instant};
 
 use crate::core::cmd::sync_cmd;
 use crate::core::scanner;
 use crate::models::*;
 use crate::AppState;
+
+const LANGUAGE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+
+#[derive(Debug, Default, Deserialize)]
+pub struct GitStatusQuery {
+    /// Recompute source-language statistics while keeping Git status live.
+    #[serde(default)]
+    pub refresh: bool,
+}
 
 /// Resolve GitHub token from MCP configs for git operations (push, PR creation).
 async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
@@ -28,7 +39,9 @@ async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
 /// Helper: resolve a project's filesystem path from its DB id.
 async fn resolve_project_path(state: &AppState, id: &str) -> Result<std::path::PathBuf, String> {
     let pid = id.to_string();
-    let project = state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
         .await
         .map_err(|e| format!("DB error: {}", e))?;
     let project = project.ok_or_else(|| "Project not found".to_string())?;
@@ -43,18 +56,79 @@ async fn resolve_project_path(state: &AppState, id: &str) -> Result<std::path::P
 pub async fn git_status(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<GitStatusQuery>,
 ) -> Json<ApiResponse<GitStatusResponse>> {
-    let repo_path = match resolve_project_path(&state, &id).await {
-        Ok(p) => p,
-        Err(e) => return Json(ApiResponse::err(e)),
+    let id_for_read = id.clone();
+    let project_and_exclusions = match state
+        .db
+        .with_read_conn(move |conn| {
+            let project = crate::db::projects::get_project(conn, &id_for_read)?;
+            let exclusions = crate::db::projects::get_source_exclusions(conn, &id_for_read)?;
+            Ok((project, exclusions))
+        })
+        .await
+    {
+        Ok((Some(project), exclusions)) => (project, exclusions),
+        Ok((None, _)) => return Json(ApiResponse::err("Project not found")),
+        Err(error) => return Json(ApiResponse::err(format!("DB error: {error}"))),
     };
+    let (project, exclusions) = project_and_exclusions;
+    let repo_path = scanner::resolve_host_path(&project.path);
+    if !repo_path.exists() {
+        return Json(ApiResponse::err(format!(
+            "Project path not found: {}",
+            repo_path.display()
+        )));
+    }
 
+    let cached_languages = if query.refresh {
+        None
+    } else {
+        state
+            .git_language_cache
+            .lock()
+            .await
+            .get(&id)
+            .filter(|cached| {
+                cached.inserted_at.elapsed() < LANGUAGE_CACHE_TTL && cached.exclusions == exclusions
+            })
+            .map(|cached| (cached.checked_at, cached.languages.clone()))
+    };
+    let exclusions_for_cache = exclusions.clone();
+    let id_for_cache = id.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_git_status(&repo_path)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        let mut status = crate::api::git_ops::run_git_status(&repo_path)?;
+        if let Some((checked_at, languages)) = cached_languages {
+            status.languages = languages;
+            status.languages_checked_at = Some(checked_at);
+            status.languages_cached = true;
+        } else {
+            status.languages =
+                crate::api::ai_docs::compute_source_language_stats(&repo_path, &exclusions);
+            status.languages_checked_at = Some(chrono::Utc::now());
+        }
+        Ok::<_, String>(status)
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
-        Ok(status) => Json(ApiResponse::ok(status)),
+        Ok(status) => {
+            if !status.languages_cached {
+                if let Some(checked_at) = status.languages_checked_at {
+                    state.git_language_cache.lock().await.insert(
+                        id_for_cache,
+                        CachedProjectLanguages {
+                            inserted_at: Instant::now(),
+                            checked_at,
+                            exclusions: exclusions_for_cache,
+                            languages: status.languages.clone(),
+                        },
+                    );
+                }
+            }
+            Json(ApiResponse::ok(status))
+        }
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -83,11 +157,47 @@ pub async fn git_diff(
         } else {
             crate::api::git_ops::run_git_diff(&repo_path, &file_path)
         }
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(diff) => Json(ApiResponse::ok(diff)),
         Err(e) => Json(ApiResponse::err(e)),
+    }
+}
+
+/// GET /api/projects/:id/git-blame?path=src/foo.rs
+pub async fn git_blame(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<GitBlameQuery>,
+) -> Json<ApiResponse<GitBlameResponse>> {
+    let relative = std::path::Path::new(&query.path);
+    if query.path.is_empty()
+        || query.path.starts_with('/')
+        || query.path.starts_with('\\')
+        || relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+    {
+        return Json(ApiResponse::err("Invalid source path"));
+    }
+
+    let repo_path = match resolve_project_path(&state, &id).await {
+        Ok(path) => path,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
+    let file_path = query.path;
+    let result = tokio::task::spawn_blocking(move || {
+        crate::api::git_ops::run_git_blame(&repo_path, &file_path)
+    })
+    .await
+    .unwrap_or_else(|error| Err(format!("Task failed: {error}")));
+
+    match result {
+        Ok(blame) => Json(ApiResponse::ok(blame)),
+        Err(error) => Json(ApiResponse::err(error)),
     }
 }
 
@@ -120,8 +230,12 @@ pub async fn git_branch(
             return Err(format!("git checkout -b failed: {}", stderr.trim()));
         }
 
-        Ok(GitBranchResponse { branch: branch_name })
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        Ok(GitBranchResponse {
+            branch: branch_name,
+        })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -158,7 +272,9 @@ pub async fn git_commit(
     let sign = req.sign;
     let result = tokio::task::spawn_blocking(move || {
         crate::api::git_ops::run_git_commit(&repo_path, &files, &message, amend, sign)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -179,7 +295,9 @@ pub async fn git_push(
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
         crate::api::git_ops::run_git_push(&repo_path, github_token.as_deref())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -203,7 +321,9 @@ pub async fn project_exec(
     {
         let config = state.config.read().await;
         if config.agents.any_installed() && !config.agents.any_full_access() {
-            return Json(ApiResponse::err("Terminal requires full_access enabled on at least one agent"));
+            return Json(ApiResponse::err(
+                "Terminal requires full_access enabled on at least one agent",
+            ));
         }
     }
 
@@ -223,9 +343,10 @@ pub async fn project_exec(
         Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_exec(&repo_path, &cmd)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let result =
+        tokio::task::spawn_blocking(move || crate::api::git_ops::run_exec(&repo_path, &cmd))
+            .await
+            .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -249,8 +370,16 @@ pub async fn create_pr(
     let base = req.base.clone();
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_create_pr(&repo_path, &title, &body, &base, github_token.as_deref())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        crate::api::git_ops::run_create_pr(
+            &repo_path,
+            &title,
+            &body,
+            &base,
+            github_token.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(url) => Json(ApiResponse::ok(serde_json::json!({ "url": url }))),

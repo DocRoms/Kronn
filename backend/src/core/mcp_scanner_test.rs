@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeSet, HashMap};
     use crate::core::mcp_scanner::*;
     use serial_test::serial;
+    use std::collections::{BTreeSet, HashMap};
 
     // Tests that mutate `KRONN_TEMPLATES_DIR` share the
     // `kronn_templates_env` key with audit::validation::tests so
@@ -10,23 +10,34 @@ mod tests {
 
     fn make_test_data() -> McpJsonFile {
         let mut servers = HashMap::new();
-        servers.insert("github".to_string(), McpServerEntry {
-            command: Some("npx".to_string()),
-            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-github".into()]),
-            url: None,
-            env: {
-                let mut env = HashMap::new();
-                env.insert("GITHUB_TOKEN".to_string(), "ghp_test123".to_string());
-                env
+        servers.insert(
+            "github".to_string(),
+            McpServerEntry {
+                command: Some("npx".to_string()),
+                args: Some(vec![
+                    "-y".into(),
+                    "@modelcontextprotocol/server-github".into(),
+                ]),
+                url: None,
+                env: {
+                    let mut env = HashMap::new();
+                    env.insert("GITHUB_TOKEN".to_string(), "ghp_test123".to_string());
+                    env
+                },
             },
-        });
-        servers.insert("context7".to_string(), McpServerEntry {
-            command: Some("npx".to_string()),
-            args: Some(vec!["-y".into(), "@upstash/context7-mcp".into()]),
-            url: None,
-            env: HashMap::new(),
-        });
-        McpJsonFile { mcp_servers: servers }
+        );
+        servers.insert(
+            "context7".to_string(),
+            McpServerEntry {
+                command: Some("npx".to_string()),
+                args: Some(vec!["-y".into(), "@upstash/context7-mcp".into()]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
+        McpJsonFile {
+            mcp_servers: servers,
+        }
     }
 
     fn setup_tmp(name: &str) -> std::path::PathBuf {
@@ -62,7 +73,10 @@ mod tests {
 
         // Verify structure has mcpServers key (not mcp_servers)
         let raw: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(raw.get("mcpServers").is_some(), "JSON should use mcpServers key");
+        assert!(
+            raw.get("mcpServers").is_some(),
+            "JSON should use mcpServers key"
+        );
 
         cleanup(&tmp);
     }
@@ -74,11 +88,15 @@ mod tests {
         let tmp = setup_tmp("kiro-write");
         let data = make_test_data();
 
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data).unwrap();
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data)
+            .unwrap();
 
         let file = tmp.join(".kiro/settings/mcp.json");
         assert!(file.exists(), ".kiro/settings/mcp.json should be created");
-        assert!(tmp.join(".kiro/settings").is_dir(), ".kiro/settings/ dir should exist");
+        assert!(
+            tmp.join(".kiro/settings").is_dir(),
+            ".kiro/settings/ dir should exist"
+        );
 
         let content = std::fs::read_to_string(&file).unwrap();
         let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
@@ -101,7 +119,10 @@ mod tests {
 
         let content = std::fs::read_to_string(&file).unwrap();
         let raw: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(raw.get("mcpServers").is_some(), "Gemini JSON should use mcpServers key");
+        assert!(
+            raw.get("mcpServers").is_some(),
+            "Gemini JSON should use mcpServers key"
+        );
 
         let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
         assert_eq!(parsed.mcp_servers.len(), 2);
@@ -115,12 +136,18 @@ mod tests {
         let data = make_test_data();
 
         // Write twice — second should overwrite, not append
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data).unwrap();
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data).unwrap();
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data)
+            .unwrap();
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data)
+            .unwrap();
 
         let content = std::fs::read_to_string(tmp.join(".kiro/settings/mcp.json")).unwrap();
         let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
-        assert_eq!(parsed.mcp_servers.len(), 2, "Should have 2 servers, not duplicated");
+        assert_eq!(
+            parsed.mcp_servers.len(),
+            2,
+            "Should have 2 servers, not duplicated"
+        );
 
         cleanup(&tmp);
     }
@@ -140,15 +167,23 @@ mod tests {
         });
         std::fs::write(&file, serde_json::to_string_pretty(&original).unwrap()).unwrap();
 
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".gemini/settings.json", &make_test_data()).unwrap();
+        write_mcp_json_to_subpath(
+            &tmp.to_string_lossy(),
+            ".gemini/settings.json",
+            &make_test_data(),
+        )
+        .unwrap();
 
-        let merged: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(merged["theme"], "user-dark");
         assert_eq!(merged["telemetry"]["enabled"], false);
         assert_eq!(merged["mcpServers"]["github"]["command"], "user-github");
         assert_eq!(merged["mcpServers"]["manual-only"]["command"], "manual");
         assert!(merged["mcpServers"].get("context7").is_some());
-        assert!(tmp.join(".kronn/backups/mcp-configs/.gemini__settings.json.backup").exists());
+        assert!(tmp
+            .join(".kronn/backups/mcp-configs/.gemini__settings.json.backup")
+            .exists());
         cleanup(&tmp);
     }
 
@@ -164,7 +199,8 @@ mod tests {
         assert!(error.contains("refusing overwrite"));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), invalid);
         assert_eq!(
-            std::fs::read_to_string(tmp.join(".kronn/backups/mcp-configs/.mcp.json.backup")).unwrap(),
+            std::fs::read_to_string(tmp.join(".kronn/backups/mcp-configs/.mcp.json.backup"))
+                .unwrap(),
             invalid
         );
         cleanup(&tmp);
@@ -179,8 +215,11 @@ mod tests {
         symlink(&outside, tmp.join(".gemini")).unwrap();
 
         let error = write_mcp_json_to_subpath(
-            &tmp.to_string_lossy(), ".gemini/settings.json", &make_test_data()
-        ).unwrap_err();
+            &tmp.to_string_lossy(),
+            ".gemini/settings.json",
+            &make_test_data(),
+        )
+        .unwrap_err();
 
         assert!(error.contains("symlink"));
         assert!(!outside.join("settings.json").exists());
@@ -197,8 +236,11 @@ mod tests {
         symlink(&outside, tmp.join(".kiro")).unwrap();
 
         let error = write_mcp_json_to_subpath(
-            &tmp.to_string_lossy(), ".kiro/settings/mcp.json", &make_test_data()
-        ).unwrap_err();
+            &tmp.to_string_lossy(),
+            ".kiro/settings/mcp.json",
+            &make_test_data(),
+        )
+        .unwrap_err();
 
         assert!(error.contains("symlink"));
         assert!(
@@ -232,16 +274,21 @@ mod tests {
         let target = tmp.join("settings.json");
 
         std::fs::write(&target, "edited-after-read").unwrap();
-        let error = atomic_write_if_unchanged(&target, "kronn", Some(b"original"))
-            .unwrap_err();
+        let error = atomic_write_if_unchanged(&target, "kronn", Some(b"original")).unwrap_err();
         assert!(error.contains("changed concurrently"));
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "edited-after-read");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "edited-after-read"
+        );
 
         let created = tmp.join("created.json");
         std::fs::write(&created, "created-by-user").unwrap();
         let error = atomic_write_if_unchanged(&created, "kronn", None).unwrap_err();
         assert!(error.contains("changed concurrently"));
-        assert_eq!(std::fs::read_to_string(&created).unwrap(), "created-by-user");
+        assert_eq!(
+            std::fs::read_to_string(&created).unwrap(),
+            "created-by-user"
+        );
         cleanup(&tmp);
     }
 
@@ -252,23 +299,33 @@ mod tests {
         let mut first = make_test_data();
         write_owned_mcp_json_to_subpath(&path, ".mcp.json", &first).unwrap();
 
-        first.mcp_servers.get_mut("github").unwrap().env
+        first
+            .mcp_servers
+            .get_mut("github")
+            .unwrap()
+            .env
             .insert("GITHUB_TOKEN".into(), "rotated-token".into());
         first.mcp_servers.remove("context7");
         let file = tmp.join(".mcp.json");
-        let mut raw: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         raw["mcpServers"]["manual"] = serde_json::json!({"command": "mine"});
         std::fs::write(&file, serde_json::to_string_pretty(&raw).unwrap()).unwrap();
 
         write_owned_mcp_json_to_subpath(&path, ".mcp.json", &first).unwrap();
 
-        let merged: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        assert_eq!(merged["mcpServers"]["github"]["env"]["GITHUB_TOKEN"], "rotated-token");
+        let merged: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(
+            merged["mcpServers"]["github"]["env"]["GITHUB_TOKEN"],
+            "rotated-token"
+        );
         assert!(merged["mcpServers"].get("context7").is_none());
         assert_eq!(merged["mcpServers"]["manual"]["command"], "mine");
         let state: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(tmp.join(".kronn/mcp-managed.json")).unwrap()
-        ).unwrap();
+            &std::fs::read_to_string(tmp.join(".kronn/mcp-managed.json")).unwrap(),
+        )
+        .unwrap();
         assert_eq!(state["files"][".mcp.json"], serde_json::json!(["github"]));
         cleanup(&tmp);
     }
@@ -284,14 +341,17 @@ mod tests {
         });
         std::fs::write(&file, serde_json::to_string_pretty(&original).unwrap()).unwrap();
 
-        let error = write_owned_mcp_json_to_subpath(
-            &tmp.to_string_lossy(), ".mcp.json", &make_test_data()
-        ).unwrap_err();
+        let error =
+            write_owned_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &make_test_data())
+                .unwrap_err();
 
         assert!(error.contains("Invalid MCP ownership state"));
-        let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        let after: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(after, original);
-        assert!(tmp.join(".kronn/backups/mcp-configs/.kronn__mcp-managed.json.backup").exists());
+        assert!(tmp
+            .join(".kronn/backups/mcp-configs/.kronn__mcp-managed.json.backup")
+            .exists());
         cleanup(&tmp);
     }
 
@@ -300,7 +360,9 @@ mod tests {
         let tmp = setup_tmp("vibe-preserve-user");
         let file = tmp.join(".vibe/config.toml");
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
-        std::fs::write(&file, r#"theme = "solarized"
+        std::fs::write(
+            &file,
+            r#"theme = "solarized"
 
 [[mcp_servers]]
 name = "github"
@@ -311,31 +373,47 @@ command = "user-github"
 name = "manual"
 transport = "stdio"
 command = "manual-command"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         let desired = vec![
             VibeMcpEntry {
-                name: "github".into(), transport: "stdio".into(), command: Some("kronn-github".into()),
-                args: None, url: None, env: HashMap::new(),
+                name: "github".into(),
+                transport: "stdio".into(),
+                command: Some("kronn-github".into()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
             },
             VibeMcpEntry {
-                name: "new-kronn".into(), transport: "stdio".into(), command: Some("new-command".into()),
-                args: None, url: None, env: HashMap::new(),
+                name: "new-kronn".into(),
+                transport: "stdio".into(),
+                command: Some("new-command".into()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
             },
         ];
 
-        let owned = merge_vibe_config(&tmp.to_string_lossy(), &file, &desired, &BTreeSet::new()).unwrap();
+        let owned =
+            merge_vibe_config(&tmp.to_string_lossy(), &file, &desired, &BTreeSet::new()).unwrap();
 
         let merged: toml::Table = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(merged["theme"].as_str(), Some("solarized"));
         let servers = merged["mcp_servers"].as_array().unwrap();
-        let command = |name: &str| servers.iter()
-            .find(|entry| entry["name"].as_str() == Some(name))
-            .and_then(|entry| entry["command"].as_str());
+        let command = |name: &str| {
+            servers
+                .iter()
+                .find(|entry| entry["name"].as_str() == Some(name))
+                .and_then(|entry| entry["command"].as_str())
+        };
         assert_eq!(command("github"), Some("user-github"));
         assert_eq!(command("manual"), Some("manual-command"));
         assert_eq!(command("new-kronn"), Some("new-command"));
         assert_eq!(owned, BTreeSet::from(["new-kronn".to_string()]));
-        assert!(tmp.join(".kronn/backups/mcp-configs/.vibe__config.toml.backup").exists());
+        assert!(tmp
+            .join(".kronn/backups/mcp-configs/.vibe__config.toml.backup")
+            .exists());
         cleanup(&tmp);
     }
 
@@ -346,33 +424,57 @@ command = "manual-command"
         std::fs::create_dir_all(file.parent().unwrap()).unwrap();
         let first = vec![
             VibeMcpEntry {
-                name: "managed-a".into(), transport: "stdio".into(), command: Some("old".into()),
-                args: None, url: None, env: HashMap::new(),
+                name: "managed-a".into(),
+                transport: "stdio".into(),
+                command: Some("old".into()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
             },
             VibeMcpEntry {
-                name: "managed-b".into(), transport: "stdio".into(), command: Some("remove-me".into()),
-                args: None, url: None, env: HashMap::new(),
+                name: "managed-b".into(),
+                transport: "stdio".into(),
+                command: Some("remove-me".into()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
             },
         ];
-        let owned = merge_vibe_config(&tmp.to_string_lossy(), &file, &first, &BTreeSet::new()).unwrap();
-        let mut table: toml::Table = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-        table["mcp_servers"].as_array_mut().unwrap().push(toml::Value::try_from(VibeMcpEntry {
-            name: "manual".into(), transport: "stdio".into(), command: Some("mine".into()),
-            args: None, url: None, env: HashMap::new(),
-        }).unwrap());
+        let owned =
+            merge_vibe_config(&tmp.to_string_lossy(), &file, &first, &BTreeSet::new()).unwrap();
+        let mut table: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        table["mcp_servers"].as_array_mut().unwrap().push(
+            toml::Value::try_from(VibeMcpEntry {
+                name: "manual".into(),
+                transport: "stdio".into(),
+                command: Some("mine".into()),
+                args: None,
+                url: None,
+                env: HashMap::new(),
+            })
+            .unwrap(),
+        );
         std::fs::write(&file, toml::to_string_pretty(&table).unwrap()).unwrap();
         let second = vec![VibeMcpEntry {
-            name: "managed-a".into(), transport: "stdio".into(), command: Some("rotated".into()),
-            args: None, url: None, env: HashMap::new(),
+            name: "managed-a".into(),
+            transport: "stdio".into(),
+            command: Some("rotated".into()),
+            args: None,
+            url: None,
+            env: HashMap::new(),
         }];
 
         let now_owned = merge_vibe_config(&tmp.to_string_lossy(), &file, &second, &owned).unwrap();
 
         let merged: toml::Table = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
         let servers = merged["mcp_servers"].as_array().unwrap();
-        let command = |name: &str| servers.iter()
-            .find(|entry| entry["name"].as_str() == Some(name))
-            .and_then(|entry| entry["command"].as_str());
+        let command = |name: &str| {
+            servers
+                .iter()
+                .find(|entry| entry["name"].as_str() == Some(name))
+                .and_then(|entry| entry["command"].as_str())
+        };
         assert_eq!(command("managed-a"), Some("rotated"));
         assert_eq!(command("managed-b"), None);
         assert_eq!(command("manual"), Some("mine"));
@@ -388,7 +490,8 @@ command = "manual-command"
         let data = make_test_data();
 
         write_mcp_json(&tmp.to_string_lossy(), &data).unwrap();
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data).unwrap();
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data)
+            .unwrap();
         write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".gemini/settings.json", &data).unwrap();
 
         let claude = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
@@ -396,7 +499,10 @@ command = "manual-command"
         let gemini = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
 
         assert_eq!(claude, kiro, "Claude and Kiro configs should be identical");
-        assert_eq!(claude, gemini, "Claude and Gemini configs should be identical");
+        assert_eq!(
+            claude, gemini,
+            "Claude and Gemini configs should be identical"
+        );
 
         cleanup(&tmp);
     }
@@ -413,9 +519,15 @@ command = "manual-command"
         ensure_gitignore_public(&tmp.to_string_lossy(), ".gemini/");
 
         let content = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
-        assert!(content.contains(".kiro/settings/"), "Should contain .kiro/settings/");
+        assert!(
+            content.contains(".kiro/settings/"),
+            "Should contain .kiro/settings/"
+        );
         assert!(content.contains(".gemini/"), "Should contain .gemini/");
-        assert!(content.contains(".mcp.json"), "Should still contain .mcp.json");
+        assert!(
+            content.contains(".mcp.json"),
+            "Should still contain .mcp.json"
+        );
 
         cleanup(&tmp);
     }
@@ -430,7 +542,10 @@ command = "manual-command"
         ensure_gitignore_public(&tmp.to_string_lossy(), ".kiro/settings/");
 
         let content = std::fs::read_to_string(tmp.join(".gitignore")).unwrap();
-        let count = content.lines().filter(|l| l.trim() == ".kiro/settings/").count();
+        let count = content
+            .lines()
+            .filter(|l| l.trim() == ".kiro/settings/")
+            .count();
         assert_eq!(count, 1, "Pattern should appear exactly once");
 
         cleanup(&tmp);
@@ -445,7 +560,8 @@ command = "manual-command"
 
         // Create all 3 JSON configs
         write_mcp_json(&tmp.to_string_lossy(), &data).unwrap();
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data).unwrap();
+        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &data)
+            .unwrap();
         write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".gemini/settings.json", &data).unwrap();
 
         assert!(tmp.join(".mcp.json").exists());
@@ -453,16 +569,29 @@ command = "manual-command"
         assert!(tmp.join(".gemini/settings.json").exists());
 
         // Simulate cleanup (same logic as sync_project_mcps_to_disk when no MCPs)
-        for filename in &[".mcp.json", ".kiro/settings/mcp.json", ".gemini/settings.json"] {
+        for filename in &[
+            ".mcp.json",
+            ".kiro/settings/mcp.json",
+            ".gemini/settings.json",
+        ] {
             let file = tmp.join(filename);
             if file.exists() {
                 std::fs::remove_file(&file).unwrap();
             }
         }
 
-        assert!(!tmp.join(".mcp.json").exists(), ".mcp.json should be removed");
-        assert!(!tmp.join(".kiro/settings/mcp.json").exists(), "Kiro config should be removed");
-        assert!(!tmp.join(".gemini/settings.json").exists(), "Gemini config should be removed");
+        assert!(
+            !tmp.join(".mcp.json").exists(),
+            ".mcp.json should be removed"
+        );
+        assert!(
+            !tmp.join(".kiro/settings/mcp.json").exists(),
+            "Kiro config should be removed"
+        );
+        assert!(
+            !tmp.join(".gemini/settings.json").exists(),
+            "Gemini config should be removed"
+        );
 
         cleanup(&tmp);
     }
@@ -534,7 +663,10 @@ command = "manual-command"
             url: Some("http://localhost:8000/sse".into()),
             env: HashMap::new(),
         };
-        assert!(sse_entry.command.is_none(), "SSE entries must not have command");
+        assert!(
+            sse_entry.command.is_none(),
+            "SSE entries must not have command"
+        );
 
         // A stdio entry has command
         let stdio_entry = McpServerEntry {
@@ -543,22 +675,28 @@ command = "manual-command"
             url: None,
             env: HashMap::new(),
         };
-        assert!(stdio_entry.command.is_some(), "Stdio entries must have command");
+        assert!(
+            stdio_entry.command.is_some(),
+            "Stdio entries must have command"
+        );
 
         // Filtering by command.is_some() should exclude SSE
         let mut all = HashMap::new();
         all.insert("github".to_string(), stdio_entry);
         all.insert("data.gouv.fr".to_string(), sse_entry);
 
-        let stdio_only: HashMap<String, McpServerEntry> = all.iter()
+        let stdio_only: HashMap<String, McpServerEntry> = all
+            .iter()
             .filter(|(_, entry)| entry.command.is_some())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
 
         assert_eq!(stdio_only.len(), 1, "Only stdio servers should remain");
         assert!(stdio_only.contains_key("github"));
-        assert!(!stdio_only.contains_key("data.gouv.fr"),
-            "SSE server must be filtered from .mcp.json (breaks Claude Code schema)");
+        assert!(
+            !stdio_only.contains_key("data.gouv.fr"),
+            "SSE server must be filtered from .mcp.json (breaks Claude Code schema)"
+        );
     }
 
     // ─── ensure_redirectors ────────────────────────────────────────────────
@@ -594,18 +732,41 @@ command = "manual-command"
         std::fs::write(tpl.join("GEMINI.md"), "Read ai/index.md").unwrap();
         std::fs::write(tpl.join("AGENTS.md"), "Read ai/index.md").unwrap();
         std::fs::create_dir_all(tpl.join(".kiro/steering")).unwrap();
-        std::fs::write(tpl.join(".kiro/steering/instructions.md"), "Read ai/index.md").unwrap();
+        std::fs::write(
+            tpl.join(".kiro/steering/instructions.md"),
+            "Read ai/index.md",
+        )
+        .unwrap();
         std::fs::create_dir_all(tpl.join(".github")).unwrap();
-        std::fs::write(tpl.join(".github/copilot-instructions.md"), "Read ai/index.md").unwrap();
+        std::fs::write(
+            tpl.join(".github/copilot-instructions.md"),
+            "Read ai/index.md",
+        )
+        .unwrap();
 
         std::env::set_var("KRONN_TEMPLATES_DIR", tpl.to_string_lossy().to_string());
         super::super::mcp_scanner::ensure_redirectors_public(&tmp.to_string_lossy());
 
-        assert!(tmp.join("CLAUDE.md").exists(), "CLAUDE.md should be created");
-        assert!(tmp.join("GEMINI.md").exists(), "GEMINI.md should be created");
-        assert!(tmp.join("AGENTS.md").exists(), "AGENTS.md should be created");
-        assert!(tmp.join(".kiro/steering/instructions.md").exists(), ".kiro/steering/instructions.md should be created");
-        assert!(tmp.join(".github/copilot-instructions.md").exists(), ".github/copilot-instructions.md should be created");
+        assert!(
+            tmp.join("CLAUDE.md").exists(),
+            "CLAUDE.md should be created"
+        );
+        assert!(
+            tmp.join("GEMINI.md").exists(),
+            "GEMINI.md should be created"
+        );
+        assert!(
+            tmp.join("AGENTS.md").exists(),
+            "AGENTS.md should be created"
+        );
+        assert!(
+            tmp.join(".kiro/steering/instructions.md").exists(),
+            ".kiro/steering/instructions.md should be created"
+        );
+        assert!(
+            tmp.join(".github/copilot-instructions.md").exists(),
+            ".github/copilot-instructions.md should be created"
+        );
 
         cleanup(&tmp);
         let _ = std::fs::remove_dir_all(&tpl);
@@ -633,10 +794,16 @@ command = "manual-command"
 
         // CLAUDE.md should NOT be overwritten
         let content = std::fs::read_to_string(tmp.join("CLAUDE.md")).unwrap();
-        assert_eq!(content, "Custom content", "Existing file should not be overwritten");
+        assert_eq!(
+            content, "Custom content",
+            "Existing file should not be overwritten"
+        );
 
         // GEMINI.md should be created (was missing)
-        assert!(tmp.join("GEMINI.md").exists(), "Missing GEMINI.md should be created");
+        assert!(
+            tmp.join("GEMINI.md").exists(),
+            "Missing GEMINI.md should be created"
+        );
 
         cleanup(&tmp);
         let _ = std::fs::remove_dir_all(&tpl);
@@ -736,7 +903,10 @@ command = "manual-command"
         );
         assert!(!ok, "concurrent write must surface as ok=false");
         // Concurrent writer's content survived.
-        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{\"by-other\":1}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"by-other\":1}"
+        );
         cleanup(&tmp);
     }
 
@@ -754,7 +924,10 @@ command = "manual-command"
         assert!(parsed.mcp_servers.contains_key("github"));
 
         // No temp file left behind
-        assert!(!tmp.join(".mcp.tmp").exists(), "Temp file should be cleaned up");
+        assert!(
+            !tmp.join(".mcp.tmp").exists(),
+            "Temp file should be cleaned up"
+        );
 
         cleanup(&tmp);
     }
@@ -762,7 +935,7 @@ command = "manual-command"
     #[test]
     fn incompatibility_detects_gitlab_for_kiro() {
         use crate::core::mcp_scanner::get_incompatibilities;
-        use crate::models::{McpServer, McpTransport, McpSource, AgentType};
+        use crate::models::{AgentType, McpServer, McpSource, McpTransport};
 
         let servers = vec![
             McpServer {
@@ -799,11 +972,13 @@ command = "manual-command"
     #[test]
     fn incompatibility_returns_empty_for_compatible_servers() {
         use crate::core::mcp_scanner::get_incompatibilities;
-        use crate::models::{McpServer, McpTransport, McpSource};
+        use crate::models::{McpServer, McpSource, McpTransport};
 
         let servers = vec![
             McpServer {
-                id: "mcp-github".into(), name: "GitHub".into(), description: "".into(),
+                id: "mcp-github".into(),
+                name: "GitHub".into(),
+                description: "".into(),
                 transport: McpTransport::Stdio {
                     command: "npx".into(),
                     args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
@@ -812,7 +987,9 @@ command = "manual-command"
                 api_spec: None,
             },
             McpServer {
-                id: "mcp-context7".into(), name: "Context7".into(), description: "".into(),
+                id: "mcp-context7".into(),
+                name: "Context7".into(),
+                description: "".into(),
                 transport: McpTransport::Stdio {
                     command: "npx".into(),
                     args: vec!["-y".into(), "@upstash/context7-mcp".into()],
@@ -823,25 +1000,34 @@ command = "manual-command"
         ];
 
         let incomp = get_incompatibilities(&servers);
-        assert!(incomp.is_empty(), "Compatible servers should have no incompatibilities");
+        assert!(
+            incomp.is_empty(),
+            "Compatible servers should have no incompatibilities"
+        );
     }
 
     #[test]
     fn incompatibility_flags_localhost_sse_servers() {
         use crate::core::mcp_scanner::get_incompatibilities;
-        use crate::models::{McpServer, McpTransport, McpSource};
+        use crate::models::{McpServer, McpSource, McpTransport};
 
-        let servers = vec![
-            McpServer {
-                id: "detected:data-gouv".into(), name: "data.gouv.fr".into(), description: "".into(),
-                transport: McpTransport::Sse { url: "http://localhost:8000/sse".into() },
-                source: McpSource::Detected,
-                api_spec: None,
+        let servers = vec![McpServer {
+            id: "detected:data-gouv".into(),
+            name: "data.gouv.fr".into(),
+            description: "".into(),
+            transport: McpTransport::Sse {
+                url: "http://localhost:8000/sse".into(),
             },
-        ];
+            source: McpSource::Detected,
+            api_spec: None,
+        }];
 
         let incomp = get_incompatibilities(&servers);
-        assert_eq!(incomp.len(), 1, "Localhost SSE should be flagged as incompatible");
+        assert_eq!(
+            incomp.len(),
+            1,
+            "Localhost SSE should be flagged as incompatible"
+        );
     }
 
     #[test]
@@ -849,19 +1035,39 @@ command = "manual-command"
         // Verify that write_mcp_json_to_subpath with filtered data excludes gitlab
         let tmp = setup_tmp("kiro-no-gitlab");
         let mut servers = std::collections::HashMap::new();
-        servers.insert("github".to_string(), McpServerEntry {
-            command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "@modelcontextprotocol/server-github".into()]),
-            url: None, env: std::collections::HashMap::new(),
-        });
+        servers.insert(
+            "github".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec![
+                    "-y".into(),
+                    "@modelcontextprotocol/server-github".into(),
+                ]),
+                url: None,
+                env: std::collections::HashMap::new(),
+            },
+        );
         // gitlab should NOT be in Kiro config (filtered by sync logic)
-        let kiro_data = McpJsonFile { mcp_servers: servers };
-        write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".kiro/settings/mcp.json", &kiro_data).unwrap();
+        let kiro_data = McpJsonFile {
+            mcp_servers: servers,
+        };
+        write_mcp_json_to_subpath(
+            &tmp.to_string_lossy(),
+            ".kiro/settings/mcp.json",
+            &kiro_data,
+        )
+        .unwrap();
 
         let content = std::fs::read_to_string(tmp.join(".kiro/settings/mcp.json")).unwrap();
         let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
-        assert!(parsed.mcp_servers.contains_key("github"), "github should be in Kiro config");
-        assert!(!parsed.mcp_servers.contains_key("gitlab"), "gitlab should NOT be in Kiro config");
+        assert!(
+            parsed.mcp_servers.contains_key("github"),
+            "github should be in Kiro config"
+        );
+        assert!(
+            !parsed.mcp_servers.contains_key("gitlab"),
+            "gitlab should NOT be in Kiro config"
+        );
 
         cleanup(&tmp);
     }
@@ -872,24 +1078,32 @@ command = "manual-command"
         // `sh` should always be available on any Unix system
         assert!(is_command_available("sh"), "sh should be available");
         // Nonexistent command
-        assert!(!is_command_available("kronn_nonexistent_cmd_12345"),
-            "Nonexistent command should not be found");
+        assert!(
+            !is_command_available("kronn_nonexistent_cmd_12345"),
+            "Nonexistent command should not be found"
+        );
     }
 
     #[test]
     fn incompatibility_detects_localhost_sse() {
         use crate::core::mcp_scanner::get_incompatibilities;
-        use crate::models::{McpServer, McpTransport, McpSource};
+        use crate::models::{McpServer, McpSource, McpTransport};
 
         let servers = vec![
             McpServer {
-                id: "detected:data-gouv".into(), name: "data.gouv.fr".into(), description: "".into(),
-                transport: McpTransport::Sse { url: "http://localhost:8000/sse".into() },
+                id: "detected:data-gouv".into(),
+                name: "data.gouv.fr".into(),
+                description: "".into(),
+                transport: McpTransport::Sse {
+                    url: "http://localhost:8000/sse".into(),
+                },
                 source: McpSource::Detected,
                 api_spec: None,
             },
             McpServer {
-                id: "mcp-github".into(), name: "GitHub".into(), description: "".into(),
+                id: "mcp-github".into(),
+                name: "GitHub".into(),
+                description: "".into(),
                 transport: McpTransport::Stdio {
                     command: "npx".into(),
                     args: vec!["-y".into(), "@modelcontextprotocol/server-github".into()],
@@ -902,17 +1116,24 @@ command = "manual-command"
         let incomp = get_incompatibilities(&servers);
         assert_eq!(incomp.len(), 1, "Only localhost SSE should be flagged");
         assert_eq!(incomp[0].server_id, "detected:data-gouv");
-        assert!(incomp[0].reason.contains("localhost"), "Reason should mention localhost");
+        assert!(
+            incomp[0].reason.contains("localhost"),
+            "Reason should mention localhost"
+        );
     }
 
     #[test]
     fn localhost_127_also_detected() {
         use crate::core::mcp_scanner::get_incompatibilities;
-        use crate::models::{McpServer, McpTransport, McpSource};
+        use crate::models::{McpServer, McpSource, McpTransport};
 
         let servers = vec![McpServer {
-            id: "local-svc".into(), name: "Local".into(), description: "".into(),
-            transport: McpTransport::Streamable { url: "http://127.0.0.1:3000/mcp".into() },
+            id: "local-svc".into(),
+            name: "Local".into(),
+            description: "".into(),
+            transport: McpTransport::Streamable {
+                url: "http://127.0.0.1:3000/mcp".into(),
+            },
             source: McpSource::Detected,
             api_spec: None,
         }];
@@ -924,11 +1145,15 @@ command = "manual-command"
     #[test]
     fn remote_sse_not_flagged() {
         use crate::core::mcp_scanner::get_incompatibilities;
-        use crate::models::{McpServer, McpTransport, McpSource};
+        use crate::models::{McpServer, McpSource, McpTransport};
 
         let servers = vec![McpServer {
-            id: "remote-svc".into(), name: "Remote".into(), description: "".into(),
-            transport: McpTransport::Sse { url: "https://api.example.com/mcp".into() },
+            id: "remote-svc".into(),
+            name: "Remote".into(),
+            description: "".into(),
+            transport: McpTransport::Sse {
+                url: "https://api.example.com/mcp".into(),
+            },
             source: McpSource::Detected,
             api_spec: None,
         }];
@@ -951,8 +1176,11 @@ startup_timeout_sec = 60
         // primitives only since 1.0).
         let parsed: toml::Table = input.parse().unwrap();
         let server = &parsed["mcp_servers"]["github"];
-        assert_eq!(server["startup_timeout_sec"].as_integer(), Some(60),
-            "startup_timeout_sec must survive TOML round-trip");
+        assert_eq!(
+            server["startup_timeout_sec"].as_integer(),
+            Some(60),
+            "startup_timeout_sec must survive TOML round-trip"
+        );
         assert_eq!(server["command"].as_str(), Some("npx"));
     }
 
@@ -960,8 +1188,11 @@ startup_timeout_sec = 60
     fn codex_config_default_timeout_is_30() {
         // Verify the default_startup_timeout constant is 30 (not 10)
         // to prevent regression to Codex's too-short default
-        assert_eq!(super::super::mcp_scanner::default_startup_timeout(), 30,
-            "Default startup timeout must be 30s (Codex default is 10s, too short for binaries)");
+        assert_eq!(
+            super::super::mcp_scanner::default_startup_timeout(),
+            30,
+            "Default startup timeout must be 30s (Codex default is 10s, too short for binaries)"
+        );
     }
 
     // ─── Codex config preservation (regression for silent unwrap_or_default) ─
@@ -1000,12 +1231,18 @@ args = ["@example/old-mcp"]
 
         match load_codex_config_for_merge(&path) {
             CodexLoadOutcome::Loaded(table) => {
-                assert!(table.contains_key("model_providers"),
-                    "model_providers section must be preserved");
-                assert!(table.contains_key("profiles"),
-                    "profiles section must be preserved");
-                assert!(table.contains_key("mcp_servers"),
-                    "existing mcp_servers section must be preserved (sync replaces it)");
+                assert!(
+                    table.contains_key("model_providers"),
+                    "model_providers section must be preserved"
+                );
+                assert!(
+                    table.contains_key("profiles"),
+                    "profiles section must be preserved"
+                );
+                assert!(
+                    table.contains_key("mcp_servers"),
+                    "existing mcp_servers section must be preserved (sync replaces it)"
+                );
             }
             other => panic!("expected Loaded, got {:?}", other),
         }
@@ -1030,10 +1267,15 @@ args = ["@example/old-mcp"]
 
         // Backup rotation N=5 (0.6.0): the most recent backup lives at slot .1.
         let backup = tmp.join("config.toml.kronn-backup.1");
-        assert!(backup.exists(), "corrupt config must be backed up to .kronn-backup.1");
+        assert!(
+            backup.exists(),
+            "corrupt config must be backed up to .kronn-backup.1"
+        );
         let backup_content = std::fs::read_to_string(&backup).unwrap();
-        assert!(backup_content.contains("not = valid"),
-            "backup must contain the original (corrupt) bytes");
+        assert!(
+            backup_content.contains("not = valid"),
+            "backup must contain the original (corrupt) bytes"
+        );
 
         // The original file is left in place untouched (we never wrote over it)
         let original = std::fs::read_to_string(&path).unwrap();
@@ -1070,7 +1312,11 @@ args = ["@example/old-mcp"]
         let tmp = setup_tmp("resolve-host");
         let path = tmp.to_string_lossy().to_string();
         let resolved = resolve_host_path(&path);
-        assert_eq!(resolved.to_string_lossy(), path, "Existing local path should be returned unchanged");
+        assert_eq!(
+            resolved.to_string_lossy(),
+            path,
+            "Existing local path should be returned unchanged"
+        );
         cleanup(&tmp);
     }
 
@@ -1079,7 +1325,11 @@ args = ["@example/old-mcp"]
         use crate::core::scanner::resolve_host_path;
         let fake = "/tmp/kronn-nonexistent-path-test-12345";
         let resolved = resolve_host_path(fake);
-        assert_eq!(resolved.to_string_lossy(), fake, "Missing path should be returned as-is");
+        assert_eq!(
+            resolved.to_string_lossy(),
+            fake,
+            "Missing path should be returned as-is"
+        );
     }
 
     #[test]
@@ -1090,7 +1340,10 @@ args = ["@example/old-mcp"]
         let json = serde_json::to_string_pretty(&data).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert!(parsed["mcpServers"].is_object(), "Root must have mcpServers key");
+        assert!(
+            parsed["mcpServers"].is_object(),
+            "Root must have mcpServers key"
+        );
         let github = &parsed["mcpServers"]["github"];
         assert_eq!(github["command"].as_str(), Some("npx"));
         assert!(github["args"].is_array());
@@ -1105,10 +1358,17 @@ args = ["@example/old-mcp"]
         let label = "My Custom Label";
         // Simulate the key assignment logic (must match mcp_scanner.rs)
         let key = label.to_string(); // = config.label.clone()
-        assert_eq!(key, "My Custom Label", "Key must preserve label casing exactly");
+        assert_eq!(
+            key, "My Custom Label",
+            "Key must preserve label casing exactly"
+        );
         // The old buggy code would have used server.name.to_lowercase() for single configs
         let server_name = "Fastly";
-        assert_ne!(key, server_name.to_lowercase(), "Key must NOT be server.name.to_lowercase()");
+        assert_ne!(
+            key,
+            server_name.to_lowercase(),
+            "Key must NOT be server.name.to_lowercase()"
+        );
     }
 
     // ─── File sync integration tests ──────────────────────────────────────────
@@ -1120,13 +1380,18 @@ args = ["@example/old-mcp"]
         let mut env = HashMap::new();
         env.insert("API_KEY".to_string(), "sk-test-alpha-123".to_string());
         env.insert("API_SECRET".to_string(), "secret-beta-456".to_string());
-        servers.insert("test-server".to_string(), McpServerEntry {
-            command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "test-pkg".into()]),
-            url: None,
-            env,
-        });
-        let data = McpJsonFile { mcp_servers: servers };
+        servers.insert(
+            "test-server".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec!["-y".into(), "test-pkg".into()]),
+                url: None,
+                env,
+            },
+        );
+        let data = McpJsonFile {
+            mcp_servers: servers,
+        };
 
         write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &data).unwrap();
 
@@ -1143,28 +1408,40 @@ args = ["@example/old-mcp"]
     fn sync_uses_config_label_as_key() {
         let tmp = setup_tmp("sync-label-key");
         let mut servers = HashMap::new();
-        servers.insert("PeerAlpha Config".to_string(), McpServerEntry {
-            command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "server-alpha".into()]),
-            url: None,
-            env: HashMap::new(),
-        });
-        servers.insert("PeerBeta Config".to_string(), McpServerEntry {
-            command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "server-beta".into()]),
-            url: None,
-            env: HashMap::new(),
-        });
-        let data = McpJsonFile { mcp_servers: servers };
+        servers.insert(
+            "PeerAlpha Config".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec!["-y".into(), "server-alpha".into()]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
+        servers.insert(
+            "PeerBeta Config".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec!["-y".into(), "server-beta".into()]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
+        let data = McpJsonFile {
+            mcp_servers: servers,
+        };
 
         write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &data).unwrap();
 
         let content = std::fs::read_to_string(tmp.join(".mcp.json")).unwrap();
         let parsed: McpJsonFile = serde_json::from_str(&content).unwrap();
-        assert!(parsed.mcp_servers.contains_key("PeerAlpha Config"),
-            "Key should be the config label 'PeerAlpha Config'");
-        assert!(parsed.mcp_servers.contains_key("PeerBeta Config"),
-            "Key should be the config label 'PeerBeta Config'");
+        assert!(
+            parsed.mcp_servers.contains_key("PeerAlpha Config"),
+            "Key should be the config label 'PeerAlpha Config'"
+        );
+        assert!(
+            parsed.mcp_servers.contains_key("PeerBeta Config"),
+            "Key should be the config label 'PeerBeta Config'"
+        );
         assert_eq!(parsed.mcp_servers.len(), 2);
 
         cleanup(&tmp);
@@ -1174,13 +1451,18 @@ args = ["@example/old-mcp"]
     fn sync_empty_env_when_no_secrets() {
         let tmp = setup_tmp("sync-empty-env");
         let mut servers = HashMap::new();
-        servers.insert("no-secrets".to_string(), McpServerEntry {
-            command: Some("npx".into()),
-            args: Some(vec!["-y".into(), "pkg".into()]),
-            url: None,
-            env: HashMap::new(), // empty env
-        });
-        let data = McpJsonFile { mcp_servers: servers };
+        servers.insert(
+            "no-secrets".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec!["-y".into(), "pkg".into()]),
+                url: None,
+                env: HashMap::new(), // empty env
+            },
+        );
+        let data = McpJsonFile {
+            mcp_servers: servers,
+        };
 
         write_mcp_json_to_subpath(&tmp.to_string_lossy(), ".mcp.json", &data).unwrap();
 
@@ -1190,9 +1472,14 @@ args = ["@example/old-mcp"]
         assert!(entry.env.is_empty(), "env should be empty when no secrets");
         // Also verify the JSON omits env (skip_serializing_if)
         let raw: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(raw["mcpServers"]["no-secrets"]["env"].is_null()
-            || !raw["mcpServers"]["no-secrets"].as_object().unwrap().contains_key("env"),
-            "Empty env should be omitted from JSON");
+        assert!(
+            raw["mcpServers"]["no-secrets"]["env"].is_null()
+                || !raw["mcpServers"]["no-secrets"]
+                    .as_object()
+                    .unwrap()
+                    .contains_key("env"),
+            "Empty env should be omitted from JSON"
+        );
 
         cleanup(&tmp);
     }
@@ -1204,18 +1491,26 @@ args = ["@example/old-mcp"]
         let mut servers = HashMap::new();
         let mut env = HashMap::new();
         env.insert("TOKEN".to_string(), "test-token-value".to_string());
-        servers.insert("test-copilot-server".to_string(), McpServerEntry {
-            command: Some("node".into()),
-            args: Some(vec!["server.js".into()]),
-            url: None,
-            env,
-        });
-        let data = McpJsonFile { mcp_servers: servers };
+        servers.insert(
+            "test-copilot-server".to_string(),
+            McpServerEntry {
+                command: Some("node".into()),
+                args: Some(vec!["server.js".into()]),
+                url: None,
+                env,
+            },
+        );
+        let data = McpJsonFile {
+            mcp_servers: servers,
+        };
 
         let json_str = serde_json::to_string_pretty(&data).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
 
-        assert!(parsed["mcpServers"].is_object(), "Root key must be mcpServers");
+        assert!(
+            parsed["mcpServers"].is_object(),
+            "Root key must be mcpServers"
+        );
         let server = &parsed["mcpServers"]["test-copilot-server"];
         assert_eq!(server["command"].as_str(), Some("node"));
         assert!(server["args"].is_array());
@@ -1225,8 +1520,8 @@ args = ["@example/old-mcp"]
 
     #[test]
     fn vibe_config_toml_format() {
-        use super::super::mcp_scanner::VibeMcpEntry;
         use super::super::mcp_scanner::VibeConfig;
+        use super::super::mcp_scanner::VibeMcpEntry;
 
         let mut env = HashMap::new();
         env.insert("API_KEY".to_string(), "test-key-value".to_string());
@@ -1247,10 +1542,22 @@ args = ["@example/old-mcp"]
         let toml_str = toml::to_string_pretty(&config).unwrap();
 
         // Verify TOML has the expected structure
-        assert!(toml_str.contains("[[mcp_servers]]"), "TOML should have [[mcp_servers]] array");
-        assert!(toml_str.contains("name = \"TestServer\""), "Should have name field");
-        assert!(toml_str.contains("command = \"npx\""), "Should have command field");
-        assert!(toml_str.contains("transport = \"stdio\""), "Should have transport field");
+        assert!(
+            toml_str.contains("[[mcp_servers]]"),
+            "TOML should have [[mcp_servers]] array"
+        );
+        assert!(
+            toml_str.contains("name = \"TestServer\""),
+            "Should have name field"
+        );
+        assert!(
+            toml_str.contains("command = \"npx\""),
+            "Should have command field"
+        );
+        assert!(
+            toml_str.contains("transport = \"stdio\""),
+            "Should have transport field"
+        );
 
         // Verify round-trip
         let parsed: VibeConfig = toml::from_str(&toml_str).unwrap();
@@ -1258,7 +1565,10 @@ args = ["@example/old-mcp"]
         assert_eq!(parsed.mcp_servers[0].name, "TestServer");
         assert_eq!(parsed.mcp_servers[0].command.as_deref(), Some("npx"));
         assert_eq!(parsed.mcp_servers[0].args.as_ref().unwrap().len(), 2);
-        assert_eq!(parsed.mcp_servers[0].env.get("API_KEY").unwrap(), "test-key-value");
+        assert_eq!(
+            parsed.mcp_servers[0].env.get("API_KEY").unwrap(),
+            "test-key-value"
+        );
     }
 
     // ── Claude settings.local.json sync tests ──
@@ -1275,25 +1585,44 @@ args = ["@example/old-mcp"]
             "enableAllProjectMcpServers": true,
             "enabledMcpjsonServers": ["atlassian"]
         });
-        std::fs::write(claude_dir.join("settings.local.json"),
-            serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
 
         // MCP servers to sync
         let mut servers = HashMap::new();
-        servers.insert("atlassian".to_string(), McpServerEntry {
-            command: Some("uvx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
-        });
-        servers.insert("GitLab".to_string(), McpServerEntry {
-            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
-        });
+        servers.insert(
+            "atlassian".to_string(),
+            McpServerEntry {
+                command: Some("uvx".into()),
+                args: Some(vec![]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
+        servers.insert(
+            "GitLab".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec![]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
 
         sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
 
         // Re-read and verify
         let content = std::fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
         let result: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let enabled: Vec<&str> = result["enabledMcpjsonServers"].as_array().unwrap()
-            .iter().map(|v| v.as_str().unwrap()).collect();
+        let enabled: Vec<&str> = result["enabledMcpjsonServers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
 
         assert!(enabled.contains(&"atlassian"), "existing entry preserved");
         assert!(enabled.contains(&"GitLab"), "new entry added");
@@ -1318,21 +1647,34 @@ args = ["@example/old-mcp"]
         let settings = serde_json::json!({
             "enabledMcpjsonServers": ["GitLab", "Docker"]
         });
-        std::fs::write(claude_dir.join("settings.local.json"),
-            serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
 
         // Only GitLab is in the current .mcp.json
         let mut servers = HashMap::new();
-        servers.insert("GitLab".to_string(), McpServerEntry {
-            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
-        });
+        servers.insert(
+            "GitLab".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec![]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
 
         sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
 
         let content = std::fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
         let result: serde_json::Value = serde_json::from_str(&content).unwrap();
-        let enabled: Vec<&str> = result["enabledMcpjsonServers"].as_array().unwrap()
-            .iter().map(|v| v.as_str().unwrap()).collect();
+        let enabled: Vec<&str> = result["enabledMcpjsonServers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
 
         // Docker must be REMOVED (stale), only GitLab remains
         assert_eq!(enabled.len(), 1, "stale entry must be removed");
@@ -1346,9 +1688,15 @@ args = ["@example/old-mcp"]
     fn sync_claude_enabled_servers_skips_when_no_settings_file() {
         let tmp = setup_tmp("claude-settings-none");
         let mut servers = HashMap::new();
-        servers.insert("GitLab".to_string(), McpServerEntry {
-            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
-        });
+        servers.insert(
+            "GitLab".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec![]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
 
         // Should not panic or create a file
         sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
@@ -1367,20 +1715,32 @@ args = ["@example/old-mcp"]
         let settings = serde_json::json!({
             "permissions": { "allow": [] }
         });
-        std::fs::write(claude_dir.join("settings.local.json"),
-            serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+        std::fs::write(
+            claude_dir.join("settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
 
         let mut servers = HashMap::new();
-        servers.insert("GitLab".to_string(), McpServerEntry {
-            command: Some("npx".into()), args: Some(vec![]), url: None, env: HashMap::new(),
-        });
+        servers.insert(
+            "GitLab".to_string(),
+            McpServerEntry {
+                command: Some("npx".into()),
+                args: Some(vec![]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
 
         sync_claude_enabled_servers(tmp.to_str().unwrap(), &servers);
 
         // File unchanged — no enabledMcpjsonServers created
         let content = std::fs::read_to_string(claude_dir.join("settings.local.json")).unwrap();
         let result: serde_json::Value = serde_json::from_str(&content).unwrap();
-        assert!(result.get("enabledMcpjsonServers").is_none(), "should not create list");
+        assert!(
+            result.get("enabledMcpjsonServers").is_none(),
+            "should not create list"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }
@@ -1402,8 +1762,16 @@ args = ["@example/old-mcp"]
                     env_key: "TEST_API_KEY".into(),
                 },
                 endpoints: vec![
-                    ApiEndpoint { path: "/hello".into(), method: "GET".into(), description: "Hello".into() },
-                    ApiEndpoint { path: "/ping".into(), method: "GET".into(), description: "Ping".into() },
+                    ApiEndpoint {
+                        path: "/hello".into(),
+                        method: "GET".into(),
+                        description: "Hello".into(),
+                    },
+                    ApiEndpoint {
+                        path: "/ping".into(),
+                        method: "GET".into(),
+                        description: "Ping".into(),
+                    },
                 ],
                 docs_url: Some("https://example.com/api-docs".into()),
                 config_keys: vec![ApiConfigKey {
@@ -1425,9 +1793,15 @@ args = ["@example/old-mcp"]
         // Pure MCP server (no api_spec) → block collapses to "".
         use crate::models::*;
         let mcp = McpServer {
-            id: "mcp-only".into(), name: "MCP".into(), description: "".into(),
-            transport: McpTransport::Stdio { command: "x".into(), args: vec![] },
-            source: McpSource::Registry, api_spec: None,
+            id: "mcp-only".into(),
+            name: "MCP".into(),
+            description: "".into(),
+            transport: McpTransport::Stdio {
+                command: "x".into(),
+                args: vec![],
+            },
+            source: McpSource::Registry,
+            api_spec: None,
         };
         let out = build_api_context_block(&[(mcp, "cfg-1".into(), HashMap::new())]);
         assert!(out.is_empty(), "pure MCP plugin must not emit API block");
@@ -1444,20 +1818,41 @@ args = ["@example/old-mcp"]
         assert!(out.contains("https://api.example.com"), "base URL rendered");
         // Discovery via the broker, not a catalogue.
         assert!(out.contains("api_call"), "points at the api_call MCP tool");
-        assert!(out.contains("mcp_list"), "points at mcp_list for endpoint discovery");
-        assert!(out.contains("2 endpoints"), "endpoint COUNT surfaced, got: {out}");
+        assert!(
+            out.contains("mcp_list"),
+            "points at mcp_list for endpoint discovery"
+        );
+        assert!(
+            out.contains("2 endpoints"),
+            "endpoint COUNT surfaced, got: {out}"
+        );
         // First endpoint shown as a shape example…
         assert!(out.contains("/hello"), "first endpoint shown as example");
         // …but the rest are NOT dumped (this is the whole point).
-        assert!(!out.contains("/ping"), "second endpoint must NOT be dumped: {out}");
+        assert!(
+            !out.contains("/ping"),
+            "second endpoint must NOT be dumped: {out}"
+        );
         // Auth is broker-only: neither the credential nor non-secret config
         // values are copied into model context. Config stays usable through
         // the broker's ${ENV.KEY} substitution syntax.
-        assert!(!out.contains("supersecret-123"), "credential leaked into prompt: {out}");
+        assert!(
+            !out.contains("supersecret-123"),
+            "credential leaked into prompt: {out}"
+        );
         assert!(out.contains("injected server-side by `api_call`"));
-        assert!(out.contains("${ENV.TEST_HOST}"), "config reference missing: {out}");
-        assert!(!out.contains("test_host=example.com"), "config value leaked into prompt: {out}");
-        assert!(out.contains("https://example.com/api-docs"), "docs link present");
+        assert!(
+            out.contains("${ENV.TEST_HOST}"),
+            "config reference missing: {out}"
+        );
+        assert!(
+            !out.contains("test_host=example.com"),
+            "config value leaked into prompt: {out}"
+        );
+        assert!(
+            out.contains("https://example.com/api-docs"),
+            "docs link present"
+        );
     }
 
     #[test]
@@ -1467,12 +1862,21 @@ args = ["@example/old-mcp"]
         // must not expose env-key state or encourage a direct unauthenticated
         // call with a literal placeholder.
         let server = McpServer {
-            id: "api-broken".into(), name: "Broken".into(), description: "".into(),
-            transport: McpTransport::ApiOnly, source: McpSource::Registry,
+            id: "api-broken".into(),
+            name: "Broken".into(),
+            description: "".into(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Registry,
             api_spec: Some(ApiSpec {
                 base_url: "https://example.com".into(),
-                auth: ApiAuthKind::Bearer { env_key: "MISSING_TOKEN".into() },
-                endpoints: vec![ApiEndpoint { path: "/".into(), method: "GET".into(), description: "".into() }],
+                auth: ApiAuthKind::Bearer {
+                    env_key: "MISSING_TOKEN".into(),
+                },
+                endpoints: vec![ApiEndpoint {
+                    path: "/".into(),
+                    method: "GET".into(),
+                    description: "".into(),
+                }],
                 docs_url: None,
                 config_keys: vec![],
             }),
@@ -1496,11 +1900,24 @@ args = ["@example/old-mcp"]
         use crate::models::*;
 
         let variants = vec![
-            ApiAuthKind::ApiKeyQuery { param_name: "key".into(), env_key: "SECRET_QUERY".into() },
-            ApiAuthKind::ApiKeyHeader { header_name: "X-Key".into(), env_key: "SECRET_HEADER".into() },
-            ApiAuthKind::Bearer { env_key: "SECRET_BEARER".into() },
-            ApiAuthKind::Basic { user_env: "SECRET_USER".into(), password_env: "SECRET_PASSWORD".into() },
-            ApiAuthKind::BasicApiKey { env_key: "SECRET_BASIC_KEY".into() },
+            ApiAuthKind::ApiKeyQuery {
+                param_name: "key".into(),
+                env_key: "SECRET_QUERY".into(),
+            },
+            ApiAuthKind::ApiKeyHeader {
+                header_name: "X-Key".into(),
+                env_key: "SECRET_HEADER".into(),
+            },
+            ApiAuthKind::Bearer {
+                env_key: "SECRET_BEARER".into(),
+            },
+            ApiAuthKind::Basic {
+                user_env: "SECRET_USER".into(),
+                password_env: "SECRET_PASSWORD".into(),
+            },
+            ApiAuthKind::BasicApiKey {
+                env_key: "SECRET_BASIC_KEY".into(),
+            },
             ApiAuthKind::OAuth2ClientCredentials {
                 token_url: "https://auth.example/token".into(),
                 client_id_env: "SECRET_CLIENT_ID".into(),
@@ -1518,14 +1935,22 @@ args = ["@example/old-mcp"]
                 body_format: TokenExchangeBodyFormat::Json,
                 token_jsonpath: "$.token".into(),
                 ttl_seconds: 60,
-                inject: TokenInjection::CustomHeader { name: "X-Session".into() },
+                inject: TokenInjection::CustomHeader {
+                    name: "X-Session".into(),
+                },
                 creds_env_keys: vec!["SECRET_QUERY".into()],
             },
         ];
         let secret_values = [
-            "query-value-7Qv", "header-value-9Jx", "bearer-value-2Lm",
-            "user-value-8Rw", "password-value-4Tk", "basic-value-6Np",
-            "client-id-value-3Hs", "client-secret-value-5Dz", "access-value-1Fc",
+            "query-value-7Qv",
+            "header-value-9Jx",
+            "bearer-value-2Lm",
+            "user-value-8Rw",
+            "password-value-4Tk",
+            "basic-value-6Np",
+            "client-id-value-3Hs",
+            "client-secret-value-5Dz",
+            "access-value-1Fc",
         ];
         let mut env = HashMap::new();
         for (key, value) in [
@@ -1552,14 +1977,21 @@ args = ["@example/old-mcp"]
                 api_spec: Some(ApiSpec {
                     base_url: "https://api.example".into(),
                     auth,
-                    endpoints: vec![ApiEndpoint { path: "/x".into(), method: "GET".into(), description: String::new() }],
+                    endpoints: vec![ApiEndpoint {
+                        path: "/x".into(),
+                        method: "GET".into(),
+                        description: String::new(),
+                    }],
                     docs_url: None,
                     config_keys: vec![],
                 }),
             };
             let out = build_api_context_block(&[(server, format!("cfg-{idx}"), env.clone())]);
             for secret in secret_values {
-                assert!(!out.contains(secret), "auth variant {idx} leaked {secret}: {out}");
+                assert!(
+                    !out.contains(secret),
+                    "auth variant {idx} leaked {secret}: {out}"
+                );
             }
         }
     }
@@ -1568,12 +2000,21 @@ args = ["@example/old-mcp"]
     fn auth_env_key_cannot_interpolate_into_base_url() {
         use crate::models::*;
         let server = McpServer {
-            id: "bad-template".into(), name: "BadTemplate".into(), description: String::new(),
-            transport: McpTransport::ApiOnly, source: McpSource::Registry,
+            id: "bad-template".into(),
+            name: "BadTemplate".into(),
+            description: String::new(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Registry,
             api_spec: Some(ApiSpec {
                 base_url: "https://{AUTH_TOKEN}.example".into(),
-                auth: ApiAuthKind::Bearer { env_key: "AUTH_TOKEN".into() },
-                endpoints: vec![ApiEndpoint { path: "/".into(), method: "GET".into(), description: String::new() }],
+                auth: ApiAuthKind::Bearer {
+                    env_key: "AUTH_TOKEN".into(),
+                },
+                endpoints: vec![ApiEndpoint {
+                    path: "/".into(),
+                    method: "GET".into(),
+                    description: String::new(),
+                }],
                 docs_url: None,
                 // A hostile/malformed spec must not launder an auth value by
                 // declaring the same env key as non-secret configuration.
@@ -1589,7 +2030,10 @@ args = ["@example/old-mcp"]
         env.insert("AUTH_TOKEN".into(), "must-not-enter-url".into());
         let out = build_api_context_block(&[(server, "cfg".into(), env)]);
         assert!(out.contains("<NOT_CONFIGURED:AUTH_TOKEN>"));
-        assert!(!out.contains("must-not-enter-url"), "auth leaked through URL interpolation: {out}");
+        assert!(
+            !out.contains("must-not-enter-url"),
+            "auth leaked through URL interpolation: {out}"
+        );
     }
 
     /// Regression (2026-06-10, ex-`matches_config` TODO P0.5b): TWO configs
@@ -1612,7 +2056,8 @@ args = ["@example/old-mcp"]
             "INSERT INTO projects (id, name, path, created_at, updated_at)
              VALUES ('proj-1', 'Test', '/tmp/test', datetime('now'), datetime('now'))",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let (server, _) = api_server("api-multi", "https://multi.example.com");
         crate::db::mcps::upsert_server(&conn, &server).unwrap();
@@ -1640,12 +2085,23 @@ args = ["@example/old-mcp"]
         let plugins = collect_active_api_plugins(&conn, "proj-1", secret).unwrap();
         assert_eq!(plugins.len(), 2, "both instances must surface");
 
-        let env_of = |cid: &str| plugins.iter()
-            .find(|(_, c, _)| c == cid)
-            .map(|(_, _, env)| env.get("TEST_API_KEY").cloned().unwrap())
-            .unwrap_or_else(|| panic!("config {cid} missing from collector output"));
-        assert_eq!(env_of("cfg-A"), "key-of-A", "cfg-A must carry ITS key, not the first one found");
-        assert_eq!(env_of("cfg-B"), "key-of-B", "cfg-B must carry ITS key, not cfg-A's");
+        let env_of = |cid: &str| {
+            plugins
+                .iter()
+                .find(|(_, c, _)| c == cid)
+                .map(|(_, _, env)| env.get("TEST_API_KEY").cloned().unwrap())
+                .unwrap_or_else(|| panic!("config {cid} missing from collector output"))
+        };
+        assert_eq!(
+            env_of("cfg-A"),
+            "key-of-A",
+            "cfg-A must carry ITS key, not the first one found"
+        );
+        assert_eq!(
+            env_of("cfg-B"),
+            "key-of-B",
+            "cfg-B must carry ITS key, not cfg-A's"
+        );
     }
 
     #[test]
@@ -1654,9 +2110,13 @@ args = ["@example/old-mcp"]
         // api_spec (or the registry loader misses it), the builtin won't
         // be callable. Verify key endpoints are present.
         let reg = crate::core::registry::builtin_registry();
-        let chartbeat = reg.iter().find(|d| d.id == "api-chartbeat")
+        let chartbeat = reg
+            .iter()
+            .find(|d| d.id == "api-chartbeat")
             .expect("Chartbeat must be in the builtin registry");
-        let spec = chartbeat.api_spec.as_ref()
+        let spec = chartbeat
+            .api_spec
+            .as_ref()
             .expect("Chartbeat must have api_spec populated");
         assert_eq!(spec.base_url, "https://api.chartbeat.com");
         let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
@@ -1671,9 +2131,15 @@ args = ["@example/old-mcp"]
         assert!(paths.contains(&"/live/quickstats/v4/"));
         assert!(paths.contains(&"/historical/traffic/series/"));
         assert!(paths.contains(&"/historical/engagement/series/"));
-        assert!(spec.docs_url.is_some(), "docs_url mandatory so agent can self-extend");
+        assert!(
+            spec.docs_url.is_some(),
+            "docs_url mandatory so agent can self-extend"
+        );
         // Host is exposed as a config key so the user enters it per-instance.
-        assert!(spec.config_keys.iter().any(|k| k.env_key == "CHARTBEAT_HOST"));
+        assert!(spec
+            .config_keys
+            .iter()
+            .any(|k| k.env_key == "CHARTBEAT_HOST"));
     }
 
     #[test]
@@ -1686,20 +2152,28 @@ args = ["@example/old-mcp"]
         // GitHub silently disappear from the wizard's plugin picker.
         use crate::models::{ApiAuthKind, McpTransport};
         let reg = crate::core::registry::builtin_registry();
-        let gh = reg.iter().find(|d| d.id == "mcp-github")
+        let gh = reg
+            .iter()
+            .find(|d| d.id == "mcp-github")
             .expect("GitHub must be in the builtin registry");
         // Hybrid: Stdio transport stays for the MCP server.
-        assert!(matches!(gh.transport, McpTransport::Stdio { .. }),
-            "GitHub keeps the Stdio MCP transport for agent-side usage");
+        assert!(
+            matches!(gh.transport, McpTransport::Stdio { .. }),
+            "GitHub keeps the Stdio MCP transport for agent-side usage"
+        );
         // REST API spec is what makes ApiCall steps possible.
-        let spec = gh.api_spec.as_ref()
+        let spec = gh
+            .api_spec
+            .as_ref()
             .expect("GitHub must have api_spec populated for ApiCall steps");
         assert_eq!(spec.base_url, "https://api.github.com");
         // Same token powers MCP + REST — never split into two env keys.
         match &spec.auth {
             ApiAuthKind::Bearer { env_key } => {
-                assert_eq!(env_key, "GITHUB_PERSONAL_ACCESS_TOKEN",
-                    "GitHub Bearer auth must reuse the MCP env key");
+                assert_eq!(
+                    env_key, "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "GitHub Bearer auth must reuse the MCP env key"
+                );
             }
             other => panic!("GitHub must use Bearer auth, got {:?}", other),
         }
@@ -1720,8 +2194,10 @@ args = ["@example/old-mcp"]
         // No config_keys: GitHub doesn't need per-instance non-secret
         // config (unlike Chartbeat HOST or Google Search CX) — the
         // owner/repo lives in the path itself.
-        assert!(spec.config_keys.is_empty(),
-            "GitHub has no per-instance config keys (owner/repo in path)");
+        assert!(
+            spec.config_keys.is_empty(),
+            "GitHub has no per-instance config keys (owner/repo in path)"
+        );
     }
 
     #[test]
@@ -1733,19 +2209,28 @@ args = ["@example/old-mcp"]
         // workflows on Jira silently break.
         use crate::models::{ApiAuthKind, McpTransport};
         let reg = crate::core::registry::builtin_registry();
-        let atl = reg.iter().find(|d| d.id == "mcp-atlassian")
+        let atl = reg
+            .iter()
+            .find(|d| d.id == "mcp-atlassian")
             .expect("Atlassian must be in the builtin registry");
         // Hybrid: keeps the Stdio MCP transport for agent-side usage.
-        assert!(matches!(atl.transport, McpTransport::Stdio { .. }),
-            "Atlassian keeps the Stdio MCP transport for agent-side usage");
-        let spec = atl.api_spec.as_ref()
+        assert!(
+            matches!(atl.transport, McpTransport::Stdio { .. }),
+            "Atlassian keeps the Stdio MCP transport for agent-side usage"
+        );
+        let spec = atl
+            .api_spec
+            .as_ref()
             .expect("Atlassian must have api_spec populated");
         // base_url is a templated placeholder — the executor resolves it
         // against the encrypted env (JIRA_URL config_key) at request time.
         assert_eq!(spec.base_url, "{JIRA_URL}");
         // Auth — Basic email:token, both halves come from encrypted env.
         match &spec.auth {
-            ApiAuthKind::Basic { user_env, password_env } => {
+            ApiAuthKind::Basic {
+                user_env,
+                password_env,
+            } => {
                 assert_eq!(user_env, "JIRA_USERNAME");
                 assert_eq!(password_env, "JIRA_API_TOKEN");
             }
@@ -1757,11 +2242,20 @@ args = ["@example/old-mcp"]
         assert!(spec.config_keys.iter().any(|k| k.env_key == "JIRA_URL"));
         // The two killer endpoints for backlog ops + sanity check.
         let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.contains(&"/rest/api/3/myself"), "/myself is the auth sanity check");
+        assert!(
+            paths.contains(&"/rest/api/3/myself"),
+            "/myself is the auth sanity check"
+        );
         // Use /search/jql (cursor pagination) — Atlassian removed
         // /rest/api/3/search in April 2025 (CHANGE-2046, 410 Gone).
-        assert!(paths.contains(&"/rest/api/3/search/jql"), "/search/jql replaces the removed /search");
-        assert!(!paths.contains(&"/rest/api/3/search"), "deprecated /search must NOT be exposed (410 Gone)");
+        assert!(
+            paths.contains(&"/rest/api/3/search/jql"),
+            "/search/jql replaces the removed /search"
+        );
+        assert!(
+            !paths.contains(&"/rest/api/3/search"),
+            "deprecated /search must NOT be exposed (410 Gone)"
+        );
         assert!(paths.contains(&"/rest/api/3/issue/{issueIdOrKey}"));
         assert!(paths.contains(&"/rest/api/3/project/search"));
         // docs_url — agents bounce here when stumped.
@@ -1777,13 +2271,20 @@ args = ["@example/old-mcp"]
         // both `config_keys` carrying cx AND `env_keys` listing both.
         use crate::models::ApiAuthKind;
         let reg = crate::core::registry::builtin_registry();
-        let gs = reg.iter().find(|d| d.id == "api-google-search")
+        let gs = reg
+            .iter()
+            .find(|d| d.id == "api-google-search")
             .expect("Google Search must be in the builtin registry");
-        let spec = gs.api_spec.as_ref()
+        let spec = gs
+            .api_spec
+            .as_ref()
             .expect("Google Search must have api_spec populated");
         assert_eq!(spec.base_url, "https://www.googleapis.com/customsearch/v1");
         match &spec.auth {
-            ApiAuthKind::ApiKeyQuery { param_name, env_key } => {
+            ApiAuthKind::ApiKeyQuery {
+                param_name,
+                env_key,
+            } => {
                 assert_eq!(param_name, "key", "Google uses `key=` param by convention");
                 assert_eq!(env_key, "GOOGLE_SEARCH_API_KEY");
             }
@@ -1792,8 +2293,12 @@ args = ["@example/old-mcp"]
         // The cx must be exposed as a non-secret config key so the user
         // enters it per-instance (different Programmable Search Engines
         // for different scopes — e.g. whole-web vs site-scoped).
-        assert!(spec.config_keys.iter().any(|k| k.env_key == "GOOGLE_SEARCH_CX"),
-            "GOOGLE_SEARCH_CX must be a config_key (non-secret, per-engine)");
+        assert!(
+            spec.config_keys
+                .iter()
+                .any(|k| k.env_key == "GOOGLE_SEARCH_CX"),
+            "GOOGLE_SEARCH_CX must be a config_key (non-secret, per-engine)"
+        );
         // Transport MUST be ApiOnly so the sync branch-skip fires on it
         // (no .mcp.json write).
         assert!(matches!(gs.transport, crate::models::McpTransport::ApiOnly));
@@ -1811,45 +2316,71 @@ args = ["@example/old-mcp"]
         // cross-analysis flow the user relies on.
         use crate::models::ApiAuthKind;
         let reg = crate::core::registry::builtin_registry();
-        let adobe = reg.iter().find(|d| d.id == "api-adobe-analytics")
+        let adobe = reg
+            .iter()
+            .find(|d| d.id == "api-adobe-analytics")
             .expect("Adobe Analytics must be in the builtin registry");
-        let spec = adobe.api_spec.as_ref()
+        let spec = adobe
+            .api_spec
+            .as_ref()
             .expect("Adobe Analytics must have api_spec populated");
 
         // Base URL MUST template the company_id so the agent sees the
         // tenant-scoped URL inside the prompt injection.
-        assert!(spec.base_url.contains("{ADOBE_COMPANY_ID}"),
-            "base_url must template the company id: {}", spec.base_url);
+        assert!(
+            spec.base_url.contains("{ADOBE_COMPANY_ID}"),
+            "base_url must template the company id: {}",
+            spec.base_url
+        );
 
         // Auth is OAuth2 + required extra headers.
         match &spec.auth {
             ApiAuthKind::OAuth2ClientCredentials {
-                token_url, client_id_env, client_secret_env, scope, extra_headers
+                token_url,
+                client_id_env,
+                client_secret_env,
+                scope,
+                extra_headers,
             } => {
-                assert!(token_url.contains("ims-na1.adobelogin.com"),
-                    "Adobe IMS endpoint required: {}", token_url);
+                assert!(
+                    token_url.contains("ims-na1.adobelogin.com"),
+                    "Adobe IMS endpoint required: {}",
+                    token_url
+                );
                 assert_eq!(client_id_env, "ADOBE_CLIENT_ID");
                 assert_eq!(client_secret_env, "ADOBE_CLIENT_SECRET");
                 // Adobe uses COMMA-separated scopes (not spaces like RFC).
                 // If this ever flips to spaces, IMS returns
                 // "invalid_scope" — quickly catches a copy-paste drift.
-                assert!(scope.contains(","), "Adobe IMS wants comma-separated scopes");
+                assert!(
+                    scope.contains(","),
+                    "Adobe IMS wants comma-separated scopes"
+                );
                 // The two required headers beyond Authorization: Bearer.
                 let hdr_names: Vec<&str> = extra_headers.iter().map(|h| h.name.as_str()).collect();
                 assert!(hdr_names.contains(&"x-api-key"), "missing x-api-key header");
-                assert!(hdr_names.contains(&"x-proxy-global-company-id"),
-                    "missing x-proxy-global-company-id header");
+                assert!(
+                    hdr_names.contains(&"x-proxy-global-company-id"),
+                    "missing x-proxy-global-company-id header"
+                );
             }
             other => panic!("Adobe must use OAuth2ClientCredentials, got {:?}", other),
         }
 
         // Endpoints — the bare minimum for reporting + metadata.
         let paths: Vec<&str> = spec.endpoints.iter().map(|e| e.path.as_str()).collect();
-        assert!(paths.contains(&"/reports"), "core /reports endpoint missing");
+        assert!(
+            paths.contains(&"/reports"),
+            "core /reports endpoint missing"
+        );
         assert!(paths.contains(&"/users/me"), "smoke-test endpoint missing");
 
         // Non-secret config surfaces in the add-plugin form.
-        let cfg_keys: Vec<&str> = spec.config_keys.iter().map(|k| k.env_key.as_str()).collect();
+        let cfg_keys: Vec<&str> = spec
+            .config_keys
+            .iter()
+            .map(|k| k.env_key.as_str())
+            .collect();
         assert!(cfg_keys.contains(&"ADOBE_COMPANY_ID"));
         assert!(cfg_keys.contains(&"ADOBE_RSID"));
     }
@@ -1869,7 +2400,9 @@ args = ["@example/old-mcp"]
         // Indirect smoke: force an API plugin through the builder and
         // check the resolved URL via the rendered block.
         let srv = crate::models::McpServer {
-            id: "api-test".into(), name: "T".into(), description: "".into(),
+            id: "api-test".into(),
+            name: "T".into(),
+            description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
             source: crate::models::McpSource::Registry,
             api_spec: Some(crate::models::ApiSpec {
@@ -1902,11 +2435,17 @@ args = ["@example/old-mcp"]
         env_with_token.insert("__access_token__".into(), "access-xyz".into());
         let out = build_api_context_block(&[(srv.clone(), "cfg-1".into(), env_with_token.clone())]);
         // Base URL should be interpolated (no remaining `{` from the tpl).
-        assert!(out.contains("https://ex.com/api/examplecorp"),
-            "base_url interpolation failed: {}", out);
+        assert!(
+            out.contains("https://ex.com/api/examplecorp"),
+            "base_url interpolation failed: {}",
+            out
+        );
         // Auth shape remains useful, but neither the client id nor the
         // exchanged bearer token may enter model context.
-        assert!(out.contains("`x-api-key`"), "extra-header name missing: {out}");
+        assert!(
+            out.contains("`x-api-key`"),
+            "extra-header name missing: {out}"
+        );
         assert!(!out.contains("abc-client-id"), "client id leaked: {out}");
         assert!(!out.contains("access-xyz"), "access token leaked: {out}");
     }
@@ -1918,14 +2457,20 @@ args = ["@example/old-mcp"]
         // <NOT_CONFIGURED:...> marker so the agent stops rather than
         // firing a 404.
         let srv = crate::models::McpServer {
-            id: "api-broken".into(), name: "T".into(), description: "".into(),
+            id: "api-broken".into(),
+            name: "T".into(),
+            description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
             source: crate::models::McpSource::Registry,
             api_spec: Some(crate::models::ApiSpec {
                 base_url: "https://ex.com/api/{MISSING_KEY}".into(),
-                auth: crate::models::ApiAuthKind::Bearer { env_key: "TOK".into() },
+                auth: crate::models::ApiAuthKind::Bearer {
+                    env_key: "TOK".into(),
+                },
                 endpoints: vec![crate::models::ApiEndpoint {
-                    path: "/x".into(), method: "GET".into(), description: "".into(),
+                    path: "/x".into(),
+                    method: "GET".into(),
+                    description: "".into(),
                 }],
                 docs_url: None,
                 config_keys: vec![],
@@ -1934,8 +2479,11 @@ args = ["@example/old-mcp"]
         let mut env = std::collections::HashMap::new();
         env.insert("TOK".to_string(), "t".to_string());
         let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
-        assert!(out.contains("<NOT_CONFIGURED:MISSING_KEY>"),
-            "missing key should be flagged in output: {}", out);
+        assert!(
+            out.contains("<NOT_CONFIGURED:MISSING_KEY>"),
+            "missing key should be flagged in output: {}",
+            out
+        );
     }
 
     #[test]
@@ -1944,7 +2492,9 @@ args = ["@example/old-mcp"]
         // provider data. The broker owns diagnostics; model context only
         // states the server-side auth contract.
         let srv = crate::models::McpServer {
-            id: "api-oauth-failed".into(), name: "T".into(), description: "".into(),
+            id: "api-oauth-failed".into(),
+            name: "T".into(),
+            description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
             source: crate::models::McpSource::Registry,
             api_spec: Some(crate::models::ApiSpec {
@@ -1957,17 +2507,25 @@ args = ["@example/old-mcp"]
                     extra_headers: vec![],
                 },
                 endpoints: vec![crate::models::ApiEndpoint {
-                    path: "/x".into(), method: "GET".into(), description: "".into(),
+                    path: "/x".into(),
+                    method: "GET".into(),
+                    description: "".into(),
                 }],
                 docs_url: None,
                 config_keys: vec![],
             }),
         };
         let mut env = std::collections::HashMap::new();
-        env.insert("__token_error__".into(), "token exchange failed (401): invalid_client".into());
+        env.insert(
+            "__token_error__".into(),
+            "token exchange failed (401): invalid_client".into(),
+        );
         let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
         assert!(out.contains("OAuth2 token injected and refreshed server-side"));
-        assert!(!out.contains("invalid_client"), "provider error leaked: {out}");
+        assert!(
+            !out.contains("invalid_client"),
+            "provider error leaked: {out}"
+        );
     }
 
     #[test]
@@ -1980,16 +2538,24 @@ args = ["@example/old-mcp"]
         // it as if it were an MCP server — noisy, confusing, and a
         // silent leak of client_id/client_secret on disk.
         let reg = crate::core::registry::builtin_registry();
-        let adobe = reg.iter().find(|d| d.id == "api-adobe-analytics")
+        let adobe = reg
+            .iter()
+            .find(|d| d.id == "api-adobe-analytics")
             .expect("Adobe Analytics must be in the builtin registry");
         // Transport MUST be ApiOnly so the sync branch-skip fires.
-        assert!(matches!(adobe.transport, crate::models::McpTransport::ApiOnly),
-            "Adobe must have transport = ApiOnly, got {:?}", adobe.transport);
+        assert!(
+            matches!(adobe.transport, crate::models::McpTransport::ApiOnly),
+            "Adobe must have transport = ApiOnly, got {:?}",
+            adobe.transport
+        );
         // Belt-and-suspenders: the Chartbeat entry must also be ApiOnly
         // — if someone later promotes it to hybrid, they must take care
         // of the sync path explicitly.
         let chartbeat = reg.iter().find(|d| d.id == "api-chartbeat").unwrap();
-        assert!(matches!(chartbeat.transport, crate::models::McpTransport::ApiOnly));
+        assert!(matches!(
+            chartbeat.transport,
+            crate::models::McpTransport::ApiOnly
+        ));
     }
 
     #[test]
@@ -1997,7 +2563,9 @@ args = ["@example/old-mcp"]
         // An OAuth2 plugin with a static base URL may surface the header
         // NAME for debugging, never its templated credential value.
         let srv = crate::models::McpServer {
-            id: "api-oauth-static".into(), name: "StaticOAuth".into(), description: "".into(),
+            id: "api-oauth-static".into(),
+            name: "StaticOAuth".into(),
+            description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
             source: crate::models::McpSource::Registry,
             api_spec: Some(crate::models::ApiSpec {
@@ -2013,7 +2581,9 @@ args = ["@example/old-mcp"]
                     }],
                 },
                 endpoints: vec![crate::models::ApiEndpoint {
-                    path: "/ping".into(), method: "GET".into(), description: "ping".into(),
+                    path: "/ping".into(),
+                    method: "GET".into(),
+                    description: "ping".into(),
                 }],
                 docs_url: None,
                 config_keys: vec![],
@@ -2023,9 +2593,15 @@ args = ["@example/old-mcp"]
         env.insert("CID".into(), "client-xyz".into());
         env.insert("__access_token__".into(), "tok-123".into());
         let out = build_api_context_block(&[(srv, "cfg-1".into(), env)]);
-        assert!(out.contains("`x-api-key`"), "header name must remain discoverable: {out}");
+        assert!(
+            out.contains("`x-api-key`"),
+            "header name must remain discoverable: {out}"
+        );
         assert!(!out.contains("tok-123"), "bearer leaked: {out}");
-        assert!(!out.contains("client-xyz"), "templated secret header leaked: {out}");
+        assert!(
+            !out.contains("client-xyz"),
+            "templated secret header leaked: {out}"
+        );
     }
 
     #[test]
@@ -2033,7 +2609,9 @@ args = ["@example/old-mcp"]
         // Neither a healthy token nor a provider error belongs in model
         // context, including when several plugins have distinct states.
         let mk_srv = |id: &str, base: &str| crate::models::McpServer {
-            id: id.into(), name: id.into(), description: "".into(),
+            id: id.into(),
+            name: id.into(),
+            description: "".into(),
             transport: crate::models::McpTransport::ApiOnly,
             source: crate::models::McpSource::Registry,
             api_spec: Some(crate::models::ApiSpec {
@@ -2046,7 +2624,9 @@ args = ["@example/old-mcp"]
                     extra_headers: vec![],
                 },
                 endpoints: vec![crate::models::ApiEndpoint {
-                    path: "/x".into(), method: "GET".into(), description: "".into(),
+                    path: "/x".into(),
+                    method: "GET".into(),
+                    description: "".into(),
                 }],
                 docs_url: None,
                 config_keys: vec![],
@@ -2060,10 +2640,20 @@ args = ["@example/old-mcp"]
         let mut env_broken = std::collections::HashMap::new();
         env_broken.insert("__token_error__".into(), "invalid_client".into());
 
-        let out = build_api_context_block(&[(srv_ok, "cfg-1".into(), env_ok), (srv_broken, "cfg-2".into(), env_broken)]);
-        assert_eq!(out.matches("OAuth2 token injected and refreshed server-side").count(), 2);
+        let out = build_api_context_block(&[
+            (srv_ok, "cfg-1".into(), env_ok),
+            (srv_broken, "cfg-2".into(), env_broken),
+        ]);
+        assert_eq!(
+            out.matches("OAuth2 token injected and refreshed server-side")
+                .count(),
+            2
+        );
         assert!(!out.contains("valid-token"), "healthy token leaked: {out}");
-        assert!(!out.contains("invalid_client"), "provider error leaked: {out}");
+        assert!(
+            !out.contains("invalid_client"),
+            "provider error leaked: {out}"
+        );
     }
 
     // ─── kronn-internal injection (project-local + global host configs) ───
@@ -2098,16 +2688,24 @@ args = ["@example/old-mcp"]
             "disc-introspection-mcp.py not findable — dev fallback broken?"
         );
 
-        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        let mut file = McpJsonFile {
+            mcp_servers: HashMap::new(),
+        };
         let injected = inject_kronn_internal(&mut file);
         assert!(injected, "inject should succeed when the script is on disk");
 
-        let entry = file.mcp_servers.get("kronn-internal").expect("entry missing");
+        let entry = file
+            .mcp_servers
+            .get("kronn-internal")
+            .expect("entry missing");
         assert_eq!(entry.command.as_deref(), Some("python3"));
         let args = entry.args.as_ref().expect("args missing");
         assert_eq!(args.len(), 1);
-        assert!(args[0].ends_with("disc-introspection-mcp.py"),
-            "bridge path should point at the script, got {:?}", args[0]);
+        assert!(
+            args[0].ends_with("disc-introspection-mcp.py"),
+            "bridge path should point at the script, got {:?}",
+            args[0]
+        );
         // env stays empty — KRONN_DISCUSSION_ID flows through the agent
         // process env, not the MCP entry's env block.
         assert!(entry.env.is_empty());
@@ -2115,7 +2713,9 @@ args = ["@example/old-mcp"]
 
     #[test]
     fn inject_kronn_internal_is_idempotent() {
-        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        let mut file = McpJsonFile {
+            mcp_servers: HashMap::new(),
+        };
         inject_kronn_internal(&mut file);
         inject_kronn_internal(&mut file);
         // Two calls = one entry, not two.
@@ -2151,7 +2751,7 @@ args = ["@example/old-mcp"]
 
     #[test]
     #[serial]
-            fn host_mcp_command_available_respects_the_host_container_boundary() {
+    fn host_mcp_command_available_respects_the_host_container_boundary() {
         // Codex review (2026-07-12): the host writers must judge availability
         // where the HOST CLI runs, not in the backend's PATH.
         use crate::core::mcp_scanner::host_mcp_command_available;
@@ -2164,7 +2764,9 @@ args = ["@example/old-mcp"]
         if !std::path::Path::new("/.dockerenv").exists()
             && !std::path::Path::new("/run/.containerenv").exists()
         {
-            assert!(!host_mcp_command_available("definitely-not-a-binary-kronn-test"));
+            assert!(!host_mcp_command_available(
+                "definitely-not-a-binary-kronn-test"
+            ));
             assert!(host_mcp_command_available("sh"));
         }
 
@@ -2172,9 +2774,15 @@ args = ["@example/old-mcp"]
         std::env::set_var("KRONN_IN_DOCKER", "1");
         std::env::set_var("KRONN_HOST_BIN", tmp.path());
         std::os::unix::fs::symlink("/no/such/Cellar/uv/bin/uvx", tmp.path().join("uvx")).unwrap();
-        assert!(host_mcp_command_available("uvx"), "host symlink entry counts even when dangling in-container");
+        assert!(
+            host_mcp_command_available("uvx"),
+            "host symlink entry counts even when dangling in-container"
+        );
         // Docker + host bins mounted but binary absent → skip.
-        assert!(!host_mcp_command_available("glab"), "absent from host bins → dead entry");
+        assert!(
+            !host_mcp_command_available("glab"),
+            "absent from host bins → dead entry"
+        );
         // Docker + absolute path → unverifiable from the container → keep.
         assert!(host_mcp_command_available("/usr/local/bin/uvx"));
         // Docker without a host-bin mount → keep (never drop what may work).
@@ -2212,35 +2820,45 @@ args = ["@example/old-mcp"]
 
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
-        crate::db::mcps::upsert_server(&conn, &crate::models::McpServer {
-            id: "srv-uvx".into(),
-            name: "Atlassian".into(),
-            description: String::new(),
-            transport: crate::models::McpTransport::Stdio {
-                command: "uvx".into(),
-                args: vec!["mcp-atlassian".into()],
+        crate::db::mcps::upsert_server(
+            &conn,
+            &crate::models::McpServer {
+                id: "srv-uvx".into(),
+                name: "Atlassian".into(),
+                description: String::new(),
+                transport: crate::models::McpTransport::Stdio {
+                    command: "uvx".into(),
+                    args: vec!["mcp-atlassian".into()],
+                },
+                source: crate::models::McpSource::Registry,
+                api_spec: None,
             },
-            source: crate::models::McpSource::Registry,
-            api_spec: None,
-        }).unwrap();
-        crate::db::mcps::insert_config(&conn, &crate::models::McpConfig {
-            id: "cfg-uvx".into(),
-            server_id: "srv-uvx".into(),
-            label: "atlassian".into(),
-            env_keys: vec![],
-            env_encrypted: String::new(),
-            args_override: None,
-            is_global: true,
-            include_general: true,
-            config_hash: "h".into(),
-            project_ids: vec![],
-            host_sync: crate::models::HostSyncMode::GlobalOnly,
-        }).unwrap();
+        )
+        .unwrap();
+        crate::db::mcps::insert_config(
+            &conn,
+            &crate::models::McpConfig {
+                id: "cfg-uvx".into(),
+                server_id: "srv-uvx".into(),
+                label: "atlassian".into(),
+                env_keys: vec![],
+                env_encrypted: String::new(),
+                args_override: None,
+                is_global: true,
+                include_general: true,
+                config_hash: "h".into(),
+                project_ids: vec![],
+                host_sync: crate::models::HostSyncMode::GlobalOnly,
+            },
+        )
+        .unwrap();
 
         let plan = CodexSync.prepare(&conn, "secret-irrelevant").expect("plan");
-        assert!(plan.content.contains("[mcp_servers.atlassian]"),
+        assert!(
+            plan.content.contains("[mcp_servers.atlassian]"),
             "a host-installed uvx MCP must survive the Codex plan under Docker. Got:\n{}",
-            plan.content);
+            plan.content
+        );
 
         match prev_home {
             Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
@@ -2284,31 +2902,51 @@ args = ["@example/old-mcp"]
             api_spec: None,
         };
         crate::db::mcps::upsert_server(&conn, &server).unwrap();
-        crate::db::mcps::insert_config(&conn, &crate::models::McpConfig {
-            id: "cfg-ghost".into(),
-            server_id: "srv-ghost".into(),
-            label: "ghost".into(),
-            env_keys: vec![],
-            env_encrypted: String::new(),
-            args_override: None,
-            is_global: true,
-            include_general: true,
-            config_hash: "h".into(),
-            project_ids: vec![],
-            host_sync: crate::models::HostSyncMode::GlobalOnly,
-        }).unwrap();
+        crate::db::mcps::insert_config(
+            &conn,
+            &crate::models::McpConfig {
+                id: "cfg-ghost".into(),
+                server_id: "srv-ghost".into(),
+                label: "ghost".into(),
+                env_keys: vec![],
+                env_encrypted: String::new(),
+                args_override: None,
+                is_global: true,
+                include_general: true,
+                config_hash: "h".into(),
+                project_ids: vec![],
+                host_sync: crate::models::HostSyncMode::GlobalOnly,
+            },
+        )
+        .unwrap();
 
-        let codex = CodexSync.prepare(&conn, "secret-irrelevant")
+        let codex = CodexSync
+            .prepare(&conn, "secret-irrelevant")
             .expect("plan still produced (kronn-internal)");
-        assert!(!codex.content.contains("definitely-not-a-binary-kronn-test"),
-            "unavailable command must not reach config.toml:\n{}", codex.content);
-        assert!(codex.content.contains("kronn-internal"), "bridge injection survives the filter");
+        assert!(
+            !codex.content.contains("definitely-not-a-binary-kronn-test"),
+            "unavailable command must not reach config.toml:\n{}",
+            codex.content
+        );
+        assert!(
+            codex.content.contains("kronn-internal"),
+            "bridge injection survives the filter"
+        );
 
-        let copilot = CopilotSync.prepare(&conn, "secret-irrelevant")
+        let copilot = CopilotSync
+            .prepare(&conn, "secret-irrelevant")
             .expect("plan still produced (kronn-internal)");
-        assert!(!copilot.content.contains("definitely-not-a-binary-kronn-test"),
-            "unavailable command must not reach mcp-config.json:\n{}", copilot.content);
-        assert!(copilot.content.contains("kronn-internal"), "bridge injection survives the filter");
+        assert!(
+            !copilot
+                .content
+                .contains("definitely-not-a-binary-kronn-test"),
+            "unavailable command must not reach mcp-config.json:\n{}",
+            copilot.content
+        );
+        assert!(
+            copilot.content.contains("kronn-internal"),
+            "bridge injection survives the filter"
+        );
 
         match prev {
             Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
@@ -2340,15 +2978,20 @@ args = ["@example/old-mcp"]
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
 
-        let plan = CodexSync.prepare(&conn, "secret-irrelevant")
+        let plan = CodexSync
+            .prepare(&conn, "secret-irrelevant")
             .expect("CodexSync should produce a plan even with no user MCPs (kronn-internal)");
 
-        assert!(plan.content.contains("kronn-internal"),
+        assert!(
+            plan.content.contains("kronn-internal"),
             "Codex config.toml should carry [mcp_servers.kronn-internal]. Got:\n{}",
-            plan.content);
-        assert!(plan.content.contains("disc-introspection-mcp.py"),
+            plan.content
+        );
+        assert!(
+            plan.content.contains("disc-introspection-mcp.py"),
             "Codex entry should reference the bridge script. Got:\n{}",
-            plan.content);
+            plan.content
+        );
         // The summary line lives on every host_sync log — verify the
         // count includes the bridge.
         assert!(plan.summary.contains("MCP servers"));
@@ -2373,15 +3016,20 @@ args = ["@example/old-mcp"]
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::run(&conn).unwrap();
 
-        let plan = CopilotSync.prepare(&conn, "secret-irrelevant")
+        let plan = CopilotSync
+            .prepare(&conn, "secret-irrelevant")
             .expect("CopilotSync should produce a plan with kronn-internal even when no user MCPs");
 
-        assert!(plan.content.contains("kronn-internal"),
+        assert!(
+            plan.content.contains("kronn-internal"),
             "Copilot mcp-config.json should carry the kronn-internal entry. Got:\n{}",
-            plan.content);
-        assert!(plan.content.contains("disc-introspection-mcp.py"),
+            plan.content
+        );
+        assert!(
+            plan.content.contains("disc-introspection-mcp.py"),
             "Copilot entry should reference the bridge script. Got:\n{}",
-            plan.content);
+            plan.content
+        );
 
         match prev {
             Some(v) => std::env::set_var("KRONN_HOST_HOME", v),
@@ -2414,16 +3062,26 @@ args = ["@example/old-mcp"]
 
         assert!(wrote, "bridge resolved via env → files should be written");
         for (path, label) in &[
-            (".mcp.json",               "Claude Code"),
+            (".mcp.json", "Claude Code"),
             (".kiro/settings/mcp.json", "Kiro"),
-            (".ai/mcp/mcp.json",        "Kiro (.ai)"),
-            (".gemini/settings.json",   "Gemini CLI"),
+            (".ai/mcp/mcp.json", "Kiro (.ai)"),
+            (".gemini/settings.json", "Gemini CLI"),
         ] {
             let file = tmp.join(path);
-            assert!(file.exists(), "{}: {} not written for an MCP-less project", label, path);
+            assert!(
+                file.exists(),
+                "{}: {} not written for an MCP-less project",
+                label,
+                path
+            );
             let content = std::fs::read_to_string(&file).unwrap();
-            assert!(content.contains("kronn-internal"),
-                "{}: {} must carry the kronn-internal entry. Got:\n{}", label, path, content);
+            assert!(
+                content.contains("kronn-internal"),
+                "{}: {} must carry the kronn-internal entry. Got:\n{}",
+                label,
+                path,
+                content
+            );
         }
         cleanup(&tmp);
     }
@@ -2440,24 +3098,32 @@ args = ["@example/old-mcp"]
         write_general_mcp_json(&conn, "test-secret-irrelevant", &tmp.to_string_lossy()).unwrap();
 
         for (path, label) in &[
-            (".mcp.json",                        "Claude Code"),
-            (".kiro/settings/mcp.json",          "Kiro (canonical)"),
-            (".ai/mcp/mcp.json",                 "Kiro (.ai variant)"),
-            (".gemini/settings.json",            "Gemini CLI"),
+            (".mcp.json", "Claude Code"),
+            (".kiro/settings/mcp.json", "Kiro (canonical)"),
+            (".ai/mcp/mcp.json", "Kiro (.ai variant)"),
+            (".gemini/settings.json", "Gemini CLI"),
         ] {
             let file = tmp.join(path);
-            assert!(file.exists(),
+            assert!(
+                file.exists(),
                 "{}: {} not written by write_general_mcp_json",
-                label, path
+                label,
+                path
             );
             let content = std::fs::read_to_string(&file).unwrap();
-            assert!(content.contains("kronn-internal"),
+            assert!(
+                content.contains("kronn-internal"),
                 "{}: file at {} should carry the kronn-internal entry. Got:\n{}",
-                label, path, content
+                label,
+                path,
+                content
             );
-            assert!(content.contains("disc-introspection-mcp.py"),
+            assert!(
+                content.contains("disc-introspection-mcp.py"),
                 "{}: file at {} should reference the bridge script. Got:\n{}",
-                label, path, content
+                label,
+                path,
+                content
             );
         }
 

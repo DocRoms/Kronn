@@ -1,4 +1,4 @@
-import { useState, useRef, useMemo, useEffect } from 'react';
+import { Fragment, useState, useRef, useMemo, useEffect, useCallback } from 'react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { useT } from '../lib/I18nContext';
 import { workflows as workflowsApi, discussions as discussionsApi, quickPrompts as quickPromptsApi, quickApis as quickApisApi, mcps as mcpsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi } from '../lib/api';
@@ -30,6 +30,15 @@ import { triggerDownload } from '../lib/downloadBlob';
 import { mergeDeclaredAndDetected } from '../lib/workflowVariables';
 import { AGENT_LABELS, agentColor } from '../lib/constants';
 import { MatrixText } from '../components/MatrixText';
+import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
+import { ListControls } from '../components/ListControls';
+import { CopyIdPill } from '../components/CopyIdPill';
+import {
+  sortQuickApis,
+  sortQuickPrompts,
+  type QuickApiSort,
+  type QuickPromptSort,
+} from '../lib/automationSort';
 import './WorkflowsPage.css';
 
 interface WorkflowsPageProps {
@@ -80,23 +89,23 @@ export function appendLiveBuffer(prev: string, chunks: string, max: number): str
   return merged.slice(merged.length - max);
 }
 
-const STATUS_COLORS: Record<string, string> = {
-  Pending: 'var(--kr-warning)',
-  Running: 'var(--kr-cyan)',
-  Success: 'var(--kr-success)',
-  Failed: 'var(--kr-error)',
-  Cancelled: 'var(--kr-cancelled)',
-  WaitingApproval: 'var(--kr-accent-ink)',
-  // 0.7.0 — `StoppedByGuard` is a self-protection stop, not a failure.
-  // Antoine UX rationale: orange (warning) not red (error) so users
-  // distinguish "I asked Kronn to stop me" from "something went wrong".
-  StoppedByGuard: 'var(--kr-warning)',
-};
+const RUN_FETCH_PAGE_SIZE = 10;
+const RUN_FETCH_MAX_PAGE_SIZE = 500;
 
 export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, configLanguage, onNavigateDiscussion, onBatchLaunched, initialSelectedWorkflowId, onInitialSelectionConsumed, onNavigateToBatch, toast: toastProp, pendingPreset, onPendingPresetConsumed }: WorkflowsPageProps) {
   const { t } = useT();
-  const isMobile = useIsMobile();
+  // The 380px workflow list plus the detail panel needs substantially more
+  // room than a phone-only breakpoint. Switch to the existing single-pane
+  // navigation on tablets too, before the detail content becomes cramped.
+  const isMobile = useIsMobile(1024);
   const [tab, setTab] = useState<'workflows' | 'quickPrompts' | 'quickApis'>('workflows');
+  const [quickPromptSort, setQuickPromptSort] = useState<QuickPromptSort>('name');
+  const [quickPromptSortReversed, setQuickPromptSortReversed] = useState(false);
+  const [quickPromptAgentFilter, setQuickPromptAgentFilter] = useState<string>('all');
+  const [quickApiSort, setQuickApiSort] = useState<QuickApiSort>('name');
+  const [quickApiSortReversed, setQuickApiSortReversed] = useState(false);
+  const [quickApiPluginFilter, setQuickApiPluginFilter] = useState('all');
+  const [quickPromptUsage, setQuickPromptUsage] = useState<Record<string, number>>({});
   // 0.8.5 — post-deploy focus: when the user lands here right after
   // clicking "Deploy improved QP" in DiscussionsPage, this state holds
   // the target QP id; the page switches to the Quick Prompts tab and
@@ -111,6 +120,13 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const { data: skillsCatalog } = useApi(() => skillsApi.list(), []);
   const { data: profilesCatalog } = useApi(() => profilesApi.list(), []);
   const { data: directivesCatalog } = useApi(() => directivesApi.list(), []);
+  const recordQuickPromptUsage = useCallback((qpId: string, launches: number) => {
+    setQuickPromptUsage(current =>
+      current[qpId] === launches ? current : { ...current, [qpId]: launches }
+    );
+  }, []);
+  const quickPromptUsageReady = (quickPromptList ?? [])
+    .every(qp => Object.hasOwn(quickPromptUsage, qp.id));
   const [selectedId, setSelectedId] = useState<string | null>(null);
   // #11 — when a parent run's sub-run link is clicked, remember the target
   // child run so the opened WorkflowDetail auto-expands + scrolls to it.
@@ -169,6 +185,42 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // backend) — needed by `ApiCallStepCard` inside `QuickApiForm`. Loaded
   // lazily on tab open since not every user wires API plugins.
   const [availableApiPlugins, setAvailableApiPlugins] = useState<ApiPluginOption[]>([]);
+  const quickPromptAgents = useMemo(
+    () => Array.from(new Set((quickPromptList ?? []).map(qp => qp.agent)))
+      .sort((a, b) => (AGENT_LABELS[a] ?? a).localeCompare(AGENT_LABELS[b] ?? b)),
+    [quickPromptList],
+  );
+  const quickApiPlugins = useMemo(() => {
+    const labels = new Map(
+      availableApiPlugins.map(option => [option.server.id, option.server.name]),
+    );
+    return Array.from(new Set((quickApiList ?? []).map(qa => qa.api_plugin_slug)))
+      .sort((a, b) => (labels.get(a) ?? a).localeCompare(labels.get(b) ?? b))
+      .map(slug => ({ slug, label: labels.get(slug) ?? slug }));
+  }, [availableApiPlugins, quickApiList]);
+  const sortedQuickPrompts = useMemo(() => {
+    const filtered = quickPromptAgentFilter === 'all'
+      ? (quickPromptList ?? [])
+      : (quickPromptList ?? []).filter(qp => qp.agent === quickPromptAgentFilter);
+    return sortQuickPrompts(
+      filtered,
+      quickPromptSort,
+      quickPromptUsage,
+      quickPromptSortReversed,
+    );
+  }, [
+    quickPromptAgentFilter,
+    quickPromptList,
+    quickPromptSort,
+    quickPromptSortReversed,
+    quickPromptUsage,
+  ]);
+  const sortedQuickApis = useMemo(() => {
+    const filtered = quickApiPluginFilter === 'all'
+      ? (quickApiList ?? [])
+      : (quickApiList ?? []).filter(qa => qa.api_plugin_slug === quickApiPluginFilter);
+    return sortQuickApis(filtered, quickApiSort, quickApiSortReversed);
+  }, [quickApiList, quickApiPluginFilter, quickApiSort, quickApiSortReversed]);
   const [showCreate, setShowCreate] = useState(false);
   // 0.8.2 — Local snapshot of the pending preset, captured at the moment
   // `pendingPreset` arrives. We can't pass `pendingPreset` directly to
@@ -229,7 +281,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // a small preview snapshot so the drawer can render "tu vas importer
   // X" before confirm.
   const [importing, setImporting] = useState<{
-    kind: 'workflow' | 'qp';
+    kind: 'workflow' | 'qp' | 'qa';
     content: string;
     preview: { name: string; stepCount?: number; qpVarsCount?: number };
     targetProjectId: string;
@@ -245,6 +297,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   } | null>(null);
   const [detailWorkflow, setDetailWorkflow] = useState<Workflow | null>(null);
   const [detailRuns, setDetailRuns] = useState<WorkflowRun[]>([]);
+  const [detailRunPageCount, setDetailRunPageCount] = useState(0);
+  const [detailRunTotal, setDetailRunTotal] = useState(0);
+  const [hasMoreDetailRuns, setHasMoreDetailRuns] = useState(false);
+  const [loadingMoreRuns, setLoadingMoreRuns] = useState(false);
+  const loadingMoreRunsRef = useRef(false);
   // Throttle clock for mirroring WorkflowRunUpdated into the run list while a
   // local SSE run is streaming (see the useWebSocket handler below).
   const lastRunsRefetchRef = useRef(0);
@@ -284,6 +341,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   const launchGenRef = useRef(0);
   // openDetail response-ordering guard (see openDetail).
   const detailSeqRef = useRef(0);
+  const detailScrollRef = useRef<HTMLDivElement>(null);
 
   const workflows = workflowList ?? [];
   // Persist collapse state across reloads — same convention as the
@@ -338,25 +396,83 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setCollapsedGroups(prev => ({ ...prev, [key]: !prev[key] }));
   };
 
-  const openDetail = async (id: string, runId?: string) => {
+  const fetchRunPage = async (id: string, offset: number, pageSize: number) => {
+    const [runs, total] = await Promise.all([
+      workflowsApi.listRuns(id, pageSize, offset, true),
+      workflowsApi.countRuns(id),
+    ]);
+    return {
+      runs,
+      total,
+      hasMore: offset + runs.length < total,
+    };
+  };
+
+  const openDetail = async (id: string, runId?: string, runLimit = RUN_FETCH_PAGE_SIZE) => {
+    // The workflow list and detail are independently scrollable on desktop.
+    // Keep the user's position in a long list, but always reveal the top of
+    // the newly selected workflow instead of leaving its detail scrolled down.
+    if (detailScrollRef.current) detailScrollRef.current.scrollTop = 0;
     setSelectedId(id);
     setFocusRunId(runId ?? null);
     setLoadingDetail(true);
+    setHasMoreDetailRuns(false);
     // Out-of-order guard: click A (slow fetch) then B (fast) — A's response
     // landing last must not repaint the panel with A while selectedId is B.
     const seq = ++detailSeqRef.current;
     try {
-      const [wf, runs] = await Promise.all([
+      const [wf, page, focusedRun] = await Promise.all([
         workflowsApi.get(id),
-        workflowsApi.listRuns(id),
+        fetchRunPage(id, 0, runLimit),
+        runId ? workflowsApi.getRun(id, runId).catch(() => null) : Promise.resolve(null),
       ]);
       if (detailSeqRef.current !== seq) return;
       setDetailWorkflow(wf);
+      const runs = focusedRun && !page.runs.some(run => run.id === focusedRun.id)
+        ? [...page.runs, focusedRun]
+        : page.runs;
       setDetailRuns(runs);
+      setDetailRunPageCount(page.runs.length);
+      setDetailRunTotal(page.total);
+      setHasMoreDetailRuns(page.hasMore);
     } catch (e) {
       console.warn('Workflow action failed:', e);
     } finally {
       if (detailSeqRef.current === seq) setLoadingDetail(false);
+    }
+  };
+
+  const changeStepAgent = async (stepIndex: number, agent: AgentType) => {
+    const workflow = detailWorkflow;
+    const step = workflow?.steps[stepIndex];
+    if (!workflow || !step || (step.step_type && step.step_type.type !== 'Agent')) return;
+    if (step.agent === agent) return;
+
+    // Preserve portable settings, but clear an explicit provider-specific
+    // model (e.g. Claude's "opus" cannot be passed to Codex). The abstract
+    // tier and reasoning effort still carry over to the new agent.
+    const steps = workflow.steps.map((current, index) =>
+      index === stepIndex
+        ? {
+            ...current,
+            agent,
+            agent_settings: current.agent_settings
+              ? { ...current.agent_settings, model: null }
+              : current.agent_settings,
+          }
+        : current
+    );
+    try {
+      const updated = await workflowsApi.update(workflow.id, { steps });
+      setDetailWorkflow(current => current?.id === workflow.id ? updated : current);
+      void refetch();
+      toastProp?.(
+        t('wf.stepAgentChanged', step.name, AGENT_LABELS[agent] ?? agent),
+        'success',
+      );
+    } catch (error) {
+      toastProp?.(userError(error), 'error');
+      throw error;
     }
   };
 
@@ -391,8 +507,59 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       if (nowTs - lastRunsRefetchRef.current < 3500) return;
       lastRunsRefetchRef.current = nowTs;
     }
-    workflowsApi.listRuns(detailWorkflow.id).then(setDetailRuns).catch(() => {});
+    fetchRunPage(
+      detailWorkflow.id,
+      0,
+      Math.max(RUN_FETCH_PAGE_SIZE, detailRunPageCount),
+    ).then(page => {
+      setDetailRuns(page.runs);
+      setDetailRunPageCount(page.runs.length);
+      setDetailRunTotal(page.total);
+      setHasMoreDetailRuns(page.hasMore);
+    }).catch(() => {});
   });
+
+  const loadMoreDetailRuns = async (amount: number | 'all') => {
+    if (!detailWorkflow || loadingMoreRunsRef.current) return;
+    loadingMoreRunsRef.current = true;
+    setLoadingMoreRuns(true);
+    try {
+      let nextRuns: WorkflowRun[] = [];
+      let nextOffset = detailRunPageCount;
+      let total = detailRunTotal;
+      if (amount === 'all') {
+        total = await workflowsApi.countRuns(detailWorkflow.id);
+        while (nextOffset < total) {
+          const page = await workflowsApi.listRuns(
+            detailWorkflow.id,
+            Math.min(RUN_FETCH_MAX_PAGE_SIZE, total - nextOffset),
+            nextOffset,
+            true,
+          );
+          if (page.length === 0) break;
+          nextRuns = [...nextRuns, ...page];
+          nextOffset += page.length;
+        }
+      } else {
+        const page = await fetchRunPage(detailWorkflow.id, nextOffset, amount);
+        nextRuns = page.runs;
+        nextOffset += page.runs.length;
+        total = page.total;
+      }
+      setDetailRuns(current => {
+        const seen = new Set(current.map(run => run.id));
+        return [...current, ...nextRuns.filter(run => !seen.has(run.id))];
+      });
+      setDetailRunPageCount(nextOffset);
+      setDetailRunTotal(total);
+      setHasMoreDetailRuns(nextOffset < total);
+    } catch (e) {
+      console.warn('Workflow run history load failed:', e);
+    } finally {
+      loadingMoreRunsRef.current = false;
+      setLoadingMoreRuns(false);
+    }
+  };
 
   /** 0.6.0 UX pass — actually fire the trigger (with optional variables).
    *  Split out so handleTrigger can intercept and show the launch modal
@@ -636,6 +803,39 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     setShowCreateQP(false);
     setEditingQP(null);
     refetchQP();
+  };
+
+  const changeQuickPromptAgent = async (qp: QuickPrompt, agent: AgentType) => {
+    if (qp.agent === agent) return;
+    try {
+      await quickPromptsApi.update(qp.id, {
+        name: qp.name,
+        icon: qp.icon,
+        prompt_template: qp.prompt_template,
+        variables: qp.variables,
+        agent,
+        project_id: qp.project_id,
+        skill_ids: qp.skill_ids,
+        profile_ids: qp.profile_ids,
+        directive_ids: qp.directive_ids,
+        tier: qp.tier,
+        // A concrete model name belongs to the previous provider. Keep the
+        // portable tier/effort settings, but let the new agent resolve its
+        // own model instead of receiving e.g. a Claude model on Codex.
+        agent_settings: qp.agent_settings
+          ? { ...qp.agent_settings, model: null }
+          : null,
+        description: qp.description,
+      });
+      refetchQP();
+      toastProp?.(
+        t('qp.agentChanged', qp.name, AGENT_LABELS[agent] ?? agent),
+        'success',
+      );
+    } catch (error) {
+      toastProp?.(userError(error), 'error');
+      throw error;
+    }
   };
 
   const handleSaveQA = async (req: CreateQuickApiRequest) => {
@@ -1089,39 +1289,64 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     }
   };
 
+  const aiCreation = tab === 'workflows'
+    ? {
+        title: t('wf.aiArchitectTitle'),
+        prompt: t('wf.aiArchitectPrompt'),
+        hint: t('wf.createWithAIHint'),
+        skillIds: ['workflow-architect'],
+      }
+    : tab === 'quickPrompts'
+      ? {
+          title: t('qp.aiArchitectTitle'),
+          prompt: t('qp.aiArchitectPrompt'),
+          hint: t('qp.createWithAIHint'),
+          skillIds: ['qp-improver'],
+        }
+      : {
+          title: t('qa.aiArchitectTitle'),
+          prompt: t('qa.aiArchitectPrompt'),
+          hint: t('qa.createWithAIHint'),
+          skillIds: [],
+        };
+
+  const handleCreateWithAI = async () => {
+    if (!onNavigateDiscussion) return;
+    try {
+      // Compact project lookup: enough context to attach the draft without
+      // spending a tool round-trip or filling the agent context needlessly.
+      const shown = projects.slice(0, 20);
+      const projectContext = shown.length > 0
+        ? '\n\n---\nProjets[name=id]: ' + shown.map(p => `${p.name}=${p.id}`).join(' | ')
+          + (projects.length > 20 ? ` (+${projects.length - 20})` : '')
+        : '';
+      const disc = await discussionsApi.create({
+        project_id: null,
+        title: aiCreation.title,
+        agent: 'ClaudeCode',
+        language: configLanguage || 'fr',
+        initial_prompt: aiCreation.prompt + projectContext,
+        skill_ids: aiCreation.skillIds,
+        profile_ids: [],
+        directive_ids: [],
+        tier: 'reasoning',
+      });
+      onNavigateDiscussion(disc.id);
+    } catch (e) {
+      console.warn('Failed to create AI discussion:', e);
+    }
+  };
+
   return (
     <div>
-      <div className="flex-between mb-4">
+      <div className="flex-between mb-4 automation-page-header">
         <div>
           <h1 className="wf-h1"><MatrixText text={t('wf.title')} /></h1>
         </div>
         {tab === 'workflows' ? (
-        <div className="flex-row gap-3">
+        <div className="flex-row gap-3 automation-header-actions">
           {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={t('wf.createWithAIHint')} onClick={async () => {
-              try {
-                // Inject project list as compact lookup table (max 20, saves tokens)
-                const shown = projects.slice(0, 20);
-                const projectContext = shown.length > 0
-                  ? '\n\n---\nProjets[name=id]: ' + shown.map(p => `${p.name}=${p.id}`).join(' | ')
-                    + (projects.length > 20 ? ` (+${projects.length - 20})` : '')
-                  : '';
-                const disc = await discussionsApi.create({
-                  project_id: null,
-                  title: 'Workflow Architect',
-                  agent: 'ClaudeCode',
-                  language: configLanguage || 'fr',
-                  initial_prompt: t('wf.aiArchitectPrompt') + projectContext,
-                  skill_ids: ['workflow-architect'],
-                  profile_ids: [],
-                  directive_ids: [],
-                  tier: 'reasoning',
-                });
-                onNavigateDiscussion(disc.id);
-              } catch (e) {
-                console.warn('Failed to create AI discussion:', e);
-              }
-            }}>
+            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
               <Zap size={14} /> {t('wf.createWithAI')}
             </button>
           )}
@@ -1144,7 +1369,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </button>
         </div>
         ) : tab === 'quickPrompts' ? (
-        <div className="flex-row gap-3">
+        <div className="flex-row gap-3 automation-header-actions">
+          {onNavigateDiscussion && (
+            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+              <Zap size={14} /> {t('wf.createWithAI')}
+            </button>
+          )}
           <button
             className="wf-create-btn wf-create-btn-secondary"
             title={t('qp.importHint')}
@@ -1162,11 +1392,26 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </button>
         </div>
         ) : (
-        // quickApis — header aligné sur les deux autres onglets. Pas
-        // d'import pour l'instant (pas de drawer QA). Le bouton est
-        // masqué tant qu'aucun plugin API n'est wired ; la warning
-        // détaillée + CTA reste affichée dans le contenu de l'onglet.
-        <div className="flex-row gap-3">
+        // Quick APIs mirror the other tabs. Manual creation still needs a
+        // wired plugin; import and AI-assisted setup remain useful without one.
+        <div className="flex-row gap-3 automation-header-actions">
+          {onNavigateDiscussion && (
+            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+              <Zap size={14} /> {t('wf.createWithAI')}
+            </button>
+          )}
+          <button
+            className="wf-create-btn wf-create-btn-secondary"
+            title={t('qa.importHint')}
+            onClick={() => setImporting({
+              kind: 'qa',
+              content: '',
+              preview: { name: '' },
+              targetProjectId: '',
+            })}
+          >
+            <Upload size={14} /> {t('qa.import')}
+          </button>
           {availableApiPlugins.length > 0 && (
             <button className="wf-create-btn" onClick={() => setShowCreateQA(true)}>
               <Plus size={14} /> {t('qa.new')}
@@ -1232,10 +1477,10 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       )}
 
       {!showCreate && !editingWorkflow && workflows.length > 0 && (
-        <div className="flex-col gap-8" style={isMobile ? undefined : { flexDirection: 'row' }}>
+        <div className="wf-workspace" data-mobile={isMobile}>
           {/* List — grouped by project */}
           {!(isMobile && selectedId) && (
-          <div style={{ flex: isMobile ? '1 1 auto' : '0 0 380px' }}>
+          <div className="wf-workflow-list-pane" data-testid="workflow-list-pane">
             {groupedWorkflows.map(group => (
               <div key={group.key} className="mb-6">
                 {/* Group header */}
@@ -1265,6 +1510,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   const live = liveRun && liveRun.workflowId === wf.id && !liveRun.finished ? liveRun : null;
                   const lastStatus = wf.last_run?.status;
                   const isRunning = !!live || lastStatus === 'Running' || lastStatus === 'Pending';
+                  const storedRunIsActive = lastStatus === 'Running' || lastStatus === 'Pending';
+                  const runIdToCancel = live?.runId
+                    ?? (storedRunIsActive ? wf.last_run?.id : undefined);
+                  const cancelling = runIdToCancel
+                    ? cancellingRunIds.has(runIdToCancel)
+                    : false;
                   return (
                   <div
                     key={wf.id}
@@ -1273,50 +1524,55 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                     data-running={isRunning}
                     onClick={() => openDetail(wf.id)}
                   >
-                    <div className="flex-row gap-4 mb-3">
-                      {isRunning && (
-                        <Loader2
-                          size={14}
-                          className="wf-spin"
-                          style={{ color: 'var(--kr-cyan)', flexShrink: 0 }}
-                          aria-label={t('wf.running')}
-                        />
-                      )}
-                      <span className="font-semibold text-md flex-1">{wf.name}</span>
-                      <button
-                        className="wf-icon-btn"
-                        style={{ color: wf.pinned ? 'var(--kr-accent)' : 'var(--kr-text-dim)' }}
-                        onClick={(e) => { e.stopPropagation(); handleTogglePin(wf); }}
-                        title={wf.pinned ? t('wf.unpin') : t('wf.pin')}
-                        aria-pressed={wf.pinned}
-                        aria-label={wf.pinned ? t('wf.unpin') : t('wf.pin')}
-                      >
-                        <Star size={14} fill={wf.pinned ? 'currentColor' : 'none'} />
-                      </button>
-                      <button
-                        className="wf-icon-btn"
-                        style={{ color: wf.enabled ? 'var(--kr-success)' : 'var(--kr-text-dim)' }}
-                        onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
-                        title={wf.enabled ? t('wf.active') : t('wf.inactive')}
-                        aria-pressed={wf.enabled}
-                        aria-label={wf.enabled ? t('wf.active') : t('wf.inactive')}
-                      >
-                        {wf.enabled ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
-                      </button>
+                    <div className="wf-card-head">
+                      <div className="wf-card-identity">
+                        {isRunning && (
+                          <Loader2
+                            size={14}
+                            className="wf-spin"
+                            aria-label={t('wf.running')}
+                          />
+                        )}
+                        <span className="wf-card-title">{wf.name}</span>
+                      </div>
+                      <div className="wf-card-controls">
+                        <button
+                          className="wf-icon-btn"
+                          data-active={wf.pinned}
+                          onClick={(e) => { e.stopPropagation(); handleTogglePin(wf); }}
+                          title={wf.pinned ? t('wf.unpin') : t('wf.pin')}
+                          aria-pressed={wf.pinned}
+                          aria-label={wf.pinned ? t('wf.unpin') : t('wf.pin')}
+                        >
+                          <Star size={14} fill={wf.pinned ? 'currentColor' : 'none'} />
+                        </button>
+                        <button
+                          className="wf-icon-btn wf-card-enabled-btn"
+                          data-enabled={wf.enabled}
+                          onClick={(e) => { e.stopPropagation(); handleToggle(wf); }}
+                          title={wf.enabled ? t('wf.active') : t('wf.inactive')}
+                          aria-pressed={wf.enabled}
+                          aria-label={wf.enabled ? t('wf.active') : t('wf.inactive')}
+                        >
+                          {wf.enabled ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
+                        </button>
+                      </div>
                     </div>
 
-                    <div className="flex-row gap-4 text-sm text-muted">
+                    <div className="wf-card-meta">
                       <span className="wf-trigger-badge" data-type={wf.trigger_type}>
                         {wf.trigger_type === 'cron' && <Clock size={10} />}
                         {wf.trigger_type === 'tracker' && <GitBranch size={10} />}
                         {wf.trigger_type === 'manual' && <Zap size={10} />}
                         {TRIGGER_LABELS[wf.trigger_type] ?? wf.trigger_type}
                       </span>
-                      <span>{wf.step_count} step{wf.step_count > 1 ? 's' : ''}</span>
+                      <span className="wf-card-step-count">
+                        <Layers size={11} />
+                        {wf.step_count} step{wf.step_count > 1 ? 's' : ''}
+                      </span>
                       {wf.misconfigured_step_count > 0 && (
                         <span
                           className="wf-needs-config-badge"
-                          style={{ color: 'var(--kr-warning)', display: 'inline-flex', alignItems: 'center', gap: '3px' }}
                           title={t('wf.needsConfigTip')}
                         >
                           <AlertTriangle size={10} />
@@ -1325,76 +1581,62 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       )}
                     </div>
 
-                    {wf.last_run && (
-                      <div className="flex-row gap-3 mt-3 text-xs">
-                        <span style={{ color: STATUS_COLORS[wf.last_run.status] ?? 'var(--kr-text-faint)' }}>
-                          {wf.last_run.status}
-                        </span>
-                        <span className="text-ghost">
-                          {new Date(wf.last_run.started_at).toLocaleString()}
-                        </span>
-                        {wf.last_run.tokens_used > 0 && (
-                          <span className="text-ghost">
-                            · {wf.last_run.tokens_used} tokens
-                          </span>
-                        )}
-                        {/* Stop button — visible whenever the row's workflow has
-                            an in-flight run, sourced from EITHER the persisted
-                            `last_run` (post-refetch) OR the in-memory `liveRun`
-                            (during SSE between trigger and first refetch).
-                            Without the liveRun branch, the user sees a Running
-                            spinner with no Stop affordance for the first ~5-10s
-                            after they click "Lancer". */}
-                        {(() => {
-                          // Hoist into locals so TS narrowing from the
-                          // outer `wf.last_run && (...)` carries into the
-                          // IIFE — avoids the `wf.last_run!` and the
-                          // React-19 strict non-null-assertion warning.
-                          const lastRun = wf.last_run;
-                          if (!lastRun) return null;
-                          const live = liveRun && liveRun.workflowId === wf.id && !liveRun.finished ? liveRun : null;
-                          const runStatus = lastRun.status;
-                          const isLive = !!live;
-                          const isStored = runStatus === 'Running' || runStatus === 'Pending';
-                          if (!isLive && !isStored) return null;
-                          const runIdToCancel = live?.runId ?? lastRun.id;
-                          const cancelling = cancellingRunIds.has(runIdToCancel);
-                          return (
-                            <button
-                              className="wf-card-stop-btn"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                if (!runIdToCancel) return;
-                                void handleCancelRun(wf.id, runIdToCancel);
-                              }}
-                              disabled={!runIdToCancel || cancelling}
-                              title={t('wf.cancelRun')}
-                              aria-label={t('wf.cancelRun')}
+                    <div className="wf-card-footer">
+                      <div className="wf-card-run-summary">
+                        {wf.last_run && (
+                          <>
+                            <span
+                              className="wf-run-status-chip"
+                              data-status={wf.last_run.status}
+                              data-current="true"
                             >
-                              <Square size={9} style={{ fill: 'currentColor' }} />
-                              {cancelling ? t('wf.cancelling') : t('wf.cancelRun')}
-                            </button>
-                          );
-                        })()}
+                              {wf.last_run.status}
+                            </span>
+                            <span className="wf-card-run-date">
+                              {new Date(wf.last_run.started_at).toLocaleString()}
+                            </span>
+                            {wf.last_run.tokens_used > 0 && (
+                              <span className="wf-card-run-tokens">
+                                {wf.last_run.tokens_used} tokens
+                              </span>
+                            )}
+                          </>
+                        )}
                       </div>
-                    )}
-
-                    <div className="flex-row gap-2 mt-4">
-                      <button
-                        className="wf-small-btn"
-                        onClick={(e) => { e.stopPropagation(); handleTrigger(wf.id); }}
-                        disabled={!wf.enabled || triggering === wf.id}
-                        title={!wf.enabled ? t('wf.launchDisabledHint') : undefined}
-                      >
-                        {triggering === wf.id ? <Loader2 size={10} className="spin" /> : <Play size={10} />}
-                        {t('wf.trigger')}
-                      </button>
-                      <button
-                        className="wf-small-btn wf-small-btn-danger"
-                        onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
-                      >
-                        <Trash2 size={10} /> {t('wf.delete')}
-                      </button>
+                      <div className="wf-card-actions">
+                        {runIdToCancel && (
+                          <button
+                            className="wf-card-stop-btn"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleCancelRun(wf.id, runIdToCancel);
+                            }}
+                            disabled={cancelling}
+                            title={t('wf.cancelRun')}
+                            aria-label={t('wf.cancelRun')}
+                          >
+                            <Square size={9} fill="currentColor" />
+                            {cancelling ? t('wf.cancelling') : t('wf.cancelRun')}
+                          </button>
+                        )}
+                        <button
+                          className="wf-card-run-btn"
+                          onClick={(e) => { e.stopPropagation(); handleTrigger(wf.id); }}
+                          disabled={!wf.enabled || triggering === wf.id}
+                          title={!wf.enabled ? t('wf.launchDisabledHint') : undefined}
+                        >
+                          {triggering === wf.id ? <Loader2 size={11} className="spin" /> : <Play size={11} fill="currentColor" />}
+                          {t('wf.trigger')}
+                        </button>
+                        <button
+                          className="wf-card-delete-btn"
+                          onClick={(e) => { e.stopPropagation(); handleDelete(wf.id); }}
+                          title={t('wf.delete')}
+                          aria-label={`${t('wf.delete')} ${wf.name}`}
+                        >
+                          <Trash2 size={12} />
+                        </button>
+                      </div>
                     </div>
                   </div>
                   );
@@ -1405,7 +1647,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           )}
 
           {/* Detail panel */}
-          <div className="flex-1 min-w-0">
+          <div
+            ref={detailScrollRef}
+            className="wf-workflow-detail-pane"
+            data-testid="workflow-detail-pane"
+          >
             {isMobile && selectedId && (
               <button
                 className="wf-back-btn"
@@ -1424,9 +1670,19 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
               <WorkflowDetail
                 workflow={detailWorkflow}
                 runs={detailRuns}
+                availableAgentTypes={installedAgentTypes}
+                onChangeStepAgent={changeStepAgent}
+                totalRuns={detailRunTotal}
+                hasMoreRuns={hasMoreDetailRuns}
+                loadingMoreRuns={loadingMoreRuns}
+                onLoadMoreRuns={loadMoreDetailRuns}
                 liveRun={liveRun?.workflowId === detailWorkflow.id ? liveRun : null}
                 onTrigger={() => handleTrigger(detailWorkflow.id)}
-                onRefresh={() => openDetail(detailWorkflow.id)}
+                onRefresh={() => openDetail(
+                  detailWorkflow.id,
+                  undefined,
+                  Math.max(RUN_FETCH_PAGE_SIZE, detailRunPageCount),
+                )}
                 onEdit={() => setEditingWorkflow(detailWorkflow)}
                 onDeleteRun={async (runId) => {
                   if (!confirm(t('wf.deleteRunConfirm'))) return;
@@ -1435,7 +1691,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   refetch();
                 }}
                 onDeleteAllRuns={async () => {
-                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRuns.length))) return;
+                  if (!confirm(t('wf.deleteAllRunsConfirm', detailRunTotal))) return;
                   await workflowsApi.deleteAllRuns(detailWorkflow.id);
                   openDetail(detailWorkflow.id);
                   refetch();
@@ -1508,35 +1764,91 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   <p className="wf-empty-hint">{t('qp.emptyHint')}</p>
                 </div>
               ) : (
-                <div className="qp-list">
-                  {quickPromptList.map(qp => (
-                    <div key={qp.id} className="qp-card" data-qp-id={qp.id}>
+                <>
+                  <div className="automation-list-toolbar">
+                    <ListControls
+                      filterLabel={t('automation.filter.label')}
+                      filterAriaLabel={t('automation.filter.qpAgentLabel')}
+                      filterValue={quickPromptAgentFilter}
+                      filterOptions={[
+                        { value: 'all', label: t('automation.filter.allAgents') },
+                        ...quickPromptAgents.map(agent => ({
+                          value: agent,
+                          label: AGENT_LABELS[agent] ?? agent,
+                        })),
+                      ]}
+                      onFilterChange={setQuickPromptAgentFilter}
+                      sortLabel={t('automation.sort.label')}
+                      sortAriaLabel={t('automation.sort.qpLabel')}
+                      sortValue={quickPromptSort}
+                      sortOptions={[
+                        { value: 'name', label: t('automation.sort.name') },
+                        { value: 'updated', label: t('automation.sort.updated') },
+                        {
+                          value: 'usage',
+                          label: t(quickPromptUsageReady
+                            ? 'automation.sort.usage'
+                            : 'automation.sort.usageLoading'),
+                          disabled: !quickPromptUsageReady,
+                        },
+                      ]}
+                      onSortChange={setQuickPromptSort}
+                      reversed={quickPromptSortReversed}
+                      onToggleDirection={() => setQuickPromptSortReversed(value => !value)}
+                      directionLabel={t(quickPromptSortReversed
+                        ? 'automation.sort.restoreDirection'
+                        : 'automation.sort.reverseDirection')}
+                    />
+                  </div>
+                  <div className="qp-list">
+                  {sortedQuickPrompts.length === 0 && (
+                    <div className="automation-filter-empty">{t('automation.filter.empty')}</div>
+                  )}
+                  {sortedQuickPrompts.map(qp => (
+                    <div key={qp.id} className="qp-card" data-kind="prompt" data-qp-id={qp.id}>
                       <div className="qp-card-header">
-                        <span className="qp-card-icon">{qp.icon}</span>
-                        <span className="qp-card-name">{qp.name}</span>
-                        {/* Agent badge — pre-2026-05-10 the QP list
-                         *  showed `qp.agent` nowhere; users had to open
-                         *  the editor to discover which agent ran. The
-                         *  agent is the most-used identity signal of a
-                         *  QP (a "Code review with Claude" reads
-                         *  differently from "Code review with Codex"),
-                         *  so we surface it inline next to the name. */}
-                        <span
-                          className="qp-card-agent-badge"
-                          style={{ color: agentColor(qp.agent), borderColor: agentColor(qp.agent) }}
-                          title={t('qp.agentBadgeTooltip', AGENT_LABELS[qp.agent] ?? qp.agent)}
-                        >
-                          {AGENT_LABELS[qp.agent] ?? qp.agent}
-                        </span>
+                        <div className="qp-card-identity">
+                          <span className="qp-card-icon">{qp.icon}</span>
+                          <span className="qp-card-name">{qp.name}</span>
+                        </div>
+                        <div className="qp-card-head-controls">
+                          <CopyIdPill id={qp.id} title={t('automation.copyId', qp.name)} />
+                          <AgentSwitchPicker
+                            currentAgent={qp.agent}
+                            availableAgents={installedAgentTypes ?? []}
+                            onChange={agent => changeQuickPromptAgent(qp, agent)}
+                            title={t('disc.switchAgent')}
+                            ariaLabel={t('qp.agentSwitchLabel', qp.name, AGENT_LABELS[qp.agent] ?? qp.agent)}
+                            staticClassName="qp-card-agent-static"
+                          />
+                        </div>
+                      </div>
+
+                      {qp.description && (
+                        <p className="qp-card-desc">{qp.description}</p>
+                      )}
+
+                      <div className="qp-card-meta">
                         {qp.variables.length > 0 && (
                           <span className="qp-card-vars">{t('qp.vars', qp.variables.length)}</span>
                         )}
                         {/* 0.8.5 — fitness chip: current-version avg
                             tokens / duration + launch count. Hidden
                             until the QP has ≥ 1 launch. */}
-                        <QPCardMetricsChip qpId={qp.id} />
-                        <div className="qp-card-actions">
-                          <button className="wf-icon-btn" onClick={() => setEditingQP(qp)} title="Edit">
+                        <QPCardMetricsChip
+                          qpId={qp.id}
+                          onUsageLoaded={recordQuickPromptUsage}
+                        />
+                      </div>
+
+                      <div className="qp-card-footer">
+                        <div className="qp-card-tools">
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            onClick={() => setEditingQP(qp)}
+                            title={t('qp.edit')}
+                            aria-label={`${t('qp.edit')} ${qp.name}`}
+                          >
                             <Eye size={12} />
                           </button>
                           {/* 0.8.5 — "Improve with AI" — opens a discussion
@@ -1546,11 +1858,12 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               deploys it in one click via PUT
                               /api/quick-prompts/:id. */}
                           <button
-                            className="wf-icon-btn"
+                            className="wf-icon-btn qp-card-tool-btn"
                             data-testid="qp-improve-btn"
                             disabled={!installedAgentTypes || installedAgentTypes.length === 0}
                             onClick={() => handleImproveQP(qp)}
                             title={t('qp.improveWithAi')}
+                            aria-label={`${t('qp.improveWithAi')} ${qp.name}`}
                           >
                             ✨
                           </button>
@@ -1561,37 +1874,52 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           <QPHistoryDrawer qpId={qp.id} qpName={qp.name} />
 
                           {/* 0.7.0 UX pass — export QP as JSON file. */}
-                          <button className="wf-icon-btn" onClick={async () => {
-                            try {
-                              const { filename, blob } = await quickPromptsApi.exportQp(qp.id);
-                              triggerDownload(filename, blob);
-                              if (toastProp) toastProp(t('qp.exportDone').replace('{name}', qp.name), 'success');
-                            } catch (e) {
-                              if (toastProp) toastProp(userError(e), 'error');
-                            }
-                          }} title={t('qp.export')}>
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            onClick={async () => {
+                              try {
+                                const { filename, blob } = await quickPromptsApi.exportQp(qp.id);
+                                triggerDownload(filename, blob);
+                                if (toastProp) toastProp(t('qp.exportDone').replace('{name}', qp.name), 'success');
+                              } catch (e) {
+                                if (toastProp) toastProp(userError(e), 'error');
+                              }
+                            }}
+                            title={t('qp.export')}
+                            aria-label={`${t('qp.export')} ${qp.name}`}
+                          >
                             <Download size={12} />
                           </button>
-                          <button className="wf-icon-btn" onClick={async () => {
-                            if (!confirm(t('qp.deleteConfirm'))) return;
-                            await quickPromptsApi.delete(qp.id);
-                            refetchQP();
-                          }} title={t('qp.delete')}>
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            data-danger="true"
+                            onClick={async () => {
+                              if (!confirm(t('qp.deleteConfirm'))) return;
+                              await quickPromptsApi.delete(qp.id);
+                              refetchQP();
+                            }}
+                            title={t('qp.delete')}
+                            aria-label={`${t('qp.delete')} ${qp.name}`}
+                          >
                             <Trash2 size={12} />
                           </button>
+                        </div>
+
+                        <div className="qp-card-primary-actions">
                           {/* Batch button — fans out N discussions from a list
                               of values for the first QP variable. Only meaningful
                               for QPs with at least one variable. */}
                           {qp.variables.length > 0 && (
                             <button
-                              className="wf-icon-btn"
+                              className="qp-card-secondary-btn"
                               onClick={() => {
                                 setBatchingQP(batchingQP?.id === qp.id ? null : qp);
                                 setBatchInputLines('');
                               }}
                               title={t('qp.batch.launch')}
+                              aria-label={`${t('qp.batch.launch')} ${qp.name}`}
                             >
-                              <Layers size={12} />
+                              <Layers size={12} /> {t('qp.batch.short')}
                             </button>
                           )}
                           {/* Compare-agents button — opens the launch form
@@ -1601,7 +1929,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               `installedAgentTypes` may be empty during boot
                               detection — disable in that case. */}
                           <button
-                            className="wf-icon-btn"
+                            className="qp-card-secondary-btn"
                             data-testid="qp-compare-agents-btn"
                             disabled={!installedAgentTypes || installedAgentTypes.length === 0}
                             onClick={() => {
@@ -1610,8 +1938,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                               setCompareAgents(null);
                             }}
                             title={t('qp.compareAgents.button', installedAgentTypes?.length ?? 0)}
+                            aria-label={`${t('qp.compareAgents.button', installedAgentTypes?.length ?? 0)} — ${qp.name}`}
                           >
-                            🤝
+                            🤝 {t('qp.compareAgents.short')}
                           </button>
                           <button
                             className="qp-launch-btn"
@@ -1813,7 +2142,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       )}
                     </div>
                   ))}
-                </div>
+                  </div>
+                </>
               )}
             </>
           )}
@@ -1867,55 +2197,140 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                   <p className="wf-empty-hint">{t('qa.emptyHint')}</p>
                 </div>
               ) : (
-                <div className="qp-list">
-                  {quickApiList.map(qa => (
-                    <div key={qa.id} className="qp-card">
+                <>
+                  <div className="automation-list-toolbar">
+                    <ListControls
+                      filterLabel={t('automation.filter.label')}
+                      filterAriaLabel={t('automation.filter.qaApiLabel')}
+                      filterValue={quickApiPluginFilter}
+                      filterOptions={[
+                        { value: 'all', label: t('automation.filter.allApis') },
+                        ...quickApiPlugins.map(plugin => ({
+                          value: plugin.slug,
+                          label: plugin.label,
+                        })),
+                      ]}
+                      onFilterChange={setQuickApiPluginFilter}
+                      sortLabel={t('automation.sort.label')}
+                      sortAriaLabel={t('automation.sort.qaLabel')}
+                      sortValue={quickApiSort}
+                      sortOptions={[
+                        { value: 'name', label: t('automation.sort.name') },
+                        { value: 'updated', label: t('automation.sort.updated') },
+                        { value: 'endpoint', label: t('automation.sort.endpoint') },
+                      ]}
+                      onSortChange={setQuickApiSort}
+                      reversed={quickApiSortReversed}
+                      onToggleDirection={() => setQuickApiSortReversed(value => !value)}
+                      directionLabel={t(quickApiSortReversed
+                        ? 'automation.sort.restoreDirection'
+                        : 'automation.sort.reverseDirection')}
+                    />
+                  </div>
+                  <div className="qp-list">
+                  {sortedQuickApis.length === 0 && (
+                    <div className="automation-filter-empty">{t('automation.filter.empty')}</div>
+                  )}
+                  {sortedQuickApis.map((qa, index) => {
+                    const startsApiGroup = quickApiSort === 'endpoint'
+                      && sortedQuickApis[index - 1]?.api_plugin_slug !== qa.api_plugin_slug;
+                    const apiLabel = availableApiPlugins.find(
+                      option => option.server.id === qa.api_plugin_slug,
+                    )?.server.name ?? qa.api_plugin_slug;
+                    return (
+                    <Fragment key={qa.id}>
+                    {startsApiGroup && (
+                      <div className="quick-api-group-heading">
+                        <span>{apiLabel}</span>
+                        <span>{t('automation.sort.apiGroup')}</span>
+                      </div>
+                    )}
+                    <div className="qp-card" data-kind="api" data-qa-id={qa.id}>
                       <div className="qp-card-header">
-                        <span className="qp-card-icon">{qa.icon}</span>
-                        <span className="qp-card-name">{qa.name}</span>
+                        <div className="qp-card-identity">
+                          <span className="qp-card-icon">{qa.icon}</span>
+                          <span className="qp-card-name">{qa.name}</span>
+                        </div>
+                        <div className="qp-card-head-controls">
+                          <CopyIdPill id={qa.id} title={t('automation.copyId', qa.name)} />
+                        </div>
+                      </div>
+
+                      {qa.description && (
+                        <p className="qp-card-desc">{qa.description}</p>
+                      )}
+
+                      <div className="qp-card-meta">
+                        <span className="qp-card-api-plugin">{apiLabel}</span>
+                        <span className="qp-card-endpoint">
+                          <span className="qp-card-method" data-method={qa.api_method ?? 'GET'}>
+                            {qa.api_method ?? 'GET'}
+                          </span>
+                          <code>{qa.api_endpoint_path}</code>
+                        </span>
                         {qa.variables.length > 0 && (
                           <span className="qp-card-vars">{t('qa.vars', qa.variables.length)}</span>
                         )}
-                        <span className="text-2xs text-ghost" style={{ marginLeft: 8 }}>
-                          {qa.api_method ?? 'GET'} {qa.api_endpoint_path}
-                        </span>
-                        <div className="qp-card-actions">
-                          <button className="wf-icon-btn" onClick={() => setEditingQA(qa)} title={t('qa.edit')}>
+                      </div>
+
+                      <div className="qp-card-footer">
+                        <div className="qp-card-tools">
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            onClick={() => setEditingQA(qa)}
+                            title={t('qa.edit')}
+                            aria-label={`${t('qa.edit')} ${qa.name}`}
+                          >
                             <Eye size={12} />
                           </button>
-                          <button className="wf-icon-btn" onClick={async () => {
-                            try {
-                              const { filename, blob } = await quickApisApi.exportQa(qa.id);
-                              triggerDownload(filename, blob);
-                              if (toastProp) toastProp(t('qa.exportDone').replace('{name}', qa.name), 'success');
-                            } catch (e) {
-                              if (toastProp) toastProp(userError(e), 'error');
-                            }
-                          }} title={t('qa.export')}>
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            onClick={async () => {
+                              try {
+                                const { filename, blob } = await quickApisApi.exportQa(qa.id);
+                                triggerDownload(filename, blob);
+                                if (toastProp) toastProp(t('qa.exportDone').replace('{name}', qa.name), 'success');
+                              } catch (e) {
+                                if (toastProp) toastProp(userError(e), 'error');
+                              }
+                            }}
+                            title={t('qa.export')}
+                            aria-label={`${t('qa.export')} ${qa.name}`}
+                          >
                             <Download size={12} />
                           </button>
-                          <button className="wf-icon-btn" onClick={async () => {
-                            if (!confirm(t('qa.deleteConfirm').replace('{name}', qa.name))) return;
-                            await quickApisApi.delete(qa.id);
-                            refetchQA();
-                          }} title={t('qa.delete')}>
+                          <button
+                            className="wf-icon-btn qp-card-tool-btn"
+                            data-danger="true"
+                            onClick={async () => {
+                              if (!confirm(t('qa.deleteConfirm').replace('{name}', qa.name))) return;
+                              await quickApisApi.delete(qa.id);
+                              refetchQA();
+                            }}
+                            title={t('qa.delete')}
+                            aria-label={`${t('qa.delete')} ${qa.name}`}
+                          >
                             <Trash2 size={12} />
                           </button>
+                        </div>
+
+                        <div className="qp-card-primary-actions">
                           {/* Batch button — fans out N HTTP calls from a list
                               of values for the QA's variables. Mirror of the
                               QP Batch button. Only meaningful when the QA
                               declares at least one variable. */}
                           {qa.variables.length > 0 && (
                             <button
-                              className="wf-icon-btn"
+                              className="qp-card-secondary-btn"
                               onClick={() => {
                                 setBatchingQA(batchingQA?.id === qa.id ? null : qa);
                                 setBatchQAInput('');
                                 setBatchQAResult(null);
                               }}
                               title={t('qa.batch.launch')}
+                              aria-label={`${t('qa.batch.launch')} ${qa.name}`}
                             >
-                              <Layers size={12} />
+                              <Layers size={12} /> {t('qa.batch.short')}
                             </button>
                           )}
                           {/* Launch button — same shape as QP for visual
@@ -1941,9 +2356,6 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           </button>
                         </div>
                       </div>
-                      {qa.description && (
-                        <p className="qp-card-desc">{qa.description}</p>
-                      )}
                       {/* Batch form — paste list of values, fan-out parallel HTTP.
                           For 1-variable QAs: one value per line.
                           For N-variable QAs: JSON array of objects.
@@ -2177,8 +2589,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         </div>
                       )}
                     </div>
-                  ))}
-                </div>
+                    </Fragment>
+                    );
+                  })}
+                  </div>
+                </>
               )}
             </>
           )}
@@ -2317,7 +2732,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         </div>
       )}
 
-      {/* 0.7.0 UX pass — Import drawer (workflow OR qp).
+      {/* Shared Import drawer (workflow, QP, or QA).
           2-step flow : (1) drop / pick file → preview rendered + project
           dropdown ; (2) confirm → POST → refetch + close.
           Modal-style overlay so the user is focused on the operation. */}
@@ -2327,7 +2742,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
             <div className="flex-row gap-3 mb-4">
               <Upload size={16} />
               <h3 className="text-lg font-semibold flex-1" style={{ margin: 0 }}>
-                {importing.kind === 'workflow' ? t('imp.workflowTitle') : t('imp.qpTitle')}
+                {importing.kind === 'workflow'
+                  ? t('imp.workflowTitle')
+                  : importing.kind === 'qp'
+                    ? t('imp.qpTitle')
+                    : t('imp.qaTitle')}
               </h3>
               <button className="wf-icon-btn" onClick={() => setImporting(null)} disabled={importingSubmit}>
                 <X size={12} />
@@ -2336,7 +2755,11 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
 
             {!importing.content ? (
               <ImportDropzone
-                expectedKind={importing.kind === 'workflow' ? 'kronn.workflow' : 'kronn.quick_prompt'}
+                expectedKind={importing.kind === 'workflow'
+                  ? 'kronn.workflow'
+                  : importing.kind === 'qp'
+                    ? 'kronn.quick_prompt'
+                    : 'kronn.quick_api'}
                 embedded
                 onFile={(content, parsed) => {
                   if (importing.kind === 'workflow') {
@@ -2350,7 +2773,7 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                         qpVarsCount: env.referenced_quick_prompts?.length ?? 0,
                       },
                     });
-                  } else {
+                  } else if (importing.kind === 'qp') {
                     const env = parsed as { quick_prompt?: { name?: string; variables?: unknown[] } };
                     setImporting({
                       ...importing,
@@ -2358,6 +2781,16 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       preview: {
                         name: env.quick_prompt?.name ?? '?',
                         qpVarsCount: env.quick_prompt?.variables?.length ?? 0,
+                      },
+                    });
+                  } else {
+                    const env = parsed as { quick_api?: { name?: string; variables?: unknown[] } };
+                    setImporting({
+                      ...importing,
+                      content,
+                      preview: {
+                        name: env.quick_api?.name ?? '?',
+                        qpVarsCount: env.quick_api?.variables?.length ?? 0,
                       },
                     });
                   }
@@ -2384,7 +2817,8 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                       )}
                     </>
                   )}
-                  {importing.kind === 'qp' && (importing.preview.qpVarsCount ?? 0) > 0 && (
+                  {(importing.kind === 'qp' || importing.kind === 'qa')
+                    && (importing.preview.qpVarsCount ?? 0) > 0 && (
                     <div className="text-sm">
                       <span className="text-muted">{t('imp.previewVars')}:</span>{' '}
                       {importing.preview.qpVarsCount}
@@ -2432,10 +2866,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
                           await workflowsApi.importWorkflow({ content: importing.content, project_id: projectId });
                           if (toastProp) toastProp(t('imp.workflowDone').replace('{name}', importing.preview.name), 'success');
                           refetch();
-                        } else {
+                        } else if (importing.kind === 'qp') {
                           await quickPromptsApi.importQp({ content: importing.content, project_id: projectId });
                           if (toastProp) toastProp(t('imp.qpDone').replace('{name}', importing.preview.name), 'success');
                           refetchQP();
+                        } else {
+                          await quickApisApi.importQa({ content: importing.content, project_id: projectId });
+                          if (toastProp) toastProp(t('imp.qaDone').replace('{name}', importing.preview.name), 'success');
+                          refetchQA();
                         }
                         setImporting(null);
                       } catch (e) {

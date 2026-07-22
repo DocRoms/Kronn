@@ -24,7 +24,7 @@ class MockUtterance {
 
 // Mock API — DiscussionsPage uses discussions, projects, and skills APIs
 vi.mock('../../lib/api', () => ({
-  // 0.9.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
+  // 0.10.0 — ChatHeader renders <LearningsBadge> which polls learnings.pending().
   learnings: {
     pending: vi.fn().mockResolvedValue({ count: 0 }),
     list: vi.fn().mockResolvedValue([]),
@@ -1466,7 +1466,7 @@ describe('DiscussionsPage', () => {
     // Agent switch button should be visible with the current agent name
     const switchBtn = document.querySelector('[title="Changer d\'agent"]');
     expect(switchBtn).toBeTruthy();
-    expect(switchBtn?.textContent).toContain('ClaudeCode');
+    expect(switchBtn?.textContent).toContain('Claude Code');
   });
 
   // ─── Discussion search filter tests ──────────────────────────────────
@@ -1510,7 +1510,7 @@ describe('DiscussionsPage', () => {
 
   // ─── Agent switch dropdown tests ─────────────────────────────────────
 
-  it('clicking agent switch button shows dropdown with other agents', async () => {
+  it('switches the discussion agent silently without launching a response', async () => {
     const fullDisc: Discussion = {
       ...makeListDiscussion('d-dropdown', 2),
       messages: [
@@ -1550,6 +1550,18 @@ describe('DiscussionsPage', () => {
     expect(body).toContain('Claude Code');
     expect(body).toContain('Codex');
     expect(body).toContain('Gemini CLI');
+
+    vi.mocked(discussionsApi.update).mockClear();
+    vi.mocked(discussionsApi.runAgent).mockClear();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
+    });
+
+    await waitFor(() => {
+      expect(vi.mocked(discussionsApi.update))
+        .toHaveBeenCalledWith('d-dropdown', { agent: 'Codex' });
+    });
+    expect(vi.mocked(discussionsApi.runAgent)).not.toHaveBeenCalled();
   });
 
   it('shows contacts section in sidebar when contacts exist', async () => {

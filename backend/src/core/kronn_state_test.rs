@@ -2,7 +2,8 @@ use crate::core::kronn_state::*;
 use std::path::PathBuf;
 
 fn fresh_tmp(name: &str) -> PathBuf {
-    let tmp = std::env::temp_dir().join(format!("kronn-state-test-{name}-{}", uuid::Uuid::new_v4()));
+    let tmp =
+        std::env::temp_dir().join(format!("kronn-state-test-{name}-{}", uuid::Uuid::new_v4()));
     let _ = std::fs::create_dir_all(tmp.join("docs"));
     tmp
 }
@@ -32,12 +33,24 @@ fn mutators_abort_on_corrupt_state_instead_of_clobbering() {
     let corrupt = "{ \"audits\": [ …truncated by a torn write";
     std::fs::write(tmp.join("docs/.kronn.json"), corrupt).unwrap();
 
-    assert!(record_audit(&tmp, "full").is_err(), "record_audit must abort on corrupt state");
-    assert!(mark_validated(&tmp).is_err(), "mark_validated must abort on corrupt state");
-    assert!(mark_bootstrapped(&tmp).is_err(), "mark_bootstrapped must abort on corrupt state");
+    assert!(
+        record_audit(&tmp, "full").is_err(),
+        "record_audit must abort on corrupt state"
+    );
+    assert!(
+        mark_validated(&tmp).is_err(),
+        "mark_validated must abort on corrupt state"
+    );
+    assert!(
+        mark_bootstrapped(&tmp).is_err(),
+        "mark_bootstrapped must abort on corrupt state"
+    );
 
     let content = std::fs::read_to_string(tmp.join("docs/.kronn.json")).unwrap();
-    assert_eq!(content, corrupt, "a corrupt .kronn.json must never be rebuilt from default");
+    assert_eq!(
+        content, corrupt,
+        "a corrupt .kronn.json must never be rebuilt from default"
+    );
     cleanup(&tmp);
 }
 
@@ -50,7 +63,8 @@ fn backfill_skips_when_state_file_is_corrupt() {
     std::fs::write(
         tmp.join("docs/checksums.json"),
         r#"{"audited_at": "2026-01-01", "mappings": []}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let did = backfill_from_legacy_state(&tmp).unwrap();
     assert!(!did, "backfill must not overwrite a corrupt .kronn.json");
@@ -66,7 +80,10 @@ fn record_audit_creates_file_with_readme() {
     let state = read(&tmp).expect("file should exist");
     assert_eq!(state.audits.len(), 1);
     assert_eq!(state.audits[0].audit_type, "full");
-    assert!(state.audits[0].kronn_version.chars().any(|c| c.is_ascii_digit()));
+    assert!(state.audits[0]
+        .kronn_version
+        .chars()
+        .any(|c| c.is_ascii_digit()));
     assert!(state.readme.contains("Kronn"), "readme must mention Kronn");
     cleanup(&tmp);
 }
@@ -116,7 +133,8 @@ fn revoke_validated_neutralizes_a_legacy_marker_project() {
     std::fs::write(
         tmp.join("docs/AGENTS.md"),
         "# Proj\n<!-- KRONN:VALIDATED:2020-01-01 -->\n",
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(
         crate::core::scanner::detect_audit_status(tmp.to_str().unwrap()),
         crate::models::AiAuditStatus::Validated,
@@ -164,18 +182,24 @@ fn write_rewrites_readme_even_if_caller_blanks_it() {
     };
     write(&tmp, &mut state).unwrap();
     let reread = read(&tmp).unwrap();
-    assert!(reread.readme.contains("Do not delete"),
-        "write() must re-inject the canonical readme, got: {:?}", reread.readme);
+    assert!(
+        reread.readme.contains("Do not delete"),
+        "write() must re-inject the canonical readme, got: {:?}",
+        reread.readme
+    );
     cleanup(&tmp);
 }
 
 #[test]
 fn write_resolves_to_legacy_ai_dir_when_only_ai_exists() {
-    let tmp = std::env::temp_dir().join(format!("kronn-state-test-legacy-{}", uuid::Uuid::new_v4()));
+    let tmp =
+        std::env::temp_dir().join(format!("kronn-state-test-legacy-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(tmp.join("ai")).unwrap();
     record_audit(&tmp, "full").unwrap();
-    assert!(tmp.join("ai/.kronn.json").is_file(),
-        "state file should land under ai/ when that's the only docs dir");
+    assert!(
+        tmp.join("ai/.kronn.json").is_file(),
+        "state file should land under ai/ when that's the only docs dir"
+    );
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
@@ -193,7 +217,8 @@ fn backfill_seeds_audit_entry_from_checksums_alone() {
     std::fs::write(
         tmp.join("docs/checksums.json"),
         r#"{"audited_at": "2026-01-01", "mappings": []}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let did = backfill_from_legacy_state(&tmp).unwrap();
     assert!(did, "backfill should fire when checksums.json exists");
@@ -213,7 +238,8 @@ fn backfill_seeds_validated_when_marker_present() {
     std::fs::write(
         tmp.join("docs/AGENTS.md"),
         "# my project\n<!-- KRONN:VALIDATED -->\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let did = backfill_from_legacy_state(&tmp).unwrap();
     assert!(did);
@@ -230,7 +256,8 @@ fn backfill_seeds_bootstrapped_when_marker_present() {
     std::fs::write(
         tmp.join("docs/AGENTS.md"),
         "# bootstrap\n<!-- KRONN:BOOTSTRAPPED -->\n",
-    ).unwrap();
+    )
+    .unwrap();
 
     let did = backfill_from_legacy_state(&tmp).unwrap();
     assert!(did);
@@ -245,13 +272,15 @@ fn backfill_combines_validated_and_bootstrapped_markers() {
     std::fs::write(
         tmp.join("docs/AGENTS.md"),
         "# project\n<!-- KRONN:BOOTSTRAPPED -->\n<!-- KRONN:VALIDATED -->\n",
-    ).unwrap();
+    )
+    .unwrap();
     // Minimal valid checksums file (the structural reader requires
     // `audited_at` + `mappings[]` per ChecksumsFile).
     std::fs::write(
         tmp.join("docs/checksums.json"),
         r#"{"audited_at": "2026-01-01", "mappings": []}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     backfill_from_legacy_state(&tmp).unwrap();
     let state = read(&tmp).unwrap();
@@ -274,14 +303,18 @@ fn backfill_skips_when_kronn_json_already_exists() {
     std::fs::write(
         tmp.join("docs/checksums.json"),
         r#"{"audited_at": "2026-01-01", "mappings": []}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let did = backfill_from_legacy_state(&tmp).unwrap();
     assert!(!did, "backfill must skip when .kronn.json already exists");
 
     let state = read(&tmp).unwrap();
     assert_eq!(state.audits.len(), 1, "audits not overwritten");
-    assert_eq!(state.audits[0].audit_type, "full", "must keep the 'full' from record_audit, not 'legacy'");
+    assert_eq!(
+        state.audits[0].audit_type, "full",
+        "must keep the 'full' from record_audit, not 'legacy'"
+    );
     cleanup(&tmp);
 }
 
@@ -309,7 +342,8 @@ fn backfill_is_idempotent_on_repeated_calls() {
     std::fs::write(
         tmp.join("docs/checksums.json"),
         r#"{"audited_at": "2026-01-01", "mappings": []}"#,
-    ).unwrap();
+    )
+    .unwrap();
 
     let first = backfill_from_legacy_state(&tmp).unwrap();
     let second = backfill_from_legacy_state(&tmp).unwrap();

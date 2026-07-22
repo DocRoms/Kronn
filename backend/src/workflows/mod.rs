@@ -3,32 +3,32 @@
 //! Ticks every 30s, checks triggers, enforces concurrency limits,
 //! and spawns runs.
 
-pub mod big_ticket_template;
-pub mod step_output_format;
-pub mod template;
-pub mod triage;
-pub mod workspace;
-pub mod steps;
-pub mod batch_step;
-pub mod batch_apicall_step;
-pub mod quick_api_hydrate;
-pub mod quick_prompt_hydrate;
-pub mod json_data_step;
-pub mod sub_workflow_step;
-pub mod notify_step;
-pub mod gate_step;
-pub mod gate_checkpoint;
-pub mod exec_step;
-pub mod api_call_step;
-pub mod api_call_security;
 pub mod api_call_executor;
 pub mod api_call_ratelimit;
+pub mod api_call_security;
+pub mod api_call_step;
+pub mod batch_apicall_step;
+pub mod batch_step;
+pub mod big_ticket_template;
+pub mod exec_step;
+pub mod gate_checkpoint;
+pub mod gate_step;
+pub mod json_data_step;
+pub mod notify_step;
+pub mod quick_api_hydrate;
+pub mod quick_prompt_hydrate;
 pub mod runner;
-pub mod trigger;
+pub mod step_output_format;
+pub mod steps;
+pub mod sub_workflow_step;
+pub mod template;
 pub mod tracker;
+pub mod triage;
+pub mod trigger;
+pub mod workspace;
 
-use std::sync::Arc;
 use chrono::Utc;
+use std::sync::Arc;
 use tokio::time::{interval, Duration};
 use uuid::Uuid;
 
@@ -58,8 +58,12 @@ impl WorkflowEngine {
 
     /// Convenience accessors so existing code using `self.db` / `self.config`
     /// keeps working without threading `.state.` everywhere.
-    fn db(&self) -> &Arc<Database> { &self.state.db }
-    fn config(&self) -> &Arc<tokio::sync::RwLock<AppConfig>> { &self.state.config }
+    fn db(&self) -> &Arc<Database> {
+        &self.state.db
+    }
+    fn config(&self) -> &Arc<tokio::sync::RwLock<AppConfig>> {
+        &self.state.config
+    }
 
     /// Start the engine tick loop (runs forever).
     pub async fn start(self: Arc<Self>) {
@@ -99,25 +103,37 @@ impl WorkflowEngine {
             wf.updated_at = Utc::now();
             let wf_clone = wf.clone();
             let db2 = self.db().clone();
-            match db2.with_conn(move |conn| crate::db::workflows::update_workflow(conn, &wf_clone)).await {
-                Ok(false) => tracing::warn!("Heal skipped: workflow '{}' vanished mid-pass", wf.name),
+            match db2
+                .with_conn(move |conn| crate::db::workflows::update_workflow(conn, &wf_clone))
+                .await
+            {
+                Ok(false) => {
+                    tracing::warn!("Heal skipped: workflow '{}' vanished mid-pass", wf.name)
+                }
                 Ok(true) => {
                     healed_count += 1;
                     tracing::info!(
                         "Healed workflow '{}' (id={}): upgraded steps {:?} to Structured",
-                        wf.name, wf.id, names
+                        wf.name,
+                        wf.id,
+                        names
                     );
                 }
                 Err(e) => {
                     tracing::warn!(
                         "Failed to persist heal for workflow '{}' (id={}): {}",
-                        wf.name, wf.id, e
+                        wf.name,
+                        wf.id,
+                        e
                     );
                 }
             }
         }
         if healed_count > 0 {
-            tracing::info!("Workflow healing pass complete — {} workflow(s) upgraded", healed_count);
+            tracing::info!(
+                "Workflow healing pass complete — {} workflow(s) upgraded",
+                healed_count
+            );
         }
         Ok(())
     }
@@ -132,9 +148,7 @@ impl WorkflowEngine {
         };
 
         let db = self.db().clone();
-        let workflows = db.with_conn(|conn| {
-            crate::db::workflows::list_workflows(conn)
-        }).await?;
+        let workflows = db.with_conn(crate::db::workflows::list_workflows).await?;
 
         for wf in workflows {
             if !wf.enabled {
@@ -149,24 +163,39 @@ impl WorkflowEngine {
             if let Some(limit) = wf.concurrency_limit {
                 let wf_id = wf.id.clone();
                 let db2 = self.db().clone();
-                let active = db2.with_conn(move |conn| {
-                    crate::db::workflows::count_active_runs(conn, &wf_id)
-                }).await?;
+                let active = db2
+                    .with_conn(move |conn| crate::db::workflows::count_active_runs(conn, &wf_id))
+                    .await?;
                 if active >= limit {
-                    tracing::debug!("Workflow '{}' skipped — concurrency limit ({}/{})", wf.name, active, limit);
+                    tracing::debug!(
+                        "Workflow '{}' skipped — concurrency limit ({}/{})",
+                        wf.name,
+                        active,
+                        limit
+                    );
                     continue;
                 }
             }
 
             match &wf.trigger {
                 WorkflowTrigger::Cron { .. } => {
-                    self.spawn_run(&wf, serde_json::json!({
-                        "type": "cron",
-                        "triggered_at": Utc::now().to_rfc3339(),
-                    })).await?;
+                    self.spawn_run(
+                        &wf,
+                        serde_json::json!({
+                            "type": "cron",
+                            "triggered_at": Utc::now().to_rfc3339(),
+                        }),
+                    )
+                    .await?;
                 }
-                WorkflowTrigger::Tracker { source, query, labels, .. } => {
-                    self.handle_tracker_trigger(&wf, source, query, labels).await?;
+                WorkflowTrigger::Tracker {
+                    source,
+                    query,
+                    labels,
+                    ..
+                } => {
+                    self.handle_tracker_trigger(&wf, source, query, labels)
+                        .await?;
                 }
                 WorkflowTrigger::Manual => {}
             }
@@ -185,14 +214,18 @@ impl WorkflowEngine {
     ) -> anyhow::Result<()> {
         let tracker: Box<dyn tracker::TrackerSource> = match source {
             TrackerSourceConfig::GitHub { owner, repo } => {
-                let token = std::env::var("GITHUB_TOKEN")
-                    .unwrap_or_default();
+                let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
                 if token.is_empty() {
-                    tracing::warn!("Workflow '{}' tracker trigger skipped: no GITHUB_TOKEN", wf.name);
+                    tracing::warn!(
+                        "Workflow '{}' tracker trigger skipped: no GITHUB_TOKEN",
+                        wf.name
+                    );
                     return Ok(());
                 }
                 Box::new(tracker::github::GitHubTracker::new(
-                    owner.clone(), repo.clone(), token,
+                    owner.clone(),
+                    repo.clone(),
+                    token,
                 ))
             }
         };
@@ -204,9 +237,11 @@ impl WorkflowEngine {
             let wf_id = wf.id.clone();
             let issue_id = issue.id.clone();
             let db = self.db().clone();
-            let already = db.with_conn(move |conn| {
-                crate::db::workflows::is_issue_processed(conn, &wf_id, &issue_id)
-            }).await?;
+            let already = db
+                .with_conn(move |conn| {
+                    crate::db::workflows::is_issue_processed(conn, &wf_id, &issue_id)
+                })
+                .await?;
 
             if already {
                 continue;
@@ -218,7 +253,8 @@ impl WorkflowEngine {
             let db2 = self.db().clone();
             db2.with_conn(move |conn| {
                 crate::db::workflows::mark_issue_processed(conn, &wf_id, &issue_id)
-            }).await?;
+            })
+            .await?;
 
             // Spawn a run with issue context
             let trigger_ctx = serde_json::json!({
@@ -304,7 +340,18 @@ impl WorkflowEngine {
 
         // Execute in background
         tokio::spawn(async move {
-            if let Err(e) = runner::execute_run(state.clone(), &workflow, &mut run, &tokens, &agents, None, None, None).await {
+            if let Err(e) = runner::execute_run(
+                state.clone(),
+                &workflow,
+                &mut run,
+                &tokens,
+                &agents,
+                None,
+                None,
+                None,
+            )
+            .await
+            {
                 tracing::error!("Workflow run {} failed: {}", run.id, e);
             }
             // B6 — surface a silently-failing scheduled/auto run via webhook.
@@ -362,17 +409,28 @@ mod tests {
             }
         }
         let rust: std::collections::BTreeSet<&str> = [
-            StepType::Agent, StepType::ApiCall, StepType::BatchQuickPrompt,
-            StepType::Notify, StepType::Gate, StepType::Exec,
-            StepType::BatchApiCall, StepType::JsonData, StepType::SubWorkflow,
+            StepType::Agent,
+            StepType::ApiCall,
+            StepType::BatchQuickPrompt,
+            StepType::Notify,
+            StepType::Gate,
+            StepType::Exec,
+            StepType::BatchApiCall,
+            StepType::JsonData,
+            StepType::SubWorkflow,
         ]
         .iter()
         .map(variant_name)
         .collect();
 
-        let py_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/disc-introspection-mcp.py");
+        let py_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/scripts/disc-introspection-mcp.py"
+        );
         let py = std::fs::read_to_string(py_path).expect("read sidecar script");
-        let start = py.find("\"step_types_closed_set\"").expect("step_types_closed_set present in sidecar");
+        let start = py
+            .find("\"step_types_closed_set\"")
+            .expect("step_types_closed_set present in sidecar");
         let arr = &py[start..];
         let open = arr.find('[').expect("[");
         let close = arr[open..].find(']').expect("]") + open;
@@ -461,13 +519,20 @@ mod tests {
         // consumer references .data. The pass flips the producer.
         let mut steps = vec![
             bare_step("main", "Fetch tickets", StepOutputFormat::FreeText),
-            bare_step("analyze", "Analyse {{steps.main.data}}", StepOutputFormat::FreeText),
+            bare_step(
+                "analyze",
+                "Analyse {{steps.main.data}}",
+                StepOutputFormat::FreeText,
+            ),
         ];
         let upgraded = heal_steps_in_place(&mut steps);
         assert_eq!(upgraded, vec!["main".to_string()]);
         assert_eq!(steps[0].output_format, StepOutputFormat::Structured);
-        assert_eq!(steps[1].output_format, StepOutputFormat::FreeText,
-            "Consumer stays as-is — only producers get upgraded");
+        assert_eq!(
+            steps[1].output_format,
+            StepOutputFormat::FreeText,
+            "Consumer stays as-is — only producers get upgraded"
+        );
     }
 
     #[test]
@@ -477,8 +542,14 @@ mod tests {
             bare_step("main", "Fetch", StepOutputFormat::FreeText),
             bare_step("use", "{{steps.main.data}}", StepOutputFormat::FreeText),
         ];
-        assert!(!heal_steps_in_place(&mut steps).is_empty(), "First pass should heal");
-        assert!(heal_steps_in_place(&mut steps).is_empty(), "Second pass should no-op");
+        assert!(
+            !heal_steps_in_place(&mut steps).is_empty(),
+            "First pass should heal"
+        );
+        assert!(
+            heal_steps_in_place(&mut steps).is_empty(),
+            "Second pass should no-op"
+        );
     }
 
     #[test]
@@ -505,16 +576,26 @@ mod tests {
             bare_step("b", "Produce", StepOutputFormat::FreeText),
         ];
         let upgraded = heal_steps_in_place(&mut steps);
-        assert!(upgraded.is_empty(), "Forward-ref must stay for save-time validation to catch");
-        assert_eq!(steps[1].output_format, StepOutputFormat::FreeText,
-            "Producer is referenced illegally (forward) — not upgraded");
+        assert!(
+            upgraded.is_empty(),
+            "Forward-ref must stay for save-time validation to catch"
+        );
+        assert_eq!(
+            steps[1].output_format,
+            StepOutputFormat::FreeText,
+            "Producer is referenced illegally (forward) — not upgraded"
+        );
     }
 
     #[test]
     fn heal_upgrades_previous_step_predecessor() {
         let mut steps = vec![
             bare_step("a", "Do a thing", StepOutputFormat::FreeText),
-            bare_step("b", "Summary: {{previous_step.summary}}", StepOutputFormat::FreeText),
+            bare_step(
+                "b",
+                "Summary: {{previous_step.summary}}",
+                StepOutputFormat::FreeText,
+            ),
         ];
         let upgraded = heal_steps_in_place(&mut steps);
         assert_eq!(upgraded, vec!["a".to_string()]);

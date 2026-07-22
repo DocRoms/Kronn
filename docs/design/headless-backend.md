@@ -18,7 +18,7 @@ rejected:
 
 1. **Schema drift** — the bridge would duplicate migration knowledge (75
    migrations and counting). Two sources of truth for the schema is the exact
-   bug class the 0.8.12/0.8.13 hardening spent days eliminating (index vs
+   bug class the 0.8.12/0.9.0 hardening spent days eliminating (index vs
    files, `done_status` vs DB row…).
 2. **Crypto boundary** — the secrets envelope lives in the backend; a
    SQL-only bridge could never resolve credentials, tokens, or encrypted
@@ -60,7 +60,7 @@ HTTP error per call.
   the environment.
 - **Audits/workflows launched against a headless backend** run fine (agents
   spawn on demand); only cron-triggered work requires the full profile. The
-  audit drop-guard (0.8.13) and boot reconciles behave identically.
+  audit drop-guard (0.9.0) and boot reconciles behave identically.
 - **Single-instance guard**: headless must refuse to start when a full
   backend already owns the port/db lock (`.kronn.lock`), and a full boot
   should adopt-or-replace a headless one gracefully.
@@ -90,4 +90,4 @@ backend AND the frontend? Two different answers:
 ## Sizing
 
 Backend: a boot-path branch gating scanner/cron/workflow autostart (~1 day
-incl. tests). Bridge: autostart + error message (~2 h). Candidate: 0.8.14.
+incl. tests). Bridge: autostart + error message (~2 h). Candidate: 0.9.1.

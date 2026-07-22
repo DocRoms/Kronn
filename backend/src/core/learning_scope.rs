@@ -34,21 +34,39 @@ mod tests {
 
     #[test]
     fn preference_always_user() {
-        assert_eq!(route_scope(LearningKind::Preference, Some("p1")), LearningScope::User);
-        assert_eq!(route_scope(LearningKind::Preference, None), LearningScope::User);
+        assert_eq!(
+            route_scope(LearningKind::Preference, Some("p1")),
+            LearningScope::User
+        );
+        assert_eq!(
+            route_scope(LearningKind::Preference, None),
+            LearningScope::User
+        );
     }
 
     #[test]
     fn fact_inference_route_on_project_presence() {
-        assert_eq!(route_scope(LearningKind::Fact, Some("p1")), LearningScope::Project);
+        assert_eq!(
+            route_scope(LearningKind::Fact, Some("p1")),
+            LearningScope::Project
+        );
         assert_eq!(route_scope(LearningKind::Fact, None), LearningScope::User);
-        assert_eq!(route_scope(LearningKind::Inference, Some("p1")), LearningScope::Project);
-        assert_eq!(route_scope(LearningKind::Inference, None), LearningScope::User);
+        assert_eq!(
+            route_scope(LearningKind::Inference, Some("p1")),
+            LearningScope::Project
+        );
+        assert_eq!(
+            route_scope(LearningKind::Inference, None),
+            LearningScope::User
+        );
     }
 
     #[test]
     fn targets_are_dedicated_files() {
-        assert_eq!(promotion_target(LearningScope::Project), "docs/learnings.md");
+        assert_eq!(
+            promotion_target(LearningScope::Project),
+            "docs/learnings.md"
+        );
         assert_eq!(promotion_target(LearningScope::User), "learnings.md");
     }
 }

@@ -168,6 +168,20 @@ test.describe('Run detail — produced branches panel', () => {
         body: JSON.stringify({ success: true, data: [RUN_FIXTURE], error: null }),
       })
     );
+    await page.route(`**/api/workflows/${WF_ID}/runs?*`, route =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: [RUN_FIXTURE], error: null }),
+      })
+    );
+    await page.route(`**/api/workflows/${WF_ID}/runs/count`, route =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: 1, error: null }),
+      })
+    );
 
     await page.route(`**/api/workflows/${WF_ID}/runs/${RUN_ID}`, route => {
       if (route.request().method() === 'GET') {

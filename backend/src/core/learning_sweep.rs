@@ -1,4 +1,4 @@
-//! 0.9.0 — Continual Learning staleness cron (spec §8, decision D9).
+//! 0.10.0 — Continual Learning staleness cron (spec §8, decision D9).
 //!
 //! A `tokio::interval` loop (hourly) that marks pending/validated learnings
 //! `stale` once they haven't been (re)validated for 7 days — baseline
@@ -57,7 +57,8 @@ impl LearningSweep {
         let n = self
             .db
             .with_conn(move |conn| {
-                crate::db::learnings::mark_stale_before(conn, &cutoff).map_err(|e| anyhow::anyhow!("{e}"))
+                crate::db::learnings::mark_stale_before(conn, &cutoff)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
             })
             .await?;
         if n > 0 {
@@ -77,7 +78,11 @@ mod tests {
         Learning {
             id: id.into(),
             claim: format!("claim {id}"),
-            evidence: vec![Evidence { kind: "user".into(), reference: "user:2000-01-01".into(), quote: None }],
+            evidence: vec![Evidence {
+                kind: "user".into(),
+                reference: "user:2000-01-01".into(),
+                quote: None,
+            }],
             kind: LearningKind::Preference,
             status: LearningStatus::Pending,
             scope: None,

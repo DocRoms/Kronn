@@ -5,10 +5,7 @@
 //! Gemini …), read from their local logs. See `core::usage` for the scope
 //! discipline (global, not per-Kronn-project in 0.8.7).
 
-use axum::{
-    extract::Query,
-    Json,
-};
+use axum::{extract::Query, Json};
 use serde::Deserialize;
 
 use crate::core::usage::{self, UsageReport};

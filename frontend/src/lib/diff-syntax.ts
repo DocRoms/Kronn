@@ -22,6 +22,9 @@
 
 import hljs from 'highlight.js/lib/core';
 import bash from 'highlight.js/lib/languages/bash';
+import c from 'highlight.js/lib/languages/c';
+import cpp from 'highlight.js/lib/languages/cpp';
+import csharp from 'highlight.js/lib/languages/csharp';
 import css from 'highlight.js/lib/languages/css';
 import go from 'highlight.js/lib/languages/go';
 import ini from 'highlight.js/lib/languages/ini'; // also handles TOML-ish
@@ -29,6 +32,7 @@ import java from 'highlight.js/lib/languages/java';
 import javascript from 'highlight.js/lib/languages/javascript';
 import json from 'highlight.js/lib/languages/json';
 import markdown from 'highlight.js/lib/languages/markdown';
+import php from 'highlight.js/lib/languages/php';
 import python from 'highlight.js/lib/languages/python';
 import rust from 'highlight.js/lib/languages/rust';
 import shell from 'highlight.js/lib/languages/shell';
@@ -41,6 +45,9 @@ import yaml from 'highlight.js/lib/languages/yaml';
 // module-level side-effect keeps the call site for each language visible
 // in one place — useful when debugging missing highlights.
 hljs.registerLanguage('bash', bash);
+hljs.registerLanguage('c', c);
+hljs.registerLanguage('cpp', cpp);
+hljs.registerLanguage('csharp', csharp);
 hljs.registerLanguage('css', css);
 hljs.registerLanguage('go', go);
 hljs.registerLanguage('ini', ini);
@@ -48,6 +55,7 @@ hljs.registerLanguage('java', java);
 hljs.registerLanguage('javascript', javascript);
 hljs.registerLanguage('json', json);
 hljs.registerLanguage('markdown', markdown);
+hljs.registerLanguage('php', php);
 hljs.registerLanguage('python', python);
 hljs.registerLanguage('rust', rust);
 hljs.registerLanguage('shell', shell);
@@ -87,10 +95,18 @@ export function languageForPath(path: string): string | null {
       return 'rust';
     case 'py':
       return 'python';
+    case 'php':
+      return 'php';
     case 'go':
       return 'go';
     case 'java':
       return 'java';
+    case 'c': case 'h':
+      return 'c';
+    case 'cc': case 'cpp': case 'cxx': case 'hpp':
+      return 'cpp';
+    case 'cs':
+      return 'csharp';
     case 'json': case 'jsonc':
       return 'json';
     case 'yaml': case 'yml':

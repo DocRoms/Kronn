@@ -1,4 +1,7 @@
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::Utc;
 
 use crate::models::{AddContactRequest, AddContactResult, ApiResponse, Contact, NetworkInfo};
@@ -19,14 +22,19 @@ pub async fn add(
 ) -> Json<ApiResponse<AddContactResult>> {
     let (pseudo, kronn_url) = match crate::db::contacts::parse_invite_code(&req.invite_code) {
         Some(parsed) => parsed,
-        None => return Json(ApiResponse::err("Invalid invite code. Format: kronn:pseudo@host:port")),
+        None => {
+            return Json(ApiResponse::err(
+                "Invalid invite code. Format: kronn:pseudo@host:port",
+            ))
+        }
     };
 
     // Check if already exists
     let code = req.invite_code.clone();
-    let exists = state.db.with_conn(move |conn| {
-        crate::db::contacts::find_contact_by_invite_code(conn, &code)
-    }).await;
+    let exists = state
+        .db
+        .with_conn(move |conn| crate::db::contacts::find_contact_by_invite_code(conn, &code))
+        .await;
     if let Ok(Some(_)) = exists {
         return Json(ApiResponse::err("Contact already exists"));
     }
@@ -63,7 +71,11 @@ pub async fn add(
     };
 
     let c = contact.clone();
-    match state.db.with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(AddContactResult { contact, warning })),
         Err(e) => Json(ApiResponse::err(format!("Failed to add contact: {}", e))),
     }
@@ -106,7 +118,9 @@ fn is_tailscale_ip(ip: &str) -> bool {
 /// Check if an IP is in a private range (10.x, 172.16-31.x, 192.168.x)
 fn is_private_ip(ip: &str) -> bool {
     let parts: Vec<u8> = ip.split('.').filter_map(|s| s.parse().ok()).collect();
-    if parts.len() != 4 { return false; }
+    if parts.len() != 4 {
+        return false;
+    }
     parts[0] == 10
         || (parts[0] == 172 && (16..=31).contains(&parts[1]))
         || (parts[0] == 192 && parts[1] == 168)
@@ -117,7 +131,11 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    match state.db.with_conn(move |conn| crate::db::contacts::delete_contact(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::contacts::delete_contact(conn, &id))
+        .await
+    {
         Ok(true) => Json(ApiResponse::ok(())),
         Ok(false) => Json(ApiResponse::err("Contact not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -216,9 +234,10 @@ pub async fn ping(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<bool>> {
-    let contact = state.db.with_conn(move |conn| {
-        crate::db::contacts::get_contact(conn, &id)
-    }).await;
+    let contact = state
+        .db
+        .with_conn(move |conn| crate::db::contacts::get_contact(conn, &id))
+        .await;
 
     let contact = match contact {
         Ok(Some(c)) => c,
@@ -278,10 +297,7 @@ mod tests {
 
     #[test]
     fn advertised_host_falls_back_to_host() {
-        assert_eq!(
-            advertised_host(&cfg("192.168.1.50", None)),
-            "192.168.1.50"
-        );
+        assert_eq!(advertised_host(&cfg("192.168.1.50", None)), "192.168.1.50");
     }
 
     #[test]
@@ -292,10 +308,7 @@ mod tests {
 
     #[test]
     fn advertised_host_ignores_empty_domain() {
-        assert_eq!(
-            advertised_host(&cfg("10.0.0.5", Some(""))),
-            "10.0.0.5"
-        );
+        assert_eq!(advertised_host(&cfg("10.0.0.5", Some(""))), "10.0.0.5");
     }
 
     #[tokio::test]
@@ -336,7 +349,10 @@ mod tests {
             assert!(code.starts_with("kronn:"), "host={h} code={code}");
             assert!(!code.starts_with("kronn:@"), "empty pseudo leaked: {code}");
             let parsed = parse_invite_code(&code);
-            assert!(parsed.is_some(), "peer must accept our code (host={h}): {code}");
+            assert!(
+                parsed.is_some(),
+                "peer must accept our code (host={h}): {code}"
+            );
         }
     }
 

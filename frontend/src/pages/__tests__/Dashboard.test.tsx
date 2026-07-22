@@ -338,7 +338,7 @@ describe('Dashboard — Ctrl+Enter keyboard shortcuts', () => {
   });
 });
 
-describe('Dashboard — audit_finished toast (0.8.13)', () => {
+describe('Dashboard — audit_finished toast (0.9.0)', () => {
   // The WS hook is module-mocked; capture the handler Dashboard registers
   // so tests can inject audit_finished frames directly.
   const fireWs = async (msg: unknown) => {

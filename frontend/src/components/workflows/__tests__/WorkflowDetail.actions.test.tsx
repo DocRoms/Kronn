@@ -21,8 +21,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 
-const { cancelRun, decideRun, listBatchRunSummaries } = vi.hoisted(() => ({
+const { cancelRun, resumeRun, decideRun, listBatchRunSummaries } = vi.hoisted(() => ({
   cancelRun: vi.fn(),
+  resumeRun: vi.fn(),
   decideRun: vi.fn(),
   listBatchRunSummaries: vi.fn(),
 }));
@@ -34,6 +35,7 @@ vi.mock('../../../lib/api', () =>
       // gate-decision path resolves. cancelRun + listBatchRunSummaries are
       // in the factory but we want our spies so we can assert calls.
       cancelRun,
+      resumeRun,
       decideRun,
       listBatchRunSummaries,
     },
@@ -139,6 +141,7 @@ const renderDetail = (overrides: Partial<Props> = {}) => {
 
 beforeEach(() => {
   cancelRun.mockReset().mockResolvedValue({ run_cancelled: true, child_discs_cancelled: 0 });
+  resumeRun.mockReset().mockResolvedValue({ run_id: 'r1', new_status: 'Running' });
   decideRun.mockReset().mockResolvedValue({ run_id: 'r1', new_status: 'Running' });
   listBatchRunSummaries.mockReset().mockResolvedValue([]);
 });
@@ -271,6 +274,39 @@ describe('WorkflowDetail — runs list', () => {
     expect(screen.getByText('Runs (2)')).toBeInTheDocument();
     expect(screen.getByText('Success')).toBeInTheDocument();
     expect(screen.getByText('Failed')).toBeInTheDocument();
+  });
+
+  it('loads the next server page when older runs remain', () => {
+    const onLoadMoreRuns = vi.fn();
+    const runs = Array.from({ length: 10 }, (_, index) =>
+      mkRun({ id: `run-${index}`, status: 'Success' })
+    );
+    renderDetail({ runs, totalRuns: 500, hasMoreRuns: true, onLoadMoreRuns });
+
+    expect(screen.getByText('Runs (500)')).toBeInTheDocument();
+    const amount = screen.getByLabelText('wf.runs.loadAmountLabel');
+    expect(screen.getByRole('option', { name: '10' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '50' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '100' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'wf.runs.loadAll' })).toBeInTheDocument();
+
+    fireEvent.change(amount, { target: { value: '50' } });
+    fireEvent.click(screen.getByText('wf.runs.loadPrefix'));
+    expect(onLoadMoreRuns).toHaveBeenCalledWith(50);
+
+    onLoadMoreRuns.mockClear();
+    fireEvent.click(screen.getByText('wf.runs.loadSuffix'));
+    expect(onLoadMoreRuns).toHaveBeenCalledWith(50);
+
+    onLoadMoreRuns.mockClear();
+    fireEvent.click(amount);
+    expect(onLoadMoreRuns).not.toHaveBeenCalled();
+
+    fireEvent.change(amount, { target: { value: 'all' } });
+    const loadArea = screen.getByText('wf.runs.loadSuffix').closest('.wf-runs-load-more');
+    expect(loadArea).not.toBeNull();
+    fireEvent.click(loadArea!);
+    expect(onLoadMoreRuns).toHaveBeenLastCalledWith('all');
   });
 
   it('fires onDeleteAllRuns from the delete-all button', () => {
@@ -537,7 +573,9 @@ describe('WorkflowDetail — batch conversations chip', () => {
 // ---- #6 compact rows -------------------------------------------------
 describe('WorkflowDetail — compact run rows', () => {
   it('collapses a terminal run and expands its detail on click', () => {
-    renderDetail({ runs: [mkRun({ id: 'r1', status: 'Success' })] });
+    const { container } = renderDetail({ runs: [mkRun({ id: 'r1', status: 'Success' })] });
+    expect(container.querySelector('.wf-run-compact [data-status="Success"]'))
+      .toHaveAttribute('data-current', 'true');
     // Collapsed: the full RunDetail (its delete button) is not mounted.
     expect(screen.queryByTitle('wf.deleteRun')).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: /Success/ }));
@@ -548,6 +586,49 @@ describe('WorkflowDetail — compact run rows', () => {
     renderDetail({ runs: [mkRun({ id: 'r1', status: 'WaitingApproval', finished_at: null })] });
     const row = screen.getByRole('button', { name: /WaitingApproval/ });
     expect(row).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps the resume status trail visible while the terminal run is collapsed', () => {
+    renderDetail({
+      runs: [mkRun({
+        id: 'resumed',
+        status: 'Success',
+        state: {
+          '__kronn.resume_history': JSON.stringify({
+            v: 1,
+            events: [{ status: 'Interrupted' }, { status: 'Running' }],
+          }),
+        },
+      })],
+    });
+
+    const row = screen.getByRole('button', { name: /Interrupted.*Running.*Success/ });
+    expect(row).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByTestId('wf-run-status-trail')).toBeInTheDocument();
+  });
+
+  it('resumes an interrupted child through its parent and opens that parent run', async () => {
+    const onNavigateToRun = vi.fn();
+    const child = mkRun({
+      id: 'child-run',
+      status: 'Interrupted',
+      run_type: 'subworkflow',
+      parent_run_id: 'parent-run',
+      parent_workflow_id: 'parent-wf',
+      parent_workflow_name: 'Parent workflow',
+    });
+    const { props } = renderDetail({
+      workflow: mkWorkflow({ id: 'child-wf' }),
+      runs: [child],
+      focusRunId: child.id,
+      onNavigateToRun,
+    });
+
+    fireEvent.click(await screen.findByText('wf.resumeRun'));
+
+    await waitFor(() => expect(resumeRun).toHaveBeenCalledWith('parent-run'));
+    expect(onNavigateToRun).toHaveBeenCalledWith('parent-wf', 'parent-run');
+    expect(props.onRefresh).toHaveBeenCalled();
   });
 
   it('#11 — focusRunId auto-expands the targeted (otherwise-collapsed) run', () => {

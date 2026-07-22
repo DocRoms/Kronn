@@ -55,6 +55,10 @@ The bridge auto-derives your `agent_type` from the MCP `clientInfo.name` handsha
 
 - **Simple (recommended for live chat)** : `disc_append({content: "..."})`. Bridge auto-fills `disc_id` (from `disc_join` binding), generates `source_msg_id`, defaults `role=Agent`, stamps `agent_type` from `clientInfo`.
 - **Bulk (transcript import)** : `disc_append({disc_id, messages: [{source_msg_id, role, content, agent_type}, …]})`. Idempotent on `(disc_id, source_msg_id)`.
+- A simple live Agent append wakes the discussion's native principal so it can
+  answer the joined peer. The bridge session id distinguishes this from an
+  imported transcript; duplicates, bulk appends and no-agent discussions do
+  not launch the native runner.
 
 ## Project rules
 

@@ -73,9 +73,7 @@ const SPEC_HEADER: &str = "\
 /// Canonical opening marker — written with the date filled in.
 fn opening_marker_for_today() -> String {
     let today = Utc::now().format("%Y-%m-%d").to_string();
-    format!(
-        "<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"{today}\" -->"
-    )
+    format!("<!-- kronn:section name=\"anti-hallu\" curated=\"ai\" audit=\"{today}\" -->")
 }
 
 /// The full canonical block (open marker + body + close marker), with today's
@@ -259,7 +257,9 @@ mod tests {
     /// the `<!-- kronn:section:end -->` placement.
     #[test]
     fn canonical_body_shape() {
-        assert!(ANTI_HALLU_SECTION_BODY.trim_start().starts_with("## 0. Anti-Hallucination Protocol"));
+        assert!(ANTI_HALLU_SECTION_BODY
+            .trim_start()
+            .starts_with("## 0. Anti-Hallucination Protocol"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("**READ THE CODE**"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("[src: file:"));
         assert!(ANTI_HALLU_SECTION_BODY.contains("[src: url:"));
@@ -289,7 +289,10 @@ mod tests {
         // The block must come BEFORE the first `---` separator.
         let section_pos = out.find("kronn:section").unwrap();
         let hr_pos = out.find("\n---\n").unwrap();
-        assert!(section_pos < hr_pos, "block must precede the --- separator\n--- got ---\n{out}");
+        assert!(
+            section_pos < hr_pos,
+            "block must precede the --- separator\n--- got ---\n{out}"
+        );
     }
 
     #[test]
@@ -300,8 +303,14 @@ mod tests {
         );
         let (out, result) = transform(&input);
         assert_eq!(result, AntiHalluApplyResult::Refreshed);
-        assert!(!out.contains(stale_date), "stale audit date must be replaced");
-        assert!(out.contains("SOME USER-EDITED BODY THAT SHOULD STAY"), "body inside markers must be preserved");
+        assert!(
+            !out.contains(stale_date),
+            "stale audit date must be replaced"
+        );
+        assert!(
+            out.contains("SOME USER-EDITED BODY THAT SHOULD STAY"),
+            "body inside markers must be preserved"
+        );
         assert!(out.contains("audit=\""));
         let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
         assert!(out.contains(&today), "new audit date must be today");
@@ -332,7 +341,10 @@ mod tests {
         let (out, result) = transform(&input);
         assert_eq!(result, AntiHalluApplyResult::Refreshed);
         assert!(out.contains("kronn:spec="), "spec header must be added");
-        assert!(out.contains("github.com/DocRoms/Kronn"), "canonical URL must be present");
+        assert!(
+            out.contains("github.com/DocRoms/Kronn"),
+            "canonical URL must be present"
+        );
         // Section body must be untouched.
         assert!(out.contains("BODY"));
     }
@@ -343,7 +355,10 @@ mod tests {
         let (out1, _) = transform(input);
         let (out2, _) = transform(&out1);
         let count = out2.matches("kronn:spec=").count();
-        assert_eq!(count, 1, "spec marker must appear exactly once after two passes");
+        assert_eq!(
+            count, 1,
+            "spec marker must appear exactly once after two passes"
+        );
     }
 
     #[test]
@@ -374,8 +389,8 @@ mod tests {
             .parent()
             .expect("backend has a parent")
             .join("templates/docs/AGENTS.md");
-        let template = std::fs::read_to_string(&template_path)
-            .expect("templates/docs/AGENTS.md must exist");
+        let template =
+            std::fs::read_to_string(&template_path).expect("templates/docs/AGENTS.md must exist");
 
         // Extract the section between the markers in the template.
         let open_idx = template

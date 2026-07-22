@@ -85,7 +85,11 @@ pub fn key_fingerprint(key: &[u8; 32]) -> String {
     let result = hasher.finalize();
     // sha2 0.11 returns `hybrid_array::Array` (no `LowerHex`) — manual hex, as
     // in `core::checksums`. First 8 bytes are ample to distinguish keys.
-    result.iter().take(8).map(|b| format!("{:02x}", b)).collect()
+    result
+        .iter()
+        .take(8)
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// KID from a hex-encoded secret string — convenience for the config / keystore
@@ -234,7 +238,10 @@ mod tests {
         assert!(s1.chars().all(|c| c.is_ascii_hexdigit()));
         // Collision in 256-bit space is astronomically unlikely. Two calls
         // returning the same value flags an OsRng wiring bug.
-        assert_ne!(s1, s2, "generate_secret must produce fresh entropy each call");
+        assert_ne!(
+            s1, s2,
+            "generate_secret must produce fresh entropy each call"
+        );
     }
 
     #[test]

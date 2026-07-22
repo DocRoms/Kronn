@@ -155,15 +155,35 @@ test.describe('Run detail — WaitingApproval surfaced as amber (not red)', () =
         body: JSON.stringify({ success: true, data: [PAUSED_RUN], error: null }),
       })
     );
+    await page.route(`**/api/workflows/${WF_ID}/runs?*`, route =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: [PAUSED_RUN], error: null }),
+      })
+    );
+    await page.route(`**/api/workflows/${WF_ID}/runs/count`, route =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: 1, error: null }),
+      })
+    );
 
     const dashboard = new DashboardPage(page);
     await dashboard.goto();
     await dashboard.clickWorkflows();
     await page.locator('.wf-card').filter({ hasText: 'E2E Waiting Banner' }).click();
 
-    // The run row should be visible and tagged with the WaitingApproval
-    // badge. We assert the badge class (which encodes the amber tone)
-    // rather than the localized text, to stay locale-independent.
+    // Run history is now a compact accordion. Open the row before asserting
+    // the detailed WaitingApproval badge.
+    const compactRow = page.locator('.wf-run-compact').first();
+    await expect(compactRow).toBeVisible({ timeout: 5_000 });
+    await compactRow.click();
+
+    // The expanded run should be tagged with the WaitingApproval badge. We
+    // assert the badge class (which encodes the amber tone) rather than the
+    // localized text, to stay locale-independent.
     const runCard = page.locator('.wf-run-card').first();
     await expect(runCard).toBeVisible({ timeout: 5_000 });
 

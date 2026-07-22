@@ -2,7 +2,9 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 
-use crate::models::{AgentType, ModelTier, QuickPrompt, QuickPromptVersion, QuickPromptVersionMetrics};
+use crate::models::{
+    AgentType, ModelTier, QuickPrompt, QuickPromptVersion, QuickPromptVersionMetrics,
+};
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
@@ -33,7 +35,10 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
     let tier_str: String = row.get(8).unwrap_or_default();
     let description: String = row.get(11).unwrap_or_default();
     // 070 — nullable; absent/NULL/garbage → None (fall back to tier).
-    let agent_settings = row.get::<_, Option<String>>(14).ok().flatten()
+    let agent_settings = row
+        .get::<_, Option<String>>(14)
+        .ok()
+        .flatten()
         .and_then(|s| serde_json::from_str(&s).ok());
     // 0.8.5 — fall back to `[]` when the column is missing (pre-056 rows
     // were already backfilled with `'[]'` by the ALTER, but we keep the
@@ -63,9 +68,13 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
 const SELECT_COLUMNS: &str = "id, name, icon, prompt_template, variables_json, agent, project_id, skill_ids_json, tier, created_at, updated_at, description, profile_ids_json, directive_ids_json, agent_settings_json";
 
 pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
-    let sql = format!("SELECT {} FROM quick_prompts ORDER BY updated_at DESC", SELECT_COLUMNS);
+    let sql = format!(
+        "SELECT {} FROM quick_prompts ORDER BY updated_at DESC",
+        SELECT_COLUMNS
+    );
     let mut stmt = conn.prepare(&sql)?;
-    let items = stmt.query_map([], |row| Ok(row_to_quick_prompt(row)))?
+    let items = stmt
+        .query_map([], |row| Ok(row_to_quick_prompt(row)))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(items)
@@ -74,7 +83,9 @@ pub fn list_quick_prompts(conn: &Connection) -> Result<Vec<QuickPrompt>> {
 pub fn get_quick_prompt(conn: &Connection, id: &str) -> Result<Option<QuickPrompt>> {
     let sql = format!("SELECT {} FROM quick_prompts WHERE id = ?1", SELECT_COLUMNS);
     let mut stmt = conn.prepare(&sql)?;
-    let item = stmt.query_row(params![id], |row| Ok(row_to_quick_prompt(row))).ok();
+    let item = stmt
+        .query_row(params![id], |row| Ok(row_to_quick_prompt(row)))
+        .ok();
     Ok(item)
 }
 
@@ -185,9 +196,12 @@ pub fn snapshot_quick_prompt_version(conn: &Connection, qp: &QuickPrompt) -> Res
 pub fn list_all_quick_prompt_versions(conn: &Connection) -> Result<Vec<QuickPromptVersion>> {
     let mut ids = Vec::new();
     {
-        let mut stmt = conn.prepare("SELECT DISTINCT quick_prompt_id FROM quick_prompt_versions")?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT quick_prompt_id FROM quick_prompt_versions")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
-        for r in rows { ids.push(r?); }
+        for r in rows {
+            ids.push(r?);
+        }
     }
     let mut all = Vec::new();
     for id in ids {
@@ -230,14 +244,17 @@ pub fn insert_quick_prompt_version_row(conn: &Connection, v: &QuickPromptVersion
 }
 
 /// Return all stored versions for a QP, newest first.
-pub fn list_quick_prompt_versions(conn: &Connection, qp_id: &str) -> Result<Vec<QuickPromptVersion>> {
+pub fn list_quick_prompt_versions(
+    conn: &Connection,
+    qp_id: &str,
+) -> Result<Vec<QuickPromptVersion>> {
     let mut stmt = conn.prepare(
         "SELECT id, quick_prompt_id, version_index, name, icon, prompt_template, variables_json,
                 agent, project_id, skill_ids_json, profile_ids_json, directive_ids_json,
                 tier, description, created_at
          FROM quick_prompt_versions
          WHERE quick_prompt_id = ?1
-         ORDER BY version_index DESC"
+         ORDER BY version_index DESC",
     )?;
     let rows = stmt.query_map(params![qp_id], |row| {
         let agent_str: String = row.get::<_, String>(7).unwrap_or_default();
@@ -254,7 +271,8 @@ pub fn list_quick_prompt_versions(conn: &Connection, qp_id: &str) -> Result<Vec<
             icon: row.get(4)?,
             prompt_template: row.get(5)?,
             variables: serde_json::from_str(&variables_json).unwrap_or_default(),
-            agent: serde_json::from_str(&format!("\"{}\"", agent_str)).unwrap_or(AgentType::ClaudeCode),
+            agent: serde_json::from_str(&format!("\"{}\"", agent_str))
+                .unwrap_or(AgentType::ClaudeCode),
             project_id: row.get(8)?,
             skill_ids: serde_json::from_str(&skill_ids_json).unwrap_or_default(),
             profile_ids: serde_json::from_str(&profile_ids_json).unwrap_or_default(),
@@ -273,7 +291,10 @@ pub fn list_quick_prompt_versions(conn: &Connection, qp_id: &str) -> Result<Vec<
 /// (the QP's first reply). Returns one row per version_index that has
 /// at least one launch; versions with zero launches are NOT returned
 /// (the frontend renders them with N/A — saves a row roundtrip).
-pub fn list_quick_prompt_version_metrics(conn: &Connection, qp_id: &str) -> Result<Vec<QuickPromptVersionMetrics>> {
+pub fn list_quick_prompt_version_metrics(
+    conn: &Connection,
+    qp_id: &str,
+) -> Result<Vec<QuickPromptVersionMetrics>> {
     // Inner query: pick the first Agent message per discussion (by
     // sort_order, falling back to timestamp). Aggregate the chosen
     // rows grouped by `originating_qp_version` on the parent disc.
@@ -295,7 +316,7 @@ pub fn list_quick_prompt_version_metrics(conn: &Connection, qp_id: &str) -> Resu
                LIMIT 1
            )
          GROUP BY d.originating_qp_version
-         ORDER BY d.originating_qp_version DESC"
+         ORDER BY d.originating_qp_version DESC",
     )?;
     let rows = stmt.query_map(params![qp_id], |row| {
         Ok(QuickPromptVersionMetrics {
@@ -416,7 +437,11 @@ mod tests {
         let qp = mk_qp("qp-1", "first");
         insert_quick_prompt(&conn, &qp).unwrap();
         let cur = current_version_index(&conn, "qp-1").unwrap();
-        assert_eq!(cur, Some(1), "insert must seed v1 automatically (058 contract)");
+        assert_eq!(
+            cur,
+            Some(1),
+            "insert must seed v1 automatically (058 contract)"
+        );
     }
 
     #[test]
@@ -503,8 +528,10 @@ mod tests {
         let result = delete_quick_prompt_version(&conn, "qp-LATEST", 1);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("Cannot delete the current version"),
-            "expected anchor-protection error, got: {msg}");
+        assert!(
+            msg.contains("Cannot delete the current version"),
+            "expected anchor-protection error, got: {msg}"
+        );
     }
 
     #[test]
@@ -529,8 +556,10 @@ mod tests {
         let conn = test_conn();
         insert_quick_prompt(&conn, &mk_qp("qp-NoLaunch", "NoLaunch")).unwrap();
         let metrics = list_quick_prompt_version_metrics(&conn, "qp-NoLaunch").unwrap();
-        assert!(metrics.is_empty(),
-            "metrics must be empty for a QP that hasn't been launched yet");
+        assert!(
+            metrics.is_empty(),
+            "metrics must be empty for a QP that hasn't been launched yet"
+        );
     }
 
     #[test]

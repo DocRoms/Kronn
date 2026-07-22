@@ -30,11 +30,11 @@ use std::path::Path;
 /// runtime so user-curated `.mcp.json` files with different
 /// capitalization still resolve.
 pub const AUDIT_MCP_ALLOWLIST: &[&str] = &[
-    "kronn-internal",        // Kronn's own introspection — always
-    "Sequential Thinking",   // Structured reasoning, useful on big audits
-    "Memory",                // Cross-step state
-    "context7",              // External lib docs lookup
-    "Git",                   // Repo history (git log, blame) without Bash
+    "kronn-internal",      // Kronn's own introspection — always
+    "Sequential Thinking", // Structured reasoning, useful on big audits
+    "Memory",              // Cross-step state
+    "context7",            // External lib docs lookup
+    "Git",                 // Repo history (git log, blame) without Bash
 ];
 
 /// Env var the user can set to extend the allowlist for a single
@@ -98,10 +98,7 @@ pub fn filter_mcp_json(raw: &str) -> Result<(Value, AuditMcpFilterReport), serde
     // A `.mcp.json` without `mcpServers` is unusual but not an error;
     // we pass it through verbatim so the audit doesn't crash on a
     // half-written file.
-    if let Some(servers) = value
-        .get_mut("mcpServers")
-        .and_then(|s| s.as_object_mut())
-    {
+    if let Some(servers) = value.get_mut("mcpServers").and_then(|s| s.as_object_mut()) {
         let original: Map<String, Value> = std::mem::take(servers);
         for (name, cfg) in original {
             if is_allowed(&name, &allowlist) {
@@ -190,7 +187,8 @@ impl AuditMcpSwap {
         }
         tracing::info!(
             "Audit MCP filter active: kept {} / dropped {} servers",
-            report.kept.len(), report.dropped.len()
+            report.kept.len(),
+            report.dropped.len()
         );
         Ok(Some(Self {
             mcp_path: Some(mcp_path),
@@ -207,7 +205,9 @@ impl AuditMcpSwap {
     /// Manual restore — usually not needed, the Drop impl handles it.
     /// Idempotent: a second call after a successful first is a no-op.
     pub fn restore(&mut self) {
-        let Some(mcp_path) = self.mcp_path.take() else { return; };
+        let Some(mcp_path) = self.mcp_path.take() else {
+            return;
+        };
         if !self.bak_path.exists() {
             tracing::warn!(
                 "Audit MCP swap restore: backup file {} missing — original `.mcp.json` may have been replaced by another writer",
@@ -263,15 +263,26 @@ mod tests {
                 "context7":       {"command": "node", "args": ["c7.js"]},
                 "atlassian":      {"command": "npx", "args": ["jira-mcp"]},
             }
-        }).to_string();
+        })
+        .to_string();
         let (filtered, report) = filter_mcp_json(&raw).unwrap();
         let servers = filtered.get("mcpServers").unwrap().as_object().unwrap();
         assert_eq!(servers.len(), 2);
         assert!(servers.contains_key("kronn-internal"));
         assert!(servers.contains_key("context7"));
         // Report mirrors the split for SSE / logs.
-        assert_eq!(report.kept, vec!["context7".to_string(), "kronn-internal".to_string()]);
-        assert_eq!(report.dropped, vec!["Docker".to_string(), "Fastly".to_string(), "atlassian".to_string()]);
+        assert_eq!(
+            report.kept,
+            vec!["context7".to_string(), "kronn-internal".to_string()]
+        );
+        assert_eq!(
+            report.dropped,
+            vec![
+                "Docker".to_string(),
+                "Fastly".to_string(),
+                "atlassian".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -285,10 +296,15 @@ mod tests {
                 "memory":              {"command": "y"},
                 "GIT":                 {"command": "z"},
             }
-        }).to_string();
+        })
+        .to_string();
         let (filtered, report) = filter_mcp_json(&raw).unwrap();
         let servers = filtered.get("mcpServers").unwrap().as_object().unwrap();
-        assert_eq!(servers.len(), 3, "all three should survive despite capitalization drift");
+        assert_eq!(
+            servers.len(),
+            3,
+            "all three should survive despite capitalization drift"
+        );
         assert!(report.dropped.is_empty());
     }
 
@@ -301,7 +317,9 @@ mod tests {
         // (vitest-style) so the env var doesn't leak between tests.
         let _lock = ENV_LOCK.lock().unwrap();
         // SAFETY: lock guarantees no concurrent env writers; OK in test ctx.
-        unsafe { std::env::set_var(AUDIT_MCP_EXTRA_ENV, " Fastly , Docker "); }
+        unsafe {
+            std::env::set_var(AUDIT_MCP_EXTRA_ENV, " Fastly , Docker ");
+        }
 
         let raw = json!({
             "mcpServers": {
@@ -310,20 +328,25 @@ mod tests {
                 "Docker":         {"command": "c"},
                 "atlassian":      {"command": "d"},
             }
-        }).to_string();
+        })
+        .to_string();
         let (_filtered, report) = filter_mcp_json(&raw).unwrap();
         assert!(report.kept.contains(&"kronn-internal".to_string()));
         assert!(report.kept.contains(&"Fastly".to_string()));
         assert!(report.kept.contains(&"Docker".to_string()));
         assert!(report.dropped.contains(&"atlassian".to_string()));
 
-        unsafe { std::env::remove_var(AUDIT_MCP_EXTRA_ENV); }
+        unsafe {
+            std::env::remove_var(AUDIT_MCP_EXTRA_ENV);
+        }
     }
 
     #[test]
     fn empty_or_missing_env_var_uses_hardcoded_allowlist_only() {
         let _lock = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::remove_var(AUDIT_MCP_EXTRA_ENV); }
+        unsafe {
+            std::env::remove_var(AUDIT_MCP_EXTRA_ENV);
+        }
         let allowlist = build_allowlist();
         assert_eq!(
             allowlist.len(),
@@ -339,11 +362,18 @@ mod tests {
         // would gain a `""` entry that matches an MCP server named
         // "" (impossible but defensive).
         let _lock = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var(AUDIT_MCP_EXTRA_ENV, " , , "); }
+        unsafe {
+            std::env::set_var(AUDIT_MCP_EXTRA_ENV, " , , ");
+        }
         let allowlist = build_allowlist();
-        assert_eq!(allowlist.len(), AUDIT_MCP_ALLOWLIST.len(),
-            "empty / whitespace-only entries in the env var must NOT extend the allowlist");
-        unsafe { std::env::remove_var(AUDIT_MCP_EXTRA_ENV); }
+        assert_eq!(
+            allowlist.len(),
+            AUDIT_MCP_ALLOWLIST.len(),
+            "empty / whitespace-only entries in the env var must NOT extend the allowlist"
+        );
+        unsafe {
+            std::env::remove_var(AUDIT_MCP_EXTRA_ENV);
+        }
     }
 
     #[test]
@@ -362,8 +392,10 @@ mod tests {
     fn malformed_json_returns_error_not_panic() {
         let raw = "this is not json";
         let result = filter_mcp_json(raw);
-        assert!(result.is_err(),
-            "malformed JSON must surface as Err so caller can fallback to no MCP rather than panic");
+        assert!(
+            result.is_err(),
+            "malformed JSON must surface as Err so caller can fallback to no MCP rather than panic"
+        );
     }
 
     // ── AuditMcpSwap RAII guard ─────────────────────────────────────────
@@ -386,20 +418,30 @@ mod tests {
         std::fs::write(&mcp, original.to_string()).unwrap();
 
         {
-            let swap = AuditMcpSwap::install(tmp.path()).unwrap()
+            let swap = AuditMcpSwap::install(tmp.path())
+                .unwrap()
                 .expect("swap should install when there's something to filter");
             assert_eq!(swap.report().kept, vec!["kronn-internal".to_string()]);
-            assert_eq!(swap.report().dropped, vec!["Docker".to_string(), "Fastly".to_string()]);
+            assert_eq!(
+                swap.report().dropped,
+                vec!["Docker".to_string(), "Fastly".to_string()]
+            );
             // During the swap, .mcp.json contains only the allowlist.
-            let live: Value = serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+            let live: Value =
+                serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
             let servers = live.get("mcpServers").unwrap().as_object().unwrap();
             assert_eq!(servers.len(), 1);
             assert!(servers.contains_key("kronn-internal"));
         } // swap drops here → restore must run
 
-        let restored: Value = serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        let restored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
         let servers = restored.get("mcpServers").unwrap().as_object().unwrap();
-        assert_eq!(servers.len(), 3, "drop must restore the original 3-server config");
+        assert_eq!(
+            servers.len(),
+            3,
+            "drop must restore the original 3-server config"
+        );
         assert!(servers.contains_key("Fastly"));
         assert!(servers.contains_key("Docker"));
         // Bak file is gone after restore (it was renamed back to .mcp.json).
@@ -413,15 +455,22 @@ mod tests {
         // unchanged, no bak file is created.
         let tmp = TempDir::new().unwrap();
         let mcp = tmp.path().join(".mcp.json");
-        std::fs::write(&mcp, json!({
-            "mcpServers": {
-                "kronn-internal": {"command": "x"},
-                "Memory":         {"command": "y"},
-            }
-        }).to_string()).unwrap();
+        std::fs::write(
+            &mcp,
+            json!({
+                "mcpServers": {
+                    "kronn-internal": {"command": "x"},
+                    "Memory":         {"command": "y"},
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
         let result = AuditMcpSwap::install(tmp.path()).unwrap();
-        assert!(result.is_none(),
-            "no servers to drop → no swap, no bak file");
+        assert!(
+            result.is_none(),
+            "no servers to drop → no swap, no bak file"
+        );
         assert!(!tmp.path().join(".mcp.json.kronn-audit-bak").exists());
     }
 
@@ -444,8 +493,10 @@ mod tests {
         let mcp = tmp.path().join(".mcp.json");
         std::fs::write(&mcp, "this is not json").unwrap();
         let result = AuditMcpSwap::install(tmp.path()).unwrap();
-        assert!(result.is_none(),
-            "malformed JSON falls through to no-swap (defensive)");
+        assert!(
+            result.is_none(),
+            "malformed JSON falls through to no-swap (defensive)"
+        );
         // The user's malformed file MUST stay in place — we don't
         // rewrite or back it up.
         assert_eq!(std::fs::read_to_string(&mcp).unwrap(), "this is not json");
@@ -458,17 +509,23 @@ mod tests {
         // call doing anything.
         let tmp = TempDir::new().unwrap();
         let mcp = tmp.path().join(".mcp.json");
-        std::fs::write(&mcp, json!({
-            "mcpServers": {
-                "kronn-internal": {"command": "x"},
-                "Fastly":         {"command": "y"},
-            }
-        }).to_string()).unwrap();
+        std::fs::write(
+            &mcp,
+            json!({
+                "mcpServers": {
+                    "kronn-internal": {"command": "x"},
+                    "Fastly":         {"command": "y"},
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
         let mut swap = AuditMcpSwap::install(tmp.path()).unwrap().unwrap();
         swap.restore();
         // Second call (and the Drop later) should both be no-ops.
         swap.restore();
-        let restored: Value = serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        let restored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
         assert!(restored.get("mcpServers").unwrap().get("Fastly").is_some());
     }
 
@@ -481,30 +538,47 @@ mod tests {
         // unwinding and the post-panic assertion can't read the file).
         let tmp = TempDir::new().unwrap();
         let mcp = tmp.path().join(".mcp.json");
-        std::fs::write(&mcp, json!({
-            "mcpServers": {
-                "kronn-internal": {"command": "x"},
-                "Fastly":         {"command": "y"},
-            }
-        }).to_string()).unwrap();
+        std::fs::write(
+            &mcp,
+            json!({
+                "mcpServers": {
+                    "kronn-internal": {"command": "x"},
+                    "Fastly":         {"command": "y"},
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
         let project_path = tmp.path().to_path_buf();
         let mcp_path_for_closure = mcp.clone();
         let result = std::panic::catch_unwind(move || {
             let _swap = AuditMcpSwap::install(&project_path).unwrap().unwrap();
             // Confirm filter is active mid-panic.
-            let live: Value = serde_json::from_str(
-                &std::fs::read_to_string(&mcp_path_for_closure).unwrap()
-            ).unwrap();
-            assert_eq!(live.get("mcpServers").unwrap().as_object().unwrap().len(), 1);
+            let live: Value =
+                serde_json::from_str(&std::fs::read_to_string(&mcp_path_for_closure).unwrap())
+                    .unwrap();
+            assert_eq!(
+                live.get("mcpServers").unwrap().as_object().unwrap().len(),
+                1
+            );
             panic!("simulated audit crash");
         });
         assert!(result.is_err());
         // After the panic unwound through Drop, original must be back.
         // `tmp` is still alive (lives in the outer scope), so `mcp` is
         // readable.
-        let restored: Value = serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
-        assert_eq!(restored.get("mcpServers").unwrap().as_object().unwrap().len(), 2,
-            "Drop on panic must restore the original `.mcp.json`");
+        let restored: Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp).unwrap()).unwrap();
+        assert_eq!(
+            restored
+                .get("mcpServers")
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .len(),
+            2,
+            "Drop on panic must restore the original `.mcp.json`"
+        );
     }
 
     // Single mutex guard for tests that mutate the process-wide env

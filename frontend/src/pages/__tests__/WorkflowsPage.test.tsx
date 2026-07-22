@@ -1,8 +1,13 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, act, cleanup, fireEvent, waitFor, within } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import {
+  discussions as discussionsApi,
+  quickApis as quickApisApi,
+  quickPrompts as quickPromptsApi,
+} from '../../lib/api';
 import { WorkflowsPage } from '../WorkflowsPage';
-import type { AgentsConfig, Workflow, WorkflowSummary } from '../../types/generated';
+import type { AgentsConfig, QuickApi, QuickPrompt, Workflow, WorkflowSummary } from '../../types/generated';
 
 const mockWorkflowsApi = vi.hoisted(() => ({
   list: vi.fn().mockResolvedValue([]),
@@ -12,6 +17,7 @@ const mockWorkflowsApi = vi.hoisted(() => ({
   delete: vi.fn(),
   trigger: vi.fn(),
   listRuns: vi.fn().mockResolvedValue([]),
+  countRuns: vi.fn().mockResolvedValue(0),
   getRun: vi.fn(),
   deleteRun: vi.fn(),
   deleteAllRuns: vi.fn(),
@@ -48,12 +54,18 @@ vi.mock('../../lib/api', () => ({
     update: vi.fn(),
     delete: vi.fn(),
   },
+  discussions: {
+    create: vi.fn(),
+  },
   quickPrompts: {
     list: vi.fn().mockResolvedValue([]),
+    metrics: vi.fn().mockResolvedValue([]),
+    history: vi.fn().mockResolvedValue([]),
     create: vi.fn(),
     update: vi.fn(),
     delete: vi.fn(),
     batchRun: vi.fn(),
+    exportQp: vi.fn(),
   },
   quickApis: {
     list: vi.fn().mockResolvedValue([]),
@@ -615,8 +627,7 @@ describe('WorkflowsPage', () => {
       <WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />
     );
 
-    const deleteBtn = document.querySelector('.wf-small-btn-danger') as HTMLButtonElement;
-    expect(deleteBtn).not.toBeNull();
+    const deleteBtn = screen.getByLabelText('Suppr. DeleteMe');
     await act(async () => { fireEvent.click(deleteBtn); });
 
     expect(confirmSpy).toHaveBeenCalled();
@@ -762,6 +773,130 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(lancer?.getAttribute('title')).toMatch(/désactivé/i);
   });
 
+  it('charge 10 runs au départ puis respecte le choix 50', async () => {
+    const run = (id: string) => ({
+      id,
+      workflow_id: 'wf-lab',
+      status: 'Success',
+      trigger_context: null,
+      step_results: [],
+      tokens_used: 0,
+      workspace_path: null,
+      started_at: `2026-07-24T10:${id.padStart(2, '0')}:00Z`,
+      finished_at: `2026-07-24T10:${id.padStart(2, '0')}:30Z`,
+      run_type: 'linear',
+      batch_total: 0,
+      batch_completed: 0,
+      batch_failed: 0,
+      batch_name: null,
+      parent_run_id: null,
+      state: {},
+      produced_branches: [],
+    });
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockReset();
+    mockWorkflowsApi.countRuns.mockReset();
+    mockWorkflowsApi.countRuns.mockResolvedValue(60);
+    mockWorkflowsApi.listRuns
+      .mockResolvedValueOnce(Array.from({ length: 10 }, (_, index) => run(String(index))))
+      .mockResolvedValueOnce(Array.from({ length: 50 }, (_, index) => run(String(index + 10))));
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await waitFor(() => expect(screen.getByText('Runs (60)')).toBeInTheDocument());
+    expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(1, 'wf-lab', 10, 0, true);
+
+    fireEvent.change(screen.getByLabelText(/Nombre d’exécutions à charger/i), {
+      target: { value: '50' },
+    });
+    await act(async () => { fireEvent.click(screen.getByText('Afficher')); });
+    await waitFor(() => {
+      expect(mockWorkflowsApi.listRuns).toHaveBeenNthCalledWith(2, 'wf-lab', 50, 10, true);
+    });
+  });
+
+  it('conserve le scroll de la liste et remonte le détail lors de la sélection', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+
+    await wrap(<WorkflowsPage projects={[]} installedAgentTypes={['ClaudeCode']} agentAccess={fullConfig} />);
+
+    const listPane = screen.getByTestId('workflow-list-pane');
+    const detailPane = screen.getByTestId('workflow-detail-pane');
+    listPane.scrollTop = 700;
+    detailPane.scrollTop = 500;
+
+    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+
+    expect(listPane.scrollTop).toBe(700);
+    expect(detailPane.scrollTop).toBe(0);
+  });
+
+  it("change l'agent d'un step sans altérer son palier de raisonnement", async () => {
+    const agentSettings = {
+      model: 'claude-opus',
+      tier: 'reasoning',
+      reasoning_effort: 'high',
+      max_tokens: null,
+    } as const;
+    const workflow = labWorkflow({
+      steps: [
+        {
+          name: 'prnum',
+          step_type: { type: 'Agent' },
+          agent: 'ClaudeCode',
+          agent_settings: agentSettings,
+          prompt_template: 'PR {{pr_number}}',
+          mode: { type: 'Normal' },
+        } as never,
+        {
+          name: 'reason',
+          step_type: { type: 'Agent' },
+          agent: 'ClaudeCode',
+          prompt_template: 'Review {{steps.prnum.data.stdout}}',
+          mode: { type: 'Normal' },
+        } as never,
+      ],
+    });
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(workflow);
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    mockWorkflowsApi.update.mockReset().mockResolvedValue({
+      ...workflow,
+      steps: workflow.steps.map((step, index) =>
+        index === 0 ? { ...step, agent: 'Codex' } : step
+      ),
+    });
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />
+    );
+    await act(async () => { fireEvent.click(screen.getByText('PR Review LAB')); });
+    await waitFor(() => expect(screen.getByText('Éditer')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByLabelText(/Changer l'agent du step « prnum »/i));
+    await act(async () => { fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' })); });
+
+    await waitFor(() => expect(mockWorkflowsApi.update).toHaveBeenCalledTimes(1));
+    const [, request] = mockWorkflowsApi.update.mock.calls[0];
+    expect(request.steps[0]).toMatchObject({
+      agent: 'Codex',
+      agent_settings: {
+        ...agentSettings,
+        model: null,
+      },
+    });
+    expect(request.steps[1].agent).toBe('ClaudeCode');
+  });
+
   it('wizard : chaque step Agent expose le sélecteur de palier (⚡/🎯/🧠) et le changement est appliqué', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
@@ -787,5 +922,239 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     expect(Array.from(tierSelect.options).map(o => o.value)).toEqual(['economy', 'default', 'reasoning']);
     fireEvent.change(tierSelect, { target: { value: 'reasoning' } });
     expect(tierSelect.value).toBe('reasoning');
+  });
+
+  it('uses the workflow card hierarchy for Quick Prompts', async () => {
+    const qp: QuickPrompt = {
+      id: 'qp-release-notes',
+      name: 'Release notes',
+      icon: '✍️',
+      description: 'Prépare des notes de version claires et actionnables.',
+      prompt_template: 'Résume {{changes}}',
+      variables: [{
+        name: 'changes',
+        label: 'Changements',
+        placeholder: 'feat: ...',
+        description: null,
+        required: true,
+      }],
+      agent: 'Codex',
+      project_id: null,
+      skill_ids: [],
+      profile_ids: [],
+      directive_ids: [],
+      tier: 'default',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([qp]);
+
+    const { container } = await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['Codex']}
+        agentAccess={fullConfig}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(1\)/ }));
+    });
+
+    const card = container.querySelector('[data-qp-id="qp-release-notes"]');
+    expect(card).toHaveAttribute('data-kind', 'prompt');
+    expect(card?.querySelector('.qp-card-identity')).toHaveTextContent('Release notes');
+    expect(card?.querySelector('.qp-card-desc')).toHaveTextContent('Prépare des notes de version');
+    expect(card?.querySelector('.qp-card-meta')).toHaveTextContent('1 variable');
+    expect(card?.querySelector('.qp-card-tools')).toBeInTheDocument();
+    expect(card?.querySelector('.qp-card-primary-actions')).toHaveTextContent('Lancer');
+    expect(screen.getByLabelText('Éditer Release notes')).toBeInTheDocument();
+  });
+
+  it('filters Quick Prompts by agent without changing the selected sort', async () => {
+    const qp = (id: string, name: string, agent: QuickPrompt['agent']): QuickPrompt => ({
+      id,
+      name,
+      icon: '✨',
+      description: '',
+      prompt_template: name,
+      variables: [],
+      agent,
+      project_id: null,
+      skill_ids: [],
+      profile_ids: [],
+      directive_ids: [],
+      tier: 'default',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    vi.mocked(quickPromptsApi.list).mockResolvedValueOnce([
+      qp('qp-codex', 'Codex prompt', 'Codex'),
+      qp('qp-claude', 'Claude prompt', 'ClaudeCode'),
+    ]);
+
+    const { container } = await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Quick Prompts \(2\)/ }));
+    });
+
+    fireEvent.change(screen.getByLabelText('Filtrer les Quick Prompts par agent'), {
+      target: { value: 'Codex' },
+    });
+    expect(container.querySelector('[data-qp-id="qp-codex"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-qp-id="qp-claude"]')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('Trier les Quick Prompts')).toHaveValue('name');
+  });
+
+  it('offers AI-assisted creation and JSON import from the Quick APIs tab', async () => {
+    const onNavigateDiscussion = vi.fn();
+    vi.mocked(discussionsApi.create).mockResolvedValueOnce({ id: 'disc-qa-architect' } as never);
+    vi.mocked(quickApisApi.importQa).mockResolvedValueOnce({ id: 'qa-imported' } as never);
+
+    const { container } = await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+        onNavigateDiscussion={onNavigateDiscussion}
+      />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(0\)/ }));
+    });
+
+    expect(screen.getByRole('button', { name: 'Importer' })).toHaveAttribute(
+      'title',
+      'Importe un Quick API exporté depuis Kronn (.json).',
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Créer avec l'IA/ }));
+    });
+
+    await waitFor(() => expect(discussionsApi.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        title: 'Architecte de Quick API',
+        initial_prompt: expect.stringContaining('qa_create_draft'),
+        skill_ids: [],
+        tier: 'reasoning',
+      }),
+    ));
+    expect(onNavigateDiscussion).toHaveBeenCalledWith('disc-qa-architect');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Importer' }));
+    const modalTitle = screen.getByRole('heading', { name: 'Importer un Quick API' });
+    expect(modalTitle).toBeInTheDocument();
+    expect(screen.getByText(/\.kronn-qa\.json/)).toBeInTheDocument();
+
+    const content = JSON.stringify({
+      kind: 'kronn.quick_api',
+      version: 1,
+      quick_api: {
+        name: 'Imported QA',
+        variables: [{ name: 'ticket' }],
+      },
+    });
+    const file = new File([content], 'imported.kronn-qa.json', { type: 'application/json' });
+    Object.defineProperty(file, 'text', { value: vi.fn().mockResolvedValue(content) });
+    const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
+    expect(fileInput).not.toBeNull();
+    await act(async () => {
+      fireEvent.change(fileInput!, { target: { files: [file] } });
+    });
+    await waitFor(() => expect(screen.getByText('Imported QA')).toBeInTheDocument());
+
+    const modal = modalTitle.closest('.wf-import-modal');
+    expect(modal).not.toBeNull();
+    await act(async () => {
+      fireEvent.click(within(modal as HTMLElement).getByRole('button', { name: 'Importer' }));
+    });
+    await waitFor(() => expect(quickApisApi.importQa).toHaveBeenCalledWith({
+      content,
+      project_id: null,
+    }));
+  });
+
+  it('groups Quick APIs by API and sorts each group by endpoint', async () => {
+    const qa = (
+      id: string,
+      name: string,
+      plugin: string,
+      endpoint: string,
+    ): QuickApi => ({
+      id,
+      name,
+      icon: '⚡',
+      description: '',
+      project_id: null,
+      api_plugin_slug: plugin,
+      api_config_id: `${plugin}-config`,
+      api_endpoint_path: endpoint,
+      variables: [],
+      profile_ids: [],
+      directive_ids: [],
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+    });
+    vi.mocked(quickApisApi.list).mockResolvedValueOnce([
+      qa('jira-z', 'Create ticket', 'jira', '/tickets/z'),
+      qa('chartbeat-z', 'Top pages', 'chartbeat', '/top'),
+      qa('jira-a', 'Find ticket', 'jira', '/tickets/a'),
+    ]);
+
+    const { container } = await wrap(
+      <WorkflowsPage projects={[]} installedAgentTypes={[]} agentAccess={fullConfig} />
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /Quick APIs \(3\)/ }));
+    });
+    fireEvent.change(screen.getByLabelText('Trier les Quick APIs'), {
+      target: { value: 'endpoint' },
+    });
+
+    const rowOrder = () => Array.from(container.querySelectorAll('.qp-list > *')).map(row =>
+      row.classList.contains('quick-api-group-heading')
+        ? `group:${row.textContent}`
+        : `qa:${row.getAttribute('data-qa-id')}`
+    );
+    expect(rowOrder()).toEqual([
+      'group:chartbeatAPI',
+      'qa:chartbeat-z',
+      'group:jiraAPI',
+      'qa:jira-a',
+      'qa:jira-z',
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Inverser l’ordre' }));
+    expect(rowOrder()).toEqual([
+      'group:jiraAPI',
+      'qa:jira-z',
+      'qa:jira-a',
+      'group:chartbeatAPI',
+      'qa:chartbeat-z',
+    ]);
+    expect(screen.getByRole('button', { name: 'Rétablir l’ordre par défaut' }))
+      .toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.change(screen.getByLabelText('Filtrer les Quick APIs par API'), {
+      target: { value: 'jira' },
+    });
+    expect(rowOrder()).toEqual([
+      'group:jiraAPI',
+      'qa:jira-z',
+      'qa:jira-a',
+    ]);
+
+    const jiraCard = container.querySelector('[data-qa-id="jira-a"]');
+    expect(jiraCard).toHaveAttribute('data-kind', 'api');
+    expect(jiraCard?.querySelector('.qp-card-identity')).toHaveTextContent('Find ticket');
+    expect(jiraCard?.querySelector('.qp-card-api-plugin')).toHaveTextContent('jira');
+    expect(jiraCard?.querySelector('.qp-card-endpoint')).toHaveTextContent('GET/tickets/a');
+    expect(jiraCard?.querySelector('.qp-card-tools')).toBeInTheDocument();
+    expect(jiraCard?.querySelector('.qp-card-primary-actions')).toHaveTextContent('Lancer');
   });
 });

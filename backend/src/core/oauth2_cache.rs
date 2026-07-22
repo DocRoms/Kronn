@@ -82,18 +82,24 @@ pub async fn resolve_token(
     env: &HashMap<String, String>,
 ) -> Result<String, String> {
     let (token_url, client_id_env, client_secret_env, scope) = match auth {
-        ApiAuthKind::OAuth2ClientCredentials { token_url, client_id_env, client_secret_env, scope, .. } => {
-            (token_url, client_id_env, client_secret_env, scope)
-        }
+        ApiAuthKind::OAuth2ClientCredentials {
+            token_url,
+            client_id_env,
+            client_secret_env,
+            scope,
+            ..
+        } => (token_url, client_id_env, client_secret_env, scope),
         _ => return Err("resolve_token called on a non-OAuth2 auth kind".into()),
     };
 
     // Read credentials up-front: needed both to mint AND to fingerprint the
     // cache entry (so a rotated client_id/secret busts a still-unexpired token
     // — see `CachedToken::cred_fp`).
-    let client_id = env.get(client_id_env)
+    let client_id = env
+        .get(client_id_env)
         .ok_or_else(|| format!("missing env var {}", client_id_env))?;
-    let client_secret = env.get(client_secret_env)
+    let client_secret = env
+        .get(client_secret_env)
         .ok_or_else(|| format!("missing env var {}", client_secret_env))?;
     let cred_fp = cred_fingerprint(&[client_id, client_secret, scope, token_url]);
 
@@ -124,7 +130,8 @@ pub async fn resolve_token(
         .build()
         .map_err(|e| format!("HTTP client init failed: {}", e))?;
 
-    let resp = http.post(token_url)
+    let resp = http
+        .post(token_url)
         .form(&params)
         .send()
         .await
@@ -143,15 +150,27 @@ pub async fn resolve_token(
 
     // Accept both `access_token` (RFC 6749 canonical) and providers that
     // drift slightly. `expires_in` is seconds — default 3600 if absent.
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("token response JSON parse error: {} — body was: {}", e, body.chars().take(200).collect::<String>()))?;
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        format!(
+            "token response JSON parse error: {} — body was: {}",
+            e,
+            body.chars().take(200).collect::<String>()
+        )
+    })?;
 
-    let access_token = json.get("access_token")
+    let access_token = json
+        .get("access_token")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| format!("token response missing `access_token` field: {}", body.chars().take(200).collect::<String>()))?
+        .ok_or_else(|| {
+            format!(
+                "token response missing `access_token` field: {}",
+                body.chars().take(200).collect::<String>()
+            )
+        })?
         .to_string();
 
-    let expires_in = json.get("expires_in")
+    let expires_in = json
+        .get("expires_in")
         .and_then(|v| v.as_u64())
         .unwrap_or(3600);
 
@@ -162,13 +181,18 @@ pub async fn resolve_token(
         let mut guard = cache.lock().await;
         guard.insert(
             config_id.to_string(),
-            CachedToken { access_token: access_token.clone(), refresh_at, cred_fp },
+            CachedToken {
+                access_token: access_token.clone(),
+                refresh_at,
+                cred_fp,
+            },
         );
     }
 
     tracing::info!(
         "OAuth2 token minted for config {} — refresh in {}s",
-        config_id, expires_in.saturating_sub(SAFETY_MARGIN.as_secs()),
+        config_id,
+        expires_in.saturating_sub(SAFETY_MARGIN.as_secs()),
     );
 
     Ok(access_token)
@@ -195,19 +219,30 @@ pub async fn resolve_token_exchange(
     base_url: &str,
     env: &HashMap<String, String>,
 ) -> Result<String, String> {
-    let (endpoint, method, body_template, body_format, token_jsonpath, ttl_seconds, creds_env_keys) = match auth {
-        ApiAuthKind::TokenExchange {
-            endpoint,
-            method,
-            body_template,
-            body_format,
-            token_jsonpath,
-            ttl_seconds,
-            creds_env_keys,
-            ..
-        } => (endpoint, method, body_template, body_format, token_jsonpath, *ttl_seconds, creds_env_keys),
-        _ => return Err("resolve_token_exchange called on a non-TokenExchange auth kind".into()),
-    };
+    let (endpoint, method, body_template, body_format, token_jsonpath, ttl_seconds, creds_env_keys) =
+        match auth {
+            ApiAuthKind::TokenExchange {
+                endpoint,
+                method,
+                body_template,
+                body_format,
+                token_jsonpath,
+                ttl_seconds,
+                creds_env_keys,
+                ..
+            } => (
+                endpoint,
+                method,
+                body_template,
+                body_format,
+                token_jsonpath,
+                *ttl_seconds,
+                creds_env_keys,
+            ),
+            _ => {
+                return Err("resolve_token_exchange called on a non-TokenExchange auth kind".into())
+            }
+        };
 
     // Fingerprint the credentials (the `creds_env_keys` values) so a rotated
     // secret busts a still-unexpired cached token — see `CachedToken::cred_fp`.
@@ -250,7 +285,9 @@ pub async fn resolve_token_exchange(
         .map_err(|e| format!("HTTP client init failed: {}", e))?;
 
     let req_builder = http.request(
-        method.parse().map_err(|e| format!("Invalid HTTP method `{method}`: {e}"))?,
+        method
+            .parse()
+            .map_err(|e| format!("Invalid HTTP method `{method}`: {e}"))?,
         &full_url,
     );
 
@@ -258,9 +295,7 @@ pub async fn resolve_token_exchange(
     // encoded flattens top-level scalar fields (the OAuth2-RFC-style
     // shape — nested objects would lose info on the wire anyway).
     let resp = match body_format {
-        TokenExchangeBodyFormat::Json => {
-            req_builder.json(&rendered_body).send().await
-        }
+        TokenExchangeBodyFormat::Json => req_builder.json(&rendered_body).send().await,
         TokenExchangeBodyFormat::FormUrlEncoded => {
             let pairs = flatten_form_pairs(&rendered_body)?;
             req_builder.form(&pairs).send().await
@@ -278,33 +313,43 @@ pub async fn resolve_token_exchange(
         ));
     }
 
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!(
+    let json: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+        format!(
             "token response JSON parse error: {} — body was: {}",
             e,
             body.chars().take(200).collect::<String>(),
-        ))?;
+        )
+    })?;
 
     // Extract via JSONPath. We use `serde_json_path` (already a workspace
     // dep for ExtractSpec). A miss is a hard error — without the token
     // there's nothing to inject downstream.
-    let access_token = extract_token_jsonpath(&json, token_jsonpath)
-        .map_err(|e| format!("token extraction failed: {e} — body was: {}", body.chars().take(200).collect::<String>()))?;
+    let access_token = extract_token_jsonpath(&json, token_jsonpath).map_err(|e| {
+        format!(
+            "token extraction failed: {e} — body was: {}",
+            body.chars().take(200).collect::<String>()
+        )
+    })?;
 
     // Cache (unless ttl=0, which only test code should use).
     if ttl_seconds > 0 {
-        let refresh_at = Instant::now()
-            + Duration::from_secs(ttl_seconds).saturating_sub(SAFETY_MARGIN);
+        let refresh_at =
+            Instant::now() + Duration::from_secs(ttl_seconds).saturating_sub(SAFETY_MARGIN);
         let mut guard = cache.lock().await;
         guard.insert(
             config_id.to_string(),
-            CachedToken { access_token: access_token.clone(), refresh_at, cred_fp },
+            CachedToken {
+                access_token: access_token.clone(),
+                refresh_at,
+                cred_fp,
+            },
         );
     }
 
     tracing::info!(
         "TokenExchange token minted for config {} — refresh in {}s",
-        config_id, ttl_seconds.saturating_sub(SAFETY_MARGIN.as_secs()),
+        config_id,
+        ttl_seconds.saturating_sub(SAFETY_MARGIN.as_secs()),
     );
 
     Ok(access_token)
@@ -319,7 +364,9 @@ fn substitute_env_in_value(
     env: &HashMap<String, String>,
 ) -> Result<serde_json::Value, String> {
     match value {
-        serde_json::Value::String(s) => Ok(serde_json::Value::String(substitute_env_in_string(s, env)?)),
+        serde_json::Value::String(s) => {
+            Ok(serde_json::Value::String(substitute_env_in_string(s, env)?))
+        }
         serde_json::Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for it in items {
@@ -362,17 +409,20 @@ pub fn substitute_env_in_string(
         // as `%24%7Benv.organization_id%7D` and broke the agent's URL.
         // Caught live 2026-05-20 on Didomi audit.
         let lower = rest.to_ascii_lowercase();
-        let Some(start) = lower.find("${env.") else { break };
+        let Some(start) = lower.find("${env.") else {
+            break;
+        };
         out.push_str(&rest[..start]);
         let after_open = &rest[start + 6..]; // skip "${env." / "${ENV."
         if let Some(end) = after_open.find('}') {
             let raw_key = &after_open[..end];
             let normalised_key = raw_key.to_ascii_uppercase();
-            let value = env.get(&normalised_key)
-                .ok_or_else(|| format!(
+            let value = env.get(&normalised_key).ok_or_else(|| {
+                format!(
                     "missing env var ${{ENV.{normalised_key}}} (also accepted as ${{env.{}}})",
                     raw_key.to_ascii_lowercase()
-                ))?;
+                )
+            })?;
             out.push_str(value);
             rest = &after_open[end + 1..];
         } else {
@@ -390,10 +440,9 @@ pub fn substitute_env_in_string(
 /// Flatten a JSON object into form-urlencoded key=value pairs. Only
 /// top-level scalar fields are encoded — nested objects produce an
 /// error so the spec author knows they're using the wrong body_format.
-fn flatten_form_pairs(
-    value: &serde_json::Value,
-) -> Result<Vec<(String, String)>, String> {
-    let map = value.as_object()
+fn flatten_form_pairs(value: &serde_json::Value) -> Result<Vec<(String, String)>, String> {
+    let map = value
+        .as_object()
         .ok_or_else(|| "FormUrlEncoded body must be a JSON object at the top level".to_string())?;
     let mut pairs = Vec::with_capacity(map.len());
     for (k, v) in map {
@@ -414,16 +463,18 @@ fn flatten_form_pairs(
 /// for the `$.foo.bar` dotted-path shape so we don't pull in
 /// `serde_json_path` just for this. Bracket / wildcard / filter syntax
 /// is NOT supported — token paths in practice are always dotted scalars.
-fn extract_token_jsonpath(
-    response: &serde_json::Value,
-    path: &str,
-) -> Result<String, String> {
+fn extract_token_jsonpath(response: &serde_json::Value, path: &str) -> Result<String, String> {
     let trimmed = path.trim();
-    let dotted = trimmed.strip_prefix("$.").unwrap_or(trimmed.strip_prefix('$').unwrap_or(trimmed));
+    let dotted = trimmed
+        .strip_prefix("$.")
+        .unwrap_or(trimmed.strip_prefix('$').unwrap_or(trimmed));
     let mut cur = response;
     for segment in dotted.split('.') {
-        if segment.is_empty() { continue; }
-        cur = cur.get(segment)
+        if segment.is_empty() {
+            continue;
+        }
+        cur = cur
+            .get(segment)
             .ok_or_else(|| format!("JSONPath `{path}` — segment `{segment}` not found"))?;
     }
     cur.as_str()
@@ -470,7 +521,9 @@ mod tests {
         env.insert("CLIENT_ID".into(), "x".into());
         env.insert("CLIENT_SECRET".into(), "y".into());
 
-        let tok = resolve_token(&cache, "cfg-1", &sample_auth(), &env).await.unwrap();
+        let tok = resolve_token(&cache, "cfg-1", &sample_auth(), &env)
+            .await
+            .unwrap();
         assert_eq!(tok, "cached-abc");
     }
 
@@ -492,7 +545,12 @@ mod tests {
                     access_token: "stale-old-client".into(),
                     refresh_at: Instant::now() + Duration::from_secs(300),
                     // Fingerprint of the OLD credentials.
-                    cred_fp: cred_fingerprint(&["OLD_ID", "OLD_SECRET", "read", "http://127.0.0.1:1/unused"]),
+                    cred_fp: cred_fingerprint(&[
+                        "OLD_ID",
+                        "OLD_SECRET",
+                        "read",
+                        "http://127.0.0.1:1/unused",
+                    ]),
                 },
             );
         }
@@ -503,23 +561,36 @@ mod tests {
         let res = resolve_token(&cache, "cfg-rot", &sample_auth(), &env).await;
         // Fingerprint mismatch → no short-circuit → attempts a re-mint against
         // the dead token_url → Err. Crucially NOT the stale token.
-        assert!(res.is_err(), "rotated creds must NOT return the stale cached token, got: {res:?}");
+        assert!(
+            res.is_err(),
+            "rotated creds must NOT return the stale cached token, got: {res:?}"
+        );
     }
 
     #[tokio::test]
     async fn missing_env_var_returns_clear_error() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let env = HashMap::new(); // no CLIENT_ID
-        let err = resolve_token(&cache, "cfg-2", &sample_auth(), &env).await.unwrap_err();
-        assert!(err.contains("CLIENT_ID"), "error must name the missing env key: {}", err);
+        let err = resolve_token(&cache, "cfg-2", &sample_auth(), &env)
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("CLIENT_ID"),
+            "error must name the missing env key: {}",
+            err
+        );
     }
 
     #[tokio::test]
     async fn wrong_auth_kind_returns_typed_error() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let env = HashMap::new();
-        let non_oauth = ApiAuthKind::Bearer { env_key: "X".into() };
-        let err = resolve_token(&cache, "cfg-3", &non_oauth, &env).await.unwrap_err();
+        let non_oauth = ApiAuthKind::Bearer {
+            env_key: "X".into(),
+        };
+        let err = resolve_token(&cache, "cfg-3", &non_oauth, &env)
+            .await
+            .unwrap_err();
         assert!(err.contains("non-OAuth2"));
     }
 
@@ -528,8 +599,16 @@ mod tests {
         // Sanity: an Instant in the past means "must refresh"; in the
         // future means "still valid". We don't want the ordering semantics
         // to drift if Instant's contract ever changes.
-        let past = CachedToken { access_token: "old".into(), refresh_at: Instant::now() - Duration::from_secs(1), cred_fp: 0 };
-        let future = CachedToken { access_token: "new".into(), refresh_at: Instant::now() + Duration::from_secs(60), cred_fp: 0 };
+        let past = CachedToken {
+            access_token: "old".into(),
+            refresh_at: Instant::now() - Duration::from_secs(1),
+            cred_fp: 0,
+        };
+        let future = CachedToken {
+            access_token: "new".into(),
+            refresh_at: Instant::now() + Duration::from_secs(60),
+            cred_fp: 0,
+        };
         assert!(past.refresh_at <= Instant::now());
         assert!(future.refresh_at > Instant::now());
     }
@@ -547,7 +626,8 @@ mod tests {
     fn substitute_env_lowercase_prefix_and_key_resolve() {
         let mut env = HashMap::new();
         env.insert("ORGANIZATION_ID".into(), "euronews".into());
-        let out = substitute_env_in_string("?organization_id=${env.organization_id}", &env).unwrap();
+        let out =
+            substitute_env_in_string("?organization_id=${env.organization_id}", &env).unwrap();
         assert_eq!(out, "?organization_id=euronews");
     }
 
@@ -555,7 +635,8 @@ mod tests {
     fn substitute_env_uppercase_prefix_and_key_resolve() {
         let mut env = HashMap::new();
         env.insert("ORGANIZATION_ID".into(), "euronews".into());
-        let out = substitute_env_in_string("?organization_id=${ENV.ORGANIZATION_ID}", &env).unwrap();
+        let out =
+            substitute_env_in_string("?organization_id=${ENV.ORGANIZATION_ID}", &env).unwrap();
         assert_eq!(out, "?organization_id=euronews");
     }
 
@@ -581,7 +662,11 @@ mod tests {
     fn substitute_env_missing_var_returns_error_naming_key() {
         let env = HashMap::new();
         let err = substitute_env_in_string("${ENV.SECRET}", &env).unwrap_err();
-        assert!(err.contains("SECRET"), "error must name the missing key: {}", err);
+        assert!(
+            err.contains("SECRET"),
+            "error must name the missing key: {}",
+            err
+        );
     }
 
     #[test]
@@ -591,7 +676,11 @@ mod tests {
         // vendor error anyway.
         let env = HashMap::new();
         let out = substitute_env_in_string("before ${ENV.FOO bar", &env).unwrap();
-        assert!(out.contains("${ENV.FOO"), "expected literal passthrough, got: {}", out);
+        assert!(
+            out.contains("${ENV.FOO"),
+            "expected literal passthrough, got: {}",
+            out
+        );
     }
 
     #[test]
@@ -613,10 +702,13 @@ mod tests {
         // Order isn't part of the contract — sort for deterministic compare.
         let mut got: Vec<(String, String)> = pairs;
         got.sort();
-        assert_eq!(got, vec![
-            ("client_id".to_string(), "abc".to_string()),
-            ("client_secret".to_string(), "xyz".to_string()),
-        ]);
+        assert_eq!(
+            got,
+            vec![
+                ("client_id".to_string(), "abc".to_string()),
+                ("client_secret".to_string(), "xyz".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -625,18 +717,29 @@ mod tests {
         let pairs = flatten_form_pairs(&v).unwrap();
         let mut got: Vec<(String, String)> = pairs;
         got.sort();
-        assert_eq!(got, vec![
-            ("live".to_string(), "true".to_string()),
-            ("n".to_string(), "42".to_string()),
-        ]);
+        assert_eq!(
+            got,
+            vec![
+                ("live".to_string(), "true".to_string()),
+                ("n".to_string(), "42".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn flatten_form_pairs_rejects_nested_object() {
         let v = serde_json::json!({ "creds": { "id": "a", "secret": "b" } });
         let err = flatten_form_pairs(&v).unwrap_err();
-        assert!(err.contains("creds"), "error must name the offending key: {}", err);
-        assert!(err.contains("Json"), "error must point to Json as the fix: {}", err);
+        assert!(
+            err.contains("creds"),
+            "error must name the offending key: {}",
+            err
+        );
+        assert!(
+            err.contains("Json"),
+            "error must point to Json as the fix: {}",
+            err
+        );
     }
 
     #[test]
@@ -674,7 +777,11 @@ mod tests {
     fn extract_token_jsonpath_missing_segment_errors_with_path() {
         let v = serde_json::json!({ "access_token": "tok" });
         let err = extract_token_jsonpath(&v, "$.data.token").unwrap_err();
-        assert!(err.contains("data"), "must name the missing segment: {}", err);
+        assert!(
+            err.contains("data"),
+            "must name the missing segment: {}",
+            err
+        );
     }
 
     #[test]
@@ -720,7 +827,9 @@ mod tests {
             &auth,
             "http://127.0.0.1:1/unused",
             &env,
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(tok, "cached-tx");
     }
 
@@ -728,8 +837,12 @@ mod tests {
     async fn token_exchange_wrong_auth_kind_typed_error() {
         let cache = Arc::new(Mutex::new(HashMap::new()));
         let env = HashMap::new();
-        let non_tx = ApiAuthKind::Bearer { env_key: "X".into() };
-        let err = resolve_token_exchange(&cache, "cfg", &non_tx, "http://x", &env).await.unwrap_err();
+        let non_tx = ApiAuthKind::Bearer {
+            env_key: "X".into(),
+        };
+        let err = resolve_token_exchange(&cache, "cfg", &non_tx, "http://x", &env)
+            .await
+            .unwrap_err();
         assert!(err.contains("non-TokenExchange"));
     }
 
@@ -749,7 +862,9 @@ mod tests {
             creds_env_keys: vec![],
         };
         let env = HashMap::new(); // no API_KEY
-        let err = resolve_token_exchange(&cache, "cfg", &auth, "http://x", &env).await.unwrap_err();
+        let err = resolve_token_exchange(&cache, "cfg", &auth, "http://x", &env)
+            .await
+            .unwrap_err();
         assert!(err.contains("API_KEY"));
     }
 
@@ -787,27 +902,26 @@ mod tests {
         env.insert("API_KEY".into(), "kid".into());
         env.insert("API_SECRET".into(), "ksecret".into());
 
-        let tok = resolve_token_exchange(
-            &cache,
-            "cfg-tx",
-            &auth,
-            &server.uri(),
-            &env,
-        ).await.unwrap();
+        let tok = resolve_token_exchange(&cache, "cfg-tx", &auth, &server.uri(), &env)
+            .await
+            .unwrap();
         assert_eq!(tok, "fresh-tx-123");
 
         // Cached for next call.
         let cached = {
             let g = cache.lock().await;
             g.get("cfg-tx").cloned()
-        }.expect("token must be cached");
+        }
+        .expect("token must be cached");
         assert_eq!(cached.access_token, "fresh-tx-123");
         assert!(cached.refresh_at > Instant::now() + Duration::from_secs(3000));
     }
 
     #[tokio::test]
     async fn token_exchange_form_urlencoded_body_works() {
-        use wiremock::matchers::{body_string_contains, header, method as wm_method, path as wm_path};
+        use wiremock::matchers::{
+            body_string_contains, header, method as wm_method, path as wm_path,
+        };
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
@@ -838,13 +952,9 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("CID".into(), "client-42".into());
 
-        let tok = resolve_token_exchange(
-            &cache,
-            "cfg-form",
-            &auth,
-            &server.uri(),
-            &env,
-        ).await.unwrap();
+        let tok = resolve_token_exchange(&cache, "cfg-form", &auth, &server.uri(), &env)
+            .await
+            .unwrap();
         assert_eq!(tok, "form-tok");
     }
 
@@ -873,14 +983,14 @@ mod tests {
         };
         let env = HashMap::new();
 
-        let err = resolve_token_exchange(
-            &cache,
-            "cfg-bad",
-            &auth,
-            &server.uri(),
-            &env,
-        ).await.unwrap_err();
+        let err = resolve_token_exchange(&cache, "cfg-bad", &auth, &server.uri(), &env)
+            .await
+            .unwrap_err();
         assert!(err.contains("401"), "error must surface status: {}", err);
-        assert!(err.contains("invalid_key"), "error must include body excerpt: {}", err);
+        assert!(
+            err.contains("invalid_key"),
+            "error must include body excerpt: {}",
+            err
+        );
     }
 }
