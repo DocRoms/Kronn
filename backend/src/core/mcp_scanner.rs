@@ -529,6 +529,8 @@ pub(crate) fn atomic_write_if_unchanged(
 /// while preserving the target's existing permissions. Permissions are copied
 /// to the temporary sibling *before* the rename, so there is no post-rename
 /// window where a normal 0644 document becomes the temp file's defensive 0600.
+/// The byte comparison is the final operation before rename, minimizing the
+/// remaining portable check-to-commit race window.
 pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
     target: &Path,
     content: &str,
@@ -550,6 +552,13 @@ pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
     }
     let permissions = metadata.permissions();
     let tmp = write_atomic_temp(target, content.as_bytes())?;
+    if let Err(e) = std::fs::set_permissions(&tmp, permissions) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "Failed to preserve permissions for {} before atomic rename: {e}",
+            target.display()
+        ));
+    }
     let unchanged = std::fs::read(target)
         .map(|current| current == observed)
         .unwrap_or(false);
@@ -557,13 +566,6 @@ pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
         let _ = std::fs::remove_file(&tmp);
         return Err(format!(
             "{} changed concurrently while its audit artifact was being sanitized; refusing overwrite",
-            target.display()
-        ));
-    }
-    if let Err(e) = std::fs::set_permissions(&tmp, permissions) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(format!(
-            "Failed to preserve permissions for {} before atomic rename: {e}",
             target.display()
         ));
     }
