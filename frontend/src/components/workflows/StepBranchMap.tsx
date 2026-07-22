@@ -1,13 +1,14 @@
-// #15 — a compact SVG "branch map" for a workflow's steps. A horizontal chip
-// row hides the back/forward jumps a Goto creates; this draws the step spine on
-// the left and each Goto as an arc in the gutter (loops highlighted), so a
-// user sees at a glance where control can jump. Not an editor — a read-only map.
+// #15 — a compact SVG map for a workflow's steps. It always draws the linear
+// spine so every workflow keeps the same detail layout, then overlays Goto arcs
+// in the gutter when branches exist. Not an editor — a read-only navigator.
 import { computeGotoEdges } from '../../lib/stepGraph';
 import type { WorkflowStep } from '../../types/generated';
 
 interface StepBranchMapProps {
   steps: WorkflowStep[];
   t: (key: string, ...args: (string | number)[]) => string;
+  selectedStepIndex?: number;
+  onSelectStep?: (index: number) => void;
 }
 
 const ROW_H = 24;
@@ -15,9 +16,14 @@ const GUTTER = 52;   // left space reserved for Goto arcs
 const WIDTH = 300;
 const PAD_TOP = 6;
 
-export function StepBranchMap({ steps, t }: StepBranchMapProps) {
+export function StepBranchMap({
+  steps,
+  t,
+  selectedStepIndex,
+  onSelectStep,
+}: StepBranchMapProps) {
   const edges = computeGotoEdges(steps);
-  if (edges.length === 0) return null; // linear workflow → nothing to draw
+  if (steps.length === 0) return null;
 
   const cy = (i: number) => i * ROW_H + ROW_H / 2 + PAD_TOP;
   const height = steps.length * ROW_H + PAD_TOP * 2;
@@ -28,8 +34,10 @@ export function StepBranchMap({ steps, t }: StepBranchMapProps) {
       <div className="wf-branch-map-title">{t('wf.branchMap.title')}</div>
       <svg
         className="wf-branch-map"
-        width={WIDTH}
+        width="100%"
         height={height}
+        viewBox={`0 0 ${WIDTH} ${height}`}
+        preserveAspectRatio="xMinYMin meet"
         role="img"
         aria-label={t('wf.branchMap.title')}
       >
@@ -42,7 +50,30 @@ export function StepBranchMap({ steps, t }: StepBranchMapProps) {
         <line x1={spineX} y1={cy(0)} x2={spineX} y2={cy(steps.length - 1)} className="wf-bm-spine" />
         {/* nodes + labels */}
         {steps.map((s, i) => (
-          <g key={i}>
+          <g
+            key={i}
+            className="wf-bm-node-g"
+            data-selected={selectedStepIndex === i}
+            data-testid={`wf-bm-node-${i}`}
+            role={onSelectStep ? 'button' : undefined}
+            tabIndex={onSelectStep ? 0 : undefined}
+            onClick={() => onSelectStep?.(i)}
+            onKeyDown={event => {
+              if (!onSelectStep || (event.key !== 'Enter' && event.key !== ' ')) return;
+              event.preventDefault();
+              onSelectStep(i);
+            }}
+          >
+            {onSelectStep && (
+              <rect
+                x={spineX - 7}
+                y={cy(i) - 10}
+                width={WIDTH - spineX + 2}
+                height={20}
+                rx={5}
+                className="wf-bm-node-hit"
+              />
+            )}
             <circle cx={spineX} cy={cy(i)} r={3.5} className="wf-bm-node" />
             <text x={spineX + 10} y={cy(i) + 3} className="wf-bm-node-label">
               {i + 1}. {s.name.length > 26 ? `${s.name.slice(0, 25)}…` : s.name}
@@ -82,8 +113,14 @@ export function StepBranchMap({ steps, t }: StepBranchMapProps) {
         })}
       </svg>
       <div className="wf-branch-map-legend">
-        <span className="wf-bm-legend-fwd">🎨 {t('wf.branchMap.legendForward')}</span>
-        <span className="wf-bm-legend-back">⇠ {t('wf.branchMap.legendLoop')}</span>
+        {edges.length > 0 ? (
+          <>
+            <span className="wf-bm-legend-fwd">🎨 {t('wf.branchMap.legendForward')}</span>
+            <span className="wf-bm-legend-back">⇠ {t('wf.branchMap.legendLoop')}</span>
+          </>
+        ) : (
+          <span className="wf-bm-legend-linear">│ {t('wf.branchMap.linear')}</span>
+        )}
       </div>
     </div>
   );

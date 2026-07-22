@@ -97,7 +97,10 @@ fn tier_unsourced_only_no_citation() {
     let text = "The function authenticate_user is defined in the auth layer.";
     let r = analyze(text, Some(&root));
     assert!(r.unsourced_count > 0, "an unanchored claim must be flagged");
-    assert!(r.sources.is_empty(), "no [src:] and no inline anchor → no sources");
+    assert!(
+        r.sources.is_empty(),
+        "no [src:] and no inline anchor → no sources"
+    );
     assert_eq!(r.verified_count(), 0);
     assert_eq!(r.fabricated_count, 0);
     assert_eq!(r.unverified_count, 0);
@@ -114,7 +117,10 @@ fn tier_fabricated_only_notfound() {
     let root = temp_project();
     let text = "Refer to [src: file: src/ghost.rs:1].";
     let r = analyze(text, Some(&root));
-    assert_eq!(r.fabricated_count, 1, "a missing formal ref is fabricated (red)");
+    assert_eq!(
+        r.fabricated_count, 1,
+        "a missing formal ref is fabricated (red)"
+    );
     assert_eq!(r.verified_count(), 0);
     assert_eq!(r.unverified_count, 0);
     assert_eq!(r.sources.len(), 1);
@@ -132,7 +138,10 @@ fn tier_fabricated_only_out_of_bounds() {
     // File exists (5 lines) but line 99 is past the end.
     let text = "Refer to [src: file: src/foo.rs:99].";
     let r = analyze(text, Some(&root));
-    assert_eq!(r.fabricated_count, 1, "out-of-bounds line is fabricated (red)");
+    assert_eq!(
+        r.fabricated_count, 1,
+        "out-of-bounds line is fabricated (red)"
+    );
     assert_eq!(r.verified_count(), 0);
     assert_eq!(r.sources[0].status, SourceStatus::OutOfBounds);
     cleanup(&root);
@@ -164,8 +173,14 @@ fn tier_unverified_only_inline_anchor_fails() {
     let root = temp_project();
     let text = "It is wired up in `src/missing.rs:3` somewhere.";
     let r = analyze(text, Some(&root));
-    assert_eq!(r.unverified_count, 1, "non-resolving inline anchor → soft amber");
-    assert_eq!(r.fabricated_count, 0, "inline failure is NOT red fabrication");
+    assert_eq!(
+        r.unverified_count, 1,
+        "non-resolving inline anchor → soft amber"
+    );
+    assert_eq!(
+        r.fabricated_count, 0,
+        "inline failure is NOT red fabrication"
+    );
     assert_eq!(r.verified_count(), 0);
     assert_eq!(r.sources.len(), 1);
     assert_eq!(r.sources[0].status, SourceStatus::Unchecked);
@@ -192,8 +207,14 @@ fn tier_unverifiable_only_url() {
     assert_eq!(r.sources[0].status, SourceStatus::Unchecked);
     assert_eq!(r.fabricated_count, 0, "an unchecked URL is not fabricated");
     assert_eq!(r.verified_count(), 0, "an unchecked URL is not verified");
-    assert_eq!(r.unverified_count, 0, "unverified_count is for inline anchors only");
-    assert!(r.has_signal(), "any citation, even unverifiable, is surfaced (Option B)");
+    assert_eq!(
+        r.unverified_count, 0,
+        "unverified_count is for inline anchors only"
+    );
+    assert!(
+        r.has_signal(),
+        "any citation, even unverifiable, is surfaced (Option B)"
+    );
     cleanup(&root);
 }
 
@@ -251,7 +272,10 @@ The function authenticate_user is defined in the core module.";
 
     assert_eq!(r.verified_count(), 1, "exactly one verified source");
     assert_eq!(r.fabricated_count, 1, "exactly one fabricated source");
-    assert_eq!(r.unverified_count, 1, "exactly one unverified inline anchor");
+    assert_eq!(
+        r.unverified_count, 1,
+        "exactly one unverified inline anchor"
+    );
     assert!(
         r.unsourced_count >= 1,
         "the unanchored claim sentence must flag at least once, got {}",
@@ -300,7 +324,10 @@ fn dedup_formal_and_inline_same_path_counts_once() {
         "the inline duplicate must not be appended, got {:?}",
         r.sources
     );
-    assert_eq!(r.unverified_count, 0, "the inline dup is not surfaced as unverified");
+    assert_eq!(
+        r.unverified_count, 0,
+        "the inline dup is not surfaced as unverified"
+    );
     cleanup(&root);
 }
 
@@ -365,14 +392,14 @@ fn no_panic_on_hostile_input() {
     let cases: Vec<String> = vec![
         String::new(),
         " ".to_string(),
-        "[src:".to_string(),                       // unterminated
-        "[src: file: ".to_string(),                // unterminated + no path
-        "[src: [src: file: a]]".to_string(),       // nested brackets
-        "[src: file: a[0][1].rs:2]".to_string(),   // balanced nested
+        "[src:".to_string(),                     // unterminated
+        "[src: file: ".to_string(),              // unterminated + no path
+        "[src: [src: file: a]]".to_string(),     // nested brackets
+        "[src: file: a[0][1].rs:2]".to_string(), // balanced nested
         "émojis 🚀🔥 and CJK 中文 and RTL \u{202E}reversed".to_string(),
         "null\u{0000}byte [src: file: \u{0000}.rs:1]".to_string(),
         "[src: file: src/foo.rs:99999999999999999999]".to_string(), // overflow line
-        "[src: file: src/foo.rs:-5]".to_string(),  // negative-ish
+        "[src: file: src/foo.rs:-5]".to_string(),                   // negative-ish
         huge,
     ];
     for c in &cases {

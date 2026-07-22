@@ -28,7 +28,13 @@ fn temp_project() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let d = std::env::temp_dir().join(format!("ahbh_{}_{}_{}_{}", DIM, std::process::id(), n, nanos));
+    let d = std::env::temp_dir().join(format!(
+        "ahbh_{}_{}_{}_{}",
+        DIM,
+        std::process::id(),
+        n,
+        nanos
+    ));
     std::fs::create_dir_all(d.join("src")).unwrap();
     std::fs::write(d.join("src/foo.rs"), "a\nb\nc\nd\ne\n").unwrap();
     d
@@ -92,7 +98,11 @@ fn deeply_nested_parent_dir_is_outside_project() {
     }
     rel.push_str("etc/passwd");
     let st = check_file(&rel, &root);
-    assert_ne!(st, SourceStatus::Verified, "deep ../ must never be Verified");
+    assert_ne!(
+        st,
+        SourceStatus::Verified,
+        "deep ../ must never be Verified"
+    );
     assert_eq!(
         st,
         SourceStatus::OutsideProject,
@@ -224,7 +234,11 @@ fn absolute_etc_passwd_is_existence_only_not_jailed() {
     // It's existence-only: Verified if it exists, NotFound otherwise.
     let exists = Path::new("/etc/passwd").exists();
     if exists {
-        assert_eq!(st, SourceStatus::Verified, "/etc/passwd exists → existence-only Verified");
+        assert_eq!(
+            st,
+            SourceStatus::Verified,
+            "/etc/passwd exists → existence-only Verified"
+        );
     } else {
         assert_eq!(st, SourceStatus::NotFound, "/etc/passwd absent → NotFound");
     }
@@ -294,7 +308,11 @@ fn backtick_wrapped_traversal_is_outside_project() {
 fn traversal_with_line_spec_is_outside_project() {
     let root = temp_project();
     let st = check_file("../../../../etc/passwd:1", &root);
-    assert_ne!(st, SourceStatus::Verified, "../ with :line must never be Verified");
+    assert_ne!(
+        st,
+        SourceStatus::Verified,
+        "../ with :line must never be Verified"
+    );
     assert_eq!(
         st,
         SourceStatus::OutsideProject,
@@ -324,7 +342,10 @@ fn analyze_counts_traversal_as_fabricated_not_verified() {
     );
     assert_eq!(report.sources.len(), 1, "exactly one [src:] extracted");
     assert_eq!(report.sources[0].status, SourceStatus::OutsideProject);
-    assert!(report.has_signal(), "a fabricated source must surface a signal");
+    assert!(
+        report.has_signal(),
+        "a fabricated source must surface a signal"
+    );
     cleanup(&root);
 }
 
@@ -383,8 +404,8 @@ fn no_panic_and_deterministic_on_adversarial_inputs() {
     let inputs: Vec<String> = vec![
         String::new(),
         "   ".to_string(),
-        "[src:".to_string(),                 // unterminated
-        "[src: file: ".to_string(),          // empty ref, unterminated
+        "[src:".to_string(),        // unterminated
+        "[src: file: ".to_string(), // empty ref, unterminated
         "[src: file: [nested[brackets]]]".to_string(),
         "[src: file: ../\0/etc/passwd]".to_string(), // null-ish
         "[src: file: ../../📁/emoji.rs]".to_string(),

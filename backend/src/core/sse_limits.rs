@@ -97,11 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn passthrough_under_limits() {
-        let inner: SseStream = Box::pin(futures::stream::iter(vec![
-            evt("a"),
-            evt("b"),
-            evt("c"),
-        ]));
+        let inner: SseStream = Box::pin(futures::stream::iter(vec![evt("a"), evt("b"), evt("c")]));
         let collected: Vec<_> = bounded(inner).collect().await;
         // Three input events come through unchanged, no synthetic terminator
         // because the stream ended naturally before any limit.

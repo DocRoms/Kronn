@@ -154,12 +154,17 @@ mod tests {
         // version in the table, or the freshness pill silently disappears
         // after a new agent lands.
         for agent in [
-            AgentType::ClaudeCode, AgentType::Codex, AgentType::Vibe,
-            AgentType::GeminiCli, AgentType::CopilotCli, AgentType::Ollama,
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Vibe,
+            AgentType::GeminiCli,
+            AgentType::CopilotCli,
+            AgentType::Ollama,
         ] {
             assert!(
                 latest_known_agent_version(&agent).is_some(),
-                "{:?} must have a latest_known version (was None)", agent,
+                "{:?} must have a latest_known version (was None)",
+                agent,
             );
         }
         // Kiro is preview; no freshness signal expected. Custom is user-defined.

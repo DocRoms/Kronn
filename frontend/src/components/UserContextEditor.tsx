@@ -12,7 +12,7 @@
 import { useEffect, useState } from 'react';
 import { useT } from '../lib/I18nContext';
 import { userContext as api, type UserContextFile } from '../lib/api';
-import { ChevronRight, Trash2, Plus, Loader2, AlertTriangle, Check } from 'lucide-react';
+import { ChevronRight, Trash2, Plus, Loader2, AlertTriangle, Check, FileText } from 'lucide-react';
 
 type RowState =
   | { kind: 'collapsed' }
@@ -120,9 +120,12 @@ export function UserContextEditor() {
 
   return (
     <div className="user-context-editor">
-      <div className="user-context-header">
-        <h3 className="text-base font-semibold">{t('userContext.title')}</h3>
-        <p className="text-xs text-muted">{t('userContext.subtitle')}</p>
+      <div className="user-context-header set-section-header-lg">
+        <FileText size={14} />
+        <div>
+          <h3 className="text-base font-semibold">{t('userContext.title')}</h3>
+          <p className="text-xs text-muted">{t('userContext.subtitle')}</p>
+        </div>
       </div>
 
       <div className="user-context-create">

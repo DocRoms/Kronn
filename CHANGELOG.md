@@ -7,7 +7,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.8.13]
+## [0.9.0]
 
 ### Added
 
@@ -22,8 +22,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Complete Agent-library reads.** `skill_get`, `profile_get` and
   `directive_get` return the full selected object while list tools stay compact.
 
-- **Chained audit: one launch, every dimension** (0.8.13). A `full` audit now runs the 9 docs steps then chains the 7 sub-audits (Security, Docker, Performance, Accessibility, Database, ApiDesign and the new **CodeQuality** kind — templates/CSS/JS/backend/perf-eco checklist; RGAA stays on-demand): 16 steps, one SSE stream, one validation discussion covering every TD. Each sub-audit opens with a relevance gate — "if this dimension does not apply, write one line and move on" — so a static site gets a one-line Database section instead of hallucinated findings. Dogfooded live: 43 TDs found on a real project vs 12 with the old scattered flow.
-- **First-contact MCP onboarding** (`kronn_intro`). New bridge tool giving a beginner-friendly "Kronn en 2 minutes" tour — désagentification, saved discussions, join/rooms, workflows, quick prompts/APIs, audits — with 5 concrete starter asks. Auto-suggested at the first `initialize` of a client (per-client marker in `~/.config/kronn/mcp-onboarded.json`); points anything secret-related at the UI, never the chat. Plus `bridge_info` (bridge staleness vs the script on disk) and a `docs/design/headless-backend.md` design note (lazy `--headless` profile, UI launching rules) sized for 0.8.14.
+- **Chained audit: one launch, every dimension** (0.9.0). A `full` audit now runs the 9 docs steps then chains the 7 sub-audits (Security, Docker, Performance, Accessibility, Database, ApiDesign and the new **CodeQuality** kind — templates/CSS/JS/backend/perf-eco checklist; RGAA stays on-demand): 16 steps, one SSE stream, one validation discussion covering every TD. Each sub-audit opens with a relevance gate — "if this dimension does not apply, write one line and move on" — so a static site gets a one-line Database section instead of hallucinated findings. Dogfooded live: 43 TDs found on a real project vs 12 with the old scattered flow.
+- **First-contact MCP onboarding** (`kronn_intro`). New bridge tool giving a beginner-friendly "Kronn en 2 minutes" tour — désagentification, saved discussions, join/rooms, workflows, quick prompts/APIs, audits — with 5 concrete starter asks. Auto-suggested at the first `initialize` of a client (per-client marker in `~/.config/kronn/mcp-onboarded.json`); points anything secret-related at the UI, never the chat. Plus `bridge_info` (bridge staleness vs the script on disk) and a `docs/design/headless-backend.md` design note (lazy `--headless` profile, UI launching rules) sized for 0.9.1.
 - **E2E specs for audit card & tab states** (`frontend/e2e/specs/audit-card-states.spec.ts`). Route-mocked, zero-token: a card must adopt an audit launched outside the UI (MCP bridge), lock its CTAs while running, release them after; the drift-refresh cycle must go stale → update → clean without phantom badges.
 
 ### Changed
@@ -31,8 +31,125 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Export fidelity matches the HTML preview.** PDF page sizing/margins and the
   DOCX HTML mapping now preserve the generated document's layout, colors,
   typography, tables and spacing much more closely.
-- **ID-copy feedback is consistent.** Discussion, workflow and message IDs use
-  the same short pill and transient copied animation.
+- **Large workflow histories open incrementally.** The detail view starts with
+  ten runs instead of blocking on as many as 500 full outputs, then lets the
+  user load 10, 50, 100 or all older runs. A page always completes its boundary
+  parent group, so one 17-child invocation is never presented as only 10
+  executions. The workflow list and detail now scroll independently, with each
+  newly selected detail opening at its top. Idle histories also stop repainting
+  every second.
+- **Workflow details are easier to scan.** Every workflow keeps its interactive
+  vertical map beside a compact step index, including linear workflows with no
+  GoTo; selecting either view opens one focused step inspector with
+  previous/next navigation instead of a long stack of expanded cards. GoTo
+  destinations are named, navigable chips, and each target can expand every
+  incoming GoTo origin with its condition and a direct link back to the source
+  step. The compact index now labels every step type with a stable type colour
+  and gives the selected step a much stronger active state. Sub-workflows use
+  the same map, compact index and focused inspector instead of expanding every
+  child card. The header, tablet layout and deterministic step labels were
+  polished at the same time.
+- **Workflow sidebar cards are easier to scan.** Trigger, step count, latest
+  status and actions now follow one compact visual hierarchy; selected and
+  running workflows remain obvious without turning every action into a full
+  text row.
+- **Interrupted fan-outs resume where they stopped.** Resuming an interrupted
+  parent now reuses its interrupted sub-workflow child and continues after the
+  child's last completed step instead of recreating it from step one. Completed
+  foreach items are reconciled by stable item identity, with a persisted-index
+  fallback for legacy rows whose item ID was empty. Run history keeps a compact
+  `Interrupted → Running → Success/Failed` trail in both collapsed rows and
+  expanded details; single-status runs use the same chip design for a consistent
+  history. An interrupted child exposes the same Resume action and delegates it
+  safely to its parent.
+- **Agent switching is fast and consistent.** Discussion headers, Quick Prompt
+  cards and workflow Agent steps share the same compact picker, menu and saving
+  feedback. Discussion switches stay silent and defer one concise handoff to
+  the next real user message instead of spending tokens on an automatic
+  introduction. Workflow/QP changes preserve the reasoning tier while clearing
+  an explicit model name that belongs to the previous provider.
+- **Quick Prompt and Quick API lists are stable and sortable.** Both default to
+  name A → Z, with last-modified alternatives; prompts can sort by total usage,
+  while APIs can group by API plugin and sort their endpoints A → Z under clear
+  group headings.
+- **Automation cards and creation affordances are consistent.** Quick Prompts
+  and Quick APIs now use the same identity, metadata, utility-action and primary
+  launch hierarchy as workflows, including a responsive header. Every tab
+  exposes AI-assisted creation with a surface-specific MCP briefing, and Quick
+  APIs gain the same JSON import drawer already available to workflows and
+  prompts.
+- **Plugin cards share the same visual language.** Installed MCP, API, CLI and
+  hybrid plugins now have type-coloured rails and icons, distinct identity,
+  scope/credential metadata and a dedicated footer with an explicit detail
+  affordance. The built-in Kronn plugin follows the same hierarchy, cards are
+  keyboard-accessible buttons, and the grid/header collapse cleanly on mobile.
+- **List controls are consistent across Plugins and Automation.** One shared
+  compact toolbar now separates filtering, sort criterion and direction:
+  Plugins filter by MCP/API/CLI and sort by name/type/scope; Quick Prompts
+  filter by agent; Quick APIs filter by API. A dedicated A→Z/Z→A button
+  reverses or restores the selected criterion without bloating dropdowns with
+  duplicate directions; hybrid plugins remain discoverable under both MCP and
+  API filters.
+- **Configuration matches the refreshed application shell.** A sticky section
+  index replaces the old pill wall on desktop, follows the currently viewed
+  setting and becomes a compact horizontal rail on small screens. The header,
+  summaries, cards, section icons and system actions now share the same visual
+  hierarchy and responsive behaviour as Plugins and Automation.
+- **Projects use a focused master/detail workspace.** Compact, filterable and
+  sortable project cards stay in an independently scrolling list while one
+  project opens in a structured overview with dedicated Discussions,
+  Docs & audit, Code and Resources views. The read-only Code explorer searches
+  the project through guarded Rust endpoints, navigates occurrences across
+  files, applies syntax colours and shows the current Git branch. Every
+  readable text file is discoverable at the repository root and inside source
+  folders (including extensionless configuration files); ignored files carry
+  an explicit `ignored` marker, and an optional Annotate mode adds Git author
+  and date metadata per line. The Code tree now renders repository-root entries
+  immediately, then hydrates the complete bounded tree in the background.
+  Large ignored result sets are streamed to Git without the former pipe-buffer
+  deadlock: on the Kronn repository the root pass takes about 40 ms and the
+  complete pass about 1.2 s instead of hanging beyond a minute. Docs,
+  dependencies, build output, binaries and obvious secret files stay excluded.
+  Mobile keeps the same hierarchy with an
+  explicit back-to-list flow, and only the selected heavy detail is mounted.
+  Every visible folder can also be excluded per project in one click and
+  restored from a compact exclusion list; common cache/vendor/bundle folders
+  are skipped by default. Search caps its total byte budget, and Git ignored
+  markers now query only the bounded visible file set instead of enumerating
+  an entire ignored cache. The overview also acts as a compact repository home:
+  browser-safe repository and PR/MR shortcuts, current branch, latest local
+  tag, upstream ahead/behind state, local-change count and a language
+  distribution that reuses the Code explorer's dependency/cache exclusions.
+  Git state stays live while the heavier language scan is cached for one hour;
+  one compact `Cache · HH:mm` refresh control exposes its age and forces a
+  recomputation without adding another full panel.
+  A dependency-health card detects JavaScript, Composer, Cargo, Go, Bundler,
+  NuGet, Poetry and Gradle manifests, then reports outdated and major packages
+  per manager. Checks prefer each ecosystem's native read-only command. If that
+  runtime is absent, incompatible or fails, one pinned Renovate local dry-run
+  scans only the affected managers, so Gradle/Android and locked Bundler
+  projects work without a local JDK, Android SDK, Ruby or Bundler install.
+  Checks are bounded, cached for six hours and manually refreshable, with
+  manifest or lockfile changes invalidating the cache; a fallback failure
+  remains explicit instead of being reported as “up to date”. Composer checks
+  are additionally container-aware: when Composer is absent from the Kronn
+  host, an already-running Docker Compose PHP/app service is detected first. If
+  the project stack is stopped or not built, Kronn falls back to the official
+  Composer image with the manifest directory mounted read-only; it never starts
+  the application stack or its dependencies. Major updates stay first in the
+  bounded package preview and use a dedicated red treatment; compatible
+  updates remain amber.
+- **Cargo build dependencies are current across backend and desktop.** Both
+  lockfiles move `cc` from 1.2.62 to 1.4.0, which safely unlocks the transitive
+  `shlex` 1.3.0 → 2.0.1 major update reported by the new dependency health
+  card.
+- **Project state chips now match the automation status language.** “To
+  prepare”, “To validate”, validation/running states and tech-debt alerts use
+  the same compact current-colour pills as workflow run states instead of a
+  project-only badge variant.
+- **ID-copy feedback is consistent.** Discussions, workflows, messages,
+  projects, Quick Prompts and Quick APIs use the same short pill, full-ID copy
+  action and transient green confirmation.
 - **Safer Agent+Exec workflows.** The wizard warns when Agent and Exec steps
   coexist without required isolation and offers a one-click action to enable
   it.
@@ -42,13 +159,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Joined agents can converse with the discussion's native principal.** A
+  live `disc_append` Agent turn now wakes the native discussion agent, while a
+  human turn still leaves connected MCP peers as the sole responders. Imports,
+  duplicates, no-agent rooms and concurrent peer replies cannot create an
+  extra native run; the generated prompt explicitly targets the latest peer
+  message.
+- **Workflow agent menus stay above later step chips.** Opening the compact
+  per-step agent picker raises its owning pipeline card, so following type
+  labels no longer paint over the dropdown.
+- **Five-field cron weekdays use standard cron numbering.** Numeric schedules
+  now treat `1-5` as Monday through Friday and `0`/`7` as Sunday before they
+  reach the Rust scheduler crate, whose native numbering starts on Sunday.
 - **SQLite timestamps no longer drift on read.** One shared parser accepts both
   RFC3339 and legacy SQLite UTC values; migration 078 normalizes existing rows
   once instead of falling back to the current time and flooding logs.
 - Removed stale Codex MCP-blocker behavior/comments now that Codex supports the
   bridge, and restored Codex to the per-agent MCP introspection matrix.
 - **Audit artifacts never carry credential literals across an agent boundary.** Full, partial/drift and linked validation-discussion runs now redact Kronn-managed audit outputs before the first spawn, after every attempt (before validation/retry), and before publication. The sweep is fail-closed, covers the complete chained target set plus TD details, rejects escaping/symlinked/non-UTF-8/non-regular targets, preserves permissions atomically, and invalidates `KRONN:VALIDATION_COMPLETE` if the final validation sweep cannot prove the artifacts clean.
-- **MCP discussion presence survives bridge reloads without ghost participants.** A host-launched CLI now persists an owner-only, symlink-safe resume credential keyed to its outermost durable CLI ancestor; reload resumes the original participant row with atomic credential rotation instead of requiring a fresh invite. Replay, wrong-agent and sibling-session takeover attempts fail closed, `disc_append`/long-poll heartbeats update only the exact session, and paced peers expose an expiring `waiting` state so the UI can show “dormant” honestly between polls. Legacy unrecoverable `adhoc-*` rows are retired once at migration.
+- **MCP discussion presence survives bridge reloads without ghost participants.** A host-launched CLI persists an owner-only, symlink-safe resume credential under the strongest stable session identity available: terminal/pane/project scope for Claude, its logical session as fallback, or the outermost CLI process identity for other clients. Reload resumes the original participant row instead of requiring a fresh invite. Replay, wrong-agent, cross-project and sibling-session takeover attempts fail closed, `disc_append`/long-poll heartbeats update only the exact session, and paced peers expose an expiring `waiting` state so the UI can show “dormant” honestly between polls. Legacy unrecoverable `adhoc-*` rows are retired once at migration.
+- **Resume-token rotation is crash-safe instead of server-first.** The bridge now generates and fsyncs a random successor credential as pending state before asking the backend to CAS `(old → successor)`; an exact replay is idempotent when the HTTP response or final disk promotion is lost, while a divergent concurrent successor is rejected. A per-binding thread/process lock serializes overlapping sidecars, the verified `agent_type` persists with the credential, and legacy bridges resume non-rotating rather than being stranded by an unacknowledged random rotation.
 - **Project-local MCP sync is ownership-aware and fail-closed.** Kronn no longer rewrites whole `.mcp.json`, Gemini/Kiro JSON, or Vibe TOML files: unrelated settings and manual MCP entries survive, while a mode-`0600` sidecar records only the entries Kronn may later rotate or remove. Invalid files are backed up byte-for-byte and refused instead of replaced with an empty config; symlinked path components, predictable temp-file attacks and concurrent edits are refused; Claude's whitelist is derived from the merged file so preserved manual servers remain enabled.
 - **API credentials stay behind the broker boundary.** Agent launch logs no longer include argv/prompt contents, discussion startup no longer performs eager token exchange, and generated API context exposes only auth shape plus symbolic non-secret config references. Bearer, Basic, API-key, OAuth2 and token-exchange values — including provider error details — are absent from model prompts and must be injected server-side by `api_call`.
 - **F27 baseline publication is coherent and fail-closed.** A full audit freezes one quiesced worktree fingerprint for every mapping, checks it again before and after atomic publication, and restores the previous baseline byte-for-byte if the source moves during that window. Rollback refuses to clobber a concurrent writer. Opt-in per-record diagnostics (`KRONN_F27_MANIFEST=1`) use per-process salted tags so the next instrumented benchmark can identify the still-unproven intermittent mutator without logging raw content digests.
@@ -69,22 +199,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **False-positive TODO detection** — backtick-quoted mentions of `TODO` in prose no longer count as real markers.
 - **`make run-backend`** — builds then runs the bare binary (no cargo-watch): the exploitation mode for long audits, after two runs died to watcher-triggered rebuilds. Backend also writes a persistent plain-text log to `<data_dir>/kronn.log`.
 - **Templates directory resolves from the binary** (not the CWD) and the repo scanner skips MCP-context injection for template/`{{`-placeholder files.
+- **The key-management coverage gate remains meaningful after the Rustfmt
+  baseline.** Real error paths for unreadable/unwritable sidecar storage,
+  whitespace-only environment overrides, unavailable vault snapshots and the
+  OS-keychain constructor are now covered instead of lowering the CI floor.
+- **The linear workflow E2E no longer depends on `httpbin.org`.** Browser CI
+  now exercises the API/run/persistence lifecycle with three deterministic
+  zero-network steps. The complete JsonData → Notify → Notify runner path,
+  request interpolation and persisted results are covered against a
+  process-local sink through a test-only policy variant that is absent from
+  production builds; production SSRF rejection remains unchanged.
 
 ### Documentation
 
 - Reconciled the technical-debt index: completed/obsolete TDs were removed,
   partial items now describe only their remaining scope, and previously
   unindexed open TDs are included.
-- Added the validated Planning/discussion-plan brief and a complete roadmap
-  from the 0.8.13 release train through the Planning evolution, with every open
-  TD assigned to a delivery track.
+- Added the validated Planning/discussion-plan product brief.
 
 ### Tests
 
-- Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, session isolation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs.
-- Full suite: backend 4,274 passed / 4 ignored; frontend 2,619 passed; MCP
-  bridge 290 passed. Clippy, production build, ESLint (0 errors), i18n parity,
-  the frozen PDF/DOCX smoke test and Tauri `cargo check` also pass.
+- Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, Claude terminal/project continuity across daemon/spare topology with logical-session fallback, session isolation, crash-safe token rotation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs.
+- Full suite: backend 4,292 passed / 4 ignored; frontend 2,646 passed; MCP
+  bridge 303 passed; shell 233 passed. Rustfmt, Clippy, production build, ESLint
+  (0 errors), i18n parity, the frozen PDF/DOCX smoke test and Tauri
+  `cargo check` also pass.
 
 ## [0.8.12] - 2026-07-19
 
@@ -287,9 +426,9 @@ After a cross-OS import, every project path is invalid (`/home/...` ⇄ `/Users/
 - **Page-level banner + filter** (`ProjectList`) — persistent "N projects have missing folders" summary with a one-click "show only these" toggle to triage a large import.
 - i18n FR/EN/ES. Tests: backend `enrich_audit_status` (missing → flagged + scans skipped, existing → present); frontend remap banner (render gating, call shape, trim, inline error, no-refetch-on-error) + list banner (singular/plural/filter).
 
-### Added — Continual Learning (0.9.0, behind a default-OFF beta toggle)
+### Added — Continual Learning foundations (0.10.0 preview, behind a default-OFF beta toggle)
 
-Agents can propose **durable learnings** (conventions, preferences, facts, pitfalls) that a human validates before they're persisted into injected truth files — closing the "every discussion re-explains the same context" gap. Full design + the multi-agent review that hardened it: `docs/research/continual-learning-0.9.0-spec.md`.
+Agents can propose **durable learnings** (conventions, preferences, facts, pitfalls) that a human validates before they're persisted into injected truth files — closing the "every discussion re-explains the same context" gap. The foundations remain opt-in preview work in 0.9.0; stabilization and the full product milestone now target 0.10.0. Full design + the multi-agent review that hardened it: `docs/research/continual-learning-0.10.0-spec.md`.
 
 - **Master toggle `continual_learning_enabled` — default OFF (beta).** The feature writes agent-proposed content into injected docs, so it ships opt-in: a bug can't pollute a user's docs. Settings → *Apprentissage continu* (`ContinualLearningSection`) + endpoints `GET/POST /api/config/continual-learning-enabled`. Gates capture only — validating/rejecting existing pending candidates stays allowed when off.
 - **Typed MCP tool `learning_propose(claim, evidence[], kind)`** (no free-form fence) — evidence is mandatory; disc/project/agent auto-inherited from the current discussion.
@@ -454,7 +593,7 @@ The `kronn-internal` MCP could only **create** workflow/QP drafts. An agent iter
 - **`qp_get(id)`** — the FULL Quick Prompt, including the `prompt_template` body that `qp_list` drops (and all bindings). So an agent can read what a QP *does* — to run it itself, or to read it before a `qp_update` surgery. `qp_list` says a QP exists; `qp_get` says what it does. (Closed a real gap: `qp_list` dropped the body and there was no `qp_get`, so agents had to ask the user to paste the QP.)
 - **`qp_update(id, patch)`** / **`qp_delete(id)`** — load-merge-write patch over `qp_list` + delete, so a QP can be iterated in place instead of orphaning a copy.
 
-Also: `_normalize_variables` fills `PromptVariable`'s required `label`/`placeholder` so agents can pass `{name}` alone instead of 422-ing (wired into both `*_create_draft` handlers too), and `workflow_create_draft`'s description now embeds a correct **flat WorkflowStep** example (Agent / ApiCall / Exec / Gate / Notify / BatchQuickPrompt) so the step schema is discoverable at call time. +21 Python tests (`WorkflowQpCrudToolTests`); full MCP suite 173 green. *(Deferred to 0.9.0: `workflow_validate` returning all errors at once — the only piece needing a Rust change, since the create/update validator is fail-fast.)*
+Also: `_normalize_variables` fills `PromptVariable`'s required `label`/`placeholder` so agents can pass `{name}` alone instead of 422-ing (wired into both `*_create_draft` handlers too), and `workflow_create_draft`'s description now embeds a correct **flat WorkflowStep** example (Agent / ApiCall / Exec / Gate / Notify / BatchQuickPrompt) so the step schema is discoverable at call time. +21 Python tests (`WorkflowQpCrudToolTests`); full MCP suite 173 green. *(Deferred to 0.9.1: `workflow_validate` returning all errors at once — the only piece needing a Rust change, since the create/update validator is fail-fast.)*
 
 ### Fixed — `api_call` broker silently forwarded malformed JSON bodies (opaque target 400s)
 
@@ -1044,15 +1183,15 @@ Released 2026-05-23 (tag `0.8.6`), bundling all phases: Phase 1-2 (advanced feat
 
 ### Phase 3 (pré-0.9.0 cleanup pass)
 
-**Cleanup pass avant Continual Learning.** 7 PRs ciblées pour qu'aucune dette ne gêne le brief 0.9.0. Zéro feature breaking, juste de la mise en ordre.
+**Cleanup pass avant Continual Learning.** 7 PRs ciblées pour qu'aucune dette ne gêne le brief désormais ciblé en 0.10.0. Zéro feature breaking, juste de la mise en ordre.
 
 ### Added — Phase 3 (cleanup batch)
 
-- **`core::redact` shared Rust module** (`backend/src/core/redact.rs` — new). Promotes the ad-hoc redactor that lived inside `db/api_call_logs.rs` into a first-class crate utility used by ALL future secret-sensitive log surfaces (including the upcoming 0.9.0 `learning_candidates` extractor). Patterns ported from `frontend/src/lib/bug-report.ts::redactSecrets` + extended : Authorization headers (Bearer/Basic/Token/Digest), JSON credential fields (`password`, `token`, `api_key`, `access_token`, `refresh_token`, `client_secret`, `private_key`), connection strings with embedded creds (postgres, mongodb+srv, mysql, redis, amqp), bare Bearer in logs, vendor prefixes (`sk-`, `p8e-`, `AIzaSy`, `gh[opsur]_`, `xox[abprs]-`), JWTs, AWS access keys, Stripe live/test keys. Exports two entry points : `redact_secrets(input)` for in-place masking + `looks_like_secret(input)` for fast boolean refusal (used by learning_candidates to reject secret-y content before persistence). Idempotent + UTF-8 boundary safe. Bonus contract change : `db::api_call_logs::redact_secrets` now re-exports the shared module, so the broker excerpts gain the wider regex coverage automatically. **30 unit tests** (per-pattern positive + false-positive guards + UTF-8/emoji boundary + multi-secret + idempotence).
+- **`core::redact` shared Rust module** (`backend/src/core/redact.rs` — new). Promotes the ad-hoc redactor that lived inside `db/api_call_logs.rs` into a first-class crate utility used by ALL future secret-sensitive log surfaces (including the upcoming 0.10.0 `learning_candidates` extractor). Patterns ported from `frontend/src/lib/bug-report.ts::redactSecrets` + extended : Authorization headers (Bearer/Basic/Token/Digest), JSON credential fields (`password`, `token`, `api_key`, `access_token`, `refresh_token`, `client_secret`, `private_key`), connection strings with embedded creds (postgres, mongodb+srv, mysql, redis, amqp), bare Bearer in logs, vendor prefixes (`sk-`, `p8e-`, `AIzaSy`, `gh[opsur]_`, `xox[abprs]-`), JWTs, AWS access keys, Stripe live/test keys. Exports two entry points : `redact_secrets(input)` for in-place masking + `looks_like_secret(input)` for fast boolean refusal (used by learning_candidates to reject secret-y content before persistence). Idempotent + UTF-8 boundary safe. Bonus contract change : `db::api_call_logs::redact_secrets` now re-exports the shared module, so the broker excerpts gain the wider regex coverage automatically. **30 unit tests** (per-pattern positive + false-positive guards + UTF-8/emoji boundary + multi-secret + idempotence).
 
 - **Flaky `notify_renders_templates_in_url_and_body` fixed** (`backend/src/workflows/notify_step.rs`). Pre-fix the two `notify_*` tests bound a std `TcpListener` to port 0, read the port, dropped the listener, then re-bound with tokio — race window between drop and re-bind let a parallel test grab the port and flake the run. Fix : bind directly with `tokio::net::TcpListener::bind("127.0.0.1:0").await`, read `local_addr().port()` from the already-tokio listener, no drop. 5×stress-tested with `--test-threads=8`, all green.
 
-- **`disc_summary` / continual-learning archive collision audit** (new memory `project_continual_learning_archive_unify.md`). Read the existing archive-time flow in `backend/src/api/discussions/streaming.rs:967-989` + the 0.9.0 brief's PR #4 plan. Decision : manual archive button triggers the future learning-validation modal, auto-archive (signal-driven, e.g. `KRONN:BOOTSTRAP_COMPLETE`) does NOT — popping a modal mid-pipeline is jarring. Pending learning candidates persist regardless of archive path + are surfaced via a global badge in `ChatHeader.tsx` (per the 0.9.0 PR #2 design). No collision with `summary_cache` (that's a compaction cache, not an archive ritual). Adjustment documented in the new memory ; 0.9.0 PR #4 scope unchanged otherwise.
+- **`disc_summary` / continual-learning archive collision audit** (new memory `project_continual_learning_archive_unify.md`). Read the existing archive-time flow in `backend/src/api/discussions/streaming.rs:967-989` + the 0.10.0 brief's PR #4 plan. Decision : manual archive button triggers the future learning-validation modal, auto-archive (signal-driven, e.g. `KRONN:BOOTSTRAP_COMPLETE`) does NOT — popping a modal mid-pipeline is jarring. Pending learning candidates persist regardless of archive path + are surfaced via a global badge in `ChatHeader.tsx` (per the 0.10.0 PR #2 design). No collision with `summary_cache` (that's a compaction cache, not an archive ritual). Adjustment documented in the new memory ; 0.10.0 PR #4 scope unchanged otherwise.
 
 - **Workflow + manual_test api_call logging** (`backend/src/workflows/api_call_executor.rs`). The 0.8.6 phase 2 audit table only captured `agent_broker` calls. Now also captures workflow runs (source=workflow, with `run_id` plumbed via new `ApiCallLogContext` plumbed through the executor entry point + batch fan-out) AND wizard "Test the call" + `/api/quick-apis/:id/run` (source=manual_test). New entry point `execute_api_call_step_with_db_as(... log_ctx)` for callers that want to override the default workflow source ; the old `execute_api_call_step_with_db(...)` signature is preserved and defaults to workflow logging. Batch `BatchApiCall` records ONE row per item (the executor fans out before the recording hook). Best-effort : DB errors NEVER short-circuit the step. **8 tests** added (parse `[SIGNAL: http_NNN]`, log context defaults, workflow / manual_test integration with in-memory DB).
 
@@ -1079,7 +1218,7 @@ Released 2026-05-23 (tag `0.8.6`), bundling all phases: Phase 1-2 (advanced feat
 ### Notes
 - All 2133 backend tests + 63 Python tests + 1454 frontend tests pass ; cargo clippy clean ; `make lint-backend-local` exit 0.
 - Released 2026-05-23 as tag `0.8.6` (phases 1-4 bundled). Phase 4 PR2/PR3 deferred to 0.8.7.
-- Zero feature changes shipped to end users beyond the audit-log read UI + STT progress feedback. This phase is dette-paid + 0.9.0 prep.
+- Zero feature changes shipped to end users beyond the audit-log read UI + STT progress feedback. This phase is dette-paid + 0.10.0 milestone prep.
 
 ### Phase 2 (2026-05-21) — post-merge quick-wins batch
 
@@ -1168,7 +1307,7 @@ L'agent appelle les APIs configurées dans Kronn directement, sans jamais voir l
 - **`[[project_dropdown_native_options_theme]]`** — custom popover dropdown component pour theme parity Firefox/Safari sur natives `<select>`.
 - **`[[project_custom_plugin_rename_orphan_env]]`** — partiellement shipped (orphan warning + filter on save), restant : auto-rekey UX prompt.
 - **SSE `DiscMessageAppended` event** — actuellement polling 5s côté UI pour rafraîchir les messages d'une disc multi-agent. Upgrade vers vrai push event (réutilise `ws_broadcast` existant) en 0.8.7. La latence 5s est OK pour MVP.
-- **Multi-agent : tour-de-jeu enforced (opt-in)** — paramètre disc `enforced_turn_order: bool` qui refuserait `disc_append` si pas le tour du caller. Surface live test 2026-05-21 où Claude et Codex se sont coordonnés par convention (lecture timestamps). Acceptable pour free-form chat, mais souhaitable pour jeux/workflows stricts. Reporté en 0.8.7 ou 0.9.0.
+- **Multi-agent : tour-de-jeu enforced (opt-in)** — paramètre disc `enforced_turn_order: bool` qui refuserait `disc_append` si pas le tour du caller. Surface live test 2026-05-21 où Claude et Codex se sont coordonnés par convention (lecture timestamps). Acceptable pour free-form chat, mais souhaitable pour jeux/workflows stricts. Toujours non planifié après 0.9.0.
 - **`[[project_multi_agent_orchestrator]]` — delegation pattern** : agent A appelle `agent_delegate({to: Codex, task: "review ce diff", context})` pour confier une sous-tâche à un autre agent spécialisé. Le substrat `discussion_sessions` shippé en 0.8.6 est prêt à recevoir ce tool. Effort ~15-25h, target 0.9.x.
 
 ## [0.8.5] - 2026-05-17

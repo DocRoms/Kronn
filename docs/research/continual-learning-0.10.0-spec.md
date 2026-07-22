@@ -1,9 +1,9 @@
-# Kronn 0.9.0 — Continual Learning : spec d'implémentation
+# Kronn 0.10.0 — Continual Learning : spec d'implémentation
 
 > **Statut** : spec de consolidation (2026-05-31). Fusionne les décisions figées
 > (REDESIGN CANONIQUE 2026-05-27, convergence 5/5 + PR4a drafté 2026-05-28) en un
 > contrat implémentable, et **explicite le gate de fidélité niveau-2** — le seul
-> verrou anti-hallu qui manque réellement pour rendre 0.9.0 sûr.
+> verrou anti-hallu qui manque réellement pour rendre 0.10.0 sûr.
 >
 > Précondition livrée : PR1-PR3 (section `docs/AGENTS.md § anti-hallu` source
 > unique + STEP 0 audit + PREAMBLE pointer + endpoints inject/sync + badge UI).
@@ -24,7 +24,7 @@ Deux toggles distincts, à ne pas confondre :
 
 **Réutilise l'infra anti-hallu** : `anti_hallu_step.rs` (`find_marker_line`/`refresh_existing`/`insert_new`) + `anti_hallu_inject.rs` (inject/sync endpoints) → on mirror pour `name="learnings"` + on ajoute le chemin **remove** (cas OFF). « Faisable simplement » confirmé.
 
-**Séquence de ship 0.9.0** : (1) toggle `continual_learning_enabled` (défaut OFF) → (2) PR4c section marker `learnings` (inject ON / remove OFF + seed) → (3) mount A+C (badge global + intercept archive manuel), gatés par le toggle → (4) PR4a-bis LLM-judge (optionnel, Gate-2 défaut OFF). Le toggle gate la CAPTURE (`propose`) ; valider/rejeter les pending existants reste possible même OFF (on draine, on ne capture plus).
+**Séquence de ship 0.10.0** : (1) toggle `continual_learning_enabled` (défaut OFF) → (2) PR4c section marker `learnings` (inject ON / remove OFF + seed) → (3) mount A+C (badge global + intercept archive manuel), gatés par le toggle → (4) PR4a-bis LLM-judge (optionnel, Gate-2 défaut OFF). Le toggle gate la CAPTURE (`propose`) ; valider/rejeter les pending existants reste possible même OFF (on draine, on ne capture plus).
 
 ---
 
@@ -43,7 +43,7 @@ qui s'y persiste devient de la **training-data permanente** pour tous les agents
 en aval (stage 3 — le pire, le pushback humain en disc disparaît). Donc :
 
 > **Aucune écriture dans un fichier-vérité sans (a) evidence qui résout
-> mécaniquement ET (b) un humain qui valide.** 0.9.0 sans le loop anti-hallu
+> mécaniquement ET (b) un humain qui valide.** 0.10.0 sans le loop anti-hallu
 > *amplifie* les hallucinations au lieu de capturer du savoir.
 
 ---
@@ -56,7 +56,7 @@ Une learning a la forme `claim` + `evidence[]`. La vérifier, c'est répondre à
 | Gate | Question | Couche | État |
 |---|---|---|---|
 | **Gate 1 — existence** | l'evidence citée *existe-t-elle* ? (`file:line` résout, in bounds ; URL ; user-confirmé daté) | niveau-1 (`verify_source_marker`) | **livré 0.8.7** |
-| **Gate 2 — fidélité** | le `claim` *découle-t-il* de l'evidence ? (`claim ⊨ evidence`) | niveau-2 (RFC-6) | **manquant — l'objet de 0.9.0** |
+| **Gate 2 — fidélité** | le `claim` *découle-t-il* de l'evidence ? (`claim ⊨ evidence`) | niveau-2 (RFC-6) | **manquant — l'objet de 0.10.0** |
 
 **Pourquoi Gate 1 ne suffit pas** (prouvé par la repasse 4-personas 2026-05-31) :
 l'existence-lint vérifie que le fichier cité existe, *jamais* que le claim
@@ -73,11 +73,11 @@ contradiction}. **Posture retenue : (B)** — le checker produit un verdict par
 paire (claim ↔ chaque evidence), stocké en `faithfulness` et affiché en chip
 dans le modal humain (🟢 entailment / 🟡 neutral / 🔴 contradiction). **Le gate
 reste l'humain**, mais informé au lieu d'aveugle ; un 🔴 force un clic de
-confirmation explicite. Ne parie pas 0.9.0 sur la précision du checker, respecte
+confirmation explicite. Ne parie pas 0.10.0 sur la précision du checker, respecte
 la désagentification, et peut être promu en bloquant en mode `enforce` plus tard.
 
 Postures écartées (trace) : **(A) bloquant auto** — parie la release sur la
-précision du checker, faux-blocages silencieux ; **(C) différer 0.9.1** — laisse
+précision du checker, faux-blocages silencieux ; **(C) différer 0.10.1** — laisse
 le trou prouvé (`nth-of-type` : Gate 1 vert mais claim faux) ouvert dans le modal.
 
 **Précondition** : le **proto jetable** (PR4-0) sur ~30 paires réelles tranche si
@@ -207,16 +207,16 @@ direct-call.
 
 | `kind` | Définition | SourceKind exigé | Graduation |
 |---|---|---|---|
-| **fact** | vérifiable mécaniquement | **≥1 evidence `file`/code `Verified`** (URL = `Unchecked` en 0.9.0 — pas de vérif réseau ; ne compte donc pas comme Verified) | OK après 1 validation humaine |
+| **fact** | vérifiable mécaniquement | **≥1 evidence `file`/code `Verified`** (URL = `Unchecked` en 0.10.0 — pas de vérif réseau ; ne compte donc pas comme Verified) | OK après 1 validation humaine |
 | **preference** | déclaration user explicite | `User` (**date requise**) | OK après 1 validation |
-| **inference** | dérivée sans déclaration explicite | `Inferred` (Unchecked) | **0.9.0 : 1 validation humaine** + warning modal ; double-validation 2 sessions = **futur 0.9.x** |
+| **inference** | dérivée sans déclaration explicite | `Inferred` (Unchecked) | **0.10.0 : 1 validation humaine** + warning modal ; double-validation 2 sessions = **futur 0.10.x** |
 
 `SourceKind::TrainingData` ⇒ **rejet auto à l'extraction**. **Enforcé backend au
 `validate` (2026-06-01)** : `fact` exige ≥1 evidence `Verified` ; `preference`
 exige ≥1 evidence `user` **datée** (`[src: user:YYYY-MM-DD]`). `inference` :
-promue sur **une** validation humaine en 0.9.0 (le gate humain EST la validation,
+promue sur **une** validation humaine en 0.10.0 (le gate humain EST la validation,
 posture B) avec warning ; la **double-validation 2 sessions est un safeguard
-futur (0.9.x)**, PAS promis en 0.9.0 — on ne sur-vend pas l'invariant (90% des
+futur (0.10.x)**, PAS promis en 0.10.0 — on ne sur-vend pas l'invariant (90% des
 hallucinations comportementales sont des inférences, donc le warning reste).
 
 ---
@@ -271,7 +271,7 @@ fichiers audités (`docs/AGENTS.md` curated) — sinon on invalide les checksums
 drift. Re-render par marqueur-bloc idempotent, `(lc_id:N)` pour update/revert.
 `scope=global/user` via une `preference` exige `[src: user: YYYY-MM-DD]`
 (enforcé backend au `validate`, 2026-06-01). La double-validation 2 sessions
-est un safeguard **futur (0.9.x)**, pas un invariant 0.9.0.
+est un safeguard **futur (0.10.x)**, pas un invariant 0.10.0.
 
 ---
 
@@ -295,7 +295,7 @@ chargement. (Event-driven rejeté au R2 : pas de FileWatcher Tauri ; le hook
 | 3 | contradiction silencieuse (cosine sim, pas de vector DB) | étape 6 → modal |
 | 4 | staleness `last_validated_at` | cron §8 + nudge |
 | 5 | sycophantie → confidence + haircut 0.85 | étape 7 |
-| 6 | reinforcement → negative learning + skill `memory-auditor` (on-demand, 0.9.x) | étape 8 |
+| 6 | reinforcement → negative learning + skill `memory-auditor` (on-demand, 0.10.x) | étape 8 |
 
 ---
 
@@ -342,7 +342,7 @@ POST /api/projects/{id}/learnings/sync — PR4c : inject/remove la section point
 2. `TrainingData`/`Inferred` → pas d'extraction auto en vérité ; binding type→SourceKind.
 3. Extracteur/évaluateur passent par `agents/runner.rs` (reçoivent le PREAMBLE).
 4. Post-render re-lint `analyze_roots()` AVANT écriture ; `fabricated_count>0` ⇒ refus (render→lint→write, pas de rollback fichier). ✅ enforcé.
-5. `fact` → ≥1 evidence `Verified` ; `preference` → ≥1 evidence `user` datée. ✅ enforcé au `validate`. `inference` → 1 validation humaine en 0.9.0 (double-validation = futur 0.9.x, non promis).
+5. `fact` → ≥1 evidence `Verified` ; `preference` → ≥1 evidence `user` datée. ✅ enforcé au `validate`. `inference` → 1 validation humaine en 0.10.0 (double-validation = futur 0.10.x, non promis).
 6. `validate` refuse tout statut ≠ `pending`. ✅ enforcé.
 
 ---
@@ -359,7 +359,7 @@ POST /api/projects/{id}/learnings/sync — PR4c : inject/remove la section point
 3. **Baseline staleness** : **`COALESCE(last_validated_at, created_at)`** ✅ — un
    pending non-revu depuis 7j mérite le nudge.
 4. **Coexistence fence** : **non — tool MCP `learning_propose` seul** ✅ (D8, fence
-   libre INTERDITE dès 0.9.0).
+   libre INTERDITE dès 0.10.0).
 5. **Spawn cron** : la feature est dans la lib `kronn::` → les 2 binaires l'ont
    gratuitement, MAIS le **spawn `LearningSweep::start()` doit être ajouté dans
    les DEUX `main.rs`** ✅ — `backend/src/main.rs` (≈:317) ET

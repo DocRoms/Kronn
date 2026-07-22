@@ -28,8 +28,17 @@ use walkdir::WalkDir;
 /// Heavy dirs skipped by every detector walk. Mirrors
 /// `scanner::scan_kronn_markers` so the two scans agree on scope.
 static SKIP_DIRS: &[&str] = &[
-    "node_modules", "vendor", "target", ".git", "dist", "build",
-    ".next", ".kronn", ".kronn-worktrees", ".venv", "__pycache__",
+    "node_modules",
+    "vendor",
+    "target",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    ".kronn",
+    ".kronn-worktrees",
+    ".venv",
+    "__pycache__",
     "docs", // never scan Kronn's own output as if it were source
 ];
 
@@ -74,13 +83,14 @@ pub struct DetectedSignal {
 
 /// Source-file extensions counted by the test-gap detector.
 static SOURCE_EXTS: &[&str] = &[
-    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs",
-    "php", "py", "go", "java", "kt", "rb", "cs",
-    "c", "h", "cpp", "hpp", "cc", "swift", "scala",
+    "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "php", "py", "go", "java", "kt", "rb", "cs", "c",
+    "h", "cpp", "hpp", "cc", "swift", "scala",
 ];
 
 /// Markup extensions scanned for `_blank` / CSP signals.
-static MARKUP_EXTS: &[&str] = &["html", "htm", "twig", "vue", "svelte", "jsx", "tsx", "php", "erb", "blade"];
+static MARKUP_EXTS: &[&str] = &[
+    "html", "htm", "twig", "vue", "svelte", "jsx", "tsx", "php", "erb", "blade",
+];
 
 /// Per-detector cap on emitted signals so a pathological repo can't
 /// flood the Step 8 prompt. When a detector truncates, it appends a
@@ -107,8 +117,12 @@ pub fn run_detectors(project_path: &Path) -> Vec<DetectedSignal> {
 
 /// The list of detector ids that `run_detectors` runs, for the honest
 /// "what was scanned" footer in [`render_signals_block`].
-pub const DETECTOR_IDS: &[&str] =
-    &["zero-tests", "blank-noopener", "csp-unsafe", "missing-community-files"];
+pub const DETECTOR_IDS: &[&str] = &[
+    "zero-tests",
+    "blank-noopener",
+    "csp-unsafe",
+    "missing-community-files",
+];
 
 // ─── Detector 1: test gap ────────────────────────────────────────────────
 
@@ -122,7 +136,9 @@ fn detect_zero_tests(root: &Path) -> Vec<DetectedSignal> {
     let mut test_count = 0usize;
     for entry in walk(root) {
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
         if !SOURCE_EXTS.contains(&ext) {
             continue;
         }
@@ -160,7 +176,9 @@ fn is_test_path(path: &Path) -> bool {
     if in_test_dir {
         return true;
     }
-    let Some(orig) = path.file_name().and_then(|n| n.to_str()) else { return false };
+    let Some(orig) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
     // CamelCase convention (Java/C#/Kotlin): `UserServiceTest.java`,
     // `FooSpec.scala`. Checked on the ORIGINAL case so we don't match
     // "contest"/"latest"/"greatest" (which only end in lowercase "test").
@@ -189,7 +207,9 @@ fn detect_blank_without_noopener(root: &Path) -> Vec<DetectedSignal> {
     let mut truncated = 0usize;
     for entry in walk(root) {
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
         if !MARKUP_EXTS.contains(&ext) {
             continue;
         }
@@ -199,7 +219,9 @@ fn detect_blank_without_noopener(root: &Path) -> Vec<DetectedSignal> {
         if is_test_path(path) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
         if !content.contains("_blank") {
             continue;
         }
@@ -238,7 +260,9 @@ fn detect_blank_without_noopener(root: &Path) -> Vec<DetectedSignal> {
 /// Line-scoped: misses tags split across lines (rare); documented limit.
 fn line_has_blank_without_noopener(line: &str) -> bool {
     let l = line.to_lowercase();
-    let has_blank = l.contains("target=\"_blank\"") || l.contains("target='_blank'") || l.contains("target=_blank");
+    let has_blank = l.contains("target=\"_blank\"")
+        || l.contains("target='_blank'")
+        || l.contains("target=_blank");
     if !has_blank {
         return false;
     }
@@ -260,14 +284,16 @@ fn line_has_blank_without_noopener(line: &str) -> bool {
 /// subscriber, middleware, nginx conf, meta tag, …).
 fn detect_csp_unsafe(root: &Path) -> Vec<DetectedSignal> {
     static CSP_EXTS: &[&str] = &[
-        "php", "rs", "ts", "js", "py", "go", "rb", "java", "conf", "html", "htm", "twig",
-        "yml", "yaml", "json", "ini", "nginx",
+        "php", "rs", "ts", "js", "py", "go", "rb", "java", "conf", "html", "htm", "twig", "yml",
+        "yaml", "json", "ini", "nginx",
     ];
     let mut out = Vec::new();
     let mut truncated = 0usize;
     for entry in walk(root) {
         let path = entry.path();
-        let Some(ext) = path.extension().and_then(|e| e.to_str()) else { continue };
+        let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+            continue;
+        };
         if !CSP_EXTS.contains(&ext) {
             continue;
         }
@@ -276,7 +302,9 @@ fn detect_csp_unsafe(root: &Path) -> Vec<DetectedSignal> {
         if is_test_path(path) {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(path) else { continue };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
         if !content.contains("unsafe-inline") && !content.contains("unsafe-eval") {
             continue;
         }
@@ -349,7 +377,9 @@ fn root_has_file(root: &Path, rel_lower: &str) -> bool {
     let mut cur = root.to_path_buf();
     let parts: Vec<&str> = rel_lower.split('/').collect();
     for (i, part) in parts.iter().enumerate() {
-        let Ok(entries) = std::fs::read_dir(&cur) else { return false };
+        let Ok(entries) = std::fs::read_dir(&cur) else {
+            return false;
+        };
         let want_dir = i < parts.len() - 1;
         let mut matched = None;
         for e in entries.flatten() {
@@ -422,7 +452,9 @@ pub fn undisposed_signals<'a>(
     let mut seen_anchors = std::collections::HashSet::new();
     let mut out = Vec::new();
     for sig in signals {
-        let Some(anchor) = disposition_anchor(sig) else { continue };
+        let Some(anchor) = disposition_anchor(sig) else {
+            continue;
+        };
         if !seen_anchors.insert(anchor.clone()) {
             continue; // already accounted for this file/keyword
         }
@@ -528,14 +560,20 @@ mod tests {
             write(t.path(), &format!("src/mod{i}.rs"), "fn x() {}");
         }
         write(t.path(), "tests/it.rs", "#[test] fn t() {}");
-        assert!(detect_zero_tests(t.path()).is_empty(), "a tests/ file must silence the detector");
+        assert!(
+            detect_zero_tests(t.path()).is_empty(),
+            "a tests/ file must silence the detector"
+        );
     }
 
     #[test]
     fn zero_tests_silent_below_threshold() {
         let t = proj();
         write(t.path(), "src/main.rs", "fn main() {}");
-        assert!(detect_zero_tests(t.path()).is_empty(), "trivial repo must not fire");
+        assert!(
+            detect_zero_tests(t.path()).is_empty(),
+            "trivial repo must not fire"
+        );
     }
 
     #[test]
@@ -548,14 +586,21 @@ mod tests {
         assert!(is_test_path(Path::new("test_thing.py")));
         assert!(is_test_path(Path::new("src/UserServiceTest.java")));
         assert!(!is_test_path(Path::new("src/user_service.rs")));
-        assert!(!is_test_path(Path::new("src/contest.rs")), "contest is not a test file");
+        assert!(
+            !is_test_path(Path::new("src/contest.rs")),
+            "contest is not a test file"
+        );
     }
 
     // ── _blank / noopener ──
     #[test]
     fn blank_without_noopener_fires() {
         let t = proj();
-        write(t.path(), "templates/page.twig", "<a href=\"x\" target=\"_blank\">link</a>");
+        write(
+            t.path(),
+            "templates/page.twig",
+            "<a href=\"x\" target=\"_blank\">link</a>",
+        );
         let s = detect_blank_without_noopener(t.path());
         assert_eq!(s.len(), 1);
         assert!(s[0].evidence.ends_with(":1"));
@@ -565,14 +610,22 @@ mod tests {
     #[test]
     fn blank_with_noopener_is_silent() {
         let t = proj();
-        write(t.path(), "a.html", "<a target=\"_blank\" rel=\"noopener noreferrer\">ok</a>");
+        write(
+            t.path(),
+            "a.html",
+            "<a target=\"_blank\" rel=\"noopener noreferrer\">ok</a>",
+        );
         assert!(detect_blank_without_noopener(t.path()).is_empty());
     }
 
     #[test]
     fn blank_with_noreferrer_only_is_silent() {
         let t = proj();
-        write(t.path(), "a.html", "<a rel=\"noreferrer\" target=\"_blank\">ok</a>");
+        write(
+            t.path(),
+            "a.html",
+            "<a rel=\"noreferrer\" target=\"_blank\">ok</a>",
+        );
         assert!(detect_blank_without_noopener(t.path()).is_empty());
     }
 
@@ -580,8 +633,13 @@ mod tests {
     fn line_has_blank_helper_matches_quote_variants() {
         assert!(line_has_blank_without_noopener("<a target=\"_blank\">"));
         assert!(line_has_blank_without_noopener("<a target='_blank'>"));
-        assert!(!line_has_blank_without_noopener("<a target=\"_blank\" rel=\"noopener\">"));
-        assert!(!line_has_blank_without_noopener("<a href=\"_blanket\">"), "substring _blank in _blanket alone must not match without target=");
+        assert!(!line_has_blank_without_noopener(
+            "<a target=\"_blank\" rel=\"noopener\">"
+        ));
+        assert!(
+            !line_has_blank_without_noopener("<a href=\"_blanket\">"),
+            "substring _blank in _blanket alone must not match without target="
+        );
     }
 
     #[test]
@@ -589,9 +647,20 @@ mod tests {
         // Codex review: `<a target="_blank">` inside a test fixture is not a
         // prod surface and must not produce a signal.
         let t = proj();
-        write(t.path(), "tests/fixtures/page.html", "<a target=\"_blank\">x</a>");
-        write(t.path(), "src/__tests__/snap.tsx", "<a target=\"_blank\">y</a>");
-        assert!(detect_blank_without_noopener(t.path()).is_empty(), "test-fixture _blank must be skipped");
+        write(
+            t.path(),
+            "tests/fixtures/page.html",
+            "<a target=\"_blank\">x</a>",
+        );
+        write(
+            t.path(),
+            "src/__tests__/snap.tsx",
+            "<a target=\"_blank\">y</a>",
+        );
+        assert!(
+            detect_blank_without_noopener(t.path()).is_empty(),
+            "test-fixture _blank must be skipped"
+        );
     }
 
     // ── CSP ──
@@ -604,7 +673,11 @@ mod tests {
             "line1\n$csp = \"default-src 'self'; script-src 'unsafe-inline'\";\nfoo\n$x='unsafe-eval';\n",
         );
         let s = detect_csp_unsafe(t.path());
-        assert_eq!(s.len(), 2, "one for unsafe-inline (line 2), one for unsafe-eval (line 4)");
+        assert_eq!(
+            s.len(),
+            2,
+            "one for unsafe-inline (line 2), one for unsafe-eval (line 4)"
+        );
         assert!(s.iter().any(|x| x.evidence.ends_with(":2")));
         assert!(s.iter().any(|x| x.evidence.ends_with(":4")));
     }
@@ -613,15 +686,26 @@ mod tests {
     fn csp_unsafe_in_test_file_is_skipped() {
         // CSP sample strings in tests are not the prod policy (Codex review).
         let t = proj();
-        write(t.path(), "tests/csp_spec.ts", "const p = \"script-src 'unsafe-inline'\";");
+        write(
+            t.path(),
+            "tests/csp_spec.ts",
+            "const p = \"script-src 'unsafe-inline'\";",
+        );
         write(t.path(), "src/headers_test.php", "$c=\"'unsafe-eval'\";");
-        assert!(detect_csp_unsafe(t.path()).is_empty(), "test-file CSP samples must be skipped");
+        assert!(
+            detect_csp_unsafe(t.path()).is_empty(),
+            "test-file CSP samples must be skipped"
+        );
     }
 
     #[test]
     fn csp_clean_policy_is_silent() {
         let t = proj();
-        write(t.path(), "nginx.conf", "add_header Content-Security-Policy \"default-src 'self'\";");
+        write(
+            t.path(),
+            "nginx.conf",
+            "add_header Content-Security-Policy \"default-src 'self'\";",
+        );
         assert!(detect_csp_unsafe(t.path()).is_empty());
     }
 
@@ -642,7 +726,10 @@ mod tests {
         write(t.path(), "ReadMe.md", "# hi");
         write(t.path(), ".github/SECURITY.md", "# policy");
         let s = detect_missing_community_files(t.path());
-        assert!(s.is_empty(), "case-insensitive README + .github/SECURITY must both be found: {s:?}");
+        assert!(
+            s.is_empty(),
+            "case-insensitive README + .github/SECURITY must both be found: {s:?}"
+        );
     }
 
     // ── orchestration + render ──
@@ -658,7 +745,10 @@ mod tests {
         assert_eq!(s[0].severity, Severity::Medium);
         // Severities are non-decreasing.
         for w in s.windows(2) {
-            assert!(w[0].severity <= w[1].severity, "must be severity-sorted: {s:?}");
+            assert!(
+                w[0].severity <= w[1].severity,
+                "must be severity-sorted: {s:?}"
+            );
         }
     }
 
@@ -683,15 +773,39 @@ mod tests {
     }
 
     // ── disposition gate (chantier 1b) ──
-    fn sig(id: &'static str, dim: &'static str, sev: Severity, title: &str, ev: &str) -> DetectedSignal {
-        DetectedSignal { detector_id: id, dimension: dim, severity: sev, title: title.into(), evidence: ev.into() }
+    fn sig(
+        id: &'static str,
+        dim: &'static str,
+        sev: Severity,
+        title: &str,
+        ev: &str,
+    ) -> DetectedSignal {
+        DetectedSignal {
+            detector_id: id,
+            dimension: dim,
+            severity: sev,
+            title: title.into(),
+            evidence: ev.into(),
+        }
     }
 
     #[test]
     fn undisposed_flags_a_file_never_mentioned() {
         let signals = vec![
-            sig("blank-noopener", "Security", Severity::Low, "_blank w/o noopener", "templates/pages/projets.html.twig:12"),
-            sig("csp-unsafe", "Security", Severity::Medium, "CSP unsafe-eval", "src/EventSubscriber/HeadersSubscriber.php:87"),
+            sig(
+                "blank-noopener",
+                "Security",
+                Severity::Low,
+                "_blank w/o noopener",
+                "templates/pages/projets.html.twig:12",
+            ),
+            sig(
+                "csp-unsafe",
+                "Security",
+                Severity::Medium,
+                "CSP unsafe-eval",
+                "src/EventSubscriber/HeadersSubscriber.php:87",
+            ),
         ];
         // Output mentions the CSP file but NOT projets.html.twig.
         let output = "## Baseline\nCSP in src/EventSubscriber/HeadersSubscriber.php:61 verified.\n";
@@ -703,8 +817,20 @@ mod tests {
     #[test]
     fn undisposed_empty_when_all_files_cited() {
         let signals = vec![
-            sig("blank-noopener", "Security", Severity::Low, "x", "a/b/projets.html.twig:12"),
-            sig("csp-unsafe", "Security", Severity::Medium, "x", "src/Headers.php:87"),
+            sig(
+                "blank-noopener",
+                "Security",
+                Severity::Low,
+                "x",
+                "a/b/projets.html.twig:12",
+            ),
+            sig(
+                "csp-unsafe",
+                "Security",
+                Severity::Medium,
+                "x",
+                "src/Headers.php:87",
+            ),
         ];
         let output = "TD cites a/b/projets.html.twig and src/Headers.php both.";
         assert!(undisposed_signals(&signals, output).is_empty());
@@ -714,9 +840,27 @@ mod tests {
     fn undisposed_dedupes_same_file() {
         // Three _blank hits in one file → one anchor → reported once if missing.
         let signals = vec![
-            sig("blank-noopener", "Security", Severity::Low, "x", "p/page.twig:1"),
-            sig("blank-noopener", "Security", Severity::Low, "x", "p/page.twig:9"),
-            sig("blank-noopener", "Security", Severity::Low, "x", "p/page.twig:20"),
+            sig(
+                "blank-noopener",
+                "Security",
+                Severity::Low,
+                "x",
+                "p/page.twig:1",
+            ),
+            sig(
+                "blank-noopener",
+                "Security",
+                Severity::Low,
+                "x",
+                "p/page.twig:9",
+            ),
+            sig(
+                "blank-noopener",
+                "Security",
+                Severity::Low,
+                "x",
+                "p/page.twig:20",
+            ),
         ];
         let un = undisposed_signals(&signals, "nothing relevant here");
         assert_eq!(un.len(), 1, "same file deduped to one undisposed entry");
@@ -725,8 +869,20 @@ mod tests {
     #[test]
     fn undisposed_count_signals_use_keyword() {
         let signals = vec![
-            sig("zero-tests", "Maintainability", Severity::Medium, "no tests", "14 source files, 0 test files"),
-            sig("missing-community-files", "Documentation drift", Severity::Low, "No README.md at repo root", "root listing has no README"),
+            sig(
+                "zero-tests",
+                "Maintainability",
+                Severity::Medium,
+                "no tests",
+                "14 source files, 0 test files",
+            ),
+            sig(
+                "missing-community-files",
+                "Documentation drift",
+                Severity::Low,
+                "No README.md at repo root",
+                "root listing has no README",
+            ),
         ];
         // Output addresses tests but not README.
         let output = "Maintainability: zero committed tests is a documented gap.";
@@ -737,8 +893,17 @@ mod tests {
 
     #[test]
     fn undisposed_skips_truncation_markers() {
-        let signals = vec![sig("blank-noopener", "Security", Severity::Low, "more …", "+7 additional hits")];
-        assert!(undisposed_signals(&signals, "").is_empty(), "+N truncation markers are not gated");
+        let signals = vec![sig(
+            "blank-noopener",
+            "Security",
+            Severity::Low,
+            "more …",
+            "+7 additional hits",
+        )];
+        assert!(
+            undisposed_signals(&signals, "").is_empty(),
+            "+N truncation markers are not gated"
+        );
     }
 
     #[test]
@@ -756,7 +921,9 @@ mod tests {
         write(t.path(), "docs/inconsistencies-tech-debt.md", "TD");
         let files: Vec<_> = walk(t.path()).map(|e| e.path().to_path_buf()).collect();
         assert!(files.iter().any(|p| p.ends_with("src/a.rs")));
-        assert!(!files.iter().any(|p| p.to_string_lossy().contains("node_modules")));
+        assert!(!files
+            .iter()
+            .any(|p| p.to_string_lossy().contains("node_modules")));
         assert!(!files.iter().any(|p| p.to_string_lossy().contains("docs/")));
     }
 }

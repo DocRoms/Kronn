@@ -37,7 +37,7 @@ Ad-hoc TS-strict warnings ride alongside:
 
 The earlier 2026-05-10 snapshot was 99 warnings. The rule set and code surface
 have evolved since then, so the old count must not be used as the CI baseline.
-The inventory above was measured directly after the 0.8.13 quick-win pass.
+The inventory above was measured directly after the 0.9.0 quick-win pass.
 
 ## Patterns applied for the cleared cases
 

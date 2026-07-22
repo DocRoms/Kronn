@@ -1,24 +1,26 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const devPort = Number(process.env.VITE_DEV_PORT ?? 5173);
+const devUrl = `http://localhost:${devPort}`;
+
 /**
  * Playwright config for Kronn E2E tests (Sprint 1.5).
  *
  * # Architecture
  *
- * Tests target Vite dev server on http://localhost:5173. Vite proxies `/api`
- * and `/ws` to the Rust backend on :3140 (cf. `vite.config.ts`). Playwright
- * therefore drives the full stack as the user does — no API mocking, real
- * SSE streaming, real DB writes.
+ * Tests target the Vite dev server on `VITE_DEV_PORT` (5173 by default).
+ * Vite proxies `/api` and `/ws` to `KRONN_BACKEND_URL` (:3140 by default,
+ * cf. `vite.config.ts`). Playwright therefore drives the full stack as the
+ * user does — no API mocking, real SSE streaming, real DB writes.
  *
  * # Backend / frontend lifecycle
  *
- * Playwright auto-spawns the **Vite dev server** (`pnpm dev`) before tests
+ * Playwright auto-spawns the **Vite dev server** before tests
  * via the `webServer` block below. `reuseExistingServer: true` means it
  * won't re-spawn if you already have `pnpm dev` running in another terminal
  * — useful when iterating on tests + UI in parallel.
  *
- * The **Rust backend** must be running separately (Vite proxies /api to
- * :3140). Two ways:
+ * The **Rust backend** must be running separately. Two ways:
  *   - Docker:  `./kronn start` or `make start`
  *   - Native:  `make dev-backend` (cargo watch with auto-reload)
  *
@@ -59,7 +61,7 @@ export default defineConfig({
     timeout: 5_000,
   },
   use: {
-    baseURL: 'http://localhost:5173',
+    baseURL: devUrl,
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
@@ -73,12 +75,13 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
-  // Auto-spawn Vite. Reuses existing instance if `pnpm dev` already runs in
+  // Auto-spawn Vite. Reuses an existing instance when the configured port is
+  // already serving the expected URL and the run is not in CI.
   // another terminal — devs iterating on UI + specs at the same time keep
   // their hot-reload session.
   webServer: {
-    command: 'pnpm dev',
-    url: 'http://localhost:5173',
+    command: `pnpm exec vite --port ${devPort}`,
+    url: devUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000,
     stdout: 'pipe',

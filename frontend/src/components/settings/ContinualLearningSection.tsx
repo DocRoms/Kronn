@@ -1,4 +1,4 @@
-// 0.9.0 — Continual Learning master toggle (beta, default OFF). Flipping it ON
+// 0.10.0 — Continual Learning master toggle (beta, default OFF). Flipping it ON
 // lets agents propose durable learnings (gated by evidence + human validation)
 // and wires the `docs/learnings.md` pointer into audited projects. OFF by
 // default because the feature writes into injected truth files — opt-in.

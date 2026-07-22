@@ -914,28 +914,13 @@ export function DiscussionsPage({
     return () => window.removeEventListener('kronn:discussion-updated', handleDiscussionUpdated);
   }, [handleDiscussionUpdated]);
 
-  // Called by ChatHeader after agent switch — triggers agent run on new agent
-  const handleAgentSwitch = useCallback(async (_newAgent: AgentType) => {
+  // Agent switches stay silent. The backend attaches the handoff to the next
+  // real user message, so changing provider never spends tokens by itself.
+  const handleAgentSwitch = useCallback((_newAgent: AgentType) => {
     if (!activeDiscussionId) return;
-    const discId = activeDiscussionId;
-    reloadDiscussion(discId);
+    reloadDiscussion(activeDiscussionId);
     refetchDiscussions();
-    // Auto-trigger the new agent to introduce itself with a summary
-    const controller = new AbortController();
-    abortControllers.current[discId] = controller;
-    setSendingMap(prev => ({ ...prev, [discId]: true }));
-    setSendingStartMap(prev => ({ ...prev, [discId]: Date.now() }));
-    setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-    resetAgentLogs();
-    await discussionsApi.runAgent(
-      discId,
-      (text) => appendStreamChunk(discId, text),
-      () => cleanupStream(discId),
-      (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
-      controller.signal,
-      onAgentLog,
-    );
-  }, [activeDiscussionId, reloadDiscussion, refetchDiscussions, abortControllers, setSendingMap, setSendingStartMap, setStreamingMap, resetAgentLogs, appendStreamChunk, cleanupStream, toast, onAgentLog]);
+  }, [activeDiscussionId, reloadDiscussion, refetchDiscussions]);
 
   // Refetch projects when viewing a briefing/validation discussion to get fresh audit_status
   useEffect(() => {

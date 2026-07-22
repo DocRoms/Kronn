@@ -44,6 +44,7 @@ vi.mock('../../lib/api', () => ({
     delete: vi.fn(),
     trigger: vi.fn(),
     listRuns: vi.fn().mockResolvedValue([]),
+    countRuns: vi.fn().mockResolvedValue(0),
     getRun: vi.fn(),
     deleteRun: vi.fn(),
     deleteAllRuns: vi.fn(),
@@ -124,10 +125,64 @@ afterEach(() => {
   createResolvers.reset();
   mockDiscussionsApi.create.mockReset();
   mockQuickPromptsApi.list.mockReset();
+  mockQuickPromptsApi.update.mockReset();
   mockQuickPromptsApi.compareAgents.mockReset();
 });
 
 describe('WorkflowsPage — QP launch double-click race', () => {
+  it('switches a QP agent inline while preserving its tier and clearing the old provider model', async () => {
+    const qp: QuickPrompt = {
+      ...sampleQpNoVar,
+      agent_settings: {
+        model: 'claude-opus',
+        tier: 'reasoning',
+        reasoning_effort: 'high',
+        max_tokens: 16000,
+      },
+    };
+    mockQuickPromptsApi.list.mockResolvedValue([qp]);
+    mockQuickPromptsApi.update.mockResolvedValue({
+      ...qp,
+      agent: 'Codex',
+      agent_settings: { ...qp.agent_settings, model: null },
+    });
+
+    await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode', 'Codex']}
+        agentAccess={fullConfig}
+      />
+    );
+
+    await act(async () => { fireEvent.click(await screen.findByText(/Quick Prompts/)); });
+    const trigger = document.querySelector<HTMLButtonElement>('.qp-card .kr-agent-switch-btn');
+    expect(trigger).not.toBeNull();
+    expect(screen.getAllByTestId('qp-history-toggle')).toHaveLength(1);
+
+    fireEvent.click(trigger!);
+    await act(async () => {
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
+    });
+
+    await waitFor(() => expect(mockQuickPromptsApi.update).toHaveBeenCalledTimes(1));
+    expect(mockQuickPromptsApi.update).toHaveBeenCalledWith(
+      qp.id,
+      expect.objectContaining({
+        name: qp.name,
+        prompt_template: qp.prompt_template,
+        agent: 'Codex',
+        tier: 'default',
+        agent_settings: {
+          model: null,
+          tier: 'reasoning',
+          reasoning_effort: 'high',
+          max_tokens: 16000,
+        },
+      }),
+    );
+  });
+
   it('does not spawn duplicate discussions on two fast Enter presses (QP with variable)', async () => {
     mockQuickPromptsApi.list.mockResolvedValue([sampleQpWithVar]);
     // Hold create() open until we manually resolve, so the second Enter has

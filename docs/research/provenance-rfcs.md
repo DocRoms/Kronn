@@ -37,7 +37,7 @@ automatic, restoration is deliberate.
 
 **Why it's out of core (for now):** transitions need tooling (a revalidation pass), edge cases,
 and UX. Until that ships it would be vocabulary the system can't honour — exactly the
-over-claiming the core spec must avoid. Candidate runtime: the 0.9.0 staleness revalidation
+over-claiming the core spec must avoid. Candidate runtime: the 0.10.0 staleness revalidation
 cron.
 
 ### Semantic status vs runtime-validated (the distinction this RFC rests on)
@@ -112,7 +112,7 @@ are large enough that verbosity is a real pain — measure first.
 Promote declared `stale` / `deprecated` semantic statuses (RFC-1) to actual lint signals once
 the system can verify them: a revalidation pass re-runs `verify_source_marker` on stored
 citations, flags `OutOfBounds`/`NotFound` that appeared since the last audit (= code drift),
-and surfaces a re-validation prompt. Candidate: 0.9.0 cron.
+and surfaces a re-validation prompt. Candidate: 0.10.0 cron.
 
 ---
 

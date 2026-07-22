@@ -1,4 +1,7 @@
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 use chrono::Utc;
 use serde::Deserialize;
 use uuid::Uuid;
@@ -7,10 +10,12 @@ use crate::models::*;
 use crate::AppState;
 
 /// GET /api/quick-prompts
-pub async fn list(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<QuickPrompt>>> {
-    match state.db.with_conn(crate::db::quick_prompts::list_quick_prompts).await {
+pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<QuickPrompt>>> {
+    match state
+        .db
+        .with_conn(crate::db::quick_prompts::list_quick_prompts)
+        .await
+    {
         Ok(items) => Json(ApiResponse::ok(items)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -48,7 +53,11 @@ pub async fn create(
     };
 
     let q = qp.clone();
-    match state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(qp)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -61,7 +70,11 @@ pub async fn update(
     Json(req): Json<CreateQuickPromptRequest>,
 ) -> Json<ApiResponse<QuickPrompt>> {
     let qp_id = id.clone();
-    let existing = match state.db.with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id)).await {
+    let existing = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id))
+        .await
+    {
         Ok(Some(qp)) => qp,
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -69,9 +82,17 @@ pub async fn update(
 
     let updated = QuickPrompt {
         id: existing.id,
-        name: if req.name.is_empty() { existing.name } else { req.name },
+        name: if req.name.is_empty() {
+            existing.name
+        } else {
+            req.name
+        },
         icon: req.icon.unwrap_or(existing.icon),
-        prompt_template: if req.prompt_template.is_empty() { existing.prompt_template } else { req.prompt_template },
+        prompt_template: if req.prompt_template.is_empty() {
+            existing.prompt_template
+        } else {
+            req.prompt_template
+        },
         variables: req.variables,
         agent: req.agent.unwrap_or(existing.agent),
         project_id: req.project_id,
@@ -88,7 +109,11 @@ pub async fn update(
     };
 
     let q = updated.clone();
-    match state.db.with_conn(move |conn| crate::db::quick_prompts::update_quick_prompt(conn, &q)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::update_quick_prompt(conn, &q))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(updated)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -99,7 +124,11 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    match state.db.with_conn(move |conn| crate::db::quick_prompts::delete_quick_prompt(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::delete_quick_prompt(conn, &id))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -115,7 +144,11 @@ pub async fn history(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<crate::models::QuickPromptVersion>>> {
-    match state.db.with_conn(move |conn| crate::db::quick_prompts::list_quick_prompt_versions(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::list_quick_prompt_versions(conn, &id))
+        .await
+    {
         Ok(v) => Json(ApiResponse::ok(v)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -132,9 +165,13 @@ pub async fn delete_version(
     State(state): State<AppState>,
     Path((id, version_index)): Path<(String, u32)>,
 ) -> Json<ApiResponse<bool>> {
-    match state.db.with_conn(move |conn| {
-        crate::db::quick_prompts::delete_quick_prompt_version(conn, &id, version_index)
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::delete_quick_prompt_version(conn, &id, version_index)
+        })
+        .await
+    {
         Ok(b) => Json(ApiResponse::ok(b)),
         Err(e) => Json(ApiResponse::err(format!("{}", e))),
     }
@@ -152,7 +189,13 @@ pub async fn metrics(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<crate::models::QuickPromptVersionMetrics>>> {
-    match state.db.with_conn(move |conn| crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &id)
+        })
+        .await
+    {
         Ok(v) => Json(ApiResponse::ok(v)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -174,10 +217,20 @@ pub async fn export_qp(
     use axum::response::IntoResponse;
 
     let qp_id = id.clone();
-    let qp = match state.db.with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id)).await {
+    let qp = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id))
+        .await
+    {
         Ok(Some(qp)) => qp,
         Ok(None) => return (StatusCode::NOT_FOUND, "Quick prompt not found").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     let envelope = QuickPromptExportEnvelope {
@@ -187,23 +240,41 @@ pub async fn export_qp(
         quick_prompt: qp.clone(),
     };
 
-    let safe_name: String = qp.name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+    let safe_name: String = qp
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let filename = format!("{}.kronn-qp.json", safe_name);
 
     let body = match serde_json::to_string_pretty(&envelope) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Serialization error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     (
         [
             (header::CONTENT_TYPE, "application/json".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
         ],
         body,
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// POST /api/quick-prompts/import
@@ -234,10 +305,14 @@ pub async fn import_qp(
 
     let mut qp = envelope.quick_prompt;
     if qp.name.trim().is_empty() {
-        return Json(ApiResponse::err("Le Quick Prompt importé n'a pas de nom — fichier corrompu ?"));
+        return Json(ApiResponse::err(
+            "Le Quick Prompt importé n'a pas de nom — fichier corrompu ?",
+        ));
     }
     if qp.prompt_template.trim().is_empty() {
-        return Json(ApiResponse::err("Le Quick Prompt importé n'a pas de prompt template — fichier corrompu ?"));
+        return Json(ApiResponse::err(
+            "Le Quick Prompt importé n'a pas de prompt template — fichier corrompu ?",
+        ));
     }
 
     let now = Utc::now();
@@ -247,7 +322,11 @@ pub async fn import_qp(
     qp.updated_at = now;
 
     let q = qp.clone();
-    match state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(qp)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -313,7 +392,9 @@ pub async fn batch_run(
     }
     if req.items.len() > MAX_BATCH_SIZE {
         return Json(ApiResponse::err(format!(
-            "Batch too large: {} items (max {})", req.items.len(), MAX_BATCH_SIZE
+            "Batch too large: {} items (max {})",
+            req.items.len(),
+            MAX_BATCH_SIZE
         )));
     }
     if req.batch_name.trim().is_empty() {
@@ -322,9 +403,11 @@ pub async fn batch_run(
 
     // Load the QP to get agent + skill_ids + tier
     let qp_lookup = qp_id.clone();
-    let qp = match state.db.with_conn(move |conn| {
-        crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)
-    }).await {
+    let qp = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -333,13 +416,18 @@ pub async fn batch_run(
     // Read user identity for message attribution
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
-        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+        (
+            config.server.pseudo.clone(),
+            config.server.avatar_email.clone(),
+        )
     };
 
     // Delegate to the shared pure fn — same logic as the workflow step executor.
     let batch_name_for_log = req.batch_name.clone();
     let qp_name_for_log = qp.name.clone();
-    let items: Vec<crate::db::workflows::BatchItemInput> = req.items.into_iter()
+    let items: Vec<crate::db::workflows::BatchItemInput> = req
+        .items
+        .into_iter()
         .map(|i| crate::db::workflows::BatchItemInput {
             title: i.title,
             prompt: i.prompt,
@@ -350,35 +438,42 @@ pub async fn batch_run(
 
     // Safety: Isolated mode needs a project (git repo) to worktree against.
     // Check the effective project_id (request override OR QP default).
-    if workspace_mode == "Isolated"
-        && req.project_id.is_none()
-        && qp.project_id.is_none()
-    {
+    if workspace_mode == "Isolated" && req.project_id.is_none() && qp.project_id.is_none() {
         return Json(ApiResponse::err(
             "Isolated workspace mode requires a project_id (the Quick Prompt or the batch request must target a git-backed project)"
         ));
     }
 
-    let outcome = match state.db.with_conn(move |conn| {
-        crate::db::workflows::create_batch_run(conn, crate::db::workflows::CreateBatchRunInput {
-            quick_prompt: &qp,
-            items,
-            batch_name: Some(req.batch_name),
-            project_id: req.project_id,
-            parent_run_id: None,
-            author_pseudo,
-            author_avatar_email,
-            language: "fr".into(),
-            workspace_mode,
+    let outcome = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::create_batch_run(
+                conn,
+                crate::db::workflows::CreateBatchRunInput {
+                    quick_prompt: &qp,
+                    items,
+                    batch_name: Some(req.batch_name),
+                    project_id: req.project_id,
+                    parent_run_id: None,
+                    author_pseudo,
+                    author_avatar_email,
+                    language: "fr".into(),
+                    workspace_mode,
+                },
+            )
         })
-    }).await {
+        .await
+    {
         Ok(o) => o,
         Err(e) => return Json(ApiResponse::err(format!("Failed to create batch: {}", e))),
     };
 
     tracing::info!(
         "Created batch run {} with {} discussions (QP: {}, name: {})",
-        outcome.run_id, outcome.batch_total, qp_name_for_log, batch_name_for_log
+        outcome.run_id,
+        outcome.batch_total,
+        qp_name_for_log,
+        batch_name_for_log
     );
 
     Json(ApiResponse::ok(BatchRunResponse {
@@ -433,12 +528,15 @@ pub async fn compare_agents(
     // agents" from blowing up the agent semaphore.
     const MAX_BATCH_SIZE: usize = 50;
     if req.agents.is_empty() {
-        return Json(ApiResponse::err("Compare-agents needs at least 1 agent in the list"));
+        return Json(ApiResponse::err(
+            "Compare-agents needs at least 1 agent in the list",
+        ));
     }
     if req.agents.len() > MAX_BATCH_SIZE {
         return Json(ApiResponse::err(format!(
             "Compare-agents too large: {} agents (max {})",
-            req.agents.len(), MAX_BATCH_SIZE
+            req.agents.len(),
+            MAX_BATCH_SIZE
         )));
     }
     if req.prompt.trim().is_empty() {
@@ -451,16 +549,20 @@ pub async fn compare_agents(
     // De-dupe agents — the frontend usually filters but a paranoid
     // guard avoids 2 disc on the same agent.
     let mut seen = std::collections::HashSet::new();
-    let agents: Vec<AgentType> = req.agents.into_iter()
+    let agents: Vec<AgentType> = req
+        .agents
+        .into_iter()
         .filter(|a| seen.insert(format!("{:?}", a)))
         .collect();
 
     // Load the QP for skill_ids + tier defaults + (optional)
     // project_id fallback.
     let qp_lookup = qp_id.clone();
-    let qp = match state.db.with_conn(move |conn| {
-        crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)
-    }).await {
+    let qp = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return Json(ApiResponse::err("Quick prompt not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -476,7 +578,10 @@ pub async fn compare_agents(
 
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
-        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+        (
+            config.server.pseudo.clone(),
+            config.server.avatar_email.clone(),
+        )
     };
 
     // Build one item per agent — same prompt, same title prefix,
@@ -484,7 +589,8 @@ pub async fn compare_agents(
     // sidebar.
     let prompt = req.prompt.clone();
     let qp_display_name = qp.name.clone();
-    let items: Vec<crate::db::workflows::BatchItemInput> = agents.into_iter()
+    let items: Vec<crate::db::workflows::BatchItemInput> = agents
+        .into_iter()
         .map(|agent| {
             let agent_label = format!("{:?}", agent); // ClaudeCode, Codex, …
             crate::db::workflows::BatchItemInput {
@@ -496,26 +602,40 @@ pub async fn compare_agents(
         .collect();
 
     let batch_total = items.len() as u32;
-    let outcome = match state.db.with_conn(move |conn| {
-        crate::db::workflows::create_batch_run(conn, crate::db::workflows::CreateBatchRunInput {
-            quick_prompt: &qp_for_run,
-            items,
-            batch_name: Some(req.batch_name.clone()),
-            project_id: req.project_id,
-            parent_run_id: None,
-            author_pseudo,
-            author_avatar_email,
-            language: "fr".into(),
-            workspace_mode: "Direct".into(),
+    let outcome = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::create_batch_run(
+                conn,
+                crate::db::workflows::CreateBatchRunInput {
+                    quick_prompt: &qp_for_run,
+                    items,
+                    batch_name: Some(req.batch_name.clone()),
+                    project_id: req.project_id,
+                    parent_run_id: None,
+                    author_pseudo,
+                    author_avatar_email,
+                    language: "fr".into(),
+                    workspace_mode: "Direct".into(),
+                },
+            )
         })
-    }).await {
+        .await
+    {
         Ok(o) => o,
-        Err(e) => return Json(ApiResponse::err(format!("Failed to create compare-agents batch: {}", e))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "Failed to create compare-agents batch: {}",
+                e
+            )))
+        }
     };
 
     tracing::info!(
         "Created compare-agents batch {} with {} discussions (QP: {})",
-        outcome.run_id, batch_total, qp.name,
+        outcome.run_id,
+        batch_total,
+        qp.name,
     );
 
     Json(ApiResponse::ok(BatchRunResponse {

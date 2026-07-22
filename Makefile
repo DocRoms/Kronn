@@ -424,7 +424,9 @@ endif
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' frontend/package.json
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
-	@sed $(SEDI) -E 's/Kronn v[0-9]+\.[0-9]+\.[0-9]+/Kronn v$(V)/' README.md
+	@sed $(SEDI) -E \
+		-e 's/(Status: )[0-9]+\.[0-9]+\.[0-9]+/\1$(V)/' \
+		-e 's/Kronn v[0-9]+\.[0-9]+\.[0-9]+/Kronn v$(V)/' README.md
 	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
 	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
 	@# still claiming v0.8.5 on the early-access disclaimer + credits line.

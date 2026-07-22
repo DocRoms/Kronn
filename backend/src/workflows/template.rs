@@ -3,8 +3,8 @@
 //! Supports `{{variable}}` syntax with nested access via dots.
 //! Built-in variables: issue.*, steps.<name>.output, previous_step.output
 
-use std::collections::HashMap;
 use anyhow::Result;
+use std::collections::HashMap;
 
 /// Template context holding all available variables.
 #[derive(Debug, Clone, Default)]
@@ -14,7 +14,9 @@ pub struct TemplateContext {
 
 impl TemplateContext {
     pub fn new() -> Self {
-        Self { values: HashMap::new() }
+        Self {
+            values: HashMap::new(),
+        }
     }
 
     /// Set a simple variable: `key` → accessible as `{{key}}`
@@ -23,7 +25,14 @@ impl TemplateContext {
     }
 
     /// Set an issue context (from tracker trigger).
-    pub fn set_issue(&mut self, title: &str, body: &str, number: &str, url: &str, labels: &[String]) {
+    pub fn set_issue(
+        &mut self,
+        title: &str,
+        body: &str,
+        number: &str,
+        url: &str,
+        labels: &[String],
+    ) {
         self.values.insert("issue.title".into(), title.into());
         self.values.insert("issue.body".into(), body.into());
         self.values.insert("issue.number".into(), number.into());
@@ -47,29 +56,47 @@ impl TemplateContext {
     /// prompt written for another engine signs with the wrong name).
     pub fn set_step_meta(&mut self, step_name: &str, agent: Option<&str>, model: Option<&str>) {
         if let Some(a) = agent {
-            self.values.insert(format!("steps.{}.agent", step_name), a.into());
+            self.values
+                .insert(format!("steps.{}.agent", step_name), a.into());
             self.values.insert("previous_step.agent".into(), a.into());
         }
         if let Some(m) = model {
-            self.values.insert(format!("steps.{}.model", step_name), m.into());
+            self.values
+                .insert(format!("steps.{}.model", step_name), m.into());
             self.values.insert("previous_step.model".into(), m.into());
         }
     }
 
     pub fn set_step_output(&mut self, step_name: &str, output: &str) {
-        self.values.insert(format!("steps.{}.output", step_name), output.into());
-        self.values.insert("previous_step.output".into(), output.into());
+        self.values
+            .insert(format!("steps.{}.output", step_name), output.into());
+        self.values
+            .insert("previous_step.output".into(), output.into());
 
         // Try to extract structured envelope
         if let Some(envelope) = extract_step_envelope(output) {
-            self.values.insert(format!("steps.{}.data", step_name), envelope.data.clone());
-            self.values.insert(format!("steps.{}.summary", step_name), envelope.summary.clone());
-            self.values.insert(format!("steps.{}.status", step_name), envelope.status.clone());
-            self.values.insert(format!("steps.{}.data_json", step_name), envelope.data_json.clone());
-            self.values.insert("previous_step.data".into(), envelope.data);
-            self.values.insert("previous_step.summary".into(), envelope.summary);
-            self.values.insert("previous_step.status".into(), envelope.status);
-            self.values.insert("previous_step.data_json".into(), envelope.data_json);
+            self.values
+                .insert(format!("steps.{}.data", step_name), envelope.data.clone());
+            self.values.insert(
+                format!("steps.{}.summary", step_name),
+                envelope.summary.clone(),
+            );
+            self.values.insert(
+                format!("steps.{}.status", step_name),
+                envelope.status.clone(),
+            );
+            self.values.insert(
+                format!("steps.{}.data_json", step_name),
+                envelope.data_json.clone(),
+            );
+            self.values
+                .insert("previous_step.data".into(), envelope.data);
+            self.values
+                .insert("previous_step.summary".into(), envelope.summary);
+            self.values
+                .insert("previous_step.status".into(), envelope.status);
+            self.values
+                .insert("previous_step.data_json".into(), envelope.data_json);
         }
 
         // 0.7.0 Phase 3 — also extract any `---ARTIFACT:<name>---` blocks
@@ -101,7 +128,8 @@ impl TemplateContext {
     /// rounds 2+ once the previous iteration wrote it.
     pub fn seed_artifacts(&mut self, artifacts: &::std::collections::HashMap<String, String>) {
         for (name, content) in artifacts {
-            self.values.insert(format!("artifacts.{}", name), content.clone());
+            self.values
+                .insert(format!("artifacts.{}", name), content.clone());
         }
     }
 
@@ -129,7 +157,9 @@ impl TemplateContext {
         if let Some(v) = resolve_typed_path(&self.values, key) {
             return Some(v);
         }
-        self.values.get(key).map(|v| serde_json::Value::String(v.clone()))
+        self.values
+            .get(key)
+            .map(|v| serde_json::Value::String(v.clone()))
     }
 
     /// Render a template string, replacing all `{{variable}}` occurrences.
@@ -140,7 +170,7 @@ impl TemplateContext {
         while let Some(c) = chars.next() {
             if c == '{' && chars.peek() == Some(&'{') {
                 chars.next(); // consume second '{'
-                // Read variable name until '}}'
+                              // Read variable name until '}}'
                 let mut var_name = String::new();
                 loop {
                     match chars.next() {
@@ -215,7 +245,9 @@ pub(crate) fn resolve_nested_path(values: &HashMap<String, String>, key: &str) -
 /// (no prefix).
 fn anchor_and_path(key: &str) -> Option<(String, Vec<&str>)> {
     let parts: Vec<&str> = key.split('.').collect();
-    let idx = parts.iter().position(|p| *p == "data" || *p == "data_json")?;
+    let idx = parts
+        .iter()
+        .position(|p| *p == "data" || *p == "data_json")?;
     if idx == 0 || idx == parts.len() - 1 {
         return None;
     }
@@ -228,7 +260,10 @@ fn anchor_and_path(key: &str) -> Option<(String, Vec<&str>)> {
 /// field (`"comments": "{{steps.review.data.inlineComments}}"` → a real array),
 /// which `stringify_json_leaf` could only express as an escaped string. Also
 /// resolves a bare `<prefix>.data` / `.data_json` to the whole parsed payload.
-pub(crate) fn resolve_typed_path(values: &HashMap<String, String>, key: &str) -> Option<serde_json::Value> {
+pub(crate) fn resolve_typed_path(
+    values: &HashMap<String, String>,
+    key: &str,
+) -> Option<serde_json::Value> {
     let parts: Vec<&str> = key.split('.').collect();
     // Whole-payload form: `<prefix>.data` or `<prefix>.data_json` (no sub-path).
     if parts.len() >= 2 && matches!(*parts.last().unwrap(), "data" | "data_json") {
@@ -333,7 +368,9 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                 let target_field = field.as_str();
                 // `.output` is raw text — a nested subpath can never resolve
                 // and would ship the literal placeholder into the prompt.
-                if target_field == "output" && caps.get(3).map(|m| !m.as_str().is_empty()).unwrap_or(false) {
+                if target_field == "output"
+                    && caps.get(3).map(|m| !m.as_str().is_empty()).unwrap_or(false)
+                {
                     errors.push(format!(
                         "Étape '{}' référence {{{{steps.{}.output{}}}}} — `.output` est du texte brut, il n'a pas de sous-chemin. Utilise {{{{steps.{}.output}}}} tel quel, ou passe par .data pour du JSON structuré.",
                         step.name, target_name, caps.get(3).map(|m| m.as_str()).unwrap_or(""), target_name
@@ -369,7 +406,9 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
                 }
             } else if let Some(field) = caps.get(4) {
                 let target_field = field.as_str();
-                if target_field == "output" && caps.get(5).map(|m| !m.as_str().is_empty()).unwrap_or(false) {
+                if target_field == "output"
+                    && caps.get(5).map(|m| !m.as_str().is_empty()).unwrap_or(false)
+                {
                     errors.push(format!(
                         "Étape '{}' référence {{{{previous_step.output{}}}}} — `.output` est du texte brut, il n'a pas de sous-chemin.",
                         step.name, caps.get(5).map(|m| m.as_str()).unwrap_or("")
@@ -394,7 +433,11 @@ pub fn validate_step_references(steps: &[crate::models::WorkflowStep]) -> Result
         }
     }
 
-    if errors.is_empty() { Ok(()) } else { Err(errors) }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 /// Return the names of producer steps that need their `output_format`
@@ -666,10 +709,18 @@ pub fn build_repair_prompt(
     use crate::models::StepOutputFormat;
     match output_format {
         StepOutputFormat::TypedSchema { schema, .. } => {
-            let pretty = serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+            let pretty =
+                serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
             let problem = schema_error
-                .map(|e| format!("Your previous response failed: schema validation failed: {}\n\n", e))
-                .unwrap_or_else(|| "Your previous response did not include the required output format.\n\n".into());
+                .map(|e| {
+                    format!(
+                        "Your previous response failed: schema validation failed: {}\n\n",
+                        e
+                    )
+                })
+                .unwrap_or_else(|| {
+                    "Your previous response did not include the required output format.\n\n".into()
+                });
             format!(
                 "{}\
 Here is what you wrote:\n---\n{}\n---\n\n\
@@ -750,10 +801,14 @@ fn validate_value(
     // min/max numeric
     if let Some(n) = value.as_f64() {
         if let Some(min) = schema_obj.get("minimum").and_then(|v| v.as_f64()) {
-            if n < min { return Err(format!("{}: {} < minimum {}", path, n, min)); }
+            if n < min {
+                return Err(format!("{}: {} < minimum {}", path, n, min));
+            }
         }
         if let Some(max) = schema_obj.get("maximum").and_then(|v| v.as_f64()) {
-            if n > max { return Err(format!("{}: {} > maximum {}", path, n, max)); }
+            if n > max {
+                return Err(format!("{}: {} > maximum {}", path, n, max));
+            }
         }
     }
 
@@ -761,12 +816,22 @@ fn validate_value(
     if let Some(s) = value.as_str() {
         if let Some(min) = schema_obj.get("minLength").and_then(|v| v.as_u64()) {
             if (s.chars().count() as u64) < min {
-                return Err(format!("{}: length {} < minLength {}", path, s.chars().count(), min));
+                return Err(format!(
+                    "{}: length {} < minLength {}",
+                    path,
+                    s.chars().count(),
+                    min
+                ));
             }
         }
         if let Some(max) = schema_obj.get("maxLength").and_then(|v| v.as_u64()) {
             if (s.chars().count() as u64) > max {
-                return Err(format!("{}: length {} > maxLength {}", path, s.chars().count(), max));
+                return Err(format!(
+                    "{}: length {} > maxLength {}",
+                    path,
+                    s.chars().count(),
+                    max
+                ));
             }
         }
     }
@@ -847,7 +912,8 @@ pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
             }
             // Try stripping markdown code fences
             let stripped = json_str
-                .trim_start_matches("```json").trim_start_matches("```")
+                .trim_start_matches("```json")
+                .trim_start_matches("```")
                 .trim_end_matches("```")
                 .trim();
             if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(stripped) {
@@ -891,7 +957,10 @@ pub fn extract_step_envelope(text: &str) -> Option<StepEnvelope> {
                 '{' if !in_string => depth += 1,
                 '}' if !in_string => {
                     depth -= 1;
-                    if depth == 0 { end = Some(start + j + 1); break; }
+                    if depth == 0 {
+                        end = Some(start + j + 1);
+                        break;
+                    }
                 }
                 _ => {}
             }
@@ -958,8 +1027,16 @@ mod tests {
     #[test]
     fn test_issue_context() {
         let mut ctx = TemplateContext::new();
-        ctx.set_issue("Bug 500", "Server crash", "42", "https://gh/42", &["bug".into()]);
-        let result = ctx.render("Fix: {{issue.title}} (#{{issue.number}})").unwrap();
+        ctx.set_issue(
+            "Bug 500",
+            "Server crash",
+            "42",
+            "https://gh/42",
+            &["bug".into()],
+        );
+        let result = ctx
+            .render("Fix: {{issue.title}} (#{{issue.number}})")
+            .unwrap();
         assert_eq!(result, "Fix: Bug 500 (#42)");
     }
 
@@ -974,13 +1051,19 @@ mod tests {
         let sig = ctx
             .render("— 🤖 Review automatique · cron Kronn ({{steps.reason.agent}} - {{steps.reason.model}})")
             .unwrap();
-        assert_eq!(sig, "— 🤖 Review automatique · cron Kronn (Codex - gpt-5.6-sol)");
+        assert_eq!(
+            sig,
+            "— 🤖 Review automatique · cron Kronn (Codex - gpt-5.6-sol)"
+        );
         assert_eq!(ctx.render("{{previous_step.agent}}").unwrap(), "Codex");
 
         // A step with no snapshot (deterministic Exec/ApiCall) sets nothing —
         // the placeholders stay unresolved rather than lying.
         ctx.set_step_meta("exec", None, None);
-        assert!(ctx.render("{{steps.exec.agent}}").unwrap().contains("{{steps.exec.agent}}"));
+        assert!(ctx
+            .render("{{steps.exec.agent}}")
+            .unwrap()
+            .contains("{{steps.exec.agent}}"));
     }
 
     #[test]
@@ -989,7 +1072,9 @@ mod tests {
         ctx.set_step_output("analyze", "Root cause: null pointer");
         let result = ctx.render("Previous: {{previous_step.output}}").unwrap();
         assert_eq!(result, "Previous: Root cause: null pointer");
-        let result2 = ctx.render("From analyze: {{steps.analyze.output}}").unwrap();
+        let result2 = ctx
+            .render("From analyze: {{steps.analyze.output}}")
+            .unwrap();
         assert_eq!(result2, "From analyze: Root cause: null pointer");
     }
 
@@ -1079,11 +1164,16 @@ mod tests {
             r#"{"verdict": "APPROVE", "inlineComments": [{"path": "a.rs", "line": 4, "body": "x"}]}"#,
             "Reviewed",
         );
-        let v = ctx.resolve_value("steps.review.data.inlineComments").unwrap();
+        let v = ctx
+            .resolve_value("steps.review.data.inlineComments")
+            .unwrap();
         assert!(v.is_array(), "must stay a JSON array, got: {v}");
         assert_eq!(v[0]["line"], 4);
         // scalar field stays a (typed) scalar string
-        assert_eq!(ctx.resolve_value("steps.review.data.verdict").unwrap(), "APPROVE");
+        assert_eq!(
+            ctx.resolve_value("steps.review.data.verdict").unwrap(),
+            "APPROVE"
+        );
     }
 
     #[test]
@@ -1092,8 +1182,13 @@ mod tests {
         // (the bug: only `data` was anchored, so `data_json.x` stayed literal).
         let ctx = ctx_with_envelope("review", r#"{"comments": [1, 2]}"#, "ok");
         let viz = ctx.render("{{steps.review.data_json.comments}}").unwrap();
-        assert!(viz.contains('1') && viz.contains('2'), "data_json nested must render, got: {viz}");
-        let typed = ctx.resolve_value("steps.review.data_json.comments").unwrap();
+        assert!(
+            viz.contains('1') && viz.contains('2'),
+            "data_json nested must render, got: {viz}"
+        );
+        let typed = ctx
+            .resolve_value("steps.review.data_json.comments")
+            .unwrap();
         assert!(typed.is_array());
     }
 
@@ -1129,7 +1224,11 @@ mod tests {
         );
         let rendered = ctx.render("{{steps.analyze.data.subtasks}}").unwrap();
         assert!(rendered.contains("\"id\": 1"), "got: {}", rendered);
-        assert!(rendered.contains("\"title\": \"Setup\""), "got: {}", rendered);
+        assert!(
+            rendered.contains("\"title\": \"Setup\""),
+            "got: {}",
+            rendered
+        );
     }
 
     #[test]
@@ -1158,10 +1257,7 @@ mod tests {
             r#"{"key": "EW-42", "title": "Login bug"}"#,
             "Loaded",
         );
-        assert_eq!(
-            ctx.render("{{previous_step.data.key}}").unwrap(),
-            "EW-42"
-        );
+        assert_eq!(ctx.render("{{previous_step.data.key}}").unwrap(), "EW-42");
     }
 
     #[test]
@@ -1169,7 +1265,9 @@ mod tests {
         // Broken refs stay visible so the operator notices — silent
         // empty-string substitution would mask bugs in gate recaps.
         let ctx = ctx_with_envelope("analyze", r#"{"a": 1}"#, "ok");
-        let rendered = ctx.render("Result: {{steps.analyze.data.missing}}").unwrap();
+        let rendered = ctx
+            .render("Result: {{steps.analyze.data.missing}}")
+            .unwrap();
         assert_eq!(rendered, "Result: {{steps.analyze.data.missing}}");
     }
 
@@ -1178,7 +1276,8 @@ mod tests {
         // `state.X.foo` shouldn't accidentally match the nested resolver —
         // state values are flat strings, not JSON.
         let mut ctx = TemplateContext::new();
-        ctx.values.insert("state.last_review".into(), "needs work".into());
+        ctx.values
+            .insert("state.last_review".into(), "needs work".into());
         let rendered = ctx.render("{{state.last_review.foo}}").unwrap();
         assert_eq!(rendered, "{{state.last_review.foo}}");
     }
@@ -1187,11 +1286,7 @@ mod tests {
     fn flat_data_still_resolves_after_nested_addition() {
         // Regression guard: bare `{{steps.X.data}}` must still resolve via
         // the direct lookup path — the nested resolver is only a fallback.
-        let ctx = ctx_with_envelope(
-            "analyze",
-            r#"{"subtasks": [{"id": 1}]}"#,
-            "Plan",
-        );
+        let ctx = ctx_with_envelope("analyze", r#"{"subtasks": [{"id": 1}]}"#, "Plan");
         let rendered = ctx.render("{{steps.analyze.data}}").unwrap();
         // `.data` is the unwrapped form (compact JSON since `data` is an
         // object, not a plain string).
@@ -1288,7 +1383,11 @@ mod tests {
         let steps = vec![
             step("main", "Fetch", FreeText),
             step("a", "{{steps.main.data}}", FreeText),
-            step("b", "{{steps.main.summary}} {{steps.main.data_json}}", FreeText),
+            step(
+                "b",
+                "{{steps.main.summary}} {{steps.main.data_json}}",
+                FreeText,
+            ),
         ];
         // Still just `main` — healing idempotent on a single producer
         assert_eq!(healable_producer_names(&steps), vec!["main".to_string()]);
@@ -1301,8 +1400,10 @@ mod tests {
             step("main", "Fetch", Structured),
             step("use", "{{steps.main.data}}", FreeText),
         ];
-        assert!(healable_producer_names(&steps).is_empty(),
-            "Already-Structured producers must not reappear");
+        assert!(
+            healable_producer_names(&steps).is_empty(),
+            "Already-Structured producers must not reappear"
+        );
     }
 
     #[test]
@@ -1313,16 +1414,16 @@ mod tests {
             step("a", "Use {{steps.b.data}}", FreeText),
             step("b", "Produce", FreeText),
         ];
-        assert!(healable_producer_names(&steps).is_empty(),
-            "Forward refs must stay for validate_step_references to flag");
+        assert!(
+            healable_producer_names(&steps).is_empty(),
+            "Forward refs must stay for validate_step_references to flag"
+        );
     }
 
     #[test]
     fn healable_ignores_unknown_step_name() {
         use crate::models::StepOutputFormat::*;
-        let steps = vec![
-            step("only", "Use {{steps.ghost.data}}", FreeText),
-        ];
+        let steps = vec![step("only", "Use {{steps.ghost.data}}", FreeText)];
         assert!(healable_producer_names(&steps).is_empty());
     }
 
@@ -1340,9 +1441,7 @@ mod tests {
     fn healable_previous_step_on_first_step_noop() {
         use crate::models::StepOutputFormat::*;
         // First step's `previous_step.*` is a structural bug — not healable.
-        let steps = vec![
-            step("first", "{{previous_step.data}}", FreeText),
-        ];
+        let steps = vec![step("first", "{{previous_step.data}}", FreeText)];
         assert!(healable_producer_names(&steps).is_empty());
     }
 
@@ -1354,7 +1453,11 @@ mod tests {
         // will produce the `---STEP_OUTPUT---` envelope.
         let steps = vec![
             step("main", "Récupère les tickets EW", FreeText),
-            step("analyze", "Analyse ces tickets : {{steps.main.data}}", FreeText),
+            step(
+                "analyze",
+                "Analyse ces tickets : {{steps.main.data}}",
+                FreeText,
+            ),
         ];
         assert_eq!(healable_producer_names(&steps), vec!["main".to_string()]);
     }
@@ -1377,7 +1480,11 @@ mod tests {
             step("use", "POST body {{steps.main.data_json}}", FreeText),
         ];
         let err = validate_step_references(&steps).unwrap_err();
-        assert!(err[0].contains("data_json"), "data_json must participate in validation, got {:?}", err);
+        assert!(
+            err[0].contains("data_json"),
+            "data_json must participate in validation, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -1386,7 +1493,11 @@ mod tests {
         // And `{{foo}}` / `{{steps.x.other}}` are not part of the contract.
         let rendered = "{{steps.x.output}} {{foo}} {{steps.x.tokens}}";
         let refs = find_unresolved_critical_refs(rendered);
-        assert!(refs.is_empty(), "Non-contract refs must be ignored, got {:?}", refs);
+        assert!(
+            refs.is_empty(),
+            "Non-contract refs must be ignored, got {:?}",
+            refs
+        );
     }
 
     #[test]
@@ -1405,7 +1516,11 @@ mod tests {
         ctx.set_step_output("collect", output);
         let rendered = ctx.render("List: {{steps.collect.data}}").unwrap();
         let refs = find_unresolved_critical_refs(&rendered);
-        assert!(refs.is_empty(), "Resolved refs must disappear, got {:?}", refs);
+        assert!(
+            refs.is_empty(),
+            "Resolved refs must disappear, got {:?}",
+            refs
+        );
     }
 
     #[test]
@@ -1415,10 +1530,15 @@ mod tests {
         // populated. The runner must detect this before calling the agent.
         let mut ctx = TemplateContext::new();
         ctx.set_step_output("main", "| Ticket | Résumé |\n|--|--|\n| EW-7181 | ... |"); // no envelope
-        let rendered = ctx.render("Analyse les tickets: {{steps.main.data}}").unwrap();
+        let rendered = ctx
+            .render("Analyse les tickets: {{steps.main.data}}")
+            .unwrap();
         let refs = find_unresolved_critical_refs(&rendered);
-        assert_eq!(refs, vec!["steps.main.data"],
-            "Workflow B regression: FreeText upstream must be caught before agent call");
+        assert_eq!(
+            refs,
+            vec!["steps.main.data"],
+            "Workflow B regression: FreeText upstream must be caught before agent call"
+        );
     }
 
     // ── validate_step_references ──
@@ -1427,7 +1547,11 @@ mod tests {
     // references .data/.summary/.status from an upstream step that isn't
     // Structured. This is the UX-level companion to the runtime fail-fast.
 
-    fn step(name: &str, prompt: &str, fmt: crate::models::StepOutputFormat) -> crate::models::WorkflowStep {
+    fn step(
+        name: &str,
+        prompt: &str,
+        fmt: crate::models::StepOutputFormat,
+    ) -> crate::models::WorkflowStep {
         crate::models::WorkflowStep {
             name: name.into(),
             step_type: crate::models::StepType::default(),
@@ -1504,8 +1628,13 @@ mod tests {
         assert_eq!(env.status, "OK");
         let data: serde_json::Value = serde_json::from_str(&env.data_json).unwrap();
         assert_eq!(data["succeeded"], 2);
-        assert!(data["last_output"].as_str().unwrap().contains("---END_STEP_OUTPUT---"),
-            "the child's markers survive intact inside the string");
+        assert!(
+            data["last_output"]
+                .as_str()
+                .unwrap()
+                .contains("---END_STEP_OUTPUT---"),
+            "the child's markers survive intact inside the string"
+        );
     }
 
     #[test]
@@ -1522,7 +1651,8 @@ mod tests {
             "summary": "fan-out"
         });
         let text = format!("---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\nOK", outer);
-        let env = extract_step_envelope(&text).expect("nine embedded markers must not defeat the extractor");
+        let env = extract_step_envelope(&text)
+            .expect("nine embedded markers must not defeat the extractor");
         assert_eq!(env.status, "OK");
     }
 
@@ -1555,7 +1685,10 @@ mod tests {
                     let env = got.unwrap_or_else(|| panic!("case `{name}` must parse"));
                     assert_eq!(env.status, status, "case `{name}`");
                 }
-                None => assert!(got.is_none(), "case `{name}` must be rejected (repair path)"),
+                None => assert!(
+                    got.is_none(),
+                    "case `{name}` must be rejected (repair path)"
+                ),
             }
         }
     }
@@ -1573,7 +1706,9 @@ mod tests {
         ];
         for base in &bases {
             for cut in 0..base.len() {
-                if !base.is_char_boundary(cut) { continue; }
+                if !base.is_char_boundary(cut) {
+                    continue;
+                }
                 let _ = extract_step_envelope(&base[..cut]);
             }
             let bytes = base.as_bytes();
@@ -1606,15 +1741,23 @@ mod tests {
 ---STEP_OUTPUT---
 {"data": [1,], "status": "OK"
 ---END_STEP_OUTPUT---"#;
-        assert!(extract_step_envelope(marked_bad).is_none(), "malformed marked block must not fall back");
+        assert!(
+            extract_step_envelope(marked_bad).is_none(),
+            "malformed marked block must not fall back"
+        );
 
         // 3. Earlier envelope-like JSON + LATER non-envelope JSON → None
         //    (the earlier one may be a quoted example from the reasoning).
-        let example_then_other = r#"I will emit {"data": [], "status": "OK"} at the end. Result: {"count": 3}"#;
-        assert!(extract_step_envelope(example_then_other).is_none(), "must not walk back past the last JSON");
+        let example_then_other =
+            r#"I will emit {"data": [], "status": "OK"} at the end. Result: {"count": 3}"#;
+        assert!(
+            extract_step_envelope(example_then_other).is_none(),
+            "must not walk back past the last JSON"
+        );
 
         // 4. Earlier non-envelope JSON + FINAL valid envelope → OK.
-        let other_then_envelope = r#"stats: {"count": 3} then {"data": {"items": [1]}, "status": "OK"}"#;
+        let other_then_envelope =
+            r#"stats: {"count": 3} then {"data": {"items": [1]}, "status": "OK"}"#;
         let env = extract_step_envelope(other_then_envelope).expect("final envelope accepted");
         assert_eq!(env.status, "OK");
 
@@ -1624,7 +1767,10 @@ mod tests {
         let env = extract_step_envelope(brace_in_string).expect("string-aware balancing");
         assert_eq!(env.data, "brace } inside string");
         let escaped_quote = r#"x: {"data": "quote \" then } brace", "status": "OK"}"#;
-        assert!(extract_step_envelope(escaped_quote).is_some(), "escaped quotes handled");
+        assert!(
+            extract_step_envelope(escaped_quote).is_some(),
+            "escaped quotes handled"
+        );
     }
 
     #[test]
@@ -1634,14 +1780,23 @@ mod tests {
         // the literal placeholder into the agent prompt.
 
         // Valid upstream .output on a FreeText producer → OK (raw-text contract).
-        let ok = vec![step("a", "do things", FreeText), step("b", "resume: {{steps.a.output}}", FreeText)];
+        let ok = vec![
+            step("a", "do things", FreeText),
+            step("b", "resume: {{steps.a.output}}", FreeText),
+        ];
         assert!(validate_step_references(&ok).is_ok());
         // previous_step.output on a FreeText predecessor → OK too.
-        let ok2 = vec![step("a", "do", FreeText), step("b", "resume: {{previous_step.output}}", FreeText)];
+        let ok2 = vec![
+            step("a", "do", FreeText),
+            step("b", "resume: {{previous_step.output}}", FreeText),
+        ];
         assert!(validate_step_references(&ok2).is_ok());
 
         // Typo'd step name → save-time error.
-        let typo = vec![step("a", "do", FreeText), step("b", "resume: {{steps.typo.output}}", FreeText)];
+        let typo = vec![
+            step("a", "do", FreeText),
+            step("b", "resume: {{steps.typo.output}}", FreeText),
+        ];
         let errs = validate_step_references(&typo).unwrap_err();
         assert!(errs[0].contains("aucune étape ne porte le nom"), "{errs:?}");
 
@@ -1650,7 +1805,10 @@ mod tests {
         assert!(validate_step_references(&selfref).is_err());
 
         // Forward reference → error.
-        let fwd = vec![step("a", "peek: {{steps.b.output}}", FreeText), step("b", "do", FreeText)];
+        let fwd = vec![
+            step("a", "peek: {{steps.b.output}}", FreeText),
+            step("b", "do", FreeText),
+        ];
         let errs = validate_step_references(&fwd).unwrap_err();
         assert!(errs[0].contains("pas exécutée avant"), "{errs:?}");
 
@@ -1659,10 +1817,16 @@ mod tests {
         assert!(validate_step_references(&first).is_err());
 
         // Codex blocker: a nested subpath on raw .output can never resolve.
-        let nested = vec![step("a", "do", FreeText), step("b", "x: {{steps.a.output.foo}}", FreeText)];
+        let nested = vec![
+            step("a", "do", FreeText),
+            step("b", "x: {{steps.a.output.foo}}", FreeText),
+        ];
         let errs = validate_step_references(&nested).unwrap_err();
         assert!(errs[0].contains("texte brut"), "{errs:?}");
-        let nested_prev = vec![step("a", "do", FreeText), step("b", "x: {{previous_step.output.foo}}", FreeText)];
+        let nested_prev = vec![
+            step("a", "do", FreeText),
+            step("b", "x: {{previous_step.output.foo}}", FreeText),
+        ];
         let errs = validate_step_references(&nested_prev).unwrap_err();
         assert!(errs[0].contains("texte brut"), "{errs:?}");
     }
@@ -1684,8 +1848,10 @@ mod tests {
             step("a", "Just do A", FreeText),
             step("b", "Just do B", FreeText),
         ];
-        assert!(validate_step_references(&steps).is_ok(),
-            "No contract refs = no validation required");
+        assert!(
+            validate_step_references(&steps).is_ok(),
+            "No contract refs = no validation required"
+        );
     }
 
     #[test]
@@ -1694,11 +1860,18 @@ mod tests {
         // Exact shape of Workflow B: step 1 in FreeText, step 2 references .data.
         let steps = vec![
             step("main", "Récupère les tickets EW", FreeText),
-            step("analyze", "Analyse ces tickets : {{steps.main.data}}", FreeText),
+            step(
+                "analyze",
+                "Analyse ces tickets : {{steps.main.data}}",
+                FreeText,
+            ),
         ];
         let err = validate_step_references(&steps).unwrap_err();
         assert_eq!(err.len(), 1);
-        assert!(err[0].contains("main"), "Error must name the offending producer");
+        assert!(
+            err[0].contains("main"),
+            "Error must name the offending producer"
+        );
         assert!(err[0].contains("Structured"), "Error must suggest the fix");
     }
 
@@ -1712,26 +1885,29 @@ mod tests {
             step("b", "Produce data", Structured),
         ];
         let err = validate_step_references(&steps).unwrap_err();
-        assert!(err[0].contains("en avant"), "Error must explain forward-ref is unsupported, got {:?}", err);
+        assert!(
+            err[0].contains("en avant"),
+            "Error must explain forward-ref is unsupported, got {:?}",
+            err
+        );
     }
 
     #[test]
     fn validate_blocks_self_reference() {
         use crate::models::StepOutputFormat::*;
-        let steps = vec![
-            step("loop", "Refer to {{steps.loop.data}}", Structured),
-        ];
+        let steps = vec![step("loop", "Refer to {{steps.loop.data}}", Structured)];
         let err = validate_step_references(&steps).unwrap_err();
-        assert!(err[0].contains("en avant") || err[0].contains("soi"),
-            "Self-ref must be flagged, got {:?}", err);
+        assert!(
+            err[0].contains("en avant") || err[0].contains("soi"),
+            "Self-ref must be flagged, got {:?}",
+            err
+        );
     }
 
     #[test]
     fn validate_blocks_unknown_step_name() {
         use crate::models::StepOutputFormat::*;
-        let steps = vec![
-            step("only", "Look at {{steps.ghost.data}}", FreeText),
-        ];
+        let steps = vec![step("only", "Look at {{steps.ghost.data}}", FreeText)];
         let err = validate_step_references(&steps).unwrap_err();
         assert!(err[0].contains("ghost"), "Error must name the missing step");
     }
@@ -1739,12 +1915,13 @@ mod tests {
     #[test]
     fn validate_previous_step_on_first_step_fails() {
         use crate::models::StepOutputFormat::*;
-        let steps = vec![
-            step("first", "{{previous_step.data}}", FreeText),
-        ];
+        let steps = vec![step("first", "{{previous_step.data}}", FreeText)];
         let err = validate_step_references(&steps).unwrap_err();
-        assert!(err[0].contains("première étape") || err[0].contains("précédente"),
-            "Must flag that the first step has no predecessor, got {:?}", err);
+        assert!(
+            err[0].contains("première étape") || err[0].contains("précédente"),
+            "Must flag that the first step has no predecessor, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -1755,8 +1932,11 @@ mod tests {
             step("b", "{{previous_step.summary}}", FreeText),
         ];
         let err = validate_step_references(&steps).unwrap_err();
-        assert!(err[0].contains("'a'") || err[0].contains("a "),
-            "Must point at the predecessor by name, got {:?}", err);
+        assert!(
+            err[0].contains("'a'") || err[0].contains("a "),
+            "Must point at the predecessor by name, got {:?}",
+            err
+        );
     }
 
     #[test]
@@ -1765,7 +1945,11 @@ mod tests {
         // `.output` is always populated — FreeText upstream is fine for it.
         let steps = vec![
             step("a", "Produce", FreeText),
-            step("b", "Raw text: {{steps.a.output}} and {{previous_step.output}}", FreeText),
+            step(
+                "b",
+                "Raw text: {{steps.a.output}} and {{previous_step.output}}",
+                FreeText,
+            ),
         ];
         assert!(validate_step_references(&steps).is_ok());
     }
@@ -1781,7 +1965,11 @@ mod tests {
             step("c", "{{previous_step.status}}", FreeText),
         ];
         let err = validate_step_references(&steps).unwrap_err();
-        assert!(err.len() >= 3, "Must return all errors at once, got {:?}", err);
+        assert!(
+            err.len() >= 3,
+            "Must return all errors at once, got {:?}",
+            err
+        );
     }
 
     // ── data_json template variable ──
@@ -1819,8 +2007,8 @@ mod tests {
         let output = "---STEP_OUTPUT---\n{\"data\": {\"id\": 42, \"tags\": [\"a\", \"b\"]}, \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---";
         ctx.set_step_output("s", output);
         let rendered = ctx.render("{{steps.s.data_json}}").unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&rendered)
-            .expect("data_json must be valid JSON");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&rendered).expect("data_json must be valid JSON");
         assert_eq!(parsed["id"], 42);
         assert_eq!(parsed["tags"][0], "a");
     }
@@ -1830,7 +2018,10 @@ mod tests {
         let mut ctx = TemplateContext::new();
         let output = "---STEP_OUTPUT---\n{\"data\": [\"x\"], \"status\": \"OK\", \"summary\": \"s\"}\n---END_STEP_OUTPUT---";
         ctx.set_step_output("main", output);
-        assert_eq!(ctx.render("{{previous_step.data_json}}").unwrap(), "[\"x\"]");
+        assert_eq!(
+            ctx.render("{{previous_step.data_json}}").unwrap(),
+            "[\"x\"]"
+        );
     }
 
     #[test]
@@ -1851,13 +2042,28 @@ mod tests {
         let output = "Reasoning.\n\n---STEP_OUTPUT---\n{\"data\": [\"pr-1\", \"pr-2\"], \"status\": \"OK\", \"summary\": \"2 orphan PRs\"}\n---END_STEP_OUTPUT---";
         ctx.set_step_output("collect", output);
 
-        assert_eq!(ctx.render("{{steps.collect.data}}").unwrap(), "[\"pr-1\",\"pr-2\"]");
-        assert_eq!(ctx.render("{{steps.collect.summary}}").unwrap(), "2 orphan PRs");
+        assert_eq!(
+            ctx.render("{{steps.collect.data}}").unwrap(),
+            "[\"pr-1\",\"pr-2\"]"
+        );
+        assert_eq!(
+            ctx.render("{{steps.collect.summary}}").unwrap(),
+            "2 orphan PRs"
+        );
         assert_eq!(ctx.render("{{steps.collect.status}}").unwrap(), "OK");
-        assert_eq!(ctx.render("{{previous_step.data}}").unwrap(), "[\"pr-1\",\"pr-2\"]");
-        assert_eq!(ctx.render("{{previous_step.summary}}").unwrap(), "2 orphan PRs");
+        assert_eq!(
+            ctx.render("{{previous_step.data}}").unwrap(),
+            "[\"pr-1\",\"pr-2\"]"
+        );
+        assert_eq!(
+            ctx.render("{{previous_step.summary}}").unwrap(),
+            "2 orphan PRs"
+        );
         // .output still contains the full raw text
-        assert!(ctx.render("{{previous_step.output}}").unwrap().contains("Reasoning"));
+        assert!(ctx
+            .render("{{previous_step.output}}")
+            .unwrap()
+            .contains("Reasoning"));
     }
 
     // ─── TypedSchema (0.7.0 Phase 2) ──────────────────────────────────────────
@@ -1902,7 +2108,11 @@ mod tests {
         });
         let data = r#"{"other": 7}"#;
         let err = validate_envelope_against_schema(data, &schema).unwrap_err();
-        assert!(err.contains("missing required property 'score'"), "got: {}", err);
+        assert!(
+            err.contains("missing required property 'score'"),
+            "got: {}",
+            err
+        );
     }
 
     #[test]
@@ -1953,7 +2163,11 @@ mod tests {
         // Invalid: second item too short
         let bad = r#"["hello", "x"]"#;
         let err = validate_envelope_against_schema(bad, &schema).unwrap_err();
-        assert!(err.contains("[1]"), "error path should point at item 1: {}", err);
+        assert!(
+            err.contains("[1]"),
+            "error path should point at item 1: {}",
+            err
+        );
         assert!(err.contains("minLength"), "got: {}", err);
     }
 
@@ -1984,7 +2198,10 @@ mod tests {
             "type": "object",
             "properties": { "score": { "type": "integer" } }
         });
-        let fmt = crate::models::StepOutputFormat::TypedSchema { schema, on_invalid: Default::default() };
+        let fmt = crate::models::StepOutputFormat::TypedSchema {
+            schema,
+            on_invalid: Default::default(),
+        };
         let prompt = build_repair_prompt(
             "previous output here",
             &fmt,
@@ -2045,7 +2262,10 @@ mod tests {
     fn extract_artifacts_skips_unclosed_block() {
         let output = "---ARTIFACT:lonely---\nno end marker ever";
         let arts = extract_artifacts(output);
-        assert!(arts.is_empty(), "unclosed block should be skipped, not panic");
+        assert!(
+            arts.is_empty(),
+            "unclosed block should be skipped, not panic"
+        );
     }
 
     #[test]
@@ -2105,7 +2325,10 @@ mod tests {
         // emission should replace the first.
         let mut ctx = TemplateContext::new();
         ctx.set_step_output("review_v1", "---ARTIFACT:review---\nv1\n---END_ARTIFACT---");
-        ctx.set_step_output("review_v2", "---ARTIFACT:review---\nv2 with more\n---END_ARTIFACT---");
+        ctx.set_step_output(
+            "review_v2",
+            "---ARTIFACT:review---\nv2 with more\n---END_ARTIFACT---",
+        );
         let rendered = ctx.render("{{artifacts.review}}").unwrap();
         assert_eq!(rendered, "v2 with more");
     }
@@ -2181,7 +2404,10 @@ mod tests {
         // ending wherever the first random `---` happens to land.
         let output = "---STATE:counter=3\nsome unrelated content\n---END_THING---";
         let st = extract_state(output);
-        assert!(st.is_empty(), "open-ended STATE without same-line close must be skipped");
+        assert!(
+            st.is_empty(),
+            "open-ended STATE without same-line close must be skipped"
+        );
     }
 
     #[test]
@@ -2267,30 +2493,24 @@ mod tests {
             ctx.set_step_output("fetch", &sample_json_data_output());
 
             // Top-level envelope fields land in ctx.
-            assert_eq!(
-                ctx.render("{{steps.fetch.status}}").unwrap(),
-                "OK",
-            );
+            assert_eq!(ctx.render("{{steps.fetch.status}}").unwrap(), "OK",);
             assert_eq!(
                 ctx.render("{{steps.fetch.summary}}").unwrap(),
                 "JSON data (1 object, 2 field(s))",
             );
             // `data` (object) renders as compact JSON via stringify path.
-            assert!(ctx.render("{{steps.fetch.data}}").unwrap().contains("DEMO-1"));
+            assert!(ctx
+                .render("{{steps.fetch.data}}")
+                .unwrap()
+                .contains("DEMO-1"));
             // Nested traversal works (resolve_nested_path via data_json).
-            assert_eq!(
-                ctx.render("{{steps.fetch.data.key}}").unwrap(),
-                "DEMO-1",
-            );
+            assert_eq!(ctx.render("{{steps.fetch.data.key}}").unwrap(), "DEMO-1",);
             assert_eq!(
                 ctx.render("{{steps.fetch.data.body}}").unwrap(),
                 "Refactor login button",
             );
             // `previous_step.*` aliases mirror the named ones.
-            assert_eq!(
-                ctx.render("{{previous_step.status}}").unwrap(),
-                "OK",
-            );
+            assert_eq!(ctx.render("{{previous_step.status}}").unwrap(), "OK",);
         }
 
         // ── ApiCall (Jira-shaped data) ──────────────────────────────────
@@ -2329,12 +2549,14 @@ mod tests {
             );
             // Deep nested traversal — `data.fields.summary`.
             assert_eq!(
-                ctx.render("{{steps.fetch_issue.data.fields.summary}}").unwrap(),
+                ctx.render("{{steps.fetch_issue.data.fields.summary}}")
+                    .unwrap(),
                 "Africanews → Euronews migration",
             );
             // `data.renderedFields.description` (Jira HTML body).
             assert_eq!(
-                ctx.render("{{steps.fetch_issue.data.renderedFields.description}}").unwrap(),
+                ctx.render("{{steps.fetch_issue.data.renderedFields.description}}")
+                    .unwrap(),
                 "<p>Port Africanews onto Euronews…</p>",
             );
             // Bare `.data` returns compact JSON (downstream agent can navigate).
@@ -2364,10 +2586,7 @@ mod tests {
         fn notify_exposes_http_metadata_to_downstream_steps() {
             let mut ctx = TemplateContext::new();
             ctx.set_step_output("alert", &sample_notify_output());
-            assert_eq!(
-                ctx.render("{{steps.alert.status}}").unwrap(),
-                "OK",
-            );
+            assert_eq!(ctx.render("{{steps.alert.status}}").unwrap(), "OK",);
             assert_eq!(
                 ctx.render("{{steps.alert.data.http_status}}").unwrap(),
                 "200",
@@ -2392,7 +2611,11 @@ mod tests {
                 "status": if exit_code == 0 { "OK" } else { "ERROR" },
                 "summary": format!("exec exit {}", exit_code),
             });
-            let signal_generic = if exit_code == 0 { "[SIGNAL: OK]" } else { "[SIGNAL: ERROR]" };
+            let signal_generic = if exit_code == 0 {
+                "[SIGNAL: OK]"
+            } else {
+                "[SIGNAL: ERROR]"
+            };
             format!(
                 "summary line\n\n---STEP_OUTPUT---\n{}\n---END_STEP_OUTPUT---\n{}\n[SIGNAL: exit_{}]",
                 env, signal_generic, exit_code,
@@ -2403,14 +2626,8 @@ mod tests {
         fn exec_exposes_exit_code_and_stdout_excerpt() {
             let mut ctx = TemplateContext::new();
             ctx.set_step_output("tests", &sample_exec_output(0, "test passed"));
-            assert_eq!(
-                ctx.render("{{steps.tests.status}}").unwrap(),
-                "OK",
-            );
-            assert_eq!(
-                ctx.render("{{steps.tests.data.exit_code}}").unwrap(),
-                "0",
-            );
+            assert_eq!(ctx.render("{{steps.tests.status}}").unwrap(), "OK",);
+            assert_eq!(ctx.render("{{steps.tests.data.exit_code}}").unwrap(), "0",);
             assert_eq!(
                 ctx.render("{{steps.tests.data.stdout_excerpt}}").unwrap(),
                 "test passed",
@@ -2423,14 +2640,8 @@ mod tests {
             // populate ctx so downstream conditional steps can branch.
             let mut ctx = TemplateContext::new();
             ctx.set_step_output("tests", &sample_exec_output(2, "compile error"));
-            assert_eq!(
-                ctx.render("{{steps.tests.status}}").unwrap(),
-                "ERROR",
-            );
-            assert_eq!(
-                ctx.render("{{steps.tests.data.exit_code}}").unwrap(),
-                "2",
-            );
+            assert_eq!(ctx.render("{{steps.tests.status}}").unwrap(), "ERROR",);
+            assert_eq!(ctx.render("{{steps.tests.data.exit_code}}").unwrap(), "2",);
         }
 
         // ── Agent (Structured) ──────────────────────────────────────────
@@ -2473,15 +2684,9 @@ mod tests {
                 ctx.render("{{steps.triage.summary}}").unwrap(),
                 "5 entries triaged",
             );
-            assert_eq!(
-                ctx.render("{{steps.triage.status}}").unwrap(),
-                "OK",
-            );
+            assert_eq!(ctx.render("{{steps.triage.status}}").unwrap(), "OK",);
             // Empty array still renders.
-            assert_eq!(
-                ctx.render("{{steps.triage.data.mocked}}").unwrap(),
-                "[]",
-            );
+            assert_eq!(ctx.render("{{steps.triage.data.mocked}}").unwrap(), "[]",);
         }
 
         // ── Agent (FreeText) ────────────────────────────────────────────
@@ -2551,10 +2756,7 @@ mod tests {
             let mut ctx = TemplateContext::new();
             ctx.set_step_output("triage_batch", &sample_batch_output());
 
-            assert_eq!(
-                ctx.render("{{steps.triage_batch.status}}").unwrap(),
-                "OK",
-            );
+            assert_eq!(ctx.render("{{steps.triage_batch.status}}").unwrap(), "OK",);
             assert_eq!(
                 ctx.render("{{steps.triage_batch.data.completed}}").unwrap(),
                 "3",
@@ -2565,7 +2767,8 @@ mod tests {
             );
             // Nested array index access.
             assert_eq!(
-                ctx.render("{{steps.triage_batch.data.discussion_ids.0}}").unwrap(),
+                ctx.render("{{steps.triage_batch.data.discussion_ids.0}}")
+                    .unwrap(),
                 "d1",
             );
         }
@@ -2632,10 +2835,7 @@ mod tests {
             ctx.set_step_output("run_tests", &sample_exec_output(0, "ok"));
             let pr_template =
                 "Tests: {{steps.run_tests.status}} (exit {{steps.run_tests.data.exit_code}})";
-            assert_eq!(
-                ctx.render(pr_template).unwrap(),
-                "Tests: OK (exit 0)",
-            );
+            assert_eq!(ctx.render(pr_template).unwrap(), "Tests: OK (exit 0)",);
         }
 
         #[test]
@@ -2701,7 +2901,10 @@ mod tests {
             let mut ctx = TemplateContext::new();
             ctx.set_step_output("legacy", legacy);
             assert_eq!(ctx.render("{{steps.legacy.status}}").unwrap(), "OK");
-            assert_eq!(ctx.render("{{steps.legacy.summary}}").unwrap(), "legacy run");
+            assert_eq!(
+                ctx.render("{{steps.legacy.summary}}").unwrap(),
+                "legacy run"
+            );
             assert_eq!(ctx.render("{{steps.legacy.data.key}}").unwrap(), "EW-1");
             assert_eq!(ctx.render("{{steps.legacy.data.body}}").unwrap(), "hi");
         }
@@ -2722,10 +2925,7 @@ mod tests {
                 ("Exec(failure)", sample_exec_output(1, "bad")),
                 (
                     "Agent(Structured)",
-                    sample_agent_structured_output(
-                        serde_json::json!({ "x": 1 }),
-                        "agent summary",
-                    ),
+                    sample_agent_structured_output(serde_json::json!({ "x": 1 }), "agent summary"),
                 ),
                 ("BatchApiCall/BatchQuickPrompt", sample_batch_output()),
             ];

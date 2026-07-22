@@ -50,15 +50,28 @@ pub async fn execute_batch_quick_prompt_step(
     // ── Validate required fields ────────────────────────────────────────
     let qp_id = match step.batch_quick_prompt_id.as_ref() {
         Some(id) if !id.is_empty() => id.clone(),
-        _ => return fail(step, start, "BatchQuickPrompt step missing `batch_quick_prompt_id`"),
+        _ => {
+            return fail(
+                step,
+                start,
+                "BatchQuickPrompt step missing `batch_quick_prompt_id`",
+            )
+        }
     };
     let items_from = match step.batch_items_from.as_ref() {
         Some(s) if !s.is_empty() => s.clone(),
-        _ => return fail(step, start, "BatchQuickPrompt step missing `batch_items_from`"),
+        _ => {
+            return fail(
+                step,
+                start,
+                "BatchQuickPrompt step missing `batch_items_from`",
+            )
+        }
     };
     let wait_for_completion = step.batch_wait_for_completion.unwrap_or(true);
     let max_items = step.batch_max_items.unwrap_or(DEFAULT_MAX_ITEMS);
-    let workspace_mode = step.batch_workspace_mode
+    let workspace_mode = step
+        .batch_workspace_mode
         .clone()
         .unwrap_or_else(|| "Direct".to_string());
 
@@ -68,25 +81,41 @@ pub async fn execute_batch_quick_prompt_step(
     // item per line. Both are accepted.
     let rendered = match ctx.render(&items_from) {
         Ok(s) => s,
-        Err(e) => return fail(step, start, format!("Template render error on items_from: {}", e)),
+        Err(e) => {
+            return fail(
+                step,
+                start,
+                format!("Template render error on items_from: {}", e),
+            )
+        }
     };
 
     let items = parse_items_rich(&rendered);
     if items.is_empty() {
-        return fail(step, start, "BatchQuickPrompt: `batch_items_from` resolved to an empty list");
+        return fail(
+            step,
+            start,
+            "BatchQuickPrompt: `batch_items_from` resolved to an empty list",
+        );
     }
     if items.len() > max_items as usize {
-        return fail(step, start, format!(
+        return fail(
+            step,
+            start,
+            format!(
             "BatchQuickPrompt: {} items exceeds max {} (use `batch_max_items` to raise the cap)",
             items.len(), max_items
-        ));
+        ),
+        );
     }
 
     // ── Load the Quick Prompt ───────────────────────────────────────────
     let qp_lookup = qp_id.clone();
-    let qp = match state.db.with_conn(move |conn| {
-        crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)
-    }).await {
+    let qp = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .await
+    {
         Ok(Some(q)) => q,
         Ok(None) => return fail(step, start, format!("Quick prompt '{}' not found", qp_id)),
         Err(e) => return fail(step, start, format!("DB error loading QP: {}", e)),
@@ -98,10 +127,12 @@ pub async fn execute_batch_quick_prompt_step(
     // fail early with a clear message — better than letting each child disc
     // crash at run time when make_agent_stream tries to locate the repo.
     if workspace_mode == "Isolated" && qp.project_id.is_none() {
-        return fail(step, start,
+        return fail(
+            step,
+            start,
             "Isolated workspace mode requires a project-linked Quick Prompt — \
              no git repo available to create per-discussion worktrees. \
-             Either attach the QP to a project, or switch back to Direct mode."
+             Either attach the QP to a project, or switch back to Direct mode.",
         );
     }
 
@@ -119,7 +150,8 @@ pub async fn execute_batch_quick_prompt_step(
     // variable (`batch_item`), so a chained apply-framing QP receives the
     // ticket id rather than the whole payload.
     let first_var_name = qp.variables.first().map(|v| v.name.clone());
-    let mut batch_items: Vec<crate::db::workflows::BatchItemInput> = Vec::with_capacity(items.len());
+    let mut batch_items: Vec<crate::db::workflows::BatchItemInput> =
+        Vec::with_capacity(items.len());
     let mut item_titles: Vec<String> = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         let (vars, title) = item_to_vars_and_title(item, first_var_name.as_deref(), &qp.name, idx);
@@ -147,57 +179,71 @@ pub async fn execute_batch_quick_prompt_step(
     let parent_id = parent_run_id.to_string();
     let parent_meta = {
         let parent_id_for_lookup = parent_id.clone();
-        state.db.with_conn(move |conn| {
-            let parent_run = crate::db::workflows::get_run(conn, &parent_id_for_lookup)?;
-            let Some(parent_run) = parent_run else {
-                return Ok::<_, anyhow::Error>(None);
-            };
-            let workflow = crate::db::workflows::get_workflow(conn, &parent_run.workflow_id)?;
-            let run_count = crate::db::workflows::count_runs(conn, &parent_run.workflow_id)?;
-            // `count_runs` includes the current linear run itself, so its index
-            // is the count (1-based). This is stable even if the user deletes
-            // older runs later — the number printed at batch-creation time
-            // reflects reality at that moment.
-            Ok(Some((workflow.map(|w| w.name), run_count)))
-        }).await.ok().flatten()
+        state
+            .db
+            .with_conn(move |conn| {
+                let parent_run = crate::db::workflows::get_run(conn, &parent_id_for_lookup)?;
+                let Some(parent_run) = parent_run else {
+                    return Ok::<_, anyhow::Error>(None);
+                };
+                let workflow = crate::db::workflows::get_workflow(conn, &parent_run.workflow_id)?;
+                let run_count = crate::db::workflows::count_runs(conn, &parent_run.workflow_id)?;
+                // `count_runs` includes the current linear run itself, so its index
+                // is the count (1-based). This is stable even if the user deletes
+                // older runs later — the number printed at batch-creation time
+                // reflects reality at that moment.
+                Ok(Some((workflow.map(|w| w.name), run_count)))
+            })
+            .await
+            .ok()
+            .flatten()
     };
 
     let now_stamp = chrono::Utc::now().format("%d %b %H:%M:%S");
     let batch_name = Some(match parent_meta.as_ref() {
         Some((Some(wf_name), run_seq)) => format!(
-            "{} · run #{} · {} · {}", wf_name, run_seq, qp.name, now_stamp
+            "{} · run #{} · {} · {}",
+            wf_name, run_seq, qp.name, now_stamp
         ),
         // Parent run exists but workflow was deleted or placeholder → fall back
         // to run sequence only. Still useful to disambiguate from sibling batches.
-        Some((None, run_seq)) => format!(
-            "run #{} · {} · {}", run_seq, qp.name, now_stamp
-        ),
+        Some((None, run_seq)) => format!("run #{} · {} · {}", run_seq, qp.name, now_stamp),
         // Parent run not found (shouldn't happen in practice since we just
         // created it upstream). Keep the old format so we never crash.
         None => format!("{} · {}", qp.name, now_stamp),
     });
     let qp_for_tx = qp.clone();
     let workspace_mode_for_tx = workspace_mode.clone();
-    let outcome = match state.db.with_conn(move |conn| {
-        crate::db::workflows::create_batch_run(conn, crate::db::workflows::CreateBatchRunInput {
-            quick_prompt: &qp_for_tx,
-            items: batch_items,
-            batch_name,
-            project_id: qp_for_tx.project_id.clone(),
-            parent_run_id: Some(parent_id),
-            author_pseudo,
-            author_avatar_email,
-            language: "fr".into(),
-            workspace_mode: workspace_mode_for_tx,
+    let outcome = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::create_batch_run(
+                conn,
+                crate::db::workflows::CreateBatchRunInput {
+                    quick_prompt: &qp_for_tx,
+                    items: batch_items,
+                    batch_name,
+                    project_id: qp_for_tx.project_id.clone(),
+                    parent_run_id: Some(parent_id),
+                    author_pseudo,
+                    author_avatar_email,
+                    language: "fr".into(),
+                    workspace_mode: workspace_mode_for_tx,
+                },
+            )
         })
-    }).await {
+        .await
+    {
         Ok(o) => o,
         Err(e) => return fail(step, start, format!("Failed to create batch run: {}", e)),
     };
 
     tracing::info!(
         "BatchQuickPrompt step '{}' created child batch run {} with {} discussions (parent: {})",
-        step.name, outcome.run_id, outcome.batch_total, parent_run_id
+        step.name,
+        outcome.run_id,
+        outcome.batch_total,
+        parent_run_id
     );
 
     // ── Queued state for EVERY child, up front ─────────────────────
@@ -243,7 +289,8 @@ pub async fn execute_batch_quick_prompt_step(
         .batch_concurrent_limit
         .unwrap_or(DEFAULT_BATCH_CONCURRENT_LIMIT)
         .clamp(1, MAX_BATCH_CONCURRENT_LIMIT);
-    let batch_semaphore = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrent_limit as usize));
+    let batch_semaphore =
+        std::sync::Arc::new(tokio::sync::Semaphore::new(concurrent_limit as usize));
     let chain_ids = step.batch_chain_prompt_ids.clone();
     // `outcome.discussion_ids` is ordered identically to `items` (see
     // `create_batch_run` in db/workflows.rs), so zipping by index is safe.
@@ -270,7 +317,8 @@ pub async fn execute_batch_quick_prompt_step(
                 disc_for_spawn,
                 chain_for_spawn,
                 batch_item,
-            ).await;
+            )
+            .await;
         });
         let _ = idx; // index already consumed via zip
     }
@@ -282,7 +330,8 @@ pub async fn execute_batch_quick_prompt_step(
         let output = build_structured_output(
             &outcome.run_id,
             outcome.batch_total,
-            0, 0, // not yet known
+            0,
+            0, // not yet known
             &outcome.discussion_ids,
             false, // incomplete
         );
@@ -294,7 +343,7 @@ pub async fn execute_batch_quick_prompt_step(
                 tokens_used: 0,
                 duration_ms: start.elapsed().as_millis() as u64,
                 started_at: None,
-            condition_result: None,
+                condition_result: None,
                 // build_structured_output always emits a data/status/summary
                 // payload that `set_step_output` can extract via Strategy 2
                 // — the contract is met even without `---STEP_OUTPUT---`.
@@ -319,21 +368,29 @@ pub async fn execute_batch_quick_prompt_step(
 
     tracing::info!(
         "BatchQuickPrompt step '{}' waiting on BatchRunFinished for child batch {}",
-        step.name, child_run_id
+        step.name,
+        child_run_id
     );
 
     loop {
         let recv = tokio::time::timeout_at(wait_deadline, ws_rx.recv()).await;
         match recv {
-            Ok(Ok(WsMessage::BatchRunFinished { run_id, batch_total, batch_completed, batch_failed, .. }))
-                if run_id == child_run_id =>
-            {
+            Ok(Ok(WsMessage::BatchRunFinished {
+                run_id,
+                batch_total,
+                batch_completed,
+                batch_failed,
+                ..
+            })) if run_id == child_run_id => {
                 final_total = batch_total;
                 final_ok = batch_completed;
                 final_failed = batch_failed;
                 tracing::info!(
                     "BatchQuickPrompt step '{}' completed: {}/{} ok, {} failed",
-                    step.name, final_ok, final_total, final_failed
+                    step.name,
+                    final_ok,
+                    final_total,
+                    final_failed
                 );
                 break;
             }
@@ -351,15 +408,21 @@ pub async fn execute_batch_quick_prompt_step(
                 // re-read the step would wait the full 2h timeout and be
                 // marked Failed while the child batch is actually Success.
                 let cid = child_run_id.clone();
-                match state.db.with_conn(move |conn| crate::db::workflows::get_run(conn, &cid)).await {
-                    Ok(Some(child)) if matches!(
-                        child.status,
-                        crate::models::RunStatus::Success
-                            | crate::models::RunStatus::Failed
-                            | crate::models::RunStatus::Cancelled
-                            | crate::models::RunStatus::StoppedByGuard
-                            | crate::models::RunStatus::Interrupted
-                    ) => {
+                match state
+                    .db
+                    .with_conn(move |conn| crate::db::workflows::get_run(conn, &cid))
+                    .await
+                {
+                    Ok(Some(child))
+                        if matches!(
+                            child.status,
+                            crate::models::RunStatus::Success
+                                | crate::models::RunStatus::Failed
+                                | crate::models::RunStatus::Cancelled
+                                | crate::models::RunStatus::StoppedByGuard
+                                | crate::models::RunStatus::Interrupted
+                        ) =>
+                    {
                         final_total = child.batch_total;
                         final_ok = child.batch_completed;
                         final_failed = child.batch_failed;
@@ -373,13 +436,21 @@ pub async fn execute_batch_quick_prompt_step(
                 }
             }
             Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
-                return fail(step, start, "WS broadcast channel closed while waiting for batch completion");
+                return fail(
+                    step,
+                    start,
+                    "WS broadcast channel closed while waiting for batch completion",
+                );
             }
             Err(_elapsed) => {
-                return fail(step, start, format!(
-                    "Timed out after {:?} waiting for child batch {} to finish",
-                    BATCH_WAIT_TIMEOUT, child_run_id
-                ));
+                return fail(
+                    step,
+                    start,
+                    format!(
+                        "Timed out after {:?} waiting for child batch {} to finish",
+                        BATCH_WAIT_TIMEOUT, child_run_id
+                    ),
+                );
             }
         }
     }
@@ -397,7 +468,11 @@ pub async fn execute_batch_quick_prompt_step(
     // The step succeeds if AT LEAST one child succeeded — matches the
     // semantics used by `increment_batch_progress` for the child batch run
     // itself. A 0/N batch propagates failure to the linear run.
-    let step_status = if final_ok > 0 { RunStatus::Success } else { RunStatus::Failed };
+    let step_status = if final_ok > 0 {
+        RunStatus::Success
+    } else {
+        RunStatus::Failed
+    };
 
     // 2026-06-10 audit P1 — honour declared `on_result` rules (the runner
     // only acts on `outcome.condition_action`; None = rules silently dead).
@@ -466,10 +541,16 @@ fn fail(step: &WorkflowStep, start: Instant, msg: impl Into<String>) -> StepOutc
 /// Public re-export for the dry-run preview endpoint
 /// (`POST /api/workflows/test-batch-step`). Same logic as the runtime path
 /// but exposed so we can preview without touching the DB.
-pub fn parse_items_for_test(rendered: &str) -> Vec<String> { parse_items(rendered) }
+pub fn parse_items_for_test(rendered: &str) -> Vec<String> {
+    parse_items(rendered)
+}
 
 /// Public re-export for the dry-run preview endpoint — see `parse_items_for_test`.
-pub fn render_qp_prompt_for_test(template: &str, first_var_name: Option<&str>, value: &str) -> String {
+pub fn render_qp_prompt_for_test(
+    template: &str,
+    first_var_name: Option<&str>,
+    value: &str,
+) -> String {
     render_qp_prompt(template, first_var_name, value)
 }
 
@@ -502,15 +583,16 @@ fn parse_items(rendered: &str) -> Vec<String> {
             let item = match v {
                 serde_json::Value::String(s) => s.trim().to_string(),
                 serde_json::Value::Number(n) => n.to_string(),
-                serde_json::Value::Object(m) => {
-                    m.get("id").or_else(|| m.get("key")).or_else(|| m.get("number"))
-                        .and_then(|v| match v {
-                            serde_json::Value::String(s) => Some(s.trim().to_string()),
-                            serde_json::Value::Number(n) => Some(n.to_string()),
-                            _ => None,
-                        })
-                        .unwrap_or_default()
-                }
+                serde_json::Value::Object(m) => m
+                    .get("id")
+                    .or_else(|| m.get("key"))
+                    .or_else(|| m.get("number"))
+                    .and_then(|v| match v {
+                        serde_json::Value::String(s) => Some(s.trim().to_string()),
+                        serde_json::Value::Number(n) => Some(n.to_string()),
+                        _ => None,
+                    })
+                    .unwrap_or_default(),
                 _ => String::new(),
             };
             if !item.is_empty() && seen.insert(item.clone()) {
@@ -522,7 +604,9 @@ fn parse_items(rendered: &str) -> Vec<String> {
 
     // Helper: scan a JSON object's values for the first array field — used
     // for shapes 3 and 4. Returns None if no array field exists.
-    fn first_array_in_object(m: &serde_json::Map<String, serde_json::Value>) -> Option<&Vec<serde_json::Value>> {
+    fn first_array_in_object(
+        m: &serde_json::Map<String, serde_json::Value>,
+    ) -> Option<&Vec<serde_json::Value>> {
         m.values().find_map(|v| v.as_array())
     }
 
@@ -593,8 +677,8 @@ fn parse_items_rich(rendered: &str) -> Vec<serde_json::Value> {
         let mut out = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for v in arr {
-            let empty = matches!(v, Value::String(s) if s.trim().is_empty())
-                || matches!(v, Value::Null);
+            let empty =
+                matches!(v, Value::String(s) if s.trim().is_empty()) || matches!(v, Value::Null);
             if empty {
                 continue;
             }
@@ -722,7 +806,9 @@ fn item_to_vars_and_title(
     match item {
         Value::Object(map) => {
             for (k, v) in map {
-                if k == "_title" { continue; }
+                if k == "_title" {
+                    continue;
+                }
                 vars.insert(k.clone(), json_scalar_to_string(v));
             }
             let title = ["_title", "id", "key", "number"]
@@ -754,9 +840,13 @@ fn build_structured_output(
     completed: bool,
 ) -> String {
     let status = if completed {
-        if ok == total { "OK" }
-        else if ok > 0 { "PARTIAL" }
-        else { "ERROR" }
+        if ok == total {
+            "OK"
+        } else if ok > 0 {
+            "PARTIAL"
+        } else {
+            "ERROR"
+        }
     } else {
         "PENDING"
     };
@@ -770,14 +860,20 @@ fn build_structured_output(
     // Use an indexmap-like construction via HashMap since serde_json::Map
     // preserves insertion order as a feature flag we don't rely on.
     let mut data = HashMap::new();
-    data.insert("batch_run_id", serde_json::Value::String(run_id.to_string()));
+    data.insert(
+        "batch_run_id",
+        serde_json::Value::String(run_id.to_string()),
+    );
     data.insert("total", serde_json::Value::Number(total.into()));
     data.insert("ok", serde_json::Value::Number(ok.into()));
     data.insert("failed", serde_json::Value::Number(failed.into()));
     data.insert(
         "discussion_ids",
         serde_json::Value::Array(
-            discussion_ids.iter().map(|s| serde_json::Value::String(s.clone())).collect()
+            discussion_ids
+                .iter()
+                .map(|s| serde_json::Value::String(s.clone()))
+                .collect(),
         ),
     );
 
@@ -841,18 +937,15 @@ mod tests {
     fn parse_items_full_envelope_with_array_in_data() {
         // Shape 4: full `{data:{tickets:[...]},status,summary}` envelope.
         // Happens when items_from is `{{steps.X}}` rather than `{{steps.X.data}}`.
-        let out = parse_items(
-            r#"{"data":{"tickets":["EW-1","EW-2"]},"status":"OK","summary":"2"}"#
-        );
+        let out =
+            parse_items(r#"{"data":{"tickets":["EW-1","EW-2"]},"status":"OK","summary":"2"}"#);
         assert_eq!(out, vec!["EW-1", "EW-2"]);
     }
 
     #[test]
     fn parse_items_envelope_with_data_as_direct_array() {
         // Shape 4 variant: data IS the array directly.
-        let out = parse_items(
-            r#"{"data":["EW-1","EW-2","EW-3"],"status":"OK","summary":"3"}"#
-        );
+        let out = parse_items(r#"{"data":["EW-1","EW-2","EW-3"],"status":"OK","summary":"3"}"#);
         assert_eq!(out, vec!["EW-1", "EW-2", "EW-3"]);
     }
 
@@ -871,7 +964,11 @@ mod tests {
 
     #[test]
     fn render_qp_prompt_substitutes_first_var() {
-        let out = render_qp_prompt("Analyse {{ticket}} en profondeur", Some("ticket"), "EW-1234");
+        let out = render_qp_prompt(
+            "Analyse {{ticket}} en profondeur",
+            Some("ticket"),
+            "EW-1234",
+        );
         assert_eq!(out, "Analyse EW-1234 en profondeur");
     }
 
@@ -888,14 +985,21 @@ mod tests {
         // A short id/key stays inline — no card for trivia.
         assert_eq!(wrap_injected_context("EW-1234", "ticket"), "EW-1234");
         let out = render_qp_prompt("Analyse {{ticket}}", Some("ticket"), "EW-1234");
-        assert!(!out.contains("kronn:context"), "small value must not be wrapped: {out}");
+        assert!(
+            !out.contains("kronn:context"),
+            "small value must not be wrapped: {out}"
+        );
     }
 
     #[test]
     fn large_value_is_wrapped_with_title() {
         let big = "Description du ticket : ".to_string() + &"bla ".repeat(200); // >400 chars
         let wrapped = wrap_injected_context(&big, "ticket");
-        assert!(wrapped.starts_with("<!-- kronn:context title=\"ticket\" -->"), "{}", &wrapped[..80]);
+        assert!(
+            wrapped.starts_with("<!-- kronn:context title=\"ticket\" -->"),
+            "{}",
+            &wrapped[..80]
+        );
         assert!(wrapped.ends_with("<!-- /kronn:context -->"));
         assert!(wrapped.contains(&big), "inner content preserved verbatim");
     }
@@ -904,7 +1008,10 @@ mod tests {
     fn large_value_wrapped_through_render() {
         let big = "x".repeat(500);
         let out = render_qp_prompt("## Le ticket\n{{ticket}}\n## Méthode", Some("ticket"), &big);
-        assert!(out.contains("<!-- kronn:context title=\"ticket\" -->"), "render must wrap the big injected value");
+        assert!(
+            out.contains("<!-- kronn:context title=\"ticket\" -->"),
+            "render must wrap the big injected value"
+        );
         // surrounding instructions stay outside the marker
         assert!(out.starts_with("## Le ticket"));
         assert!(out.trim_end().ends_with("## Méthode"));
@@ -923,8 +1030,8 @@ mod tests {
     #[test]
     fn render_template_vars_wraps_only_large_values() {
         let mut vars = HashMap::new();
-        vars.insert("key".to_string(), "EW-9".to_string());          // small → inline
-        vars.insert("body".to_string(), "z".repeat(500));            // large → carded
+        vars.insert("key".to_string(), "EW-9".to_string()); // small → inline
+        vars.insert("body".to_string(), "z".repeat(500)); // large → carded
         let out = render_qp_template_vars("{{key}} :: {{body}}", &vars);
         assert!(out.contains("EW-9"), "small value inline");
         assert!(!out.contains("title=\"key\""), "small value not carded");
@@ -935,7 +1042,8 @@ mod tests {
 
     #[test]
     fn parse_items_rich_preserves_objects() {
-        let items = parse_items_rich(r#"[{"id":"EW-1","summary":"S1"},{"id":"EW-2","summary":"S2"}]"#);
+        let items =
+            parse_items_rich(r#"[{"id":"EW-1","summary":"S1"},{"id":"EW-2","summary":"S2"}]"#);
         assert_eq!(items.len(), 2);
         assert_eq!(items[0]["id"], "EW-1");
         assert_eq!(items[0]["summary"], "S1");
@@ -952,7 +1060,10 @@ mod tests {
     #[test]
     fn parse_items_rich_string_array_back_compat() {
         let items = parse_items_rich(r#"["EW-1","EW-2"]"#);
-        assert_eq!(items, vec![serde_json::json!("EW-1"), serde_json::json!("EW-2")]);
+        assert_eq!(
+            items,
+            vec![serde_json::json!("EW-1"), serde_json::json!("EW-2")]
+        );
     }
 
     #[test]
@@ -996,7 +1107,10 @@ mod tests {
         assert_eq!(json_scalar_to_string(&serde_json::json!(42)), "42");
         assert_eq!(json_scalar_to_string(&serde_json::json!(true)), "true");
         assert_eq!(json_scalar_to_string(&serde_json::Value::Null), "");
-        assert_eq!(json_scalar_to_string(&serde_json::json!(["a","b"])), r#"["a","b"]"#);
+        assert_eq!(
+            json_scalar_to_string(&serde_json::json!(["a", "b"])),
+            r#"["a","b"]"#
+        );
     }
 
     // 0.8.5 — outputs go through the canonical Kronn envelope
@@ -1006,7 +1120,14 @@ mod tests {
 
     #[test]
     fn build_structured_output_ok() {
-        let out = build_structured_output("run-1", 3, 3, 0, &["d1".into(), "d2".into(), "d3".into()], true);
+        let out = build_structured_output(
+            "run-1",
+            3,
+            3,
+            0,
+            &["d1".into(), "d2".into(), "d3".into()],
+            true,
+        );
         let v = parse_envelope_for_test(&out);
         assert_eq!(v["status"], "OK");
         assert_eq!(v["data"]["total"], 3);
@@ -1059,9 +1180,9 @@ mod tests {
     // WS" — this is that test, paired with the fire-and-forget variant that
     // exercises everything except the WS wait.
 
-    use crate::{AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
     use crate::core::config::default_config;
     use crate::db::Database;
+    use crate::{AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
@@ -1100,9 +1221,13 @@ mod tests {
             updated_at: Utc::now(),
         };
         let qp_for_insert = qp.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::quick_prompts::insert_quick_prompt(conn, &qp_for_insert)
-        }).await.expect("insert QP");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt(conn, &qp_for_insert)
+            })
+            .await
+            .expect("insert QP");
         qp
     }
 
@@ -1159,11 +1284,15 @@ mod tests {
             parent_workflow_name: None,
             parent_run_started_at: None,
         };
-        state.db.with_conn(move |conn| -> anyhow::Result<()> {
-            crate::db::workflows::insert_workflow(conn, &workflow)?;
-            crate::db::workflows::insert_run(conn, &parent_run)?;
-            Ok(())
-        }).await.expect("insert workflow + parent run");
+        state
+            .db
+            .with_conn(move |conn| -> anyhow::Result<()> {
+                crate::db::workflows::insert_workflow(conn, &workflow)?;
+                crate::db::workflows::insert_run(conn, &parent_run)?;
+                Ok(())
+            })
+            .await
+            .expect("insert workflow + parent run");
         run_id
     }
 
@@ -1239,14 +1368,20 @@ mod tests {
         let step = batch_step(&qp.id, /* wait */ false);
         let ctx = TemplateContext::new();
 
-        let outcome = execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
+        let outcome =
+            execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
 
         // ─ Step-level assertions
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "fire-and-forget should always return Success once the spawn loop fires");
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "fire-and-forget should always return Success once the spawn loop fires"
+        );
         let envelope = parse_envelope_for_test(&outcome.result.output);
-        assert_eq!(envelope["status"], "PENDING",
-            "wait_for_completion=false must produce PENDING (caller knows it's racing)");
+        assert_eq!(
+            envelope["status"], "PENDING",
+            "wait_for_completion=false must produce PENDING (caller knows it's racing)"
+        );
         let data = &envelope["data"];
         assert_eq!(data["total"], 3, "3 items in batch_items_from → 3 children");
         assert_eq!(data["ok"], 0, "no completion info yet in fire-and-forget");
@@ -1256,22 +1391,26 @@ mod tests {
 
         // ─ DB-level assertions: the child batch run + 3 child discussions exist
         let parent_id_for_query = parent_run_id.clone();
-        let (child_run, disc_count) = state.db.with_conn(move |conn| -> anyhow::Result<_> {
-            let children = conn
-                .prepare("SELECT id, batch_total FROM workflow_runs WHERE parent_run_id = ?1")?
-                .query_map(rusqlite::params![parent_id_for_query], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            assert_eq!(children.len(), 1, "exactly one child batch run");
-            let (child_id, batch_total) = children.into_iter().next().unwrap();
-            let disc_count: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
-                rusqlite::params![child_id],
-                |row| row.get(0),
-            )?;
-            Ok(((child_id, batch_total), disc_count))
-        }).await.expect("DB readback");
+        let (child_run, disc_count) = state
+            .db
+            .with_conn(move |conn| -> anyhow::Result<_> {
+                let children = conn
+                    .prepare("SELECT id, batch_total FROM workflow_runs WHERE parent_run_id = ?1")?
+                    .query_map(rusqlite::params![parent_id_for_query], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                assert_eq!(children.len(), 1, "exactly one child batch run");
+                let (child_id, batch_total) = children.into_iter().next().unwrap();
+                let disc_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
+                    rusqlite::params![child_id],
+                    |row| row.get(0),
+                )?;
+                Ok(((child_id, batch_total), disc_count))
+            })
+            .await
+            .expect("DB readback");
         assert_eq!(child_run.1, 3, "child batch_total = number of items");
         assert_eq!(disc_count, 3, "one discussion row per batch item");
     }
@@ -1299,14 +1438,21 @@ mod tests {
             for _ in 0..40 {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 let parent = watch_parent_id.clone();
-                let child = watch_state.db.with_conn(move |conn| -> anyhow::Result<Option<String>> {
-                    let id: Option<String> = conn.query_row(
-                        "SELECT id FROM workflow_runs WHERE parent_run_id = ?1 LIMIT 1",
-                        rusqlite::params![parent],
-                        |row| row.get(0),
-                    ).ok();
-                    Ok(id)
-                }).await.ok().flatten();
+                let child = watch_state
+                    .db
+                    .with_conn(move |conn| -> anyhow::Result<Option<String>> {
+                        let id: Option<String> = conn
+                            .query_row(
+                                "SELECT id FROM workflow_runs WHERE parent_run_id = ?1 LIMIT 1",
+                                rusqlite::params![parent],
+                                |row| row.get(0),
+                            )
+                            .ok();
+                        Ok(id)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                 if let Some(child_id) = child {
                     // Tiny extra delay so the step's ws_broadcast.subscribe()
                     // is definitely listening — without this the message can
@@ -1326,12 +1472,16 @@ mod tests {
             panic!("Watchdog never saw a child batch run materialise within 2s");
         });
 
-        let outcome = execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
+        let outcome =
+            execute_batch_quick_prompt_step(&step, &parent_run_id, state.clone(), &ctx).await;
         watchdog.await.expect("watchdog finished cleanly");
 
         // ─ The wait completed and propagated the counters from our synthesized event.
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "all 3 children OK → step Success (success = at-least-one OK)");
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "all 3 children OK → step Success (success = at-least-one OK)"
+        );
         let envelope = parse_envelope_for_test(&outcome.result.output);
         assert_eq!(envelope["status"], "OK", "3 ok / 0 failed → OK envelope");
         assert_eq!(envelope["data"]["total"], 3);

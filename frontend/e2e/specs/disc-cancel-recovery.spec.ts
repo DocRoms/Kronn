@@ -34,6 +34,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 
 const TITLE = `Cancel-recovery PW ${Date.now()}`;
+const BACKEND_URL = process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140';
 
 interface DiscBody {
   id: string;
@@ -84,7 +85,7 @@ test.describe('Discussion cancel — kills child + saves partial + clears partia
     // 2. Trigger the run with a fire-and-forget POST. The SSE side is
     //    cancelled almost immediately (--max-time short) so the
     //    backend's tokio::spawn task is what keeps the agent alive.
-    const runPromise = fetch(`http://localhost:3140/api/discussions/${discId}/run`, {
+    const runPromise = fetch(`${BACKEND_URL}/api/discussions/${discId}/run`, {
       method: 'POST',
       keepalive: true,
     }).catch(() => { /* abort/disconnect is expected */ });

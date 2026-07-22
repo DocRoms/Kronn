@@ -186,6 +186,32 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       listAiFiles: resolve([]),
       readAiFile: resolve({ path: '', content: '' }),
       searchAiFiles: resolve([]),
+      gitStatus: resolve({
+        branch: 'main',
+        default_branch: 'main',
+        is_default_branch: true,
+        files: [],
+        committed_files: [],
+        ahead: 0,
+        behind: 0,
+        has_upstream: false,
+        upstream: null,
+        provider: 'unknown',
+        remote_url: null,
+        pull_requests_url: null,
+        last_tag: null,
+        pr_url: null,
+        languages: [],
+        languages_checked_at: null,
+        languages_cached: false,
+      }),
+      dependencyUpdates: resolve({
+        managers: [],
+        total_outdated: 0,
+        total_major: 0,
+        checked_at: '2026-07-24T00:00:00Z',
+        cached: false,
+      }),
       createPr: resolve({ url: '' }),
       bootstrap: resolve({}),
       migrateDocs: resolve({ status: 'NotApplicable' }),
@@ -275,6 +301,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       trigger: resolve({}),
       triggerStream: vi.fn(),
       listRuns: resolve([]),
+      countRuns: resolve(0),
       getRun: resolve(null),
       deleteRun: resolve(undefined),
       deleteAllRuns: resolve(undefined),
@@ -399,7 +426,7 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
     },
 
     learnings: {
-      // 0.9.0 — Continual Learning. Neutral defaults so components mount clean:
+      // 0.10.0 — Continual Learning. Neutral defaults so components mount clean:
       // pending → 0 (badge hidden), list/forDiscussion → empty.
       propose: resolve({ accepted: true, warnings: [], evidence_checks: [], learning: null }),
       list: resolve([]),

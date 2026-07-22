@@ -109,7 +109,10 @@ pub fn complete(
     // A 0-row update means the row vanished OR was already terminal; the
     // caller treats this write as THE authoritative terminal transition, so
     // a non-Running row must be an error, never a silent overwrite.
-    anyhow::ensure!(affected > 0, "complete: run row {id} not Running — terminal status not persisted");
+    anyhow::ensure!(
+        affected > 0,
+        "complete: run row {id} not Running — terminal status not persisted"
+    );
     Ok(())
 }
 
@@ -158,7 +161,10 @@ pub fn mark_failed_strict(conn: &Connection, id: &str, reason: &str) -> Result<(
          WHERE id = ?1 AND status = 'Running'",
         params![id, Utc::now().to_rfc3339(), format!("failure: {reason}")],
     )?;
-    anyhow::ensure!(affected > 0, "mark_failed_strict: run {id} not Running — terminal status not persisted");
+    anyhow::ensure!(
+        affected > 0,
+        "mark_failed_strict: run {id} not Running — terminal status not persisted"
+    );
     Ok(())
 }
 
@@ -175,7 +181,10 @@ pub fn mark_interrupted_strict(conn: &Connection, id: &str, reason: &str) -> Res
          WHERE id = ?1 AND status = 'Running'",
         params![id, Utc::now().to_rfc3339(), reason],
     )?;
-    anyhow::ensure!(affected > 0, "mark_interrupted_strict: run {id} not Running — transition refused");
+    anyhow::ensure!(
+        affected > 0,
+        "mark_interrupted_strict: run {id} not Running — transition refused"
+    );
     Ok(())
 }
 
@@ -232,7 +241,10 @@ pub fn set_validation_discussion(conn: &Connection, run_id: &str, disc_id: &str)
         "UPDATE audit_runs SET validation_discussion_id = ?2 WHERE id = ?1",
         params![run_id, disc_id],
     )?;
-    anyhow::ensure!(affected > 0, "set_validation_discussion: run row {run_id} not found");
+    anyhow::ensure!(
+        affected > 0,
+        "set_validation_discussion: run row {run_id} not found"
+    );
     Ok(())
 }
 
@@ -263,7 +275,10 @@ pub fn set_step_outcomes(conn: &Connection, run_id: &str, outcomes_json: &str) -
         "UPDATE audit_runs SET step_outcomes_json = ?2 WHERE id = ?1",
         params![run_id, outcomes_json],
     )?;
-    anyhow::ensure!(affected > 0, "set_step_outcomes: run row {run_id} not found");
+    anyhow::ensure!(
+        affected > 0,
+        "set_step_outcomes: run row {run_id} not found"
+    );
     Ok(())
 }
 
@@ -316,7 +331,9 @@ fn row_to_audit_run(row: &rusqlite::Row) -> rusqlite::Result<AuditRun> {
         td_resolved_since_last: row.get::<_, i64>(13)? as u32,
         td_new_since_last: row.get::<_, i64>(14)? as u32,
         td_carried_over: row.get::<_, i64>(15)? as u32,
-        health_score: row.get::<_, Option<i64>>(16)?.map(|v| v.clamp(0, 100) as u8),
+        health_score: row
+            .get::<_, Option<i64>>(16)?
+            .map(|v| v.clamp(0, 100) as u8),
         report_path: row.get(17)?,
         recommendations_json: row.get(18)?,
         last_completed_step: row.get::<_, i64>(19).unwrap_or(0).max(0) as u32,
@@ -394,7 +411,11 @@ pub fn mark_interrupted(conn: &Connection, id: &str, reason: &str) -> Result<()>
             status = 'Interrupted',
             report_path = COALESCE(report_path, ?3)
          WHERE id = ?1 AND status = 'Running'",
-        params![id, Utc::now().to_rfc3339(), format!("interrupted: {reason}")],
+        params![
+            id,
+            Utc::now().to_rfc3339(),
+            format!("interrupted: {reason}")
+        ],
     )?;
     Ok(())
 }
@@ -480,7 +501,12 @@ pub fn insert_audit_step_start(
     conn.execute(
         "INSERT OR IGNORE INTO audit_run_steps (audit_run_id, step_index, file_label, started_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![audit_run_id, step_index as i64, file_label, started_at.to_rfc3339()],
+        params![
+            audit_run_id,
+            step_index as i64,
+            file_label,
+            started_at.to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -536,7 +562,7 @@ pub fn list_audit_steps(conn: &Connection, audit_run_id: &str) -> Result<Vec<Aud
                 step_warning, step_repaired_from_template
          FROM audit_run_steps
          WHERE audit_run_id = ?1
-         ORDER BY step_index ASC"
+         ORDER BY step_index ASC",
     )?;
     let rows = stmt.query_map(params![audit_run_id], |row| {
         let started_str: String = row.get(3)?;
@@ -687,13 +713,31 @@ mod tests {
     #[test]
     fn has_running_for_project_is_project_scoped() {
         let conn = fresh_conn();
-        conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'Test 2', '/tmp/test2')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Test 2', '/tmp/test2')",
+            [],
+        )
+        .unwrap();
         let start = Utc::now();
         insert_running(&conn, "run-1", "p1", "Full", "ClaudeCode", start).unwrap();
         insert_running(&conn, "run-2", "p2", "Full", "ClaudeCode", start).unwrap();
-        complete(&conn, "run-1", start + chrono::Duration::seconds(1), "Completed",
-                 0, 0, 0, 0, 0, 0, 0, 100, None, None).unwrap();
+        complete(
+            &conn,
+            "run-1",
+            start + chrono::Duration::seconds(1),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(!has_running_for_project(&conn, "p1").unwrap());
         assert!(has_running_for_project(&conn, "p2").unwrap());
@@ -702,17 +746,33 @@ mod tests {
     #[test]
     fn validation_discussion_link_is_completed_and_project_scoped() {
         let conn = fresh_conn();
-        conn.execute("INSERT INTO projects (id, name, path) VALUES ('p2', 'Test 2', '/tmp/test2')", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, name, path) VALUES ('p2', 'Test 2', '/tmp/test2')",
+            [],
+        )
+        .unwrap();
         let start = Utc::now();
         insert_running(&conn, "run-v", "p1", "Full", "ClaudeCode", start).unwrap();
         set_validation_discussion(&conn, "run-v", "disc-v").unwrap();
 
         assert!(!validation_discussion_belongs_to_project(&conn, "disc-v", "p1").unwrap());
         complete(
-            &conn, "run-v", start + chrono::Duration::seconds(1), "Completed",
-            0, 0, 0, 0, 0, 0, 0, 100, None, None,
-        ).unwrap();
+            &conn,
+            "run-v",
+            start + chrono::Duration::seconds(1),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100,
+            None,
+            None,
+        )
+        .unwrap();
 
         assert!(validation_discussion_belongs_to_project(&conn, "disc-v", "p1").unwrap());
         assert!(!validation_discussion_belongs_to_project(&conn, "disc-v", "p2").unwrap());
@@ -725,8 +785,23 @@ mod tests {
         // First run completes.
         let t1 = Utc::now();
         insert_running(&conn, "r1", "p1", "Full", "Codex", t1).unwrap();
-        complete(&conn, "r1", t1 + chrono::Duration::seconds(60), "Completed",
-                 0, 1, 2, 3, 0, 6, 0, 84, None, None).unwrap();
+        complete(
+            &conn,
+            "r1",
+            t1 + chrono::Duration::seconds(60),
+            "Completed",
+            0,
+            1,
+            2,
+            3,
+            0,
+            6,
+            0,
+            84,
+            None,
+            None,
+        )
+        .unwrap();
         // Second run is still Running.
         let t2 = Utc::now();
         insert_running(&conn, "r2", "p1", "Full", "Kiro", t2).unwrap();
@@ -734,7 +809,10 @@ mod tests {
         let latest = latest_completed(&conn, "p1").unwrap();
         assert!(latest.is_some());
         let latest = latest.unwrap();
-        assert_eq!(latest.id, "r1", "must be the completed one, not the running one");
+        assert_eq!(
+            latest.id, "r1",
+            "must be the completed one, not the running one"
+        );
         assert_eq!(latest.health_score, Some(84));
     }
 
@@ -757,13 +835,34 @@ mod tests {
         // Out-of-order: lower value must NOT win.
         update_last_completed_step(&conn, "rr-1", 2).unwrap();
         let after3 = list_recent(&conn, "p1", 1).unwrap();
-        assert_eq!(after3[0].last_completed_step, 5, "monotonic — lower step ignored");
+        assert_eq!(
+            after3[0].last_completed_step, 5,
+            "monotonic — lower step ignored"
+        );
         // Terminal: mark complete then try to bump — must not move.
-        complete(&conn, "rr-1", start + chrono::Duration::seconds(30), "Completed",
-                 0, 0, 0, 0, 0, 0, 0, 100, None, None).unwrap();
+        complete(
+            &conn,
+            "rr-1",
+            start + chrono::Duration::seconds(30),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100,
+            None,
+            None,
+        )
+        .unwrap();
         update_last_completed_step(&conn, "rr-1", 9).unwrap();
         let after4 = list_recent(&conn, "p1", 1).unwrap();
-        assert_eq!(after4[0].last_completed_step, 5, "terminal rows must not accept new bumps");
+        assert_eq!(
+            after4[0].last_completed_step, 5,
+            "terminal rows must not accept new bumps"
+        );
     }
 
     #[test]
@@ -780,8 +879,14 @@ mod tests {
         assert_eq!(runs[0].status, "Interrupted");
         assert_eq!(runs[0].last_completed_step, 5,
             "last_completed_step must survive the mark_interrupted call so resume knows where to restart");
-        assert!(runs[0].report_path.as_deref().unwrap_or("").contains("rate-limit"),
-            "interruption reason must be captured for forensics");
+        assert!(
+            runs[0]
+                .report_path
+                .as_deref()
+                .unwrap_or("")
+                .contains("rate-limit"),
+            "interruption reason must be captured for forensics"
+        );
     }
 
     #[test]
@@ -791,8 +896,23 @@ mod tests {
         let start = Utc::now();
         // Completed run — not resumable.
         insert_running(&conn, "r-done", "p1", "Full", "Codex", start).unwrap();
-        complete(&conn, "r-done", start + chrono::Duration::seconds(10),
-                 "Completed", 0, 0, 0, 0, 0, 0, 0, 90, None, None).unwrap();
+        complete(
+            &conn,
+            "r-done",
+            start + chrono::Duration::seconds(10),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            90,
+            None,
+            None,
+        )
+        .unwrap();
         // Interrupted but no step done — restart, not resume.
         insert_running(&conn, "r-empty", "p1", "Full", "Codex", start).unwrap();
         mark_interrupted(&conn, "r-empty", "crashed at step 1").unwrap();
@@ -841,7 +961,9 @@ mod tests {
         insert_running(&conn, "r-chain", "p1", "Full", "ClaudeCode", start).unwrap();
         update_last_completed_step(&conn, "r-chain", 12).unwrap();
         mark_interrupted(&conn, "r-chain", "warned steps: [12]").unwrap();
-        let row = latest_resumable(&conn, "p1").unwrap().expect("step-12 run must be resumable");
+        let row = latest_resumable(&conn, "p1")
+            .unwrap()
+            .expect("step-12 run must be resumable");
         assert_eq!(row.last_completed_step, 12);
     }
 
@@ -855,13 +977,37 @@ mod tests {
         update_last_completed_step(&conn, "r-old", 1).unwrap();
         mark_interrupted(&conn, "r-old", "backend restarted").unwrap();
         // A later run completes the whole pipeline.
-        insert_running(&conn, "r-new", "p1", "Full", "ClaudeCode",
-                       start + chrono::Duration::minutes(30)).unwrap();
-        complete(&conn, "r-new", start + chrono::Duration::minutes(40),
-                 "Completed", 0, 0, 0, 0, 0, 0, 0, 80, None, None).unwrap();
+        insert_running(
+            &conn,
+            "r-new",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            start + chrono::Duration::minutes(30),
+        )
+        .unwrap();
+        complete(
+            &conn,
+            "r-new",
+            start + chrono::Duration::minutes(40),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            80,
+            None,
+            None,
+        )
+        .unwrap();
 
-        assert!(latest_resumable(&conn, "p1").unwrap().is_none(),
-                "a newer Completed run supersedes the old Interrupted one");
+        assert!(
+            latest_resumable(&conn, "p1").unwrap().is_none(),
+            "a newer Completed run supersedes the old Interrupted one"
+        );
     }
 
     #[test]
@@ -875,14 +1021,30 @@ mod tests {
         update_last_completed_step(&conn, "r-a", 5).unwrap();
         mark_interrupted(&conn, "r-a", "cut").unwrap();
         // Newer attempt that produced nothing (step 0, itself not resumable).
-        insert_running(&conn, "r-b", "p1", "Full", "ClaudeCode",
-                       start + chrono::Duration::minutes(5)).unwrap();
+        insert_running(
+            &conn,
+            "r-b",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            start + chrono::Duration::minutes(5),
+        )
+        .unwrap();
         mark_interrupted(&conn, "r-b", "cut early").unwrap();
-        assert!(latest_resumable(&conn, "p1").unwrap().is_none(),
-                "r-a is stale behind r-b; r-b has no completed step — nothing resumable");
+        assert!(
+            latest_resumable(&conn, "p1").unwrap().is_none(),
+            "r-a is stale behind r-b; r-b has no completed step — nothing resumable"
+        );
         // And a newer Cancelled attempt blocks the old one just the same.
-        insert_running(&conn, "r-c", "p1", "Full", "ClaudeCode",
-                       start + chrono::Duration::minutes(10)).unwrap();
+        insert_running(
+            &conn,
+            "r-c",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            start + chrono::Duration::minutes(10),
+        )
+        .unwrap();
         mark_cancelled(&conn, "r-c").unwrap();
         assert!(latest_resumable(&conn, "p1").unwrap().is_none());
     }
@@ -895,13 +1057,38 @@ mod tests {
         let conn = fresh_conn();
         let start = Utc::now();
         insert_running(&conn, "r-full", "p1", "Full", "ClaudeCode", start).unwrap();
-        complete(&conn, "r-full", start + chrono::Duration::minutes(30),
-                 "Completed", 0, 0, 0, 0, 0, 0, 0, 90, None, None).unwrap();
-        insert_running(&conn, "r-nc", "p1", "Partial", "ClaudeCode",
-                       start + chrono::Duration::hours(1)).unwrap();
+        complete(
+            &conn,
+            "r-full",
+            start + chrono::Duration::minutes(30),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            90,
+            None,
+            None,
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "r-nc",
+            "p1",
+            "Partial",
+            "ClaudeCode",
+            start + chrono::Duration::hours(1),
+        )
+        .unwrap();
         mark_failed_strict(&conn, "r-nc", "partial refresh wrote nothing").unwrap();
         let latest = latest_completed(&conn, "p1").unwrap().unwrap();
-        assert_eq!(latest.id, "r-full", "the Failed no_change run must not displace it");
+        assert_eq!(
+            latest.id, "r-full",
+            "the Failed no_change run must not displace it"
+        );
     }
 
     #[test]
@@ -921,12 +1108,30 @@ mod tests {
         let start = Utc::now();
         insert_running(&conn, "r1", "p1", "Full", "Codex", start).unwrap();
         // First completion sets status=Completed.
-        complete(&conn, "r1", start + chrono::Duration::seconds(30), "Completed",
-                 0, 0, 0, 0, 0, 0, 0, 100, None, None).unwrap();
+        complete(
+            &conn,
+            "r1",
+            start + chrono::Duration::seconds(30),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100,
+            None,
+            None,
+        )
+        .unwrap();
         // mark_failed must NOT downgrade an already-completed run.
         mark_failed(&conn, "r1", "spurious").unwrap();
         let runs = list_recent(&conn, "p1", 5).unwrap();
-        assert_eq!(runs[0].status, "Completed", "terminal row must not be overwritten");
+        assert_eq!(
+            runs[0].status, "Completed",
+            "terminal row must not be overwritten"
+        );
     }
 
     // ─── 0.8.4 (#298) audit_run_steps ────────────────────────────────
@@ -949,11 +1154,17 @@ mod tests {
         assert!(steps[0].ended_at.is_none());
         assert!(steps[0].duration_ms.is_none());
         assert!(steps[0].step_tokens.is_none());
-        assert!(steps[0].cli_success, "default cli_success=true while running");
+        assert!(
+            steps[0].cli_success,
+            "default cli_success=true while running"
+        );
 
         // Finalize with success.
         let ended = started + chrono::Duration::seconds(42);
-        finalize_audit_step(&conn, "run-x", 1, ended, 42_000, 1_234, 1_234, true, None, false).unwrap();
+        finalize_audit_step(
+            &conn, "run-x", 1, ended, 42_000, 1_234, 1_234, true, None, false,
+        )
+        .unwrap();
         let steps = list_audit_steps(&conn, "run-x").unwrap();
         assert_eq!(steps.len(), 1);
         assert_eq!(steps[0].duration_ms, Some(42_000));
@@ -985,7 +1196,10 @@ mod tests {
         assert_eq!(steps.len(), 1, "second insert must be a no-op");
         // started_at must keep the first value (not the re-fire timestamp).
         let drift = (steps[0].started_at - t0).num_seconds().abs();
-        assert!(drift < 2, "started_at must NOT be rewritten by the second insert (drift={drift}s)");
+        assert!(
+            drift < 2,
+            "started_at must NOT be rewritten by the second insert (drift={drift}s)"
+        );
     }
 
     #[test]
@@ -1012,13 +1226,16 @@ mod tests {
             false,
             Some("target file is empty — repaired from template"),
             true,
-        ).unwrap();
+        )
+        .unwrap();
 
         let steps = list_audit_steps(&conn, "run-w").unwrap();
         assert_eq!(steps.len(), 1);
         assert!(!steps[0].cli_success);
-        assert_eq!(steps[0].step_warning.as_deref(),
-            Some("target file is empty — repaired from template"));
+        assert_eq!(
+            steps[0].step_warning.as_deref(),
+            Some("target file is empty — repaired from template")
+        );
         assert!(steps[0].step_repaired_from_template);
     }
 
@@ -1035,7 +1252,11 @@ mod tests {
 
         let steps = list_audit_steps(&conn, "run-o").unwrap();
         let indexes: Vec<u32> = steps.iter().map(|s| s.step_index).collect();
-        assert_eq!(indexes, vec![1, 2, 3, 4], "must be sorted ASC by step_index");
+        assert_eq!(
+            indexes,
+            vec![1, 2, 3, 4],
+            "must be sorted ASC by step_index"
+        );
     }
 
     #[test]
@@ -1057,22 +1278,78 @@ mod tests {
         // third stays Running, fourth is unchanged.
         let conn = fresh_conn();
         let now = Utc::now();
-        insert_running(&conn, "stale-3h", "p1", "Full", "ClaudeCode", now - chrono::Duration::hours(3)).unwrap();
-        insert_running(&conn, "stale-1h", "p1", "Full", "ClaudeCode", now - chrono::Duration::hours(1)).unwrap();
-        insert_running(&conn, "fresh",    "p1", "Full", "ClaudeCode", now - chrono::Duration::minutes(5)).unwrap();
-        insert_running(&conn, "terminal", "p1", "Full", "ClaudeCode", now - chrono::Duration::hours(2)).unwrap();
-        complete(&conn, "terminal", now - chrono::Duration::hours(1), "Completed",
-                 0, 0, 0, 0, 0, 0, 0, 100, None, None).unwrap();
+        insert_running(
+            &conn,
+            "stale-3h",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            now - chrono::Duration::hours(3),
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "stale-1h",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            now - chrono::Duration::hours(1),
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "fresh",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            now - chrono::Duration::minutes(5),
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "terminal",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            now - chrono::Duration::hours(2),
+        )
+        .unwrap();
+        complete(
+            &conn,
+            "terminal",
+            now - chrono::Duration::hours(1),
+            "Completed",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            100,
+            None,
+            None,
+        )
+        .unwrap();
 
         let affected = reconcile_stale_runs(&conn, 30 * 60).unwrap();
-        assert_eq!(affected, 2, "exactly 2 stale Running rows should have been flipped");
+        assert_eq!(
+            affected, 2,
+            "exactly 2 stale Running rows should have been flipped"
+        );
 
         let runs = list_recent(&conn, "p1", 10).unwrap();
-        let by_id: std::collections::HashMap<_, _> = runs.iter().map(|r| (r.id.clone(), r.status.clone())).collect();
+        let by_id: std::collections::HashMap<_, _> = runs
+            .iter()
+            .map(|r| (r.id.clone(), r.status.clone()))
+            .collect();
         assert_eq!(by_id["stale-3h"], "Interrupted");
         assert_eq!(by_id["stale-1h"], "Interrupted");
-        assert_eq!(by_id["fresh"],    "Running",   "fresh run must NOT be touched");
-        assert_eq!(by_id["terminal"], "Completed", "terminal rows must NEVER be touched");
+        assert_eq!(by_id["fresh"], "Running", "fresh run must NOT be touched");
+        assert_eq!(
+            by_id["terminal"], "Completed",
+            "terminal rows must NEVER be touched"
+        );
 
         // Idempotent: a second call does nothing.
         let again = reconcile_stale_runs(&conn, 30 * 60).unwrap();
@@ -1095,10 +1372,14 @@ mod tests {
         reconcile_stale_runs(&conn, 30 * 60).unwrap();
 
         // The run is now Interrupted AND resumable.
-        let resumable = latest_resumable(&conn, "p1").unwrap().expect("must be resumable post-reconcile");
+        let resumable = latest_resumable(&conn, "p1")
+            .unwrap()
+            .expect("must be resumable post-reconcile");
         assert_eq!(resumable.id, "partial");
-        assert_eq!(resumable.last_completed_step, 5,
-            "last_completed_step must survive reconcile so resume picks up at step 6");
+        assert_eq!(
+            resumable.last_completed_step, 5,
+            "last_completed_step must survive reconcile so resume picks up at step 6"
+        );
     }
 
     #[test]
@@ -1108,15 +1389,35 @@ mod tests {
         // nothing is running (just rebuilt docker, etc).
         let conn = fresh_conn();
         let now = Utc::now();
-        insert_running(&conn, "fresh-1", "p1", "Full", "ClaudeCode", now - chrono::Duration::seconds(5)).unwrap();
-        insert_running(&conn, "fresh-2", "p1", "Full", "ClaudeCode", now - chrono::Duration::seconds(30)).unwrap();
+        insert_running(
+            &conn,
+            "fresh-1",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            now - chrono::Duration::seconds(5),
+        )
+        .unwrap();
+        insert_running(
+            &conn,
+            "fresh-2",
+            "p1",
+            "Full",
+            "ClaudeCode",
+            now - chrono::Duration::seconds(30),
+        )
+        .unwrap();
 
         let affected = reconcile_all_running(&conn).unwrap();
         assert_eq!(affected, 2);
 
         let runs = list_recent(&conn, "p1", 10).unwrap();
         for r in &runs {
-            assert_eq!(r.status, "Interrupted", "every Running row must be flipped (got {} for {})", r.status, r.id);
+            assert_eq!(
+                r.status, "Interrupted",
+                "every Running row must be flipped (got {} for {})",
+                r.status, r.id
+            );
         }
     }
 

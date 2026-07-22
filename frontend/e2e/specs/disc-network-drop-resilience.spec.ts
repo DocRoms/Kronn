@@ -33,6 +33,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 
 const TITLE = `Network-drop PW ${Date.now()}`;
+const BACKEND_URL = process.env.KRONN_BACKEND_URL ?? 'http://localhost:3140';
 
 interface DiscBody {
   id: string;
@@ -79,7 +80,7 @@ test.describe('Disc network-drop — agent task survives client SSE disconnect',
     //    `tokio::spawn` keeps the AgentProcess alive regardless of
     //    whether the SSE consumer is still listening.
     const controller = new AbortController();
-    const runPromise = fetch(`http://localhost:3140/api/discussions/${discId}/run`, {
+    const runPromise = fetch(`${BACKEND_URL}/api/discussions/${discId}/run`, {
       method: 'POST',
       keepalive: true,
       signal: controller.signal,

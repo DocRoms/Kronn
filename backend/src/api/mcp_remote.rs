@@ -34,9 +34,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::api::workflows::build_manual_trigger_obj;
-use crate::core::run_eta::{
-    next_check_initial, next_check_polling, NextCheck,
-};
+use crate::core::run_eta::{next_check_initial, next_check_polling, NextCheck};
 use crate::models::*;
 use crate::AppState;
 
@@ -51,9 +49,7 @@ use crate::AppState;
 /// in-flight run can't poison the average.
 const RUN_AVG_LIMIT: u32 = 10;
 
-fn avg_workflow_duration_ms(
-    runs: &[WorkflowRun],
-) -> (Option<u64>, u32) {
+fn avg_workflow_duration_ms(runs: &[WorkflowRun]) -> (Option<u64>, u32) {
     let completed: Vec<u64> = runs
         .iter()
         .filter(|r| {
@@ -70,9 +66,8 @@ fn avg_workflow_duration_ms(
             )
         })
         .filter_map(|r| {
-            r.finished_at.map(|fin| {
-                (fin - r.started_at).num_milliseconds().max(0) as u64
-            })
+            r.finished_at
+                .map(|fin| (fin - r.started_at).num_milliseconds().max(0) as u64)
         })
         .take(RUN_AVG_LIMIT as usize)
         .collect();
@@ -139,7 +134,11 @@ pub async fn workflow_trigger(
     // Required-variable validation mirrors the existing trigger route.
     for declared in &wf.variables {
         if declared.required {
-            let val = req.variables.get(&declared.name).map(|s| s.trim()).unwrap_or("");
+            let val = req
+                .variables
+                .get(&declared.name)
+                .map(|s| s.trim())
+                .unwrap_or("");
             if val.is_empty() {
                 let label = if declared.label.is_empty() {
                     &declared.name
@@ -375,7 +374,11 @@ pub async fn workflow_run_status(
     let next_check = if is_terminal_status(&run.status) {
         None
     } else {
-        Some(next_check_polling(expected_duration_ms, elapsed_ms, samples))
+        Some(next_check_polling(
+            expected_duration_ms,
+            elapsed_ms,
+            samples,
+        ))
     };
 
     let current_step = run.step_results.last().and_then(|s| {
@@ -456,10 +459,7 @@ pub struct McpQpRunResponse {
 /// Render a QP template substituting `{{var}}` placeholders. Mirrors
 /// the front-end's `renderTemplate` so the server-side path produces
 /// the same prompt the UI would have sent.
-fn render_qp_template(
-    template: &str,
-    vars: &HashMap<String, String>,
-) -> String {
+fn render_qp_template(template: &str, vars: &HashMap<String, String>) -> String {
     let mut out = template.to_string();
     for (k, v) in vars {
         let placeholder = format!("{{{{{}}}}}", k);
@@ -566,12 +566,7 @@ pub async fn qp_run(
         .await
     {
         Ok(o) => o,
-        Err(e) => {
-            return Json(ApiResponse::err(format!(
-                "Failed to create QP run: {}",
-                e
-            )))
-        }
+        Err(e) => return Json(ApiResponse::err(format!("Failed to create QP run: {}", e))),
     };
 
     let disc_id = match outcome.discussion_ids.first().cloned() {
@@ -611,10 +606,7 @@ pub async fn qp_run(
     let metrics = state
         .db
         .with_conn(move |conn| {
-            crate::db::quick_prompts::list_quick_prompt_version_metrics(
-                conn,
-                &qp_id_for_metrics,
-            )
+            crate::db::quick_prompts::list_quick_prompt_version_metrics(conn, &qp_id_for_metrics)
         })
         .await
         .unwrap_or_default();
@@ -738,7 +730,11 @@ pub async fn qp_batch_run(
     for (idx, item) in req.items.iter().enumerate() {
         for declared in &qp.variables {
             if declared.required {
-                let val = item.vars.get(&declared.name).map(|s| s.trim()).unwrap_or("");
+                let val = item
+                    .vars
+                    .get(&declared.name)
+                    .map(|s| s.trim())
+                    .unwrap_or("");
                 if val.is_empty() {
                     let label = if declared.label.is_empty() {
                         &declared.name
@@ -762,11 +758,18 @@ pub async fn qp_batch_run(
 
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
-        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+        (
+            config.server.pseudo.clone(),
+            config.server.avatar_email.clone(),
+        )
     };
     let project_id = req.project_id.clone().or_else(|| qp.project_id.clone());
     let batch_name = req.batch_name.clone().unwrap_or_else(|| {
-        format!("MCP batch · {} · {}", qp.name, Utc::now().format("%H:%M:%S"))
+        format!(
+            "MCP batch · {} · {}",
+            qp.name,
+            Utc::now().format("%H:%M:%S")
+        )
     });
 
     let qp_for_create = qp.clone();
@@ -892,7 +895,9 @@ pub async fn workflow_run_discussions(
     let run_id_lookup = run_id.clone();
     let discs = match state
         .db
-        .with_conn(move |conn| crate::db::discussions::list_discussions_by_run(conn, &run_id_lookup))
+        .with_conn(move |conn| {
+            crate::db::discussions::list_discussions_by_run(conn, &run_id_lookup)
+        })
         .await
     {
         Ok(d) => d,
@@ -1008,12 +1013,19 @@ pub async fn workflow_wait_for_completion(
             let history = state
                 .db
                 .with_conn(move |conn| {
-                    crate::db::workflows::list_runs_paginated(conn, &wf_id, Some(RUN_AVG_LIMIT + 1), None)
+                    crate::db::workflows::list_runs_paginated(
+                        conn,
+                        &wf_id,
+                        Some(RUN_AVG_LIMIT + 1),
+                        None,
+                    )
                 })
                 .await
                 .unwrap_or_default();
-            let history: Vec<WorkflowRun> =
-                history.into_iter().filter(|r| r.id != run_id_excl).collect();
+            let history: Vec<WorkflowRun> = history
+                .into_iter()
+                .filter(|r| r.id != run_id_excl)
+                .collect();
             let (expected_duration_ms, samples) = avg_workflow_duration_ms(&history);
             let next_check = next_check_polling(expected_duration_ms, elapsed_ms, samples);
 
@@ -1038,7 +1050,11 @@ mod tests {
     use super::*;
     use chrono::Duration;
 
-    fn make_run(status: RunStatus, started: chrono::DateTime<Utc>, finished: Option<chrono::DateTime<Utc>>) -> WorkflowRun {
+    fn make_run(
+        status: RunStatus,
+        started: chrono::DateTime<Utc>,
+        finished: Option<chrono::DateTime<Utc>>,
+    ) -> WorkflowRun {
         WorkflowRun {
             id: Uuid::new_v4().to_string(),
             workflow_id: "wf-1".into(),
@@ -1098,8 +1114,16 @@ mod tests {
         // pathological-run averages naturally pull the next ETA up.
         let base = Utc::now();
         let runs = vec![
-            make_run(RunStatus::StoppedByGuard, base, Some(base + Duration::seconds(45))),
-            make_run(RunStatus::Cancelled, base, Some(base + Duration::seconds(15))),
+            make_run(
+                RunStatus::StoppedByGuard,
+                base,
+                Some(base + Duration::seconds(45)),
+            ),
+            make_run(
+                RunStatus::Cancelled,
+                base,
+                Some(base + Duration::seconds(15)),
+            ),
         ];
         let (_, n) = avg_workflow_duration_ms(&runs);
         assert_eq!(n, 2);
@@ -1162,8 +1186,14 @@ mod tests {
 
     #[test]
     fn default_batch_item_title_uses_provided_when_present() {
-        assert_eq!(default_batch_item_title("Audit QP", 0, Some("Custom")), "Custom");
-        assert_eq!(default_batch_item_title("Audit QP", 0, Some("  Trimmed  ")), "Trimmed");
+        assert_eq!(
+            default_batch_item_title("Audit QP", 0, Some("Custom")),
+            "Custom"
+        );
+        assert_eq!(
+            default_batch_item_title("Audit QP", 0, Some("  Trimmed  ")),
+            "Trimmed"
+        );
     }
 
     #[test]
@@ -1171,7 +1201,10 @@ mod tests {
         assert_eq!(default_batch_item_title("Audit QP", 0, None), "Audit QP #1");
         assert_eq!(default_batch_item_title("Audit QP", 4, None), "Audit QP #5");
         // Blank provided title is treated as absent.
-        assert_eq!(default_batch_item_title("Audit QP", 2, Some("   ")), "Audit QP #3");
+        assert_eq!(
+            default_batch_item_title("Audit QP", 2, Some("   ")),
+            "Audit QP #3"
+        );
     }
 
     #[test]

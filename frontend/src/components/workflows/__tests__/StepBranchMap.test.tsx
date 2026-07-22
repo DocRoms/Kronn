@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { StepBranchMap } from '../StepBranchMap';
 import type { WorkflowStep } from '../../../types/generated';
 
@@ -19,9 +19,13 @@ const step = (name: string, gotos: Array<{ contains: string; to: string }> = [])
 } as unknown as WorkflowStep);
 
 describe('StepBranchMap', () => {
-  it('renders nothing for a purely linear workflow', () => {
-    const { container } = render(<StepBranchMap steps={[step('a'), step('b')]} t={t} />);
-    expect(container.querySelector('[data-testid="wf-branch-map"]')).toBeNull();
+  it('keeps the graph sidebar for a purely linear workflow', () => {
+    render(<StepBranchMap steps={[step('a'), step('b')]} t={t} />);
+    expect(screen.getByTestId('wf-branch-map')).toBeInTheDocument();
+    expect(screen.getByText(/wf\.branchMap\.linear/)).toBeInTheDocument();
+    expect(screen.queryAllByTestId('wf-bm-arc')).toHaveLength(0);
+    expect(screen.getByText(/1\. a/)).toBeInTheDocument();
+    expect(screen.getByText(/2\. b/)).toBeInTheDocument();
   });
 
   it('draws one arc per Goto edge (skipping dangling targets)', () => {
@@ -37,5 +41,25 @@ describe('StepBranchMap', () => {
     // A node label per step.
     expect(screen.getByText(/1\. a/)).toBeInTheDocument();
     expect(screen.getByText(/4\. d/)).toBeInTheDocument();
+  });
+
+  it('highlights and selects a node when used as a step navigator', () => {
+    const onSelectStep = vi.fn();
+    const steps = [
+      step('a'),
+      step('b', [{ contains: 'RETRY', to: 'a' }]),
+    ];
+    render(
+      <StepBranchMap
+        steps={steps}
+        t={t}
+        selectedStepIndex={1}
+        onSelectStep={onSelectStep}
+      />
+    );
+
+    expect(screen.getByTestId('wf-bm-node-1')).toHaveAttribute('data-selected', 'true');
+    fireEvent.click(screen.getByTestId('wf-bm-node-0'));
+    expect(onSelectStep).toHaveBeenCalledWith(0);
   });
 });

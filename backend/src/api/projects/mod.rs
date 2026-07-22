@@ -11,6 +11,7 @@ pub mod anti_hallu_inject;
 pub mod bootstrap;
 pub mod clone;
 pub mod crud;
+pub mod dependencies;
 pub mod git;
 pub mod migrate;
 pub mod template;
@@ -19,6 +20,7 @@ pub use anti_hallu_inject::*;
 pub use bootstrap::*;
 pub use clone::*;
 pub use crud::*;
+pub use dependencies::*;
 pub use git::*;
 pub use migrate::*;
 pub use template::*;
@@ -125,7 +127,10 @@ pub(crate) fn format_linked_repos_for_docs(repos: &[LinkedRepo]) -> Option<Strin
 ///     via `detect_docs_dir`; no-op if not bootstrapped yet.
 ///   - `sync_linked_repos_doc_in(docs_dir)` — called by the audit
 ///     Phase 1 which already knows the exact docs path.
-pub(crate) fn sync_linked_repos_doc(project_path: &std::path::Path, repos: &[LinkedRepo]) -> std::io::Result<()> {
+pub(crate) fn sync_linked_repos_doc(
+    project_path: &std::path::Path,
+    repos: &[LinkedRepo],
+) -> std::io::Result<()> {
     let docs_dir = crate::core::scanner::detect_docs_dir(project_path);
     if !docs_dir.is_dir() {
         return Ok(());
@@ -133,7 +138,10 @@ pub(crate) fn sync_linked_repos_doc(project_path: &std::path::Path, repos: &[Lin
     sync_linked_repos_doc_in(&docs_dir, repos)
 }
 
-pub(crate) fn sync_linked_repos_doc_in(docs_dir: &std::path::Path, repos: &[LinkedRepo]) -> std::io::Result<()> {
+pub(crate) fn sync_linked_repos_doc_in(
+    docs_dir: &std::path::Path,
+    repos: &[LinkedRepo],
+) -> std::io::Result<()> {
     if !docs_dir.is_dir() {
         return Ok(());
     }
@@ -245,11 +253,7 @@ async fn compute_companion_context_inner(
         None
     };
     let pid_for_universe = pid.to_string();
-    let universe_block = match state
-        .db
-        .with_conn(crate::db::projects::list_projects)
-        .await
-    {
+    let universe_block = match state.db.with_conn(crate::db::projects::list_projects).await {
         Ok(all) => format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
         Err(e) => {
             tracing::warn!(
@@ -445,9 +449,15 @@ mod tests {
     #[test]
     fn format_linked_repos_for_prompt_renders_each_entry_with_kind_and_location() {
         let block = format_linked_repos_for_prompt(&[
-            lr("backend-api", "api", "/home/priol/Repos/backend-api", "GraphQL schema lives here"),
+            lr(
+                "backend-api",
+                "api",
+                "/home/priol/Repos/backend-api",
+                "GraphQL schema lives here",
+            ),
             lr("infra", "iac", "https://github.com/org/infra", ""),
-        ]).expect("non-empty list must produce a block");
+        ])
+        .expect("non-empty list must produce a block");
         assert!(block.contains("## Linked repositories"));
         assert!(block.contains("**backend-api** (api)"));
         assert!(block.contains("/home/priol/Repos/backend-api"));
@@ -463,14 +473,17 @@ mod tests {
         // it must start with `<repo>/docs/AGENTS.md`. Without this
         // instruction it does random file scans on unfamiliar
         // codebases and burns tokens. Lock the hint here.
-        let block = format_linked_repos_for_prompt(&[
-            lr("api", "api", "/path/to/api", "")
-        ]).unwrap();
-        assert!(block.contains("docs/AGENTS.md"),
-            "skill must instruct the agent to start with docs/AGENTS.md when reading linked repos");
-        assert!(block.to_lowercase().contains("canonical")
-             || block.to_lowercase().contains("entry point"),
-            "block should frame docs/AGENTS.md as the canonical entry point");
+        let block =
+            format_linked_repos_for_prompt(&[lr("api", "api", "/path/to/api", "")]).unwrap();
+        assert!(
+            block.contains("docs/AGENTS.md"),
+            "skill must instruct the agent to start with docs/AGENTS.md when reading linked repos"
+        );
+        assert!(
+            block.to_lowercase().contains("canonical")
+                || block.to_lowercase().contains("entry point"),
+            "block should frame docs/AGENTS.md as the canonical entry point"
+        );
     }
 
     #[test]
@@ -479,12 +492,12 @@ mod tests {
         // "cross-project context" / "check the relevant companion
         // before asking the user". Locks in the why so future edits
         // of the helper don't accidentally strip the rationale.
-        let block = format_linked_repos_for_prompt(&[
-            lr("api", "api", "/x", "")
-        ]).unwrap();
+        let block = format_linked_repos_for_prompt(&[lr("api", "api", "/x", "")]).unwrap();
         assert!(block.to_lowercase().contains("cross-project"));
-        assert!(block.to_lowercase().contains("before asking the user")
-             || block.to_lowercase().contains("when a task references"));
+        assert!(
+            block.to_lowercase().contains("before asking the user")
+                || block.to_lowercase().contains("when a task references")
+        );
     }
 
     // ─── format_kronn_projects_universe_for_prompt — 0.8.3 ─────────────
@@ -492,15 +505,26 @@ mod tests {
     fn mk_project(id: &str, name: &str, path: &str) -> Project {
         let now = chrono::Utc::now();
         Project {
-            id: id.into(), name: name.into(), path: path.into(),
-            repo_url: None, token_override: None,
-            ai_config: AiConfigStatus { detected: false, configs: vec![] },
+            id: id.into(),
+            name: name.into(),
+            path: path.into(),
+            repo_url: None,
+            token_override: None,
+            ai_config: AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
             audit_status: Default::default(),
-            ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
             path_exists: true,
-            default_skill_ids: vec![], default_profile_id: None,
-            briefing_notes: None, linked_repos: vec![],
-            created_at: now, updated_at: now,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -513,7 +537,10 @@ mod tests {
         p.ai_todo_count = 99; // pretend a stale enrichment lingered
         enrich_audit_status(&mut p);
         assert!(!p.path_exists, "missing dir must flag path_exists = false");
-        assert_eq!(p.ai_todo_count, 0, "missing dir must reset to defaults, not scan");
+        assert_eq!(
+            p.ai_todo_count, 0,
+            "missing dir must reset to defaults, not scan"
+        );
         assert_eq!(p.audit_status, AiAuditStatus::default());
     }
 
@@ -524,7 +551,10 @@ mod tests {
         let mut p = mk_project("p2", "real", tmp.to_str().unwrap());
         p.path_exists = false; // force the opposite to prove enrich sets it
         enrich_audit_status(&mut p);
-        assert!(p.path_exists, "an existing directory must flag path_exists = true");
+        assert!(
+            p.path_exists,
+            "an existing directory must flag path_exists = true"
+        );
     }
 
     #[test]
@@ -545,7 +575,10 @@ mod tests {
         ];
         let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
         assert!(block.contains("front_api"));
-        assert!(!block.contains("**current**"), "current project must not be suggested as its own companion");
+        assert!(
+            !block.contains("**current**"),
+            "current project must not be suggested as its own companion"
+        );
     }
 
     #[test]
@@ -558,12 +591,19 @@ mod tests {
             mk_project("p2", "front_api", "/r/front_api"),
         ];
         let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
-        assert!(block.to_lowercase().contains("evidence"),
-            "block must require evidence before suggesting a link");
-        assert!(block.contains("file:line") || block.contains("citation"),
-            "block must demand a citation");
-        assert!(block.to_lowercase().contains("guess") || block.to_lowercase().contains("naming similarity"),
-            "block must warn against naming-similarity guesses");
+        assert!(
+            block.to_lowercase().contains("evidence"),
+            "block must require evidence before suggesting a link"
+        );
+        assert!(
+            block.contains("file:line") || block.contains("citation"),
+            "block must demand a citation"
+        );
+        assert!(
+            block.to_lowercase().contains("guess")
+                || block.to_lowercase().contains("naming similarity"),
+            "block must warn against naming-similarity guesses"
+        );
     }
 
     #[test]
@@ -576,8 +616,10 @@ mod tests {
             mk_project("p2", "front_api", "/r/front_api"),
         ];
         let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
-        assert!(block.contains("docs/AGENTS.md"),
-            "universe block must instruct the agent to read candidates' AGENTS.md FIRST");
+        assert!(
+            block.contains("docs/AGENTS.md"),
+            "universe block must instruct the agent to read candidates' AGENTS.md FIRST"
+        );
     }
 
     #[test]
@@ -590,11 +632,16 @@ mod tests {
             mk_project("p2", "front_api", "/r/front_api"),
         ];
         let block = format_kronn_projects_universe_for_prompt(&projects, "p1").unwrap();
-        assert!(block.contains("## Suggested companion repos"),
-            "universe block must specify the section name the agent should write to");
-        assert!(block.contains("OMIT the section entirely") || block.contains("omit the section entirely")
-             || block.to_lowercase().contains("silence means"),
-            "block must instruct: no findings = no section (avoid noise)");
+        assert!(
+            block.contains("## Suggested companion repos"),
+            "universe block must specify the section name the agent should write to"
+        );
+        assert!(
+            block.contains("OMIT the section entirely")
+                || block.contains("omit the section entirely")
+                || block.to_lowercase().contains("silence means"),
+            "block must instruct: no findings = no section (avoid noise)"
+        );
     }
 
     #[test]
@@ -644,7 +691,10 @@ mod tests {
         // None case so callers don't have to branch.
         let state = test_state();
         let ctx = compute_companion_context(&state, Some("nonexistent")).await;
-        assert!(ctx.is_empty(), "unknown project → empty string, got: {ctx:?}");
+        assert!(
+            ctx.is_empty(),
+            "unknown project → empty string, got: {ctx:?}"
+        );
     }
 
     #[tokio::test]
@@ -671,10 +721,14 @@ mod tests {
             )],
             ..mk_project(&pid, "test-current", "/r/test-current")
         };
-        state.db.with_conn(move |conn| {
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok::<_, anyhow::Error>(())
-        }).await.expect("insert project");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("insert project");
 
         let ctx = compute_companion_context(&state, Some(&pid)).await;
         assert!(!ctx.contains("Linked repositories (companion repos)"),
@@ -701,20 +755,30 @@ mod tests {
             )],
             ..mk_project(&pid, "test-current", "/r/test-current")
         };
-        state.db.with_conn(move |conn| {
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok::<_, anyhow::Error>(())
-        }).await.expect("insert project");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("insert project");
 
         let ctx = compute_companion_context_for_audit(&state, Some(&pid)).await;
-        assert!(ctx.contains("Linked repositories (companion repos)"),
-            "audit variant must keep linked_repos block inline, got: {ctx:?}");
-        assert!(ctx.contains("**test-api** (api)"),
-            "linked repo entry must be rendered");
+        assert!(
+            ctx.contains("Linked repositories (companion repos)"),
+            "audit variant must keep linked_repos block inline, got: {ctx:?}"
+        );
+        assert!(
+            ctx.contains("**test-api** (api)"),
+            "linked repo entry must be rendered"
+        );
         // Pre-padding so the caller can splice without worrying about
         // delimiters — the very first char of the context should be newline.
-        assert!(ctx.starts_with("\n\n"),
-            "context must be pre-padded with \\n\\n");
+        assert!(
+            ctx.starts_with("\n\n"),
+            "context must be pre-padded with \\n\\n"
+        );
     }
 
     // ── Source-level wiring guards — 0.8.3 (TD-267 + TD-268) ──────────────
@@ -734,8 +798,7 @@ mod tests {
 
     fn read_source(rel: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
     }
 
     #[test]
@@ -777,7 +840,9 @@ mod tests {
         // via `&companion_context` as `context_files_prompt`. The 3
         // internal summarization calls intentionally pass `""` because
         // companion repos are noise in a "compress conversation" prompt.
-        let debate_and_synth_refs = src.matches("context_files_prompt: &companion_context").count();
+        let debate_and_synth_refs = src
+            .matches("context_files_prompt: &companion_context")
+            .count();
         assert!(
             debate_and_synth_refs >= 2,
             "expected at least 2 user-facing agent calls to pass &companion_context as context_files_prompt \
@@ -804,7 +869,9 @@ mod tests {
         // 3+ and the test fires — exactly the protection we want, now
         // independent of the defaulted empty-string literal.
         let src = read_source("src/api/discussions/orchestration.rs");
-        let companion_calls = src.matches("context_files_prompt: &companion_context").count();
+        let companion_calls = src
+            .matches("context_files_prompt: &companion_context")
+            .count();
         assert_eq!(
             companion_calls, 2,
             "expected EXACTLY 2 sites passing `&companion_context` (debate + synthesis); found {}. \
@@ -854,20 +921,30 @@ mod tests {
         let sibling = mk_project("p_sibling", "sibling-repo", "/r/sibling-repo");
         let cur_clone = current.clone();
         let sib_clone = sibling.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::projects::insert_project(conn, &cur_clone)?;
-            crate::db::projects::insert_project(conn, &sib_clone)?;
-            Ok::<_, anyhow::Error>(())
-        }).await.expect("insert projects");
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::insert_project(conn, &cur_clone)?;
+                crate::db::projects::insert_project(conn, &sib_clone)?;
+                Ok::<_, anyhow::Error>(())
+            })
+            .await
+            .expect("insert projects");
 
         let ctx = compute_companion_context(&state, Some("p_current")).await;
-        assert!(ctx.contains("## Other Kronn projects"),
-            "universe block must be present, got: {ctx:?}");
-        assert!(ctx.contains("**sibling-repo** — `/r/sibling-repo`"),
-            "sibling project must be listed in candidate pool");
+        assert!(
+            ctx.contains("## Other Kronn projects"),
+            "universe block must be present, got: {ctx:?}"
+        );
+        assert!(
+            ctx.contains("**sibling-repo** — `/r/sibling-repo`"),
+            "sibling project must be listed in candidate pool"
+        );
         // Current project must NOT self-reference in its own pool.
-        assert!(!ctx.contains("**current** — `/r/current`"),
-            "current project must be excluded from its own candidate pool");
+        assert!(
+            !ctx.contains("**current** — `/r/current`"),
+            "current project must be excluded from its own candidate pool"
+        );
     }
 
     // ─── 0.8.4 (#295) — push → pull migration ─────────────────────────
@@ -887,12 +964,18 @@ mod tests {
         // NOW" — wrong for a pull pattern.
         let repos = vec![lr("front", "frontend", "/r/front", "")];
         let body = format_linked_repos_for_docs(&repos).expect("non-empty");
-        assert!(body.starts_with("# Linked repositories"),
-            "doc must start with a Markdown H1 (it lives at `docs/linked-repos.md`)");
-        assert!(body.contains("Read this file ONLY when"),
-            "doc must teach the agent when to read (pull semantics)");
-        assert!(body.contains("docs/AGENTS.md"),
-            "doc must still point at the canonical companion entry point");
+        assert!(
+            body.starts_with("# Linked repositories"),
+            "doc must start with a Markdown H1 (it lives at `docs/linked-repos.md`)"
+        );
+        assert!(
+            body.contains("Read this file ONLY when"),
+            "doc must teach the agent when to read (pull semantics)"
+        );
+        assert!(
+            body.contains("docs/AGENTS.md"),
+            "doc must still point at the canonical companion entry point"
+        );
     }
 
     #[test]
@@ -905,18 +988,22 @@ mod tests {
         std::fs::create_dir_all(&docs).unwrap();
         let repos = vec![
             lr("front", "frontend", "/r/front", "React app"),
-            lr("api",   "api",      "/r/api",   "GraphQL"),
+            lr("api", "api", "/r/api", "GraphQL"),
         ];
         sync_linked_repos_doc_in(&docs, &repos).unwrap();
         let target = docs.join("linked-repos.md");
         assert!(target.exists(), "non-empty list must write the file");
         let body = std::fs::read_to_string(&target).unwrap();
-        assert!(body.contains("front") && body.contains("api"),
-            "both entries must be in the file");
+        assert!(
+            body.contains("front") && body.contains("api"),
+            "both entries must be in the file"
+        );
         // Now sync with []: file must vanish.
         sync_linked_repos_doc_in(&docs, &[]).unwrap();
-        assert!(!target.exists(),
-            "empty list must remove the stale file (no contradictory state on disk)");
+        assert!(
+            !target.exists(),
+            "empty list must remove the stale file (no contradictory state on disk)"
+        );
     }
 
     #[test]

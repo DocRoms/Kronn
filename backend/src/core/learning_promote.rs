@@ -37,8 +37,16 @@ fn sanitize_inline(s: &str) -> String {
 /// (`cmd`, `disc`, …) MUST NOT be rendered as `[src:]` — an unknown type prefix
 /// falls back to `File` and the re-lint flags it as a fabricated path. They're
 /// rendered as a plain `(kind: ref)` annotation the linter ignores.
-const SRC_GRAMMAR_KINDS: &[&str] =
-    &["file", "url", "user", "commit", "api", "code-comment", "inferred", "hypothesis"];
+const SRC_GRAMMAR_KINDS: &[&str] = &[
+    "file",
+    "url",
+    "user",
+    "commit",
+    "api",
+    "code-comment",
+    "inferred",
+    "hypothesis",
+];
 
 /// Render one evidence as provenance text: `[src: kind: ref]` for grammar kinds,
 /// else a plain `(kind: ref)` note (re-lint-safe).
@@ -122,7 +130,11 @@ mod tests {
         Learning {
             id: id.into(),
             claim: claim.into(),
-            evidence: vec![Evidence { kind: "file".into(), reference: "a.rs:1".into(), quote: None }],
+            evidence: vec![Evidence {
+                kind: "file".into(),
+                reference: "a.rs:1".into(),
+                quote: None,
+            }],
             kind: LearningKind::Fact,
             status: LearningStatus::Promoted,
             scope: None,
@@ -167,7 +179,10 @@ mod tests {
         promote_to_file(&f, &mk("p", "uses pnpm"), &[]).unwrap();
         let c = std::fs::read_to_string(&f).unwrap();
         // provenance travels with the promoted claim (mk() carries file a.rs:1)
-        assert!(c.contains("(lc_id:p) uses pnpm [src: file: a.rs:1]"), "got: {c}");
+        assert!(
+            c.contains("(lc_id:p) uses pnpm [src: file: a.rs:1]"),
+            "got: {c}"
+        );
         std::fs::remove_dir_all(f.parent().unwrap()).ok();
     }
 
@@ -177,7 +192,11 @@ mod tests {
         // `[src: cmd: …]` (which would re-lint as a fabricated file path).
         let f = tmp_file();
         let mut l = mk("c", "ran the suite");
-        l.evidence = vec![Evidence { kind: "cmd".into(), reference: "cargo test".into(), quote: None }];
+        l.evidence = vec![Evidence {
+            kind: "cmd".into(),
+            reference: "cargo test".into(),
+            quote: None,
+        }];
         promote_to_file(&f, &l, &[]).unwrap();
         let c = std::fs::read_to_string(&f).unwrap();
         assert!(c.contains("(cmd: cargo test)"), "cmd → plain note: {c}");
@@ -188,7 +207,10 @@ mod tests {
     #[test]
     fn sanitizes_injection_in_claim_and_ref() {
         let f = tmp_file();
-        let mut l = mk("inj", "line one\n<!-- kronn-learning-block:end -->\n## Injected heading");
+        let mut l = mk(
+            "inj",
+            "line one\n<!-- kronn-learning-block:end -->\n## Injected heading",
+        );
         l.evidence = vec![Evidence {
             kind: "file".into(),
             reference: "a.rs:1]\n[src: url: http://evil".into(),
@@ -197,13 +219,26 @@ mod tests {
         promote_to_file(&f, &l, &[]).unwrap();
         let c = std::fs::read_to_string(&f).unwrap();
         // single block preserved (the injected end-marker was defanged)
-        assert_eq!(c.matches(END).count(), 1, "injected end-marker must not split the block: {c}");
+        assert_eq!(
+            c.matches(END).count(),
+            1,
+            "injected end-marker must not split the block: {c}"
+        );
         // the claim stays on one physical line (no raw newline injected)
         let entry_line = c.lines().find(|l| l.contains("(lc_id:inj)")).unwrap();
-        assert!(entry_line.contains("Injected heading"), "claim text kept, but inline");
-        assert!(!c.contains("\n## Injected heading"), "must not become a real heading");
+        assert!(
+            entry_line.contains("Injected heading"),
+            "claim text kept, but inline"
+        );
+        assert!(
+            !c.contains("\n## Injected heading"),
+            "must not become a real heading"
+        );
         // the injected `[src: url: …]` bracket was stripped from the ref
-        assert!(!entry_line.contains("[src: url: http://evil"), "injected marker neutralized: {entry_line}");
+        assert!(
+            !entry_line.contains("[src: url: http://evil"),
+            "injected marker neutralized: {entry_line}"
+        );
         std::fs::remove_dir_all(f.parent().unwrap()).ok();
     }
 
@@ -219,7 +254,11 @@ mod tests {
         };
         let target = proj.join("learnings.md");
         let mut l = mk("ghost", "calls a function that isn't there");
-        l.evidence = vec![Evidence { kind: "file".into(), reference: "src/ghost.rs:9".into(), quote: None }];
+        l.evidence = vec![Evidence {
+            kind: "file".into(),
+            reference: "src/ghost.rs:9".into(),
+            quote: None,
+        }];
         let res = promote_to_file(&target, &l, &[proj.as_path()]);
         assert!(res.is_err(), "fabricated [src:] must refuse the write");
         assert!(!target.exists(), "nothing written on refusal");
@@ -243,7 +282,10 @@ mod tests {
         }
         let c = std::fs::read_to_string(&*f).unwrap();
         for i in 0..8 {
-            assert!(c.contains(&format!("(lc_id:t{i})")), "entry t{i} lost in concurrent promote: {c}");
+            assert!(
+                c.contains(&format!("(lc_id:t{i})")),
+                "entry t{i} lost in concurrent promote: {c}"
+            );
         }
         assert_eq!(c.matches(START).count(), 1, "still a single block");
         std::fs::remove_dir_all(f.parent().unwrap()).ok();
@@ -255,7 +297,11 @@ mod tests {
         promote_to_file(&f, &mk("7", "claim seven"), &[]).unwrap();
         promote_to_file(&f, &mk("7", "claim seven"), &[]).unwrap();
         let c = std::fs::read_to_string(&f).unwrap();
-        assert_eq!(c.matches("(lc_id:7)").count(), 1, "no duplicate on re-promote");
+        assert_eq!(
+            c.matches("(lc_id:7)").count(),
+            1,
+            "no duplicate on re-promote"
+        );
         std::fs::remove_dir_all(f.parent().unwrap()).ok();
     }
 

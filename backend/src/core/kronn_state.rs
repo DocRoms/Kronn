@@ -114,12 +114,11 @@ pub fn write(project_path: &Path, state: &mut KronnState) -> Result<(), String> 
         .map_err(|e| format!("Failed to create {} dir: {e}", docs_dir.display()))?;
 
     state.touch_readme();
-    let json = serde_json::to_string_pretty(state)
-        .map_err(|e| format!("JSON serialize error: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(state).map_err(|e| format!("JSON serialize error: {e}"))?;
 
     let path = docs_dir.join(KRONN_STATE_FILENAME);
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
+    std::fs::write(&path, json).map_err(|e| format!("Failed to write {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -221,8 +220,7 @@ pub fn backfill_from_legacy_state(project_path: &Path) -> Result<bool, String> {
         }
     }
 
-    let has_checksums =
-        crate::core::checksums::read_checksums_file(project_path).is_some();
+    let has_checksums = crate::core::checksums::read_checksums_file(project_path).is_some();
 
     // Read AGENTS.md (or whatever the project's docs entry is) once to
     // probe for the two legacy HTML markers. Tolerant : missing file

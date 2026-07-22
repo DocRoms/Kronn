@@ -1,6 +1,6 @@
 # NLI faithfulness proto — empirical findings (Gate 2 / RFC-6 de-risk)
 
-> **2026-05-31.** Throwaway proto answering the only blocking question for 0.9.0's
+> **2026-05-31.** Throwaway proto answering the only blocking question for 0.10.0's
 > Gate 2 (`claim ⊨ evidence` faithfulness): **can a local NLI model discriminate
 > faithfulness well enough to be the `FaithfulnessChecker`?** Answer below, on a
 > real, hard, judge-labeled eval set.
@@ -55,7 +55,7 @@ entail-kept-green exposes it — it would amber-flag ~98% of *legitimate* claims
    the model is strong — and the strong model is **slow on CPU (≈4 s/pair)**,
    impractical for per-message real-time use without GPU/quantization.
 
-## Architecture consequences (feed back into the 0.9.0 spec)
+## Architecture consequences (feed back into the 0.10.0 spec)
 
 - **Posture B is the right call** (validated, not just chosen): an *informative*
   faithfulness signal a human reads, never an auto-block. The data shows an

@@ -5,7 +5,10 @@
 // `ensure_agent_writable_subfolders`, `inject_bootstrap_prompt`) are
 // `pub(crate)` because `api::audit` reuses them during the audit pipeline.
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 
 use crate::agents::runner;
 use crate::core::scanner;
@@ -18,7 +21,11 @@ pub async fn install_template(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AiAuditStatus>> {
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -27,107 +34,128 @@ pub async fn install_template(
     let project_path_str = project.path.clone();
 
     // Run filesystem I/O on blocking thread pool
-    let install_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
-        let project_path = scanner::resolve_host_path(&project_path_str);
-        if !project_path.exists() {
-            return Err(format!("Project path not found: {}", project_path.display()));
-        }
-
-        // Permission check on whichever doc-folder the project already
-        // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
-        // skip this — there's nothing to check yet.
-        let existing_docs = crate::core::scanner::detect_docs_dir(&project_path);
-        if existing_docs.exists() {
-            if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
-                let folder_name = existing_docs.file_name().and_then(|n| n.to_str()).unwrap_or("docs");
+    let install_result =
+        tokio::task::spawn_blocking(move || -> Result<(), String> {
+            let project_path = scanner::resolve_host_path(&project_path_str);
+            if !project_path.exists() {
                 return Err(format!(
+                    "Project path not found: {}",
+                    project_path.display()
+                ));
+            }
+
+            // Permission check on whichever doc-folder the project already
+            // has (`docs/`, legacy `ai/`, or alt `doc/`). Fresh projects
+            // skip this — there's nothing to check yet.
+            let existing_docs = crate::core::scanner::detect_docs_dir(&project_path);
+            if existing_docs.exists() {
+                if let Err(e) = crate::api::audit::check_ai_dir_permissions(&existing_docs) {
+                    let folder_name = existing_docs
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("docs");
+                    return Err(format!(
                     "{}/ directory exists but has permission issues that could not be fixed: {}. \
                      Run: sudo chown -R $(id -u):$(id -g) {}/{}/",
                     folder_name, e, project_path.display(), folder_name
                 ));
-            }
-        }
-
-        let template_dir = resolve_templates_dir();
-        if !template_dir.exists() {
-            return Err(format!("Templates directory not found: {}", template_dir.display()));
-        }
-
-        // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
-        // projects always get docs/; legacy `ai/` projects keep their
-        // layout until the operator clicks Migrate.
-        let docs_template = template_dir.join("docs");
-        let docs_target = if existing_docs.exists() {
-            existing_docs
-        } else {
-            project_path.join("docs")
-        };
-        let mut created_files = Vec::new();
-        if docs_template.is_dir() {
-            created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
-        }
-        // 0.8.7 — copy the anti-hallu spec embedded in the binary into
-        // the project's `docs/conventions/` so any agent running on this
-        // project (with or without Kronn) can open the convention
-        // locally. Idempotent : skip if already present (re-install
-        // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
-        // is the explicit re-sync path).
-        let conventions_dir = docs_target.join("conventions");
-        let spec_path = conventions_dir.join("agents-md-format-v1.md");
-        // no-follow primitive: a symlinked conventions/ (or dangling spec
-        // link) must never route this write outside the project.
-        if let Err(e) = crate::core::fs_guard::guarded_write_new(
-            &project_path, &spec_path, crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
-        ) {
-            tracing::warn!("anti-hallu spec not installed: {e}");
-        }
-        ensure_agent_writable_subfolders(&project_path, &docs_target);
-        // Human-friendly landing page for `docs/`. Idempotent, best-effort.
-        if let Err(e) = crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target) {
-            tracing::warn!("docs index not installed: {e}");
-        }
-
-        // The FULL redirector set — every agent-context file the templates
-        // ship (not just the 4 managed-block ones): a Gemini/Copilot user
-        // got no entry point at all before this.
-        for filename in &[
-            "CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules",
-            "AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md",
-        ] {
-            let src = template_dir.join(filename);
-            let dst = project_path.join(filename);
-            if src.exists() {
-                // no-follow: a symlinked .github/ (or dangling dst link)
-                // must never route the copy outside the project.
-                match crate::core::fs_guard::guarded_copy_new(&project_path, &src, &dst) {
-                    Ok(true) => created_files.push(dst),
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!("Failed to copy {}: {}", filename, e),
                 }
             }
-        }
 
-        // Pre-fill template placeholders with filesystem-derived defaults —
-        // scoped EXCLUSIVELY to the files this very call created (ownership
-        // by construction, Codex A2): a pre-existing docs/ tree or root file
-        // is user content and is never walked.
-        let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+            let template_dir = resolve_templates_dir();
+            if !template_dir.exists() {
+                return Err(format!(
+                    "Templates directory not found: {}",
+                    template_dir.display()
+                ));
+            }
 
-        // Resolve the entry file via detect_docs_entry so this code path
-        // works for fresh installs (docs/AGENTS.md), legacy projects
-        // (ai/index.md), and projects on the `doc/` singular convention.
-        // The bootstrap prompt is only injected into an entry file THIS
-        // call created (Codex A2) — a pre-existing user AGENTS.md is not
-        // ours to rewrite, prompt block or not.
-        let entry_file = crate::core::scanner::detect_docs_entry(&project_path);
-        if entry_file.exists() && created_files.contains(&entry_file) {
-            inject_bootstrap_prompt(&entry_file);
-        }
+            // 0.7.1+ : ship the modern `docs/AGENTS.md` convention. Fresh
+            // projects always get docs/; legacy `ai/` projects keep their
+            // layout until the operator clicks Migrate.
+            let docs_template = template_dir.join("docs");
+            let docs_target = if existing_docs.exists() {
+                existing_docs
+            } else {
+                project_path.join("docs")
+            };
+            let mut created_files = Vec::new();
+            if docs_template.is_dir() {
+                created_files.extend(copy_dir_nondestructive(&docs_template, &docs_target)?);
+            }
+            // 0.8.7 — copy the anti-hallu spec embedded in the binary into
+            // the project's `docs/conventions/` so any agent running on this
+            // project (with or without Kronn) can open the convention
+            // locally. Idempotent : skip if already present (re-install
+            // doesn't clobber user edits ; PR3 endpoint `/anti-hallu/inject`
+            // is the explicit re-sync path).
+            let conventions_dir = docs_target.join("conventions");
+            let spec_path = conventions_dir.join("agents-md-format-v1.md");
+            // no-follow primitive: a symlinked conventions/ (or dangling spec
+            // link) must never route this write outside the project.
+            if let Err(e) = crate::core::fs_guard::guarded_write_new(
+                &project_path,
+                &spec_path,
+                crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
+            ) {
+                tracing::warn!("anti-hallu spec not installed: {e}");
+            }
+            ensure_agent_writable_subfolders(&project_path, &docs_target);
+            // Human-friendly landing page for `docs/`. Idempotent, best-effort.
+            if let Err(e) =
+                crate::core::docs_migration::ensure_docs_index(&project_path, &docs_target)
+            {
+                tracing::warn!("docs index not installed: {e}");
+            }
 
-        runner::fix_file_ownership(&project_path);
+            // The FULL redirector set — every agent-context file the templates
+            // ship (not just the 4 managed-block ones): a Gemini/Copilot user
+            // got no entry point at all before this.
+            for filename in &[
+                "CLAUDE.md",
+                ".cursorrules",
+                ".windsurfrules",
+                ".clinerules",
+                "AGENTS.md",
+                "GEMINI.md",
+                ".github/copilot-instructions.md",
+            ] {
+                let src = template_dir.join(filename);
+                let dst = project_path.join(filename);
+                if src.exists() {
+                    // no-follow: a symlinked .github/ (or dangling dst link)
+                    // must never route the copy outside the project.
+                    match crate::core::fs_guard::guarded_copy_new(&project_path, &src, &dst) {
+                        Ok(true) => created_files.push(dst),
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("Failed to copy {}: {}", filename, e),
+                    }
+                }
+            }
 
-        Ok(())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+            // Pre-fill template placeholders with filesystem-derived defaults —
+            // scoped EXCLUSIVELY to the files this very call created (ownership
+            // by construction, Codex A2): a pre-existing docs/ tree or root file
+            // is user content and is never walked.
+            let _ = crate::core::docs_migration::prefill_files(&project_path, &created_files);
+
+            // Resolve the entry file via detect_docs_entry so this code path
+            // works for fresh installs (docs/AGENTS.md), legacy projects
+            // (ai/index.md), and projects on the `doc/` singular convention.
+            // The bootstrap prompt is only injected into an entry file THIS
+            // call created (Codex A2) — a pre-existing user AGENTS.md is not
+            // ours to rewrite, prompt block or not.
+            let entry_file = crate::core::scanner::detect_docs_entry(&project_path);
+            if entry_file.exists() && created_files.contains(&entry_file) {
+                inject_bootstrap_prompt(&entry_file);
+            }
+
+            runner::fix_file_ownership(&project_path);
+
+            Ok(())
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = install_result {
         return Json(ApiResponse::err(e));
@@ -136,8 +164,14 @@ pub async fn install_template(
     // Ensure the docs/var/ scratch dir is gitignored (legacy ai/var/ path
     // stays gitignored too on projects that haven't migrated yet).
     let docs_dir = crate::core::scanner::detect_docs_dir(&std::path::PathBuf::from(&project.path));
-    let docs_dir_name = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs");
-    crate::core::mcp_scanner::ensure_gitignore_public(&project.path, &format!("{}/var/", docs_dir_name));
+    let docs_dir_name = docs_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("docs");
+    crate::core::mcp_scanner::ensure_gitignore_public(
+        &project.path,
+        &format!("{}/var/", docs_dir_name),
+    );
 
     let status = scanner::detect_audit_status(&project.path);
     Json(ApiResponse::ok(status))
@@ -227,12 +261,20 @@ pub(crate) fn ensure_agent_writable_subfolders(
         let folder = docs_dir.join(name);
         // no-follow: a symlinked subfolder (conventions/gotchas/people →
         // external dir) or dangling README link is skipped, never traversed.
-        if std::fs::symlink_metadata(&folder).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-            tracing::warn!("{} is a symlink — skipping subfolder scaffold", folder.display());
+        if std::fs::symlink_metadata(&folder)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            tracing::warn!(
+                "{} is a symlink — skipping subfolder scaffold",
+                folder.display()
+            );
             continue;
         }
         if let Err(e) = crate::core::fs_guard::guarded_write_new(
-            project_root, &folder.join("README.md"), readme.as_bytes(),
+            project_root,
+            &folder.join("README.md"),
+            readme.as_bytes(),
         ) {
             tracing::warn!("subfolder README not installed: {e}");
         }
@@ -245,7 +287,10 @@ pub(crate) fn ensure_agent_writable_subfolders(
 /// allowed to touch. Existing files are never inspected or rewritten:
 /// a 0-byte or placeholder-bearing destination is user state until a
 /// manifest proves otherwise (Codex A2).
-pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Path) -> Result<Vec<std::path::PathBuf>, String> {
+pub(crate) fn copy_dir_nondestructive(
+    src: &std::path::Path,
+    dst: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
     // The destination root itself must not be a symlink: `exists()` and
     // `create_dir_all` follow links, so a symlinked docs/ would route the
     // whole install into a directory outside the ownership boundary.
@@ -259,8 +304,8 @@ pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Pa
     }
     std::fs::create_dir_all(dst).map_err(|e| format!("mkdir {}: {}", dst.display(), e))?;
 
-    let entries = std::fs::read_dir(src)
-        .map_err(|e| format!("read_dir {}: {}", src.display(), e))?;
+    let entries =
+        std::fs::read_dir(src).map_err(|e| format!("read_dir {}: {}", src.display(), e))?;
 
     let mut created = Vec::new();
     for entry in entries {
@@ -273,7 +318,11 @@ pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Pa
         // wherever the user chose. Never recurse through it, never copy
         // over it (Codex A2 symlink hardening).
         let dst_lstat = std::fs::symlink_metadata(&dst_path);
-        if dst_lstat.as_ref().map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if dst_lstat
+            .as_ref()
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             continue;
         }
 
@@ -284,15 +333,19 @@ pub(crate) fn copy_dir_nondestructive(src: &std::path::Path, dst: &std::path::Pa
             // even 0 B or placeholder-bearing: neither proves Kronn owns
             // the current content, and recovery of a corrupt skeleton is
             // an explicit operation, not an implicit side effect.
-            std::fs::copy(&src_path, &dst_path)
-                .map_err(|e| format!("copy {} -> {}: {}", src_path.display(), dst_path.display(), e))?;
+            std::fs::copy(&src_path, &dst_path).map_err(|e| {
+                format!(
+                    "copy {} -> {}: {}",
+                    src_path.display(),
+                    dst_path.display(),
+                    e
+                )
+            })?;
             created.push(dst_path);
         }
     }
     Ok(created)
 }
-
-
 
 /// Inject the bootstrap prompt at the top of the project's docs entry
 /// file (`docs/AGENTS.md` post-pivot, legacy `ai/index.md`). Caller
@@ -474,7 +527,9 @@ mod tests {
     // ownership boundary.
 
     fn write(path: &std::path::Path, content: &str) {
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(path, content).unwrap();
     }
 
@@ -498,7 +553,10 @@ mod tests {
         let user_content = "# My fresh content".repeat(50); // healthy size, distinct from template
         write(&dst.join("a.md"), &user_content);
         copy_dir_nondestructive(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("a.md")).unwrap(), user_content);
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.md")).unwrap(),
+            user_content
+        );
     }
 
     #[test]
@@ -581,7 +639,10 @@ mod tests {
         let user_kept = "y".repeat(300); // 300 B = 30% of 1000 → above threshold
         write(&dst.join("a.md"), &user_kept);
         copy_dir_nondestructive(&src, &dst).unwrap();
-        assert_eq!(std::fs::read_to_string(dst.join("a.md")).unwrap(), user_kept);
+        assert_eq!(
+            std::fs::read_to_string(dst.join("a.md")).unwrap(),
+            user_kept
+        );
     }
 
     #[test]
@@ -601,8 +662,11 @@ mod tests {
         if entry.exists() && created.contains(&entry) {
             inject_bootstrap_prompt(&entry);
         }
-        assert_eq!(std::fs::read_to_string(&entry).unwrap(), user,
-            "a pre-existing user entry file must stay byte-intact through install");
+        assert_eq!(
+            std::fs::read_to_string(&entry).unwrap(),
+            user,
+            "a pre-existing user entry file must stay byte-intact through install"
+        );
     }
 
     #[cfg(unix)]
@@ -616,10 +680,19 @@ mod tests {
         let external = tmp.path().join("external");
         std::fs::create_dir_all(&external).unwrap();
         let template_dir = tmp.path().join("templates");
-        write(&template_dir.join("docs/AGENTS.md"), &"template ".repeat(50));
-        write(&template_dir.join("docs/architecture/overview.md"), &"o".repeat(300));
+        write(
+            &template_dir.join("docs/AGENTS.md"),
+            &"template ".repeat(50),
+        );
+        write(
+            &template_dir.join("docs/architecture/overview.md"),
+            &"o".repeat(300),
+        );
         write(&template_dir.join("CLAUDE.md"), &"redirect ".repeat(40));
-        write(&template_dir.join(".github/copilot-instructions.md"), &"copilot ".repeat(40));
+        write(
+            &template_dir.join(".github/copilot-instructions.md"),
+            &"copilot ".repeat(40),
+        );
 
         let project = tmp.path().join("project");
         let docs = project.join("docs");
@@ -633,12 +706,14 @@ mod tests {
         // Trap 4: docs/index.md dangling symlink.
         std::os::unix::fs::symlink(tmp.path().join("nowhere"), docs.join("index.md")).unwrap();
         // Trap 5: .gitignore dangling symlink (append path).
-        std::os::unix::fs::symlink(tmp.path().join("nowhere-gi"), project.join(".gitignore")).unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("nowhere-gi"), project.join(".gitignore"))
+            .unwrap();
 
         // The exact install sequence, same order as the route.
         let mut created = copy_dir_nondestructive(&template_dir.join("docs"), &docs).unwrap();
         let _ = crate::core::fs_guard::guarded_write_new(
-            &project, &docs.join("conventions/agents-md-format-v1.md"),
+            &project,
+            &docs.join("conventions/agents-md-format-v1.md"),
             crate::core::anti_halluc::SPEC_AGENTS_MD_V1.as_bytes(),
         );
         ensure_agent_writable_subfolders(&project, &docs);
@@ -654,13 +729,33 @@ mod tests {
         crate::core::mcp_scanner::ensure_gitignore_public(project.to_str().unwrap(), "docs/var/");
 
         // ZERO bytes outside the root; every trap intact.
-        assert!(std::fs::read_dir(&external).unwrap().next().is_none(),
-            "the external directory must stay empty");
-        assert!(!tmp.path().join("nowhere").exists(), "nothing written through the dangling link");
-        assert!(!tmp.path().join("nowhere-gi").exists(), "gitignore append refused through the link");
-        for trap in [docs.join("conventions"), docs.join("gotchas"), project.join(".github"), docs.join("index.md"), project.join(".gitignore")] {
-            assert!(std::fs::symlink_metadata(&trap).unwrap().file_type().is_symlink(),
-                "{} must survive as a symlink", trap.display());
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "the external directory must stay empty"
+        );
+        assert!(
+            !tmp.path().join("nowhere").exists(),
+            "nothing written through the dangling link"
+        );
+        assert!(
+            !tmp.path().join("nowhere-gi").exists(),
+            "gitignore append refused through the link"
+        );
+        for trap in [
+            docs.join("conventions"),
+            docs.join("gotchas"),
+            project.join(".github"),
+            docs.join("index.md"),
+            project.join(".gitignore"),
+        ] {
+            assert!(
+                std::fs::symlink_metadata(&trap)
+                    .unwrap()
+                    .file_type()
+                    .is_symlink(),
+                "{} must survive as a symlink",
+                trap.display()
+            );
         }
         // And the legitimate installs DID land inside the project.
         assert!(docs.join("AGENTS.md").is_file());
@@ -683,9 +778,14 @@ mod tests {
         std::fs::create_dir_all(&dst).unwrap();
         std::os::unix::fs::symlink(&external, dst.join("architecture")).unwrap();
         let created = copy_dir_nondestructive(&src, &dst).unwrap();
-        assert!(created.is_empty(), "nothing may be created through the link");
-        assert!(std::fs::read_dir(&external).unwrap().next().is_none(),
-            "the external target must stay empty");
+        assert!(
+            created.is_empty(),
+            "nothing may be created through the link"
+        );
+        assert!(
+            std::fs::read_dir(&external).unwrap().next().is_none(),
+            "the external target must stay empty"
+        );
     }
 
     #[cfg(unix)]
@@ -702,8 +802,14 @@ mod tests {
         let created = copy_dir_nondestructive(&src, &dst).unwrap();
         assert!(created.is_empty());
         let meta = std::fs::symlink_metadata(dst.join("glossary.md")).unwrap();
-        assert!(meta.file_type().is_symlink(), "the dangling link must survive untouched");
-        assert!(!tmp.path().join("nowhere").exists(), "nothing written through the link");
+        assert!(
+            meta.file_type().is_symlink(),
+            "the dangling link must survive untouched"
+        );
+        assert!(
+            !tmp.path().join("nowhere").exists(),
+            "nothing written through the link"
+        );
     }
 
     #[cfg(unix)]
@@ -735,6 +841,9 @@ mod tests {
         let after = std::fs::read_to_string(dst.join("tech-debt/TEMPLATE.md")).unwrap();
         assert_eq!(after.len(), 500, "missing nested file gets created");
         assert_eq!(created, vec![dst.join("tech-debt/TEMPLATE.md")]);
-        assert_eq!(std::fs::read_to_string(dst.join("tech-debt/README.md")).unwrap(), "");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("tech-debt/README.md")).unwrap(),
+            ""
+        );
     }
 }

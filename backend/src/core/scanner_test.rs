@@ -27,9 +27,16 @@ mod tests {
         let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrap");
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
-        std::fs::write(ai_dir.join("index.md"), "# Project\nKRONN:BOOTSTRAP:START\n").unwrap();
+        std::fs::write(
+            ai_dir.join("index.md"),
+            "# Project\nKRONN:BOOTSTRAP:START\n",
+        )
+        .unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
-        assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled));
+        assert!(matches!(
+            status,
+            crate::models::AiAuditStatus::TemplateInstalled
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -38,7 +45,11 @@ mod tests {
         let tmp = std::env::temp_dir().join("kronn-test-audit-bootstrapped");
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
-        std::fs::write(ai_dir.join("index.md"), "# Project\n<!-- KRONN:BOOTSTRAPPED:2026-03-14 -->\n").unwrap();
+        std::fs::write(
+            ai_dir.join("index.md"),
+            "# Project\n<!-- KRONN:BOOTSTRAPPED:2026-03-14 -->\n",
+        )
+        .unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
         assert!(matches!(status, crate::models::AiAuditStatus::Bootstrapped));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -62,7 +73,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&ai_dir);
         std::fs::write(ai_dir.join("index.md"), "# {{PROJECT_NAME}}\n").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
-        assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled));
+        assert!(matches!(
+            status,
+            crate::models::AiAuditStatus::TemplateInstalled
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -74,13 +88,18 @@ mod tests {
         let tmp = std::env::temp_dir().join("kronn-test-audit-instr-braces");
         let ai_dir = tmp.join("ai");
         let _ = std::fs::create_dir_all(&ai_dir);
-        std::fs::write(ai_dir.join("index.md"),
-            "# My Project\nIf you see an unfilled `{{...}}`, say NOT_FOUND.\n"
-        ).unwrap();
+        std::fs::write(
+            ai_dir.join("index.md"),
+            "# My Project\nIf you see an unfilled `{{...}}`, say NOT_FOUND.\n",
+        )
+        .unwrap();
         crate::core::kronn_state::record_audit(&tmp, "full").unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
-        assert!(matches!(status, crate::models::AiAuditStatus::Audited),
-            "Instructional {{...}} + .kronn.json audit entry should yield Audited, got {:?}", status);
+        assert!(
+            matches!(status, crate::models::AiAuditStatus::Audited),
+            "Instructional {{...}} + .kronn.json audit entry should yield Audited, got {:?}",
+            status
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -121,12 +140,17 @@ mod tests {
         let tmp = std::env::temp_dir().join("kronn-test-audit-plain-docs");
         let docs_dir = tmp.join("docs");
         let _ = std::fs::create_dir_all(&docs_dir);
-        std::fs::write(docs_dir.join("AGENTS.md"),
-            "# My Project\nUser-written documentation, no Kronn involvement.\n"
-        ).unwrap();
+        std::fs::write(
+            docs_dir.join("AGENTS.md"),
+            "# My Project\nUser-written documentation, no Kronn involvement.\n",
+        )
+        .unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
-        assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled),
-            "Plain docs/AGENTS.md without Kronn artefact must be TemplateInstalled, got {:?}", status);
+        assert!(
+            matches!(status, crate::models::AiAuditStatus::TemplateInstalled),
+            "Plain docs/AGENTS.md without Kronn artefact must be TemplateInstalled, got {:?}",
+            status
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -178,10 +202,14 @@ mod tests {
         std::fs::write(
             docs_dir.join("checksums.json"),
             serde_json::to_string(&checksums).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
         let status = detect_audit_status(&tmp.to_string_lossy());
-        assert!(matches!(status, crate::models::AiAuditStatus::Audited),
-            "legacy checksums.json must keep the project Audited, got {:?}", status);
+        assert!(
+            matches!(status, crate::models::AiAuditStatus::Audited),
+            "legacy checksums.json must keep the project Audited, got {:?}",
+            status
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -201,7 +229,8 @@ mod tests {
         std::fs::write(
             ai_dir.join("index.md"),
             "# Project\n<!-- TODO: verify -->\nSome text\n<!-- TODO: check -->\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(count_ai_todos(&tmp.to_string_lossy()), 2);
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -245,7 +274,8 @@ mod tests {
              | TD-20260104-extra-1 | index-only entry | Other | low |\n\
              | TD-20260105-extra-2 | index-only entry | Other | low |\n\
              | Not a TD row | ignored | - | - |\n",
-        ).unwrap();
+        )
+        .unwrap();
         // 3 unique file IDs + 2 index-only IDs = 5 (the 2 mirrored
         // rows collapse onto their detail files).
         assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 5);
@@ -269,7 +299,8 @@ mod tests {
             docs.join("inconsistencies-tech-debt.md"),
             "| TD-20260201-alpha | a | A | low |\n\
              | TD-20260202-beta  | b | B | low |\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(count_tech_debt(&tmp.to_string_lossy()), 2);
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -301,16 +332,21 @@ mod tests {
         std::fs::create_dir_all(tmp.join("real-project/.git")).unwrap();
 
         let ignore = vec!["Library".into()];
-        let repos = scan_paths_with_depth(
-            &[tmp.to_string_lossy().to_string()],
-            &ignore,
-            3,
-        ).await.unwrap();
+        let repos = scan_paths_with_depth(&[tmp.to_string_lossy().to_string()], &ignore, 3)
+            .await
+            .unwrap();
 
         // "Library" should be ignored, only "real-project" found
         let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
-        assert!(names.contains(&"real-project"), "Expected real-project, got: {:?}", names);
-        assert!(!names.iter().any(|n| n.contains("Library")), "Library should be ignored");
+        assert!(
+            names.contains(&"real-project"),
+            "Expected real-project, got: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|n| n.contains("Library")),
+            "Library should be ignored"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -323,26 +359,25 @@ mod tests {
         std::fs::create_dir_all(tmp.join("my-repo/.git")).unwrap();
 
         let ignore = vec!["node_modules".into()];
-        let repos = scan_paths_with_depth(
-            &[tmp.to_string_lossy().to_string()],
-            &ignore,
-            3,
-        ).await.unwrap();
+        let repos = scan_paths_with_depth(&[tmp.to_string_lossy().to_string()], &ignore, 3)
+            .await
+            .unwrap();
 
         let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
-        assert!(!names.iter().any(|n| n.contains("NODE_MODULES")),
-            "NODE_MODULES should be ignored (case-insensitive)");
+        assert!(
+            !names.iter().any(|n| n.contains("NODE_MODULES")),
+            "NODE_MODULES should be ignored (case-insensitive)"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[tokio::test]
     async fn scan_nonexistent_path_returns_empty() {
-        let repos = scan_paths_with_depth(
-            &["/nonexistent/path/that/does/not/exist".into()],
-            &[],
-            3,
-        ).await.unwrap();
+        let repos =
+            scan_paths_with_depth(&["/nonexistent/path/that/does/not/exist".into()], &[], 3)
+                .await
+                .unwrap();
         assert!(repos.is_empty());
     }
 
@@ -358,18 +393,33 @@ mod tests {
     fn default_config_ignores_macos_dirs() {
         let config = crate::core::config::default_config();
         let ignore = &config.scan.ignore;
-        assert!(ignore.contains(&"Library".to_string()), "Should ignore macOS Library");
-        assert!(ignore.contains(&".Trash".to_string()), "Should ignore macOS .Trash");
-        assert!(ignore.contains(&"node_modules".to_string()), "Should ignore node_modules");
+        assert!(
+            ignore.contains(&"Library".to_string()),
+            "Should ignore macOS Library"
+        );
+        assert!(
+            ignore.contains(&".Trash".to_string()),
+            "Should ignore macOS .Trash"
+        );
+        assert!(
+            ignore.contains(&"node_modules".to_string()),
+            "Should ignore node_modules"
+        );
     }
 
     #[test]
     fn default_config_ignores_cache_dirs() {
         let config = crate::core::config::default_config();
         let ignore = &config.scan.ignore;
-        assert!(ignore.contains(&".cache".to_string()), "Should ignore .cache");
+        assert!(
+            ignore.contains(&".cache".to_string()),
+            "Should ignore .cache"
+        );
         assert!(ignore.contains(&".npm".to_string()), "Should ignore .npm");
-        assert!(ignore.contains(&".cargo".to_string()), "Should ignore .cargo");
+        assert!(
+            ignore.contains(&".cargo".to_string()),
+            "Should ignore .cargo"
+        );
     }
 
     // ─── count_ai_todos: Phase 2 markers ─────────────────────────────────────
@@ -395,11 +445,13 @@ mod tests {
         std::fs::write(
             td_dir.join("TD-20260313-old-php.md"),
             "# TD\n<!-- TODO: verify -->\nSome content\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             tmp.join("ai").join("index.md"),
             "# Project\nClean content\n",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(count_ai_todos(&tmp.to_string_lossy()), 1);
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -461,7 +513,10 @@ mod tests {
         let _ = std::fs::create_dir_all(&ai_dir);
         // ai/ dir exists but no index.md → TemplateInstalled
         let status = detect_audit_status(&tmp.to_string_lossy());
-        assert!(matches!(status, crate::models::AiAuditStatus::TemplateInstalled));
+        assert!(matches!(
+            status,
+            crate::models::AiAuditStatus::TemplateInstalled
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

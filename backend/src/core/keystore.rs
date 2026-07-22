@@ -59,7 +59,10 @@ fn decide(candidates: &[(String, &'static str)], encrypted_rows: &[String]) -> D
     // Authority = decrypt self-test. Accept the highest-priority candidate that
     // actually decrypts existing ciphertext; never accept a key by provenance.
     for (cand, src) in candidates {
-        if encrypted_rows.iter().any(|enc| mcps::decrypt_env(enc, cand).is_ok()) {
+        if encrypted_rows
+            .iter()
+            .any(|enc| mcps::decrypt_env(enc, cand).is_ok())
+        {
             return Decision::Accept(cand.clone(), src);
         }
     }
@@ -188,10 +191,9 @@ pub fn set_recovery_passphrase(config: &AppConfig, passphrase: &str) -> Result<S
              (a few words work well)"
         );
     }
-    let key_hex = config
-        .encryption_secret
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("no active encryption key to protect (token subsystem is locked?)"))?;
+    let key_hex = config.encryption_secret.clone().ok_or_else(|| {
+        anyhow::anyhow!("no active encryption key to protect (token subsystem is locked?)")
+    })?;
     let blob = recovery::wrap_key(&key_hex, passphrase).map_err(|e| anyhow::anyhow!(e))?;
     let dir = config::config_dir()?;
     recovery::save_blob(&dir, &blob).context("persist recovery sidecar")?;
@@ -215,8 +217,9 @@ pub async fn recover_with_passphrase(
         Some(code) if !code.trim().is_empty() => {
             recovery::from_code(code).map_err(|e| anyhow::anyhow!(e))?
         }
-        _ => recovery::load_blob(dir)
-            .ok_or_else(|| anyhow::anyhow!("no recovery data — provide the recovery code you saved"))?,
+        _ => recovery::load_blob(dir).ok_or_else(|| {
+            anyhow::anyhow!("no recovery data — provide the recovery code you saved")
+        })?,
     };
 
     let key = recovery::unwrap_key(&blob, passphrase).map_err(|e| anyhow::anyhow!(e))?;
@@ -232,7 +235,9 @@ pub async fn recover_with_passphrase(
     config.encryption_secret = Some(key.clone());
     persist(store, &key);
     tracing::info!("keystore: encryption key restored from recovery passphrase");
-    Ok(KeyOutcome::Resolved { source: "recovery-passphrase" })
+    Ok(KeyOutcome::Resolved {
+        source: "recovery-passphrase",
+    })
 }
 
 #[cfg(test)]
@@ -247,9 +252,15 @@ mod tests {
         val: String,
     }
     impl KeyVault for FixedVault {
-        fn name(&self) -> &'static str { self.name }
-        fn retrieve(&self) -> Result<Option<String>> { Ok(Some(self.val.clone())) }
-        fn store(&self, _secret: &str) -> Result<()> { Ok(()) }
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn retrieve(&self) -> Result<Option<String>> {
+            Ok(Some(self.val.clone()))
+        }
+        fn store(&self, _secret: &str) -> Result<()> {
+            Ok(())
+        }
     }
 
     fn encrypt_row(secret: &str, k: &str, v: &str) -> String {
@@ -374,7 +385,10 @@ mod tests {
             .with_conn(|conn| Ok(mcps::list_configs(conn)?[0].env_encrypted.clone()))
             .await
             .unwrap();
-        assert_eq!(after, enc, "reconcile must not rewrite ciphertext (orphans == 0)");
+        assert_eq!(
+            after, enc,
+            "reconcile must not rewrite ciphertext (orphans == 0)"
+        );
     }
 
     #[tokio::test]
@@ -402,9 +416,15 @@ mod tests {
     async fn reconcile_mints_even_when_no_vault_can_store_the_backup() {
         struct FailStore;
         impl KeyVault for FailStore {
-            fn name(&self) -> &'static str { "failstore" }
-            fn retrieve(&self) -> Result<Option<String>> { Ok(None) }
-            fn store(&self, _s: &str) -> Result<()> { anyhow::bail!("no writable backup medium") }
+            fn name(&self) -> &'static str {
+                "failstore"
+            }
+            fn retrieve(&self) -> Result<Option<String>> {
+                Ok(None)
+            }
+            fn store(&self, _s: &str) -> Result<()> {
+                anyhow::bail!("no writable backup medium")
+            }
         }
         let db = Database::open_in_memory().unwrap();
         let mut cfg = config::default_config();
@@ -413,7 +433,10 @@ mod tests {
 
         let outcome = reconcile_with(&mut cfg, &db, &store).await.unwrap();
         assert_eq!(outcome, KeyOutcome::Minted);
-        assert!(cfg.encryption_secret.is_some(), "mint sets the key even if backup fails");
+        assert!(
+            cfg.encryption_secret.is_some(),
+            "mint sets the key even if backup fails"
+        );
     }
 
     #[tokio::test]
@@ -425,7 +448,10 @@ mod tests {
         let store = KeyStore::from_vaults(vec![]);
         let outcome = reconcile_with(&mut cfg, &db, &store).await.unwrap();
         assert_eq!(outcome, KeyOutcome::Minted);
-        assert!(cfg.encryption_secret.is_some(), "a fresh key must be set on an empty install");
+        assert!(
+            cfg.encryption_secret.is_some(),
+            "a fresh key must be set on an empty install"
+        );
     }
 
     #[tokio::test]
@@ -471,14 +497,19 @@ mod tests {
     async fn seed_row(db: &Database, secret: &str) {
         let enc = encrypt_row(secret, "TOKEN", "s3cr3t");
         db.with_conn(move |conn| {
-            conn.execute("INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','t','stdio')", [])?;
+            conn.execute(
+                "INSERT INTO mcp_servers (id, name, transport) VALUES ('s1','t','stdio')",
+                [],
+            )?;
             conn.execute(
                 "INSERT INTO mcp_configs (id, server_id, label, env_encrypted, env_keys_json) \
                  VALUES ('c1','s1','t', ?1, '[\"TOKEN\"]')",
                 [enc],
             )?;
             Ok(())
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     #[test]
@@ -506,10 +537,21 @@ mod tests {
         cfg.encryption_secret = None; // locked
         let store = KeyStore::from_vaults(vec![]);
 
-        let outcome = recover_with_passphrase(
-            &mut cfg, &db, &store, "my-pass", Some(&code), dir.path()).await.unwrap();
-        assert_eq!(outcome, KeyOutcome::Resolved { source: "recovery-passphrase" });
-        assert_eq!(cfg.encryption_secret.as_deref(), Some(k.as_str()), "key restored live");
+        let outcome =
+            recover_with_passphrase(&mut cfg, &db, &store, "my-pass", Some(&code), dir.path())
+                .await
+                .unwrap();
+        assert_eq!(
+            outcome,
+            KeyOutcome::Resolved {
+                source: "recovery-passphrase"
+            }
+        );
+        assert_eq!(
+            cfg.encryption_secret.as_deref(),
+            Some(k.as_str()),
+            "key restored live"
+        );
     }
 
     #[tokio::test]
@@ -525,9 +567,15 @@ mod tests {
         cfg.encryption_secret = None;
         let store = KeyStore::from_vaults(vec![]);
 
-        let outcome = recover_with_passphrase(
-            &mut cfg, &db, &store, "pw", None, dir.path()).await.unwrap();
-        assert_eq!(outcome, KeyOutcome::Resolved { source: "recovery-passphrase" });
+        let outcome = recover_with_passphrase(&mut cfg, &db, &store, "pw", None, dir.path())
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            KeyOutcome::Resolved {
+                source: "recovery-passphrase"
+            }
+        );
         assert_eq!(cfg.encryption_secret.as_deref(), Some(k.as_str()));
     }
 
@@ -542,10 +590,13 @@ mod tests {
         cfg.encryption_secret = None;
         let store = KeyStore::from_vaults(vec![]);
 
-        let res = recover_with_passphrase(
-            &mut cfg, &db, &store, "wrong", Some(&code), dir.path()).await;
+        let res =
+            recover_with_passphrase(&mut cfg, &db, &store, "wrong", Some(&code), dir.path()).await;
         assert!(res.is_err(), "wrong passphrase must not recover");
-        assert!(cfg.encryption_secret.is_none(), "no key set on failed recovery");
+        assert!(
+            cfg.encryption_secret.is_none(),
+            "no key set on failed recovery"
+        );
     }
 
     #[tokio::test]
@@ -562,8 +613,11 @@ mod tests {
         cfg.encryption_secret = None;
         let store = KeyStore::from_vaults(vec![]);
 
-        let res = recover_with_passphrase(
-            &mut cfg, &db, &store, "pw", Some(&code), dir.path()).await;
-        assert!(res.is_err(), "a key that can't decrypt this instance's data must be refused");
+        let res =
+            recover_with_passphrase(&mut cfg, &db, &store, "pw", Some(&code), dir.path()).await;
+        assert!(
+            res.is_err(),
+            "a key that can't decrypt this instance's data must be refused"
+        );
     }
 }

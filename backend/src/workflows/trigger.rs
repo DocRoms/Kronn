@@ -4,8 +4,8 @@
 //! - Tracker: polls issue tracker API, reconciles processed issues
 //! - Manual: always returns false (triggered via API only)
 
-use std::str::FromStr;
 use chrono::{DateTime, Utc};
+use std::str::FromStr;
 
 use crate::models::*;
 
@@ -31,9 +31,16 @@ pub fn should_fire(trigger: &WorkflowTrigger, since: DateTime<Utc>, now: DateTim
 
 /// True when the cron expression has an occurrence in `(since, now]`.
 fn cron_fires_between(cron_expr: &str, since: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    // cron crate expects 6 fields (with seconds), add "0 " prefix if 5 fields
-    let expr = if cron_expr.split_whitespace().count() < 6 {
-        format!("0 {}", cron_expr)
+    let fields: Vec<&str> = cron_expr.split_whitespace().collect();
+    // Kronn's editor exposes standard five-field cron where Sunday is 0/7
+    // and Monday is 1. The `cron` crate uses Sunday=1 through Saturday=7,
+    // so numeric weekdays must be shifted while adding its seconds field.
+    let expr = if fields.len() == 5 {
+        let day_of_week = normalize_five_field_weekdays(fields[4]);
+        format!(
+            "0 {} {} {} {} {}",
+            fields[0], fields[1], fields[2], fields[3], day_of_week
+        )
     } else {
         cron_expr.to_string()
     };
@@ -51,6 +58,62 @@ fn cron_fires_between(cron_expr: &str, since: DateTime<Utc>, now: DateTime<Utc>)
     }
 }
 
+fn normalize_five_field_weekdays(field: &str) -> String {
+    fn crate_weekday(standard: u32) -> Option<u32> {
+        match standard {
+            0 | 7 => Some(1),
+            1..=6 => Some(standard + 1),
+            _ => None,
+        }
+    }
+
+    let mut normalized = Vec::new();
+    for segment in field.split(',') {
+        let (base, step_suffix) = match segment.split_once('/') {
+            Some((base, step)) => (base, Some(step)),
+            None => (segment, None),
+        };
+
+        if base == "*" {
+            normalized.push(segment.to_string());
+            continue;
+        }
+
+        if let Some((start, end)) = base.split_once('-') {
+            let numeric_range = start.parse::<u32>().ok().zip(end.parse::<u32>().ok()).zip(
+                step_suffix
+                    .map(|step| step.parse::<usize>().ok())
+                    .unwrap_or(Some(1)),
+            );
+            if let Some(((start, end), step)) = numeric_range {
+                if start <= end && step > 0 {
+                    let mapped: Option<Vec<String>> = (start..=end)
+                        .step_by(step)
+                        .map(|day| crate_weekday(day).map(|d| d.to_string()))
+                        .collect();
+                    if let Some(mapped) = mapped {
+                        normalized.extend(mapped);
+                        continue;
+                    }
+                }
+            }
+        } else if step_suffix.is_none() {
+            if let Ok(day) = base.parse::<u32>() {
+                if let Some(day) = crate_weekday(day) {
+                    normalized.push(day.to_string());
+                    continue;
+                }
+            }
+        }
+
+        // Named weekdays already have the same meaning in both syntaxes.
+        // Leave unsupported/invalid shapes untouched so the cron parser emits
+        // its normal validation error rather than silently changing intent.
+        normalized.push(segment.to_string());
+    }
+    normalized.join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,7 +124,11 @@ mod tests {
     #[test]
     fn manual_trigger_never_fires() {
         let now = Utc::now();
-        assert!(!should_fire(&WorkflowTrigger::Manual, now - Duration::seconds(30), now));
+        assert!(!should_fire(
+            &WorkflowTrigger::Manual,
+            now - Duration::seconds(30),
+            now
+        ));
     }
 
     // ─── Cron trigger ────────────────────────────────────────────────────
@@ -83,10 +150,18 @@ mod tests {
         // Deterministic: pick a fixed occurrence and build windows around it.
         // "0 0 7 * * *" = every day at 07:00:00.
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        assert!(fires("0 0 7 * * *", occ - Duration::seconds(30), occ),
-            "occurrence exactly at `now` fires (window is right-inclusive)");
-        assert!(fires("0 0 7 * * *", occ - Duration::seconds(10), occ + Duration::seconds(20)),
-            "occurrence strictly inside the window fires");
+        assert!(
+            fires("0 0 7 * * *", occ - Duration::seconds(30), occ),
+            "occurrence exactly at `now` fires (window is right-inclusive)"
+        );
+        assert!(
+            fires(
+                "0 0 7 * * *",
+                occ - Duration::seconds(10),
+                occ + Duration::seconds(20)
+            ),
+            "occurrence strictly inside the window fires"
+        );
     }
 
     #[test]
@@ -97,8 +172,8 @@ mod tests {
         // (since, now] so adjacent windows partition time.
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let tick1_start = occ - Duration::milliseconds(30_400); // occ − 30.4s
-        let tick1_end = tick1_start + Duration::seconds(30);    // occ − 0.4s
-        let tick2_end = tick1_end + Duration::seconds(30);      // occ + 29.6s
+        let tick1_end = tick1_start + Duration::seconds(30); // occ − 0.4s
+        let tick2_end = tick1_end + Duration::seconds(30); // occ + 29.6s
         let in_first = fires("0 0 7 * * *", tick1_start, tick1_end);
         let in_second = fires("0 0 7 * * *", tick1_end, tick2_end);
         assert!(!in_first, "occurrence is after the first window's end");
@@ -110,13 +185,21 @@ mod tests {
         // Tick starvation (slow tracker poll): the next evaluation happens
         // 90s late — the occurrence must STILL fire (old logic skipped it).
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        assert!(fires("0 0 7 * * *", occ - Duration::seconds(30), occ + Duration::seconds(90)));
+        assert!(fires(
+            "0 0 7 * * *",
+            occ - Duration::seconds(30),
+            occ + Duration::seconds(90)
+        ));
     }
 
     #[test]
     fn no_occurrence_in_window_does_not_fire() {
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        assert!(!fires("0 0 7 * * *", occ + Duration::seconds(1), occ + Duration::seconds(31)));
+        assert!(!fires(
+            "0 0 7 * * *",
+            occ + Duration::seconds(1),
+            occ + Duration::seconds(31)
+        ));
     }
 
     #[test]
@@ -132,12 +215,50 @@ mod tests {
         assert!(fires("0 * * * * *", now - Duration::seconds(61), now));
     }
 
+    #[test]
+    fn five_field_numeric_weekdays_follow_standard_cron_semantics() {
+        let weekdays = "0 7,10,13,16,19 * * 1-5";
+
+        for day in 20..=24 {
+            let occurrence = format!("2026-07-{day}T10:00:00Z")
+                .parse::<DateTime<Utc>>()
+                .unwrap();
+            assert!(
+                fires(weekdays, occurrence - Duration::seconds(30), occurrence),
+                "Monday through Friday must fire (day {day})"
+            );
+        }
+        for day in 25..=26 {
+            let occurrence = format!("2026-07-{day}T10:00:00Z")
+                .parse::<DateTime<Utc>>()
+                .unwrap();
+            assert!(
+                !fires(weekdays, occurrence - Duration::seconds(30), occurrence),
+                "Saturday and Sunday must not fire (day {day})"
+            );
+        }
+        assert_eq!(normalize_five_field_weekdays("1-5"), "2,3,4,5,6");
+    }
+
+    #[test]
+    fn five_field_zero_and_seven_both_mean_sunday() {
+        let sunday = "2026-07-26T10:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let monday = "2026-07-27T10:00:00Z".parse::<DateTime<Utc>>().unwrap();
+
+        for expr in ["0 10 * * 0", "0 10 * * 7"] {
+            assert!(fires(expr, sunday - Duration::seconds(30), sunday));
+            assert!(!fires(expr, monday - Duration::seconds(30), monday));
+        }
+    }
+
     // ─── should_fire dispatch ────────────────────────────────────────────
 
     #[test]
     fn should_fire_cron_invalid_returns_false() {
         let now = Utc::now();
-        let trigger = WorkflowTrigger::Cron { schedule: "invalid cron".into() };
+        let trigger = WorkflowTrigger::Cron {
+            schedule: "invalid cron".into(),
+        };
         assert!(!should_fire(&trigger, now - Duration::seconds(30), now));
     }
 
@@ -155,7 +276,10 @@ mod tests {
         };
         assert!(should_fire(&trigger, now - Duration::seconds(61), now));
         let invalid = WorkflowTrigger::Tracker {
-            source: TrackerSourceConfig::GitHub { owner: "o".into(), repo: "r".into() },
+            source: TrackerSourceConfig::GitHub {
+                owner: "o".into(),
+                repo: "r".into(),
+            },
             query: "".into(),
             labels: vec![],
             interval: "invalid".into(),

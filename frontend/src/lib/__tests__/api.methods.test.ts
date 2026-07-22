@@ -176,6 +176,28 @@ describe('api.projects (rest)', () => {
     const [url] = fetchMock.mock.calls[0];
     expect(url).toMatch(/\/api\/projects\/p-1\/ai-search\?q=a%26b$/);
   });
+  it('listSourceFiles', async () => { await exec(projects.listSourceFiles('p-1'), 'GET', '/projects/p-1/source-files'); });
+  it('listSourceFiles shallow', async () => { await exec(projects.listSourceFiles('p-1', true), 'GET', '/projects/p-1/source-files?shallow=true'); });
+  it('getSourceExclusions', async () => { await exec(projects.getSourceExclusions('p-1'), 'GET', '/projects/p-1/source-exclusions'); });
+  it('setSourceExclusions', async () => {
+    const body = await exec(projects.setSourceExclusions('p-1', ['var/cache']), 'PUT', '/projects/p-1/source-exclusions');
+    expect(body).toEqual(['var/cache']);
+  });
+  it('readSourceFile encodes the path query', async () => {
+    await projects.readSourceFile('p-1', 'src/A B.ts');
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/api\/projects\/p-1\/source-file\?path=src%2FA%20B\.ts$/);
+  });
+  it('searchSourceFiles encodes the q query', async () => {
+    await projects.searchSourceFiles('p-1', 'foo&bar');
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/api\/projects\/p-1\/source-search\?q=foo%26bar$/);
+  });
+  it('gitBlame encodes the source path query', async () => {
+    await projects.gitBlame('p-1', 'application/A B.php');
+    const [url] = fetchMock.mock.calls[0];
+    expect(url).toMatch(/\/api\/projects\/p-1\/git-blame\?path=application%2FA%20B\.php$/);
+  });
   it('gitStatus', async () => { await exec(projects.gitStatus('p-1'), 'GET', '/projects/p-1/git-status'); });
   it('gitDiff encodes the path query', async () => {
     await projects.gitDiff('p-1', 'src/x.ts');
@@ -361,6 +383,15 @@ describe('api.workflows (rest)', () => {
   it('testBatchStep', async () => { await exec(workflows.testBatchStep({ step: {} as never }), 'POST', '/workflows/test-batch-step'); });
   it('testExtract', async () => { await exec(workflows.testExtract({ sample: {}, path: '$.x' }), 'POST', '/workflow-steps/test-extract'); });
   it('testApiCall', async () => { await exec(workflows.testApiCall({ step: {} as never, project_id: 'p-1' }), 'POST', '/workflow-steps/test-api-call'); });
+  it('listRuns supports server pagination', async () => {
+    await exec(workflows.listRuns('wf-1', 11, 20), 'GET', '/workflows/wf-1/runs?limit=11&offset=20');
+  });
+  it('listRuns can complete the boundary parent group', async () => {
+    await exec(workflows.listRuns('wf-1', 10, 0, true), 'GET', '/workflows/wf-1/runs?limit=10&offset=0&complete_group=true');
+  });
+  it('countRuns', async () => {
+    await exec(workflows.countRuns('wf-1'), 'GET', '/workflows/wf-1/runs/count');
+  });
   it('suggestions', async () => { await exec(workflows.suggestions('p-1'), 'GET', '/projects/p-1/workflow-suggestions'); });
   it('listBatchRunSummaries', async () => { await exec(workflows.listBatchRunSummaries(), 'GET', '/workflow-runs/batch-summaries'); });
   it('deleteBatchRun', async () => { await exec(workflows.deleteBatchRun('r-1'), 'DELETE', '/workflow-runs/r-1'); });

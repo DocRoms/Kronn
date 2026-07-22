@@ -64,7 +64,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Setup sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -77,6 +77,9 @@ jobs:
             ~/.cargo/git
           key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
 
       - name: cargo clippy
         run: cargo clippy --all-targets -- -D warnings

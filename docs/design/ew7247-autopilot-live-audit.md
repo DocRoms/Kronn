@@ -176,7 +176,11 @@ Cible Phase 3 : sur N sous-tâches, l'agent ne tourne QUE pour la logique + la r
 **Structurels :**
 1. ⭐ **Frontière de confiance non validée** : l'envelope triage est TypedSchema-validée, mais les 4 fichiers `.kronn/` écrits par l'agent ne le sont pas — le Gate approuve l'envelope, le fan-out exécute `tasks.json` (divergence possible). **Fix : Kronn dérive les fichiers machine depuis l'envelope validée** (déterministe, 0 token) ; l'agent n'écrit que le manifest.md lisible. Supprime le gap + raccourcit le triage.
 2. **`last_output` foreach = sortie du commit du dernier enfant** (bruit) — pr_draft a dû ré-explorer. Fix : agréger les drift des enfants dans l'envelope OU drift_check global au parent post-foreach.
-3. **Pas de resume du fan-out** : restart à l'item 9/16 → tout re-roule. Fix : skip déterministe des items déjà commités (détectables via les commits per-task).
+3. ✅ **Resume du fan-out livré en 0.9.0** : les enfants déjà réussis sont
+   rapprochés par identité stable (index persistant pour les anciennes rows
+   sans ID), et l'enfant interrompu est réutilisé à partir de sa dernière step
+   terminée. Le parent poursuit ensuite les items restants au lieu de tout
+   rejouer.
 4. **Variance du triage** : 13 vs 16 items sur le même ticket — granularité non reproductible (limite LLM-as-planner ; atténuer via recon Exec + critères de découpe stricts).
 
 **Moyens :** 5. messages de commit génériques (lire current_task.json → `[<id>]: <what>` — quick win) · 6. `git add -A` commite le hors-scope (scope_check advisory) · 7. PARTIAL=Success peut masquer des échecs → surfacer en UI/notify · 8. items de tasks.json non validés (id/scope requis) · 9. `depends_on` non vérifié.

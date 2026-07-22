@@ -81,8 +81,17 @@ mod wake_lock {
     mod tests {
         use super::*;
 
+        static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+        fn test_guard() -> std::sync::MutexGuard<'static, ()> {
+            TEST_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+        }
+
         #[test]
         fn acquire_sets_active() {
+            let _guard = test_guard();
             // Reset state
             ACTIVE.store(false, Ordering::SeqCst);
             assert!(!is_active());
@@ -92,6 +101,7 @@ mod wake_lock {
 
         #[test]
         fn release_clears_active() {
+            let _guard = test_guard();
             ACTIVE.store(true, Ordering::SeqCst);
             release();
             assert!(!is_active());
@@ -99,6 +109,7 @@ mod wake_lock {
 
         #[test]
         fn double_acquire_is_idempotent() {
+            let _guard = test_guard();
             ACTIVE.store(false, Ordering::SeqCst);
             acquire();
             acquire(); // Should not panic or double-lock
@@ -109,6 +120,7 @@ mod wake_lock {
 
         #[test]
         fn double_release_is_idempotent() {
+            let _guard = test_guard();
             ACTIVE.store(false, Ordering::SeqCst);
             release();
             release(); // Should not panic
@@ -160,7 +172,8 @@ fn extract_frontend_dist() -> std::path::PathBuf {
     // In dev mode, try the filesystem path first (faster iteration, no re-extract)
     #[cfg(debug_assertions)]
     {
-        let dev_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../frontend/dist");
+        let dev_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../frontend/dist");
         if dev_path.join("index.html").exists() {
             tracing::info!("Dev mode: serving frontend from filesystem {:?}", dev_path);
             return dev_path;
@@ -246,7 +259,8 @@ fn shell_path_from_user_shell() -> Option<String> {
         }
     };
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(SHELL_PATH_TIMEOUT_SECS);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(SHELL_PATH_TIMEOUT_SECS);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -293,7 +307,9 @@ fn shell_path_from_user_shell() -> Option<String> {
 }
 
 #[cfg(not(unix))]
-fn shell_path_from_user_shell() -> Option<String> { None }
+fn shell_path_from_user_shell() -> Option<String> {
+    None
+}
 
 /// Discover all `bin/` directories under a node-version-manager root like
 /// `~/.nvm/versions/node` or `~/.fnm/node-versions`.
@@ -404,8 +420,14 @@ fn enrich_path() {
 
         // Dynamic discovery for nvm/fnm version dirs (real install paths,
         // not just the `current` symlink which can be broken).
-        extra_dirs.extend(discover_versioned_bins(&format!("{}/.nvm/versions/node", home)));
-        extra_dirs.extend(discover_versioned_bins(&format!("{}/.fnm/node-versions", home)));
+        extra_dirs.extend(discover_versioned_bins(&format!(
+            "{}/.nvm/versions/node",
+            home
+        )));
+        extra_dirs.extend(discover_versioned_bins(&format!(
+            "{}/.fnm/node-versions",
+            home
+        )));
     }
 
     #[cfg(target_os = "windows")]
@@ -418,9 +440,18 @@ fn enrich_path() {
                 format!("{}\\AppData\\Local\\npm", userprofile),
                 format!("{}\\.cargo\\bin", userprofile),
                 format!("{}\\.local\\bin", userprofile),
-                format!("{}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts", userprofile),
-                format!("{}\\AppData\\Local\\Programs\\Python\\Python312\\Scripts", userprofile),
-                format!("{}\\AppData\\Local\\Programs\\Python\\Python313\\Scripts", userprofile),
+                format!(
+                    "{}\\AppData\\Local\\Programs\\Python\\Python311\\Scripts",
+                    userprofile
+                ),
+                format!(
+                    "{}\\AppData\\Local\\Programs\\Python\\Python312\\Scripts",
+                    userprofile
+                ),
+                format!(
+                    "{}\\AppData\\Local\\Programs\\Python\\Python313\\Scripts",
+                    userprofile
+                ),
                 format!("{}\\AppData\\Local\\Microsoft\\WinGet\\Links", userprofile),
                 format!("{}\\scoop\\shims", userprofile),
                 format!("{}\\.bun\\bin", userprofile),
@@ -444,7 +475,11 @@ fn enrich_path() {
 
     let new_path = paths.join(separator);
     std::env::set_var("PATH", &new_path);
-    tracing::info!("PATH enriched: {} fallback dirs added, total {} entries", added, paths.len());
+    tracing::info!(
+        "PATH enriched: {} fallback dirs added, total {} entries",
+        added,
+        paths.len()
+    );
 }
 
 // ── Backend ────────────────────────────────────────────────────────────────
@@ -517,26 +552,36 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
 
     // ── Boot scans (same as backend main.rs) ───────────────────────────
     // Orphan workflow runs: mark any still-Running rows as Failed.
-    let cleaned = state.db.with_conn(|conn| {
-        let runs = conn.execute(
-            "UPDATE workflow_runs SET status = 'Failed', finished_at = datetime('now') \
+    let cleaned = state
+        .db
+        .with_conn(|conn| {
+            let runs = conn.execute(
+                "UPDATE workflow_runs SET status = 'Failed', finished_at = datetime('now') \
              WHERE status = 'Running'",
-            [],
-        )?;
-        Ok(runs)
-    }).await;
-    if let Ok(n) = cleaned { if n > 0 { tracing::warn!("Orphan scan: {} runs marked Failed", n); } }
+                [],
+            )?;
+            Ok(runs)
+        })
+        .await;
+    if let Ok(n) = cleaned {
+        if n > 0 {
+            tracing::warn!("Orphan scan: {} runs marked Failed", n);
+        }
+    }
 
     // Partial response recovery: convert dangling checkpoints to Agent messages.
-    let recovered = state.db.with_conn(|conn| {
-        kronn::db::discussions::recover_partial_responses(conn)
-    }).await;
+    let recovered = state
+        .db
+        .with_conn(|conn| kronn::db::discussions::recover_partial_responses(conn))
+        .await;
     if let Ok(ids) = recovered {
         if !ids.is_empty() {
             tracing::warn!("Partial recovery: {} discussion(s)", ids.len());
-            let _ = state.ws_broadcast.send(kronn::models::WsMessage::PartialResponseRecovered {
-                discussion_ids: ids,
-            });
+            let _ = state
+                .ws_broadcast
+                .send(kronn::models::WsMessage::PartialResponseRecovered {
+                    discussion_ids: ids,
+                });
         }
     }
 
@@ -583,10 +628,11 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     let engine = workflow_engine.clone();
     tokio::spawn(async move { engine.start().await });
 
-    // 0.9.0 — Continual Learning staleness sweep (hourly). Mirror of the spawn
+    // 0.10.0 — Continual Learning staleness sweep (hourly). Mirror of the spawn
     // in backend/src/main.rs (feature in the lib, spawn per-binary).
-    let learning_sweep =
-        std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(state.db.clone()));
+    let learning_sweep = std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(
+        state.db.clone(),
+    ));
     tokio::spawn(async move { learning_sweep.start().await });
 
     // Start WS client manager for multi-user sync
@@ -600,32 +646,32 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
     let api_router = build_router(state);
 
     // Serve frontend static files + API
-    let frontend_service = tower_http::services::ServeDir::new(&dist_dir)
-        .append_index_html_on_directories(true);
+    let frontend_service =
+        tower_http::services::ServeDir::new(&dist_dir).append_index_html_on_directories(true);
 
     // Merge: /api/* → backend, /* → frontend static files
     let app = axum::Router::new()
         .merge(api_router)
         .fallback_service(frontend_service)
-        .layer(
-            tower_http::set_header::SetResponseHeaderLayer::overriding(
-                axum::http::HeaderName::from_static("cross-origin-opener-policy"),
-                axum::http::HeaderValue::from_static("same-origin"),
-            ),
-        )
-        .layer(
-            tower_http::set_header::SetResponseHeaderLayer::overriding(
-                axum::http::HeaderName::from_static("cross-origin-embedder-policy"),
-                axum::http::HeaderValue::from_static("require-corp"),
-            ),
-        );
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::HeaderName::from_static("cross-origin-opener-policy"),
+            axum::http::HeaderValue::from_static("same-origin"),
+        ))
+        .layer(tower_http::set_header::SetResponseHeaderLayer::overriding(
+            axum::http::HeaderName::from_static("cross-origin-embedder-policy"),
+            axum::http::HeaderValue::from_static("require-corp"),
+        ));
 
     let addr = format!("{}:{}", bind_host, port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     kronn::core::net_expose::record_bound_host(&bind_host);
     tracing::info!("Kronn ready on http://{}", addr);
 
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 
@@ -676,7 +722,11 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .manage(BackendInfo { port })
-        .invoke_handler(tauri::generate_handler![get_backend_url, open_url, restart_app])
+        .invoke_handler(tauri::generate_handler![
+            get_backend_url,
+            open_url,
+            restart_app
+        ])
         .setup(move |app| {
             use tauri::Manager;
 
@@ -747,21 +797,19 @@ fn main() {
                 tray.set_menu(Some(tray_menu))?;
 
                 // Handle tray menu clicks
-                tray.on_menu_event(move |app, event| {
-                    match event.id().as_ref() {
-                        "open" => {
-                            if let Some(w) = app.get_webview_window("main") {
-                                let _ = w.show();
-                                let _ = w.unminimize();
-                                let _ = w.set_focus();
-                            }
+                tray.on_menu_event(move |app, event| match event.id().as_ref() {
+                    "open" => {
+                        if let Some(w) = app.get_webview_window("main") {
+                            let _ = w.show();
+                            let _ = w.unminimize();
+                            let _ = w.set_focus();
                         }
-                        "quit" => {
-                            wake_lock::release();
-                            app.exit(0);
-                        }
-                        _ => {}
                     }
+                    "quit" => {
+                        wake_lock::release();
+                        app.exit(0);
+                    }
+                    _ => {}
                 });
 
                 // Double-click tray icon → show window

@@ -27,8 +27,7 @@ pub const DEFAULT_CAPACITY: usize = 2000;
 
 /// Process-wide log buffer. Filled by [`BufferLayer::on_event`], read by the
 /// `GET /api/debug/logs` handler via [`LogBuffer::tail`].
-pub static LOG_BUFFER: LazyLock<LogBuffer> =
-    LazyLock::new(|| LogBuffer::new(DEFAULT_CAPACITY));
+pub static LOG_BUFFER: LazyLock<LogBuffer> = LazyLock::new(|| LogBuffer::new(DEFAULT_CAPACITY));
 
 /// Fixed-capacity ringbuffer of formatted log lines.
 pub struct LogBuffer {
@@ -48,7 +47,9 @@ impl LogBuffer {
     /// ringbuffer is full. Poisoned mutex is swallowed silently — missing
     /// logs are preferable to a panic from inside the tracing pipeline.
     pub fn push(&self, line: String) {
-        let Ok(mut q) = self.lines.lock() else { return; };
+        let Ok(mut q) = self.lines.lock() else {
+            return;
+        };
         if q.len() >= self.capacity {
             q.pop_front();
         }
@@ -59,8 +60,12 @@ impl LogBuffer {
     /// `n = 0` returns an empty vec. Requesting more than the buffer
     /// contains simply returns everything available.
     pub fn tail(&self, n: usize) -> Vec<String> {
-        let Ok(q) = self.lines.lock() else { return Vec::new(); };
-        if n == 0 { return Vec::new(); }
+        let Ok(q) = self.lines.lock() else {
+            return Vec::new();
+        };
+        if n == 0 {
+            return Vec::new();
+        }
         let start = q.len().saturating_sub(n);
         q.iter().skip(start).cloned().collect()
     }
@@ -79,7 +84,9 @@ impl LogBuffer {
     /// Drop every buffered line. Exposed for tests and for a future
     /// "Clear logs" UI action.
     pub fn clear(&self) {
-        if let Ok(mut q) = self.lines.lock() { q.clear(); }
+        if let Ok(mut q) = self.lines.lock() {
+            q.clear();
+        }
     }
 }
 
@@ -246,7 +253,13 @@ mod tests {
     #[test]
     fn level_tag_is_always_five_chars() {
         // Monospace alignment in the viewer depends on the 5-char width.
-        for lvl in [Level::ERROR, Level::WARN, Level::INFO, Level::DEBUG, Level::TRACE] {
+        for lvl in [
+            Level::ERROR,
+            Level::WARN,
+            Level::INFO,
+            Level::DEBUG,
+            Level::TRACE,
+        ] {
             assert_eq!(level_tag(lvl).len(), 5, "{lvl:?} tag not 5 chars");
         }
     }
@@ -307,7 +320,10 @@ mod tests {
         assert_eq!(captured.len(), 1);
         let line = &captured[0];
         assert!(line.contains(" INFO"), "level tag missing: {line}");
-        assert!(line.contains("kronn::agent_detect"), "target missing: {line}");
+        assert!(
+            line.contains("kronn::agent_detect"),
+            "target missing: {line}"
+        );
         assert!(line.contains("starting sweep"), "message missing: {line}");
         assert!(line.contains("host_os=macOS"), "field missing: {line}");
     }

@@ -54,12 +54,26 @@ pub fn upsert(conn: &Connection, d: &AgentDecision) -> Result<()> {
             -- so re-runs preserve the first-seen timestamp.
          ",
         params![
-            d.id, d.run_id, d.step_name, d.workflow_id, d.project_id,
-            d.ticket_ref, d.category, d.decision_id, d.what,
-            d.chosen, d.options_json, d.why,
-            d.placeholder, d.strategy, d.revisit_when,
-            d.needed_from, d.workaround,
-            d.gate_status, d.override_value, d.code_locations,
+            d.id,
+            d.run_id,
+            d.step_name,
+            d.workflow_id,
+            d.project_id,
+            d.ticket_ref,
+            d.category,
+            d.decision_id,
+            d.what,
+            d.chosen,
+            d.options_json,
+            d.why,
+            d.placeholder,
+            d.strategy,
+            d.revisit_when,
+            d.needed_from,
+            d.workaround,
+            d.gate_status,
+            d.override_value,
+            d.code_locations,
             d.created_at.to_rfc3339(),
             d.resolved_at.map(|t| t.to_rfc3339()),
         ],
@@ -182,8 +196,8 @@ mod tests {
     use super::*;
     use crate::db::migrations;
     use crate::models::agent_decisions::{
-        CATEGORY_BLOCKED, CATEGORY_DECIDED, CATEGORY_MOCKED,
-        STATUS_AUTO_APPROVED, STATUS_HUMAN_APPROVED, STATUS_RESOLVED,
+        CATEGORY_BLOCKED, CATEGORY_DECIDED, CATEGORY_MOCKED, STATUS_AUTO_APPROVED,
+        STATUS_HUMAN_APPROVED, STATUS_RESOLVED,
     };
 
     fn fresh_conn() -> Connection {
@@ -203,13 +217,29 @@ mod tests {
             category: category.into(),
             decision_id: decision_id.into(),
             what: "test entry".into(),
-            chosen: if category == CATEGORY_DECIDED { Some("optA".into()) } else { None },
+            chosen: if category == CATEGORY_DECIDED {
+                Some("optA".into())
+            } else {
+                None
+            },
             options_json: None,
-            why: if category == CATEGORY_DECIDED { Some("test why".into()) } else { None },
-            placeholder: if category == CATEGORY_MOCKED { Some("env var".into()) } else { None },
+            why: if category == CATEGORY_DECIDED {
+                Some("test why".into())
+            } else {
+                None
+            },
+            placeholder: if category == CATEGORY_MOCKED {
+                Some("env var".into())
+            } else {
+                None
+            },
             strategy: None,
             revisit_when: None,
-            needed_from: if category == CATEGORY_BLOCKED { Some("data team".into()) } else { None },
+            needed_from: if category == CATEGORY_BLOCKED {
+                Some("data team".into())
+            } else {
+                None
+            },
             workaround: None,
             gate_status: "pending".into(),
             override_value: None,
@@ -252,7 +282,12 @@ mod tests {
         upsert(&conn, &d).unwrap();
 
         let list = list_for_run(&conn, "run_a").unwrap();
-        assert_eq!(list.len(), 1, "expected 1 row after upsert, got {}", list.len());
+        assert_eq!(
+            list.len(),
+            1,
+            "expected 1 row after upsert, got {}",
+            list.len()
+        );
         assert_eq!(list[0].chosen.as_deref(), Some("optB"));
     }
 

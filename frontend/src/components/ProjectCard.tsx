@@ -15,7 +15,7 @@ import {
   saveAuditCheckpoint, loadAuditCheckpoint, clearAuditCheckpoint,
   type AuditCheckpointKind,
 } from '../lib/audit-resume';
-import type { Project, AgentDetection, AgentType, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary } from '../types/generated';
+import type { Project, AgentDetection, AgentType, DriftCheckResponse, Discussion, Skill, McpConfigDisplay, WorkflowSummary, GitStatusResponse, DependencyUpdateSummary } from '../types/generated';
 import {
   ChevronRight, ChevronDown, Cpu, Workflow,
   Plus, Trash2, Zap,
@@ -23,12 +23,36 @@ import {
   MessageSquare, AlertTriangle,
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
+  Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package,
 } from 'lucide-react';
 import { BriefingForm } from './BriefingForm';
+import { CopyIdPill } from './CopyIdPill';
+import { SourceCodeViewer } from './SourceCodeViewer';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
   Failed: 'var(--kr-error)', Cancelled: 'var(--kr-cancelled)', WaitingApproval: 'var(--kr-accent-ink)',
+};
+
+const LANGUAGE_COLORS: Record<string, string> = {
+  TypeScript: '#3178c6',
+  JavaScript: '#f1e05a',
+  Rust: '#dea584',
+  PHP: '#4f5d95',
+  Python: '#3572a5',
+  Go: '#00add8',
+  Java: '#b07219',
+  Kotlin: '#a97bff',
+  Swift: '#f05138',
+  C: '#555555',
+  'C++': '#f34b7d',
+  'C#': '#178600',
+  Ruby: '#701516',
+  Vue: '#41b883',
+  Svelte: '#ff3e00',
+  CSS: '#663399',
+  HTML: '#e34c26',
+  Shell: '#89e051',
 };
 
 /** Format a millisecond duration as `Xs` under 60s, `MmSSs` past 60s. */
@@ -39,6 +63,7 @@ function formatElapsedShort(ms: number): string {
 
 export interface ProjectCardProps {
   project: Project;
+  detailMode?: boolean;
   isOpen: boolean;
   onToggleOpen: () => void;
   discussions: Discussion[];
@@ -64,6 +89,7 @@ export interface ProjectCardProps {
 
 export function ProjectCard({
   externalAuditLive = false,
+  detailMode = false,
   project: proj,
   isOpen,
   onToggleOpen,
@@ -85,6 +111,93 @@ export function ProjectCard({
 }: ProjectCardProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
+  const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'docs' | 'code' | 'resources'>('overview');
+  const [overviewGit, setOverviewGit] = useState<GitStatusResponse | null>(null);
+  const [overviewGitLoading, setOverviewGitLoading] = useState(false);
+  const [overviewGitError, setOverviewGitError] = useState(false);
+  const gitLanguageRefreshRef = useRef(false);
+  const [dependencyUpdates, setDependencyUpdates] = useState<DependencyUpdateSummary | null>(null);
+  const [dependencyUpdatesLoading, setDependencyUpdatesLoading] = useState(false);
+  const [dependencyUpdatesError, setDependencyUpdatesError] = useState(false);
+  const dependencyRefreshRef = useRef(false);
+
+  useEffect(() => {
+    if (!detailMode || !isOpen || detailView !== 'overview' || proj.path_exists === false) return;
+    let alive = true;
+    void Promise.resolve().then(async () => {
+      if (!alive) return;
+      setOverviewGitLoading(true);
+      setOverviewGitError(false);
+      try {
+        const status = await projectsApi.gitStatus(proj.id);
+        if (alive) setOverviewGit(status);
+      } catch {
+        if (alive) {
+          setOverviewGit(null);
+          setOverviewGitError(true);
+        }
+      } finally {
+        if (alive) setOverviewGitLoading(false);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [detailMode, detailView, isOpen, proj.id, proj.path_exists]);
+
+  const refreshGitLanguages = useCallback(async () => {
+    if (gitLanguageRefreshRef.current) return;
+    gitLanguageRefreshRef.current = true;
+    setOverviewGitLoading(true);
+    setOverviewGitError(false);
+    try {
+      setOverviewGit(await projectsApi.gitStatus(proj.id, true));
+    } catch {
+      setOverviewGitError(true);
+    } finally {
+      gitLanguageRefreshRef.current = false;
+      setOverviewGitLoading(false);
+    }
+  }, [proj.id]);
+
+  useEffect(() => {
+    if (!detailMode || !isOpen || detailView !== 'overview' || proj.path_exists === false) return;
+    let alive = true;
+    void Promise.resolve().then(async () => {
+      if (!alive) return;
+      setDependencyUpdatesLoading(true);
+      setDependencyUpdatesError(false);
+      try {
+        const summary = await projectsApi.dependencyUpdates(proj.id);
+        if (alive) setDependencyUpdates(summary);
+      } catch {
+        if (alive) {
+          setDependencyUpdates(null);
+          setDependencyUpdatesError(true);
+        }
+      } finally {
+        if (alive) setDependencyUpdatesLoading(false);
+      }
+    });
+    return () => {
+      alive = false;
+    };
+  }, [detailMode, detailView, isOpen, proj.id, proj.path_exists]);
+
+  const refreshDependencyUpdates = useCallback(async () => {
+    if (dependencyRefreshRef.current) return;
+    dependencyRefreshRef.current = true;
+    setDependencyUpdatesLoading(true);
+    setDependencyUpdatesError(false);
+    try {
+      setDependencyUpdates(await projectsApi.dependencyUpdates(proj.id, true));
+    } catch {
+      setDependencyUpdatesError(true);
+    } finally {
+      dependencyRefreshRef.current = false;
+      setDependencyUpdatesLoading(false);
+    }
+  }, [proj.id]);
 
   // ── Collapsible sections ──
   // 0.8.4 (#323 / F3) — on `Validated` and `Audited`, `aiContext` is
@@ -142,17 +255,10 @@ export function ProjectCard({
     if (antiHalluBusy) return;
     setAntiHalluBusy(true);
     try {
-      const r = await projectsApi.injectAntiHallu(proj.id);
+      await projectsApi.injectAntiHallu(proj.id);
       // Refetch status to reflect the new state.
       const s = await projectsApi.antiHalluStatus(proj.id);
       setAntiHalluStatus(s);
-      // Small toast via document title flash — minimal UX without
-      // bringing in a full toast system here. The badge state change is
-      // the primary signal.
-      if (r?.status === 'ok') {
-        // Browser console as last-resort feedback for debugging.
-        console.info(`[anti-hallu] ${r.result} on ${proj.id}`);
-      }
     } finally {
       setAntiHalluBusy(false);
     }
@@ -173,6 +279,7 @@ export function ProjectCard({
       if (target) sessionStorage.removeItem(`kronn:postValidation:${proj.id}`);
     } catch { /* private mode / quota — no deep-link */ }
     if (target) {
+      setDetailView('docs');
       setExpandedTab('docAi');
       setDocDeepLink(target);
     }
@@ -320,6 +427,82 @@ export function ProjectCard({
   );
   const projMcps = mcpConfigs.filter(c => c.is_global || c.project_ids.includes(proj.id));
   const projWorkflows = workflows.filter(w => w.project_id === proj.id);
+  const repositoryUrl = overviewGit?.remote_url
+    ?? (proj.repo_url?.startsWith('http') ? proj.repo_url.replace(/\.git\/?$/, '') : null);
+  const pullRequestsUrl = overviewGit?.pull_requests_url ?? overviewGit?.pr_url ?? null;
+  const languageStats = overviewGit?.languages ?? [];
+  const languageTotalBytes = languageStats.reduce((total, item) => total + item.bytes, 0);
+  const languageCheckedTime = overviewGit?.languages_checked_at
+    ? new Date(overviewGit.languages_checked_at).toLocaleTimeString(locale, {
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+    : null;
+  const incompleteDependencyChecks = dependencyUpdates?.managers.filter(
+    manager => manager.status === 'Unsupported'
+      || manager.status === 'Unavailable'
+      || manager.status === 'Error'
+      || manager.status === 'TimedOut',
+  ).length ?? 0;
+  const dependencySummary = (() => {
+    if (dependencyUpdatesLoading) {
+      return { tone: 'loading', label: t('projects.master.overview.dependenciesChecking') };
+    }
+    if (dependencyUpdatesError || !dependencyUpdates) {
+      return { tone: 'muted', label: t('projects.master.overview.dependenciesUnavailable') };
+    }
+    if (dependencyUpdates.managers.length === 0) {
+      return { tone: 'muted', label: t('projects.master.overview.dependenciesNone') };
+    }
+    if (dependencyUpdates.total_outdated > 0) {
+      return {
+        tone: 'warning',
+        label: t('projects.master.overview.dependencyOutdatedCount', dependencyUpdates.total_outdated),
+      };
+    }
+    if (incompleteDependencyChecks > 0) {
+      return {
+        tone: 'muted',
+        label: t('projects.master.overview.dependenciesPartial', incompleteDependencyChecks),
+      };
+    }
+    return { tone: 'success', label: t('projects.master.overview.dependenciesUpToDate') };
+  })();
+  const gitSync = (() => {
+    if (overviewGitLoading) {
+      return { tone: 'loading', label: t('projects.master.overview.gitLoading') };
+    }
+    if (overviewGitError || !overviewGit) {
+      return { tone: 'muted', label: t('projects.master.overview.gitUnavailable') };
+    }
+    if (!overviewGit.has_upstream) {
+      return {
+        tone: repositoryUrl ? 'warning' : 'muted',
+        label: repositoryUrl
+          ? t('projects.master.overview.noUpstream')
+          : t('projects.master.overview.localOnly'),
+      };
+    }
+    if (overviewGit.ahead > 0 && overviewGit.behind > 0) {
+      return {
+        tone: 'warning',
+        label: t('projects.master.overview.diverged', overviewGit.ahead, overviewGit.behind),
+      };
+    }
+    if (overviewGit.behind > 0) {
+      return {
+        tone: 'warning',
+        label: t('projects.master.overview.behind', overviewGit.behind),
+      };
+    }
+    if (overviewGit.ahead > 0) {
+      return {
+        tone: 'info',
+        label: t('projects.master.overview.ahead', overviewGit.ahead),
+      };
+    }
+    return { tone: 'success', label: t('projects.master.overview.upToDate') };
+  })();
   // Pulse the "add plugins" hint when the project has zero MCPs AND hasn't
   // been audited yet — plugins dramatically improve briefing + audit quality
   // (tracker context, stack detection, MCP-aware questions) so the UI
@@ -913,13 +1096,86 @@ export function ProjectCard({
   }, [auditActive, auditStartedAt]);
 
   return (
-    <div id={`project-${proj.id}`} className="dash-card" data-active={isOpen || auditActive}>
+    <div
+      id={detailMode ? `project-detail-${proj.id}` : `project-${proj.id}`}
+      className={`dash-card${detailMode ? ' project-detail-card' : ''}`}
+      data-active={isOpen || auditActive}
+    >
+      {detailMode && (
+        <>
+          <header className="project-detail-header">
+            <div className="project-detail-heading">
+              <div className="project-detail-icon"><FileCode size={18} /></div>
+              <div className="project-detail-title-block">
+                <div className="project-detail-title-row">
+                  <h2>{proj.name}</h2>
+                  <CopyIdPill id={proj.id} title={t('projects.master.copyId', proj.name)} />
+                  {(auditActive || validationInProgress) && (
+                    <Loader2 size={13} className="spin text-accent" aria-label={t('audit.activityInProgress')} />
+                  )}
+                </div>
+                <div className="project-detail-path" title={proj.path}>{proj.path}</div>
+              </div>
+            </div>
+            <div className="project-detail-actions">
+              <span
+                className="project-status-chip"
+                data-tone={auditActive || validationInProgress
+                  ? 'running'
+                  : proj.audit_status === 'Validated'
+                    ? 'success'
+                    : proj.audit_status === 'Audited'
+                      ? 'warning'
+                      : 'muted'}
+              >
+                {auditActive
+                  ? <><Loader2 size={10} className="spin" /> {t('projects.master.status.auditRunning')}</>
+                  : validationInProgress
+                    ? <><Loader2 size={10} className="spin" /> {t('projects.status.validating')}</>
+                    : proj.audit_status === 'Validated'
+                      ? <><ShieldCheck size={10} /> {t('projects.master.status.validated')}</>
+                      : proj.audit_status === 'Audited'
+                        ? <><ShieldCheck size={10} /> {t('projects.master.status.toValidate')}</>
+                        : <><FileCode size={10} /> {t('projects.master.status.toPrepare')}</>}
+              </span>
+              <button
+                type="button"
+                className="dash-icon-btn"
+                onClick={() => {
+                  onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' });
+                  onNavigate('discussions');
+                }}
+              >
+                <Plus size={12} /> {t('disc.newTitle')}
+              </button>
+            </div>
+          </header>
+          <nav className="project-detail-tabs" aria-label={t('projects.master.detailNav')}>
+            {([
+              ['overview', t('projects.master.tab.overview'), FileCode],
+              ['discussions', t('projects.master.tab.discussions'), MessageSquare],
+              ['docs', t('projects.master.tab.docs'), BookOpen],
+              ['code', t('projects.master.tab.code'), Code2],
+              ['resources', t('projects.master.tab.resources'), Puzzle],
+            ] as const).map(([view, label, Icon]) => (
+              <button
+                key={view}
+                type="button"
+                data-active={detailView === view}
+                onClick={() => setDetailView(view)}
+              >
+                <Icon size={13} /> {label}
+              </button>
+            ))}
+          </nav>
+        </>
+      )}
       {/* The header used to be a <button>, but it contains a nested <button>
           (the drift-update CTA), which is invalid HTML and produces a React
           warning in dev. We keep the same a11y semantics via role="button"
           + Enter/Space keyboard handling, and the inner button keeps its
           stopPropagation guard so a click on it doesn't toggle the card. */}
-      <div
+      {!detailMode && <div
         className="dash-card-header"
         role="button"
         tabIndex={0}
@@ -1020,7 +1276,7 @@ export function ProjectCard({
             {!auditActive && (proj.tech_debt_count ?? 0) > 0 && (
               <span
                 className="dash-badge-tech-debt"
-                title={t('projects.techDebtBadge', proj.tech_debt_count!)}
+                title={t('projects.techDebtBadge', proj.tech_debt_count ?? 0)}
                 onClick={(e) => {
                   e.stopPropagation();
                   // 0.8.1 UX fix: also expand the card itself if it's
@@ -1081,7 +1337,7 @@ export function ProjectCard({
           <span className={`dash-meta-item ${projMcps.length <= 5 ? 'mcp-load-ok' : projMcps.length <= 10 ? 'mcp-load-warn' : 'mcp-load-danger'}`} title={projMcps.length <= 5 ? t('mcp.mcpLoadOk') : projMcps.length <= 10 ? t('mcp.mcpLoadWarn') : t('mcp.mcpLoadDanger')}><Puzzle size={12} /> {projMcps.length}</span>
           <span className="dash-meta-item"><MessageSquare size={12} /> {projDiscussions.length}</span>
         </div>
-      </div>
+      </div>}
 
       {/* Remap banner — always visible (even on a collapsed card) when the
           project directory no longer resolves on disk. Lets the operator
@@ -1149,7 +1405,331 @@ export function ProjectCard({
       )}
 
       {isOpen && (
-        <div className="dash-card-body" onClick={(e) => e.stopPropagation()}>
+        <div
+          className="dash-card-body"
+          data-detail-mode={detailMode}
+          data-detail-view={detailView}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {detailMode && (
+            <section className="project-detail-overview" data-testid="project-detail-overview">
+              <div className="project-overview-context">
+                <div>
+                  <span>{t('projects.master.overview.updated')}</span>
+                  <strong>{new Date(proj.updated_at).toLocaleDateString(locale, { day: '2-digit', month: 'short', year: 'numeric' })}</strong>
+                </div>
+                <div>
+                  <span>{t('projects.master.overview.audit')}</span>
+                  <strong>{driftStatus?.audit_date
+                    ? new Date(driftStatus.audit_date).toLocaleDateString(locale, { day: '2-digit', month: 'short', year: 'numeric' })
+                    : t('projects.master.overview.never')}</strong>
+                </div>
+                <div>
+                  <span>{t('projects.master.overview.repository')}</span>
+                  <strong>{proj.repo_url ? t('projects.master.overview.linked') : t('projects.master.overview.local')}</strong>
+                </div>
+              </div>
+              <div className="project-overview-repository" data-testid="project-overview-repository">
+                <div className="project-overview-repository-head">
+                  <div className="project-overview-repository-title">
+                    <span className="project-overview-repository-icon" aria-hidden="true">
+                      <GitBranch size={17} />
+                    </span>
+                    <div>
+                      <span>{t('projects.master.overview.repository')}</span>
+                      {repositoryUrl ? (
+                        <a href={repositoryUrl} target="_blank" rel="noreferrer">
+                          {repositoryUrl.replace(/^https?:\/\//, '')}
+                          <ExternalLink size={11} />
+                        </a>
+                      ) : (
+                        <strong>{t('projects.master.overview.local')}</strong>
+                      )}
+                    </div>
+                  </div>
+                  <div className="project-overview-repository-actions">
+                    {repositoryUrl && (
+                      <a href={repositoryUrl} target="_blank" rel="noreferrer">
+                        <ExternalLink size={13} />
+                        {t('projects.master.overview.openRepository')}
+                      </a>
+                    )}
+                    {pullRequestsUrl && (
+                      <a href={pullRequestsUrl} target="_blank" rel="noreferrer">
+                        <GitPullRequest size={13} />
+                        {overviewGit?.provider === 'gitlab'
+                          ? t('projects.master.overview.mergeRequests')
+                          : t('projects.master.overview.pullRequests')}
+                      </a>
+                    )}
+                  </div>
+                </div>
+                <div className="project-overview-repository-meta">
+                  <span className="project-overview-git-chip">
+                    <GitBranch size={12} />
+                    {overviewGit?.branch || t('projects.master.overview.unknownBranch')}
+                  </span>
+                  <span className="project-overview-git-chip">
+                    <Tag size={12} />
+                    {overviewGit?.last_tag || t('projects.master.overview.noTag')}
+                  </span>
+                  <span className="project-overview-git-chip" data-tone={gitSync.tone}>
+                    <i aria-hidden="true" />
+                    {gitSync.label}
+                  </span>
+                  {!!overviewGit?.files.length && (
+                    <span className="project-overview-git-chip" data-tone="warning">
+                      {t('projects.master.overview.localChanges', overviewGit.files.length)}
+                    </span>
+                  )}
+                  {languageCheckedTime && (
+                    <button
+                      type="button"
+                      className="project-overview-language-refresh"
+                      data-cached={overviewGit?.languages_cached}
+                      onClick={() => void refreshGitLanguages()}
+                      disabled={overviewGitLoading}
+                      aria-label={t('projects.master.overview.languagesRefresh')}
+                      title={overviewGit?.languages_cached
+                        ? t('projects.master.overview.languagesCachedAt', languageCheckedTime)
+                        : t('projects.master.overview.languagesCheckedAt', languageCheckedTime)}
+                    >
+                      <RefreshCw size={11} className={overviewGitLoading ? 'is-spinning' : undefined} />
+                      {overviewGit?.languages_cached
+                        ? t('projects.master.overview.languagesCachedShort', languageCheckedTime)
+                        : languageCheckedTime}
+                    </button>
+                  )}
+                </div>
+                {languageStats.length > 0 && languageTotalBytes > 0 && (
+                  <div className="project-overview-languages">
+                    <div className="project-overview-languages-title">
+                      <strong>{t('projects.master.overview.languages')}</strong>
+                      <span>{t('projects.master.overview.languagesHint')}</span>
+                    </div>
+                    <div
+                      className="project-overview-language-bar"
+                      role="img"
+                      aria-label={t('projects.master.overview.languages')}
+                    >
+                      {languageStats.map(item => {
+                        const percentage = (item.bytes / languageTotalBytes) * 100;
+                        return (
+                          <span
+                            key={item.language}
+                            style={{
+                              width: `${percentage}%`,
+                              background: LANGUAGE_COLORS[item.language] ?? 'var(--kr-text-faint)',
+                            }}
+                            title={`${item.language} · ${percentage.toFixed(1)} %`}
+                          />
+                        );
+                      })}
+                    </div>
+                    <div className="project-overview-language-legend">
+                      {languageStats.slice(0, 8).map(item => {
+                        const percentage = (item.bytes / languageTotalBytes) * 100;
+                        return (
+                          <span key={item.language}>
+                            <i style={{ background: LANGUAGE_COLORS[item.language] ?? 'var(--kr-text-faint)' }} />
+                            <strong>{item.language}</strong>
+                            {percentage.toFixed(1)} %
+                          </span>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="project-overview-dependencies" data-testid="project-overview-dependencies">
+                <div className="project-overview-dependencies-head">
+                  <div className="project-overview-repository-title">
+                    <span className="project-overview-repository-icon" aria-hidden="true">
+                      <Package size={17} />
+                    </span>
+                    <div>
+                      <span>{t('projects.master.overview.dependencies')}</span>
+                      <strong>
+                        {dependencySummary.label}
+                        {!!dependencyUpdates?.total_outdated && dependencyUpdates.total_major > 0 && (
+                          <span className="project-overview-dependency-major">
+                            {' · '}
+                            {t('projects.master.overview.dependencyMajorCount', dependencyUpdates.total_major)}
+                          </span>
+                        )}
+                      </strong>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="project-overview-dependencies-refresh"
+                    onClick={() => void refreshDependencyUpdates()}
+                    disabled={dependencyUpdatesLoading}
+                    aria-label={t('projects.master.overview.dependenciesRefresh')}
+                    title={t('projects.master.overview.dependenciesRefresh')}
+                  >
+                    <RefreshCw size={13} className={dependencyUpdatesLoading ? 'is-spinning' : undefined} />
+                    {t('projects.master.overview.dependenciesRefresh')}
+                  </button>
+                </div>
+                <div className="project-overview-dependencies-meta">
+                  <span className="project-overview-git-chip" data-tone={dependencySummary.tone}>
+                    <i aria-hidden="true" />
+                    {dependencySummary.label}
+                    {!!dependencyUpdates?.total_outdated && dependencyUpdates.total_major > 0 && (
+                      <strong className="project-overview-dependency-major">
+                        {' · '}
+                        {t('projects.master.overview.dependencyMajorCount', dependencyUpdates.total_major)}
+                      </strong>
+                    )}
+                  </span>
+                  {dependencyUpdates?.cached && (
+                    <span className="project-overview-git-chip">
+                      {t('projects.master.overview.dependenciesCached')}
+                    </span>
+                  )}
+                </div>
+                {!!dependencyUpdates?.managers.length && (
+                  <div className="project-overview-dependency-list">
+                    {dependencyUpdates.managers.map(manager => {
+                      const packages = manager.packages ?? [];
+                      const status = manager.status === 'UpdatesAvailable'
+                        ? (
+                          <>
+                            {t('projects.master.overview.dependencyOutdatedCount', manager.outdated)}
+                            {manager.major > 0 && (
+                              <strong className="project-overview-dependency-major">
+                                {' · '}
+                                {t('projects.master.overview.dependencyMajorCount', manager.major)}
+                              </strong>
+                            )}
+                          </>
+                        )
+                        : manager.status === 'UpToDate'
+                          ? t('projects.master.overview.dependencyUpToDate')
+                          : manager.status === 'Unsupported'
+                            ? t('projects.master.overview.dependencyUnsupported')
+                            : manager.status === 'Unavailable'
+                              ? t('projects.master.overview.dependencyToolUnavailable')
+                              : manager.status === 'TimedOut'
+                                ? t('projects.master.overview.dependencyTimedOut')
+                                : t('projects.master.overview.dependencyCheckFailed');
+                      const tone = manager.status === 'UpdatesAvailable'
+                        ? 'warning'
+                        : manager.status === 'UpToDate'
+                          ? 'success'
+                          : 'muted';
+                      return (
+                        <div key={`${manager.manager}:${manager.manifest}`} className="project-overview-dependency-row">
+                          <div>
+                            <strong>{manager.manager}</strong>
+                            <span>{manager.manifest}</span>
+                            {!!packages.length && (
+                              <small>
+                                {packages.slice(0, 3).map((pkg, index) => (
+                                  <span
+                                    key={pkg.name}
+                                    className={pkg.major ? 'project-overview-dependency-package-major' : undefined}
+                                  >
+                                    {index > 0 ? ' · ' : ''}
+                                    {pkg.name} {pkg.current} → {pkg.latest}
+                                  </span>
+                                ))}
+                                {manager.outdated > 3 && <span>{` · +${manager.outdated - 3}`}</span>}
+                              </small>
+                            )}
+                          </div>
+                          <span className="project-overview-git-chip" data-tone={tone}>
+                            <i aria-hidden="true" />
+                            {status}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+              <div className="project-overview-grid">
+                <button type="button" onClick={() => setDetailView('discussions')}>
+                  <MessageSquare size={16} />
+                  <strong>{projDiscussions.length}</strong>
+                  <span>{t('projects.master.tab.discussions')}</span>
+                </button>
+                <button type="button" onClick={() => setDetailView('docs')}>
+                  <BookOpen size={16} />
+                  <strong>
+                    {proj.audit_status === 'Validated'
+                      ? t('projects.status.valid')
+                      : proj.audit_status === 'Audited'
+                        ? t('projects.status.auditOk')
+                        : proj.audit_status === 'Bootstrapped'
+                          ? t('projects.status.bootstrapped')
+                          : proj.audit_status === 'TemplateInstalled'
+                            ? t('projects.status.template')
+                            : t('projects.status.none')}
+                  </strong>
+                  <span>{t('projects.master.tab.docs')}</span>
+                </button>
+                <button type="button" onClick={() => setDetailView('code')}>
+                  <Code2 size={16} />
+                  <strong>{t('projects.master.overview.browse')}</strong>
+                  <span>{t('projects.master.tab.code')}</span>
+                </button>
+                <button type="button" onClick={() => {
+                  setDetailView('resources');
+                  setExpandedTab('mcps');
+                }}>
+                  <Puzzle size={16} />
+                  <strong>{projMcps.length}</strong>
+                  <span>Plugins</span>
+                </button>
+                <button type="button" onClick={() => {
+                  setDetailView('resources');
+                  setExpandedTab('workflows');
+                }}>
+                  <Workflow size={16} />
+                  <strong>{projWorkflows.length}</strong>
+                  <span>{t('projects.workflows')}</span>
+                </button>
+                <button type="button" onClick={() => {
+                  setDetailView('resources');
+                  setExpandedTab('skills');
+                }}>
+                  <Zap size={16} />
+                  <strong>{(proj.default_skill_ids ?? []).length}</strong>
+                  <span>{t('projects.skills')}</span>
+                </button>
+                <button
+                  type="button"
+                  data-tone={(proj.tech_debt_count ?? 0) > 0 ? 'warning' : 'success'}
+                  onClick={() => {
+                    setDetailView('docs');
+                    setExpandedTab('docAi');
+                    if ((proj.tech_debt_count ?? 0) > 0) setDocDeepLink('docs/tech-debt');
+                  }}
+                >
+                  <AlertTriangle size={16} />
+                  <strong>{proj.tech_debt_count ?? 0}</strong>
+                  <span>{t('projects.master.sort.techDebt')}</span>
+                </button>
+                <button type="button" onClick={() => setDetailView('docs')}>
+                  <RefreshCw size={16} />
+                  <strong>{driftStatus?.stale_sections.length ?? 0}</strong>
+                  <span>{t('projects.master.overview.stale')}</span>
+                </button>
+                <button type="button" onClick={() => setDetailView('resources')}>
+                  <FolderInput size={16} />
+                  <strong>{(proj.linked_repos ?? []).length}</strong>
+                  <span>{t('linkedRepos.title')}</span>
+                </button>
+              </div>
+            </section>
+          )}
+          {detailMode && detailView === 'code' && (
+            <section className="project-detail-section project-detail-source" data-project-view="code">
+              <SourceCodeViewer projectId={proj.id} />
+            </section>
+          )}
           {/* Docs migration banner — shown only on projects still using
               the legacy `ai/index.md` layout. Disappears the next time
               the project list is fetched after a successful migration. */}
@@ -1214,7 +1794,7 @@ export function ProjectCard({
           )}
 
           {/* -- 1. Discussions -- */}
-          <div className="dash-section">
+          <div className="dash-section project-detail-section" data-project-view="discussions">
             <button className="dash-collapsible-header" onClick={() => toggleSection('discussions')} aria-expanded={isSectionOpen('discussions')}>
               {isSectionOpen('discussions') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
               <MessageSquare size={14} /> <span className="dash-section-title">Discussions</span>
@@ -1303,7 +1883,7 @@ export function ProjectCard({
               );
             }
             return (
-              <div className="dash-section">
+              <div className="dash-section project-detail-section" data-project-view="docs">
                 <button className="dash-collapsible-header" onClick={() => toggleSection('docAi')} aria-expanded={isSectionOpen('docAi')}>
                   {isSectionOpen('docAi') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
                   <BookOpen size={14} /> <span className="dash-section-title">{t('projects.docAi')}</span>
@@ -1342,7 +1922,7 @@ export function ProjectCard({
           })()}
 
           {/* -- 3. MCPs -- */}
-          <div className="dash-section">
+          <div className="dash-section project-detail-section" data-project-view="resources">
             <button className="dash-collapsible-header" onClick={() => toggleSection('mcps')} aria-expanded={isSectionOpen('mcps')}>
               {isSectionOpen('mcps') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
               <Puzzle size={14} /> <span className="dash-section-title">Plugins</span>
@@ -1393,7 +1973,7 @@ export function ProjectCard({
           </div>
 
           {/* -- 4. Workflows -- */}
-          <div className="dash-section">
+          <div className="dash-section project-detail-section" data-project-view="resources">
             <button className="dash-collapsible-header" onClick={() => toggleSection('workflows')} aria-expanded={isSectionOpen('workflows')}>
               {isSectionOpen('workflows') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
               <Workflow size={14} /> <span className="dash-section-title">{t('projects.workflows')}</span>
@@ -1440,7 +2020,7 @@ export function ProjectCard({
           </div>
 
           {/* -- 5. Skills -- */}
-          <div className="dash-section">
+          <div className="dash-section project-detail-section" data-project-view="resources">
             <button className="dash-collapsible-header" onClick={() => toggleSection('skills')} aria-expanded={isSectionOpen('skills')}>
               {isSectionOpen('skills') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
               <Zap size={14} /> <span className="dash-section-title">{t('projects.skills')}</span>
@@ -1464,7 +2044,7 @@ export function ProjectCard({
               (same conceptual layer as skills), and the audit
               pipeline picks it up at the same prompt-assembly
               point as briefing_notes. */}
-          <div className="dash-section">
+          <div className="dash-section project-detail-section" data-project-view="resources">
             <button className="dash-collapsible-header" onClick={() => toggleSection('linkedRepos')} aria-expanded={isSectionOpen('linkedRepos')}>
               {isSectionOpen('linkedRepos') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
               <FolderInput size={14} /> <span className="dash-section-title">{t('linkedRepos.title')}</span>
@@ -1480,7 +2060,7 @@ export function ProjectCard({
           </div>
 
           {/* -- 6. AI Context / Audit -- */}
-          <div className="dash-section">
+          <div className="dash-section project-detail-section" data-project-view="docs">
             <button className="dash-collapsible-header" onClick={() => toggleSection('aiContext')} aria-expanded={isSectionOpen('aiContext')}>
               {isSectionOpen('aiContext') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
               <FileCode size={14} /> <span className="dash-section-title">AI Context</span>
@@ -1865,7 +2445,7 @@ export function ProjectCard({
                           setDocDeepLink('docs/tech-debt');
                         }}
                       >
-                        {t('audit.viewTechDebts', proj.tech_debt_count!)}
+                        {t('audit.viewTechDebts', proj.tech_debt_count ?? 0)}
                       </button>
                     )}
                   </div>
@@ -1920,7 +2500,7 @@ export function ProjectCard({
             )}
           </div>
 
-          <div className="dash-delete-zone">
+          <div className="dash-delete-zone project-detail-section" data-project-view="resources">
             {deleteConfirmId === proj.id ? (
               <div>
                 <div className="flex-row gap-4 mb-4">

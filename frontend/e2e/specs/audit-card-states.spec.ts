@@ -1,5 +1,5 @@
 /**
- * Audit card & tab states — after audit / around revalidation (0.8.13).
+ * Audit card & tab states — after audit / around revalidation (0.9.0).
  *
  * Born from a live dogfooding session where every one of these states
  * broke at least once in a single day:
@@ -162,7 +162,7 @@ function mockPartialAuditStream(page: Page, projectId: string) {
   });
 }
 
-test.describe('Audit card & tab states (0.8.13 dogfooding)', () => {
+test.describe('Audit card & tab states (0.9.0 dogfooding)', () => {
   test.skip(!!process.env.CI,
     'route-mocked spec — local-only for now (same rationale as audit-banner-lifecycle).');
 

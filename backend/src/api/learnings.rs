@@ -1,4 +1,4 @@
-//! 0.9.0 — Continual Learning HTTP API. The `propose` handler is the validation
+//! 0.10.0 — Continual Learning HTTP API. The `propose` handler is the validation
 //! pipeline (spec §6): secret-guard → Gate-1 existence → kind binding → Gate-2
 //! faithfulness (off by default) → anti-generalization → confidence haircut →
 //! negative-learning → INSERT pending. `validate` routes the scope + promotes to
@@ -67,7 +67,10 @@ pub async fn propose_learning(
     // rejecting EXISTING pending candidates stays allowed when off (drain, not
     // capture), so only `propose` is gated here.
     if !state.config.read().await.server.continual_learning_enabled {
-        return reject("apprentissage continu désactivé (feature beta, OFF par défaut)", vec![]);
+        return reject(
+            "apprentissage continu désactivé (feature beta, OFF par défaut)",
+            vec![],
+        );
     }
 
     // 1. shape
@@ -125,8 +128,11 @@ pub async fn propose_learning(
     }
 
     // 4. Gate-1 — evidence existence
-    let roots: Vec<&std::path::Path> =
-        project_root.as_deref().map(std::path::Path::new).into_iter().collect();
+    let roots: Vec<&std::path::Path> = project_root
+        .as_deref()
+        .map(std::path::Path::new)
+        .into_iter()
+        .collect();
     let report = learning_gate::verify_evidence(&req.evidence, &roots);
     if report.any_fabricated {
         return reject(
@@ -150,7 +156,11 @@ pub async fn propose_learning(
     // the backend from config lands in PR4a-bis with the LLM-judge impl; until
     // there's a non-Off backend to select, the default IS off.
     let backend = FaithfulnessBackend::Off;
-    let quote = req.evidence.iter().find_map(|e| e.quote.clone()).unwrap_or_default();
+    let quote = req
+        .evidence
+        .iter()
+        .find_map(|e| e.quote.clone())
+        .unwrap_or_default();
     let faithfulness = faithfulness::check(backend, &req.claim, &quote).map(|v| v.verdict);
     if matches!(faithfulness, Some(Faithfulness::Contradiction)) {
         warnings.push("Gate-2 : la source semble CONTREDIRE le claim — à vérifier".into());
@@ -186,7 +196,10 @@ pub async fn propose_learning(
         validated_by: None,
     };
     let to_insert = learning.clone();
-    let inserted = state.db.with_conn(move |conn| db_learnings::insert(conn, &to_insert)).await;
+    let inserted = state
+        .db
+        .with_conn(move |conn| db_learnings::insert(conn, &to_insert))
+        .await;
     match inserted {
         Ok(()) => Json(ApiResponse::ok(ProposeResult {
             accepted: true,
@@ -198,7 +211,10 @@ pub async fn propose_learning(
         Err(e) => {
             let msg = e.to_string();
             if msg.contains("UNIQUE") {
-                reject("learning déjà proposé (dédup kind+scope+claim)", report.checks)
+                reject(
+                    "learning déjà proposé (dédup kind+scope+claim)",
+                    report.checks,
+                )
             } else {
                 Json(ApiResponse::err(format!("insert: {msg}")))
             }
@@ -237,7 +253,11 @@ pub struct PendingCount {
 }
 
 pub async fn pending_count(State(state): State<AppState>) -> Json<ApiResponse<PendingCount>> {
-    match state.db.with_conn(|conn| db_learnings::count_pending(conn).map_err(|e| anyhow::anyhow!("{e}"))).await {
+    match state
+        .db
+        .with_conn(|conn| db_learnings::count_pending(conn).map_err(|e| anyhow::anyhow!("{e}")))
+        .await
+    {
         Ok(count) => Json(ApiResponse::ok(PendingCount { count })),
         Err(e) => Json(ApiResponse::err(format!("{e}"))),
     }
@@ -249,7 +269,9 @@ pub async fn disc_learnings(
 ) -> Json<ApiResponse<Vec<Learning>>> {
     match state
         .db
-        .with_conn(move |conn| db_learnings::disc_pending(conn, &disc_id).map_err(|e| anyhow::anyhow!("{e}")))
+        .with_conn(move |conn| {
+            db_learnings::disc_pending(conn, &disc_id).map_err(|e| anyhow::anyhow!("{e}"))
+        })
         .await
     {
         Ok(rows) => Json(ApiResponse::ok(rows)),
@@ -296,8 +318,11 @@ pub async fn validate_learning(
     // may have moved since the proposal): no truth-file write on evidence that
     // doesn't resolve NOW. For a `fact`, require ≥1 mechanically-Verified
     // evidence (the human must fix the evidence or reclassify otherwise).
-    let roots: Vec<&std::path::Path> =
-        project_root.as_deref().map(std::path::Path::new).into_iter().collect();
+    let roots: Vec<&std::path::Path> = project_root
+        .as_deref()
+        .map(std::path::Path::new)
+        .into_iter()
+        .collect();
     let report = learning_gate::verify_evidence(&learning.evidence, &roots);
     if report.any_fabricated {
         return Json(ApiResponse::err(
@@ -319,10 +344,10 @@ pub async fn validate_learning(
             "kind=preference exige une evidence user contenant une date YYYY-MM-DD",
         ));
     }
-    // kind=inference: promoted on a single human validation in 0.9.0 (the
+    // kind=inference: promoted on a single human validation in 0.10.0 (the
     // human gate IS the validation, posture B). Double-validation across 2
     // sessions is a future safeguard (0.9.x) — NOT enforced here, and the spec
-    // no longer promises it for 0.9.0. The modal carries the inference warning.
+    // no longer promises it for 0.10.0. The modal carries the inference warning.
 
     let scope = route_scope(learning.kind, learning.project_id.as_deref());
     let target = match scope {
@@ -356,7 +381,10 @@ pub async fn validate_learning(
     if let Err(e) = promote_to_file(&target, &learning, &roots) {
         // write failed → revert the claim so a retry can re-claim.
         let id_rev = id.clone();
-        let _ = state.db.with_conn(move |conn| db_learnings::revert_promotion(conn, &id_rev)).await;
+        let _ = state
+            .db
+            .with_conn(move |conn| db_learnings::revert_promotion(conn, &id_rev))
+            .await;
         return Json(ApiResponse::err(format!("promotion: {e}")));
     }
     let target_str = target.to_string_lossy().to_string();
@@ -438,9 +466,9 @@ pub async fn reject_learning(
         .await;
     match res {
         Ok(Some(true)) => Json(ApiResponse::ok(())),
-        Ok(Some(false)) => {
-            Json(ApiResponse::err("learning non-rejetable (statut ≠ pending — déjà promu/rejeté)"))
-        }
+        Ok(Some(false)) => Json(ApiResponse::err(
+            "learning non-rejetable (statut ≠ pending — déjà promu/rejeté)",
+        )),
         Ok(None) => Json(ApiResponse::err("learning introuvable")),
         Err(e) => Json(ApiResponse::err(format!("{e}"))),
     }

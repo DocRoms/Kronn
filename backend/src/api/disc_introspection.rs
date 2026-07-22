@@ -273,9 +273,11 @@ pub async fn disc_meta(
     Path(id): Path<String>,
 ) -> Json<ApiResponse<DiscussionMeta>> {
     let did = id.clone();
-    let disc = match state.db.with_conn(move |conn| {
-        crate::db::discussions::get_discussion(conn, &did)
-    }).await {
+    let disc = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -284,11 +286,14 @@ pub async fn disc_meta(
     // Bump the per-disc tool counter (UI pill in ChatHeader). Best-effort —
     // a counter-write failure must not fail the introspection call.
     let did_bump = id.clone();
-    let _ = state.db.with_conn(move |conn| {
-        crate::db::discussions::bump_introspection_count(conn, &did_bump)
-    }).await;
+    let _ = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::bump_introspection_count(conn, &did_bump))
+        .await;
 
-    let non_system_count = disc.messages.iter()
+    let non_system_count = disc
+        .messages
+        .iter()
         .filter(|m| !matches!(m.role, MessageRole::System))
         .count() as u32;
     let last_summary = disc.summary_up_to_msg_idx.unwrap_or(0);
@@ -381,7 +386,11 @@ fn resolve_message_selector(
         .iter()
         .enumerate()
         .filter_map(|(idx, message)| {
-            message.id.to_ascii_lowercase().starts_with(&needle).then_some(idx)
+            message
+                .id
+                .to_ascii_lowercase()
+                .starts_with(&needle)
+                .then_some(idx)
         })
         .collect();
     match matches.as_slice() {
@@ -417,18 +426,21 @@ pub async fn disc_get_message(
     Query(window): Query<MessageWindowQuery>,
 ) -> Json<ApiResponse<DiscussionMessageRead>> {
     let did = id.clone();
-    let disc = match state.db.with_conn(move |conn| {
-        crate::db::discussions::get_discussion(conn, &did)
-    }).await {
+    let disc = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     let did_bump = id.clone();
-    let _ = state.db.with_conn(move |conn| {
-        crate::db::discussions::bump_introspection_count(conn, &did_bump)
-    }).await;
+    let _ = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::bump_introspection_count(conn, &did_bump))
+        .await;
 
     let total = disc.messages.len();
     if total == 0 {
@@ -447,9 +459,14 @@ pub async fn disc_get_message(
 
     let msg = &disc.messages[resolved_idx];
     let msg_id = msg.id.clone();
-    let attachments = state.db.with_conn(move |conn| {
-        crate::db::discussions::list_context_files_for_message(conn, &msg_id).map_err(|e| anyhow::anyhow!(e))
-    }).await.unwrap_or_default()
+    let attachments = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::list_context_files_for_message(conn, &msg_id)
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+        .await
+        .unwrap_or_default()
         .into_iter()
         .map(|f| MessageAttachment {
             id: f.id,
@@ -500,27 +517,33 @@ pub async fn disc_summarize(
     Json(req): Json<SummarizeRequest>,
 ) -> Json<ApiResponse<SummarizeResponse>> {
     let did = id.clone();
-    let disc = match state.db.with_conn(move |conn| {
-        crate::db::discussions::get_discussion(conn, &did)
-    }).await {
+    let disc = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     let did_bump = id.clone();
-    let _ = state.db.with_conn(move |conn| {
-        crate::db::discussions::bump_introspection_count(conn, &did_bump)
-    }).await;
+    let _ = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::bump_introspection_count(conn, &did_bump))
+        .await;
 
-    let total_non_system = disc.messages.iter()
+    let total_non_system = disc
+        .messages
+        .iter()
         .filter(|m| !matches!(m.role, MessageRole::System))
         .count() as u32;
     let from_idx = req.from.unwrap_or(0).min(total_non_system);
     let to_idx = req.to.unwrap_or(total_non_system).min(total_non_system);
     if from_idx >= to_idx {
         return Json(ApiResponse::err(format!(
-            "Invalid range: from {} >= to {}", from_idx, to_idx
+            "Invalid range: from {} >= to {}",
+            from_idx, to_idx
         )));
     }
 
@@ -533,9 +556,13 @@ pub async fn disc_summarize(
     //   3. Miss → run the inline summariser, cache the result.
     if !req.force_refresh {
         let did_for_lookup = id.clone();
-        if let Ok(Some((cached, t))) = state.db.with_conn(move |conn| {
-            crate::db::discussions::get_ranged_summary(conn, &did_for_lookup, from_idx, to_idx)
-        }).await {
+        if let Ok(Some((cached, t))) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::get_ranged_summary(conn, &did_for_lookup, from_idx, to_idx)
+            })
+            .await
+        {
             return Json(ApiResponse::ok(SummarizeResponse {
                 summary: cached,
                 from_idx,
@@ -564,7 +591,9 @@ pub async fn disc_summarize(
         from_idx,
         to_idx,
         &tokens_config,
-    ).await {
+    )
+    .await
+    {
         Ok((s, t, model_name)) => {
             // Persist to the ranged cache so the next call with the same
             // (from, to) is free. Use the discussion id from the path
@@ -573,12 +602,20 @@ pub async fn disc_summarize(
             let summary_clone = s.clone();
             let model_name_clone = model_name.clone();
             let did = id.clone();
-            let _ = state.db.with_conn(move |conn| {
-                crate::db::discussions::upsert_ranged_summary(
-                    conn, &did, from_idx, to_idx,
-                    &summary_clone, t, model_name_clone.as_deref(),
-                )
-            }).await;
+            let _ = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::discussions::upsert_ranged_summary(
+                        conn,
+                        &did,
+                        from_idx,
+                        to_idx,
+                        &summary_clone,
+                        t,
+                        model_name_clone.as_deref(),
+                    )
+                })
+                .await;
             Json(ApiResponse::ok(SummarizeResponse {
                 summary: s,
                 from_idx,
@@ -587,7 +624,10 @@ pub async fn disc_summarize(
                 tokens_used: t,
             }))
         }
-        Err(e) => Json(ApiResponse::err(format!("Summary generation failed: {}", e))),
+        Err(e) => Json(ApiResponse::err(format!(
+            "Summary generation failed: {}",
+            e
+        ))),
     }
 }
 
@@ -603,11 +643,15 @@ mod tests {
         let n = idx_str.parse::<i64>().map_err(|_| "parse".to_string())?;
         if n >= 0 {
             let i = n as usize;
-            if i >= total { return Err("out".into()); }
+            if i >= total {
+                return Err("out".into());
+            }
             Ok(i)
         } else {
             let from_end = (-n) as usize;
-            if from_end > total { return Err("out".into()); }
+            if from_end > total {
+                return Err("out".into());
+            }
             Ok(total - from_end)
         }
     }
@@ -660,7 +704,10 @@ mod tests {
         // bridges rely on this exact shape.
         let p = PollBackoffPolicy::default();
         assert_eq!(p.poll_backoff_seconds.first(), Some(&30));
-        assert_eq!(p.poll_backoff_seconds, vec![30, 30, 60, 60, 120, 120, 240, 240, 480]);
+        assert_eq!(
+            p.poll_backoff_seconds,
+            vec![30, 30, 60, 60, 120, 120, 240, 240, 480]
+        );
         assert_eq!(p.max_delay_seconds, 480, "cap = last step of the sequence");
         assert_eq!(*p.poll_backoff_seconds.last().unwrap(), p.max_delay_seconds);
         assert!(p.reset_on_peer_message);
@@ -690,7 +737,10 @@ mod tests {
         assert!(cold.attention_until.is_none());
 
         // No message ever → cold, cap.
-        assert_eq!(pacing_for(None, None, now, &p).regime, super::PacingRegime::Cold);
+        assert_eq!(
+            pacing_for(None, None, now, &p).regime,
+            super::PacingRegime::Cold
+        );
         assert_eq!(pacing_for(None, None, now, &p).next_delay_seconds, 480);
     }
 

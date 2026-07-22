@@ -12,6 +12,7 @@ pub mod agent_decisions;
 pub mod agents;
 pub mod bundle;
 pub mod db;
+pub mod dependencies;
 pub mod discussions;
 pub mod git;
 pub mod learnings;
@@ -28,6 +29,7 @@ pub use agent_decisions::*;
 pub use agents::*;
 pub use bundle::*;
 pub use db::*;
+pub use dependencies::*;
 pub use discussions::*;
 pub use git::*;
 pub use learnings::*;
@@ -53,6 +55,10 @@ where
     Ok(Some(Option::deserialize(deserializer)?))
 }
 
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 // ─── AI Documentation Files (read-only viewer) ────────────────────────────
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -63,6 +69,22 @@ pub struct AiFileNode {
     pub is_dir: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<AiFileNode>,
+}
+
+/// A file-system node exposed by the project source browser.
+///
+/// Kept separate from `AiFileNode` because source entries also carry Git
+/// metadata while documentation nodes intentionally remain repository-agnostic.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SourceFileNode {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<SourceFileNode>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub git_ignored: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -122,17 +144,32 @@ pub struct ApiResponse<T: Serialize> {
 
 impl<T: Serialize> ApiResponse<T> {
     pub fn ok(data: T) -> Self {
-        Self { success: true, data: Some(data), error: None, error_code: None }
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+            error_code: None,
+        }
     }
 
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(msg.into()), error_code: None }
+        Self {
+            success: false,
+            data: None,
+            error: Some(msg.into()),
+            error_code: None,
+        }
     }
 
     /// Error response with a machine-readable category. Prefer this over `err`
     /// in new/updated handlers so the frontend + MCP can branch on the kind.
     pub fn err_coded(code: ApiErrorCode, msg: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(msg.into()), error_code: Some(code.as_str().to_string()) }
+        Self {
+            success: false,
+            data: None,
+            error: Some(msg.into()),
+            error_code: Some(code.as_str().to_string()),
+        }
     }
 }
 
@@ -162,7 +199,9 @@ pub struct PaginationQuery {
     pub per_page: u32,
 }
 
-fn default_per_page() -> u32 { 50 }
+fn default_per_page() -> u32 {
+    50
+}
 
 // ─── Context Files (uploaded file context for discussions) ────────────────
 

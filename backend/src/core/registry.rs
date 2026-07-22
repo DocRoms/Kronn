@@ -1,6 +1,5 @@
 use crate::models::{
-    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpTransport,
-    OAuth2ExtraHeader,
+    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpTransport, OAuth2ExtraHeader,
 };
 
 /// Sentinel id surfaced at the top of the registry. Picking it in the UI
@@ -2458,8 +2457,10 @@ mod tests {
         match &def.transport {
             McpTransport::Stdio { command, args } => {
                 assert_eq!(command, "npx");
-                assert!(args.iter().any(|a| a == "resend-mcp"),
-                    "mcp-resend args must reference the resend-mcp package, got {args:?}");
+                assert!(
+                    args.iter().any(|a| a == "resend-mcp"),
+                    "mcp-resend args must reference the resend-mcp package, got {args:?}"
+                );
             }
             other => panic!("mcp-resend must keep Stdio transport (MCP capability), got {other:?}"),
         }
@@ -2476,14 +2477,25 @@ mod tests {
         assert!(!spec.endpoints.is_empty());
         // Headline endpoints — if a future rename drops them, CSM/lifecycle
         // flows break. Lock them by name.
-        assert!(spec.endpoints.iter().any(|e| e.path == "/emails" && e.method == "POST"),
-            "Resend api_spec must keep POST /emails (single send)");
-        assert!(spec.endpoints.iter().any(|e| e.path == "/emails/batch" && e.method == "POST"),
-            "Resend api_spec must keep POST /emails/batch (fan-out send)");
+        assert!(
+            spec.endpoints
+                .iter()
+                .any(|e| e.path == "/emails" && e.method == "POST"),
+            "Resend api_spec must keep POST /emails (single send)"
+        );
+        assert!(
+            spec.endpoints
+                .iter()
+                .any(|e| e.path == "/emails/batch" && e.method == "POST"),
+            "Resend api_spec must keep POST /emails/batch (fan-out send)"
+        );
 
         // ── Shared shape (credential + metadata) ──
-        assert_eq!(def.env_keys, vec!["RESEND_API_KEY"],
-            "one credential drives both surfaces — never split into two env keys");
+        assert_eq!(
+            def.env_keys,
+            vec!["RESEND_API_KEY"],
+            "one credential drives both surfaces — never split into two env keys"
+        );
         assert!(def.tags.contains(&"email".into()));
         assert!(def.tags.contains(&"api".into()),
             "the `api` tag flags this plugin as ApiCall-callable, even when the entry is `mcp-` prefixed");
@@ -2511,34 +2523,61 @@ mod tests {
         assert!(matches!(def.transport, McpTransport::ApiOnly));
         assert!(def.env_keys.contains(&"MAILJET_API_KEY".into()));
         assert!(def.env_keys.contains(&"MAILJET_API_SECRET".into()));
-        assert_eq!(def.env_keys.len(), 2,
-            "api-mailjet must declare EXACTLY the two halves of Basic auth — no more, no less");
+        assert_eq!(
+            def.env_keys.len(),
+            2,
+            "api-mailjet must declare EXACTLY the two halves of Basic auth — no more, no less"
+        );
         assert!(def.tags.contains(&"email".into()));
         assert!(def.tags.contains(&"eu".into()),
             "api-mailjet should carry the `eu` tag — RGPD positioning is the reason it exists alongside Resend");
         assert!(def.tags.contains(&"csm".into()));
-        assert!(def.default_context.is_some(), "api-mailjet must ship a default_context");
+        assert!(
+            def.default_context.is_some(),
+            "api-mailjet must ship a default_context"
+        );
         assert_eq!(def.publisher, "Mailjet");
-        assert!(def.official, "api-mailjet is by Mailjet, must be `official: true`");
+        assert!(
+            def.official,
+            "api-mailjet is by Mailjet, must be `official: true`"
+        );
         assert!(def.token_url.is_some());
         assert!(def.token_help.is_some());
 
-        let spec = def.api_spec.as_ref().expect("api-mailjet must declare api_spec");
+        let spec = def
+            .api_spec
+            .as_ref()
+            .expect("api-mailjet must declare api_spec");
         assert_eq!(spec.base_url, "https://api.mailjet.com");
         match &spec.auth {
-            ApiAuthKind::Basic { user_env, password_env } => {
+            ApiAuthKind::Basic {
+                user_env,
+                password_env,
+            } => {
                 assert_eq!(user_env, "MAILJET_API_KEY");
                 assert_eq!(password_env, "MAILJET_API_SECRET");
             }
             other => panic!("api-mailjet auth must be Basic, got {other:?}"),
         }
         assert!(!spec.endpoints.is_empty());
-        assert!(spec.endpoints.iter().any(|e| e.path == "/v3.1/send" && e.method == "POST"),
-            "api-mailjet must keep POST /v3.1/send (modern send envelope)");
-        assert!(spec.endpoints.iter().any(|e| e.path == "/v3/REST/sender" && e.method == "GET"),
-            "api-mailjet must keep GET /v3/REST/sender (sanity + sender lookup — #1 pitfall guard)");
-        assert!(spec.endpoints.iter().any(|e| e.path.contains("/managecontact") && e.method == "POST"),
-            "api-mailjet must keep /managecontact (the killer CSM segmentation endpoint)");
+        assert!(
+            spec.endpoints
+                .iter()
+                .any(|e| e.path == "/v3.1/send" && e.method == "POST"),
+            "api-mailjet must keep POST /v3.1/send (modern send envelope)"
+        );
+        assert!(
+            spec.endpoints
+                .iter()
+                .any(|e| e.path == "/v3/REST/sender" && e.method == "GET"),
+            "api-mailjet must keep GET /v3/REST/sender (sanity + sender lookup — #1 pitfall guard)"
+        );
+        assert!(
+            spec.endpoints
+                .iter()
+                .any(|e| e.path.contains("/managecontact") && e.method == "POST"),
+            "api-mailjet must keep /managecontact (the killer CSM segmentation endpoint)"
+        );
     }
 
     /// `search()` must surface the new email plugins by vendor name + by
@@ -2547,14 +2586,18 @@ mod tests {
     #[test]
     fn search_surfaces_resend_and_mailjet_email_plugins() {
         let resend_hits = search("resend");
-        assert!(resend_hits.iter().any(|d| d.id == "mcp-resend"),
+        assert!(
+            resend_hits.iter().any(|d| d.id == "mcp-resend"),
             "`search(\"resend\")` must return mcp-resend; got: {:?}",
-            resend_hits.iter().map(|d| &d.id).collect::<Vec<_>>());
+            resend_hits.iter().map(|d| &d.id).collect::<Vec<_>>()
+        );
 
         let mailjet_hits = search("mailjet");
-        assert!(mailjet_hits.iter().any(|d| d.id == "api-mailjet"),
+        assert!(
+            mailjet_hits.iter().any(|d| d.id == "api-mailjet"),
             "`search(\"mailjet\")` must return api-mailjet; got: {:?}",
-            mailjet_hits.iter().map(|d| &d.id).collect::<Vec<_>>());
+            mailjet_hits.iter().map(|d| &d.id).collect::<Vec<_>>()
+        );
 
         // Both should also be tag-discoverable via the `email` family.
         let email_hits = search("email");
@@ -2585,7 +2628,9 @@ mod tests {
         let reg = builtin_registry();
         let cli_wrappers = ["mcp-gitlab", "mcp-fastly"];
         for slug in cli_wrappers {
-            let def = reg.iter().find(|d| d.id == slug)
+            let def = reg
+                .iter()
+                .find(|d| d.id == slug)
                 .unwrap_or_else(|| panic!("missing registry entry for {}", slug));
             assert_eq!(
                 def.tags.first().map(String::as_str),
@@ -2593,7 +2638,8 @@ mod tests {
                 "{} must have `cli` as its FIRST tag — McpPage.getCategory() \
                  routes by first-matching tag, putting `cli` first ensures the \
                  plugin lands in the CLI-wrappers bucket. Got tags: {:?}",
-                slug, def.tags,
+                slug,
+                def.tags,
             );
         }
     }
@@ -2605,18 +2651,22 @@ mod tests {
         // land in the wrong bucket. Pin the inverse contract — ONLY
         // mcp-gitlab + mcp-fastly carry `cli`.
         let reg = builtin_registry();
-        let cli_tagged: Vec<&String> = reg.iter()
+        let cli_tagged: Vec<&String> = reg
+            .iter()
             .filter(|d| d.tags.iter().any(|t| t == "cli"))
             .map(|d| &d.id)
             .collect();
-        let expected: Vec<&String> = vec![
-            &"mcp-gitlab".to_string(),
-            &"mcp-fastly".to_string(),
-        ].into_iter().map(|s| {
-            // Find the equivalent &String in the actual collection.
-            cli_tagged.iter().find(|c| ***c == *s).copied()
-                .unwrap_or_else(|| panic!("expected `cli` tag on {}", s))
-        }).collect();
+        let expected: Vec<&String> = vec![&"mcp-gitlab".to_string(), &"mcp-fastly".to_string()]
+            .into_iter()
+            .map(|s| {
+                // Find the equivalent &String in the actual collection.
+                cli_tagged
+                    .iter()
+                    .find(|c| ***c == *s)
+                    .copied()
+                    .unwrap_or_else(|| panic!("expected `cli` tag on {}", s))
+            })
+            .collect();
         assert_eq!(
             cli_tagged.len(),
             expected.len(),

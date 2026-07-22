@@ -1,4 +1,4 @@
-// 0.9.0 — Continual Learning validation modal. THE human gate (posture B): in
+// 0.10.0 — Continual Learning validation modal. THE human gate (posture B): in
 // the default config nothing is written to a truth file until the user clicks
 // Validate here. Lists pending learnings with their type, confidence, evidence,
 // and the Gate-2 faithfulness verdict (informative — a 🔴 contradiction is a

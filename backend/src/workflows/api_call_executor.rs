@@ -54,10 +54,17 @@ impl ApiCallLogContext {
         Self::default()
     }
     pub fn workflow_for_run(run_id: impl Into<String>) -> Self {
-        Self { source: ApiCallLogSource::Workflow, run_id: Some(run_id.into()), ..Self::default() }
+        Self {
+            source: ApiCallLogSource::Workflow,
+            run_id: Some(run_id.into()),
+            ..Self::default()
+        }
     }
     pub fn manual_test() -> Self {
-        Self { source: ApiCallLogSource::ManualTest, ..Self::default() }
+        Self {
+            source: ApiCallLogSource::ManualTest,
+            ..Self::default()
+        }
     }
     fn to_db_source(&self) -> ApiCallSource {
         match self.source {
@@ -92,20 +99,28 @@ pub struct SecurityPolicy {
 
 impl Default for SecurityPolicy {
     fn default() -> Self {
-        Self { enforce_host_match: true, enforce_public_ip: true }
+        Self {
+            enforce_host_match: true,
+            enforce_public_ip: true,
+        }
     }
 }
 
 impl SecurityPolicy {
     /// Production default. Use this from the runner dispatch.
-    pub fn production() -> Self { Self::default() }
+    pub fn production() -> Self {
+        Self::default()
+    }
 
     /// For integration tests that MUST hit localhost (wiremock). Host-match
     /// guard stays on because the plugin base URL is the same localhost —
     /// so the actual allowlist path still runs.
     #[cfg(test)]
     pub fn allow_loopback_for_tests() -> Self {
-        Self { enforce_host_match: true, enforce_public_ip: false }
+        Self {
+            enforce_host_match: true,
+            enforce_public_ip: false,
+        }
     }
 }
 
@@ -124,10 +139,18 @@ pub async fn execute_api_call_step_core(
 
     // Validate declared fields.
     let Some(spec) = plugin.api_spec.as_ref() else {
-        return fail(step, start, "Plugin has no `api_spec` — not an API plugin".into());
+        return fail(
+            step,
+            start,
+            "Plugin has no `api_spec` — not an API plugin".into(),
+        );
     };
     let Some(endpoint_path) = step.api_endpoint_path.as_ref() else {
-        return fail(step, start, "ApiCall step missing `api_endpoint_path`".into());
+        return fail(
+            step,
+            start,
+            "ApiCall step missing `api_endpoint_path`".into(),
+        );
     };
 
     // Resolve auth first — even if a subsequent step fails, surfacing an
@@ -146,10 +169,11 @@ pub async fn execute_api_call_step_core(
         Ok(q) => q,
         Err(e) => return fail(step, start, format!("Template render error (query): {e}")),
     };
-    let extra_headers = match render_map(&step.api_headers, ctx).and_then(|m| substitute_env_in_map(m, env)) {
-        Ok(h) => h,
-        Err(e) => return fail(step, start, format!("Template render error (headers): {e}")),
-    };
+    let extra_headers =
+        match render_map(&step.api_headers, ctx).and_then(|m| substitute_env_in_map(m, env)) {
+            Ok(h) => h,
+            Err(e) => return fail(step, start, format!("Template render error (headers): {e}")),
+        };
     let body = match render_body(&step.api_body, ctx).and_then(|b| match b {
         None => Ok(None),
         Some(v) => substitute_env_in_value(&v, env).map(Some),
@@ -187,10 +211,11 @@ pub async fn execute_api_call_step_core(
     // naming the missing key (no silent `undefined` strings hitting
     // the vendor API — caught 2026-05-20 on Didomi 403 "organization
     // undefined").
-    let templated_endpoint = match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
-        Ok(s) => s,
-        Err(e) => return fail(step, start, format!("Endpoint env-substitution error: {e}")),
-    };
+    let templated_endpoint =
+        match crate::core::oauth2_cache::substitute_env_in_string(&templated_endpoint, env) {
+            Ok(s) => s,
+            Err(e) => return fail(step, start, format!("Endpoint env-substitution error: {e}")),
+        };
     // Substitute `{key}` path-segment params (e.g. /repos/{owner}/{repo}).
     // Values are rendered through TemplateContext FIRST so a previous
     // step's output can drive a segment (`{owner}` = `{{steps.X.data}}`).
@@ -211,7 +236,8 @@ pub async fn execute_api_call_step_core(
     let resolved_base_url = interpolate_env(&spec.base_url, env);
     if resolved_base_url.contains("<NOT_CONFIGURED:") {
         return fail(
-            step, start,
+            step,
+            start,
             format!(
                 "Plugin base URL has unresolved env placeholder(s): `{resolved_base_url}`. \
                  Open Settings → APIs and fill in every required config key for this plugin."
@@ -291,7 +317,10 @@ pub async fn execute_api_call_step_core(
                 return fail(step, start, format!("Invalid JSONPath `{path}`: {reason}"));
             }
         },
-        None => ExtractionOutcome { value: response.clone(), is_empty: false },
+        None => ExtractionOutcome {
+            value: response.clone(),
+            is_empty: false,
+        },
     };
 
     // Build structured envelope so downstream agents / batch steps can
@@ -432,11 +461,9 @@ async fn execute_api_call_step_with_db_inner(
     // un appel canonique côté QuickApi et de le réutiliser dans un step
     // ApiCall single sans tout re-saisir.
     let mut step_owned = step.clone();
-    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
-        &mut step_owned,
-        &state.db,
-    )
-    .await
+    if let Err(e) =
+        crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(&mut step_owned, &state.db)
+            .await
     {
         return fail(step, start, e);
     }
@@ -454,7 +481,11 @@ async fn execute_api_call_step_with_db_inner(
     // every other config reader for no reason.
     let secret_opt = { state.config.read().await.encryption_secret.clone() };
     let Some(secret) = secret_opt else {
-        return fail(step, start, "Encryption secret not configured — cannot decrypt plugin env".into());
+        return fail(
+            step,
+            start,
+            "Encryption secret not configured — cannot decrypt plugin env".into(),
+        );
     };
 
     // Project resolution. The plugin env is decrypted per-project in
@@ -486,7 +517,8 @@ async fn execute_api_call_step_with_db_inner(
                 Some(c) if !c.project_ids.is_empty() => c.project_ids[0].clone(),
                 _ => {
                     return fail(
-                        step, start,
+                        step,
+                        start,
                         format!(
                             "API plugin config `{config_id}` is not linked to any project. \
                              Open Settings → APIs and tick at least one project on this config, \
@@ -514,15 +546,21 @@ async fn execute_api_call_step_with_db_inner(
     // times with DIFFERENT credentials. Pre-fix (2026-06-10) the config
     // match was a `true` stub (`matches_config`) → the FIRST instance won
     // → potentially the wrong secret injected on multi-instance projects.
-    let found = plugins.into_iter().find(|(server, cid, _env)| {
-        server.id == *slug && cid == config_id
-    });
+    let found = plugins
+        .into_iter()
+        .find(|(server, cid, _env)| server.id == *slug && cid == config_id);
     let Some((plugin, _cid, mut env)) = found else {
-        let pid_label = if resolved_pid.is_empty() { "(global)".to_string() } else { resolved_pid.clone() };
+        let pid_label = if resolved_pid.is_empty() {
+            "(global)".to_string()
+        } else {
+            resolved_pid.clone()
+        };
         return fail(
             step,
             start,
-            format!("API plugin `{slug}` / config `{config_id}` not active on project `{pid_label}`"),
+            format!(
+                "API plugin `{slug}` / config `{config_id}` not active on project `{pid_label}`"
+            ),
         );
     };
 
@@ -595,25 +633,34 @@ pub fn resolve_auth(
         query: HashMap::new(),
     };
     match auth {
-        ApiAuthKind::ApiKeyQuery { param_name, env_key } => {
+        ApiAuthKind::ApiKeyQuery {
+            param_name,
+            env_key,
+        } => {
             let value = env.get(env_key).ok_or_else(|| {
                 format!("Auth error: env key `{env_key}` missing for ApiKeyQuery")
             })?;
             out.query.insert(param_name.clone(), value.clone());
         }
-        ApiAuthKind::ApiKeyHeader { header_name, env_key } => {
+        ApiAuthKind::ApiKeyHeader {
+            header_name,
+            env_key,
+        } => {
             let value = env.get(env_key).ok_or_else(|| {
                 format!("Auth error: env key `{env_key}` missing for ApiKeyHeader")
             })?;
             out.headers.insert(header_name.clone(), value.clone());
         }
         ApiAuthKind::Bearer { env_key } => {
-            let value = env.get(env_key).ok_or_else(|| {
-                format!("Auth error: env key `{env_key}` missing for Bearer")
-            })?;
+            let value = env
+                .get(env_key)
+                .ok_or_else(|| format!("Auth error: env key `{env_key}` missing for Bearer"))?;
             out.bearer = Some(value.clone());
         }
-        ApiAuthKind::Basic { user_env, password_env } => {
+        ApiAuthKind::Basic {
+            user_env,
+            password_env,
+        } => {
             // HTTP Basic = `Authorization: Basic <base64(user:password)>`.
             // We compose the header here rather than reusing the Bearer
             // path because the wire format differs ("Basic" prefix +
@@ -626,11 +673,14 @@ pub fn resolve_auth(
                 format!("Auth error: env key `{user_env}` missing for Basic auth (user)")
             })?;
             let password = env.get(password_env).ok_or_else(|| {
-                format!("Auth error: env key `{password_env}` missing for Basic auth (password/token)")
+                format!(
+                    "Auth error: env key `{password_env}` missing for Basic auth (password/token)"
+                )
             })?;
             use base64::{engine::general_purpose::STANDARD, Engine as _};
             let encoded = STANDARD.encode(format!("{user}:{password}"));
-            out.headers.insert("Authorization".into(), format!("Basic {encoded}"));
+            out.headers
+                .insert("Authorization".into(), format!("Basic {encoded}"));
         }
         ApiAuthKind::BasicApiKey { env_key } => {
             // HTTP Basic with the API key as user and empty password —
@@ -643,7 +693,8 @@ pub fn resolve_auth(
             })?;
             use base64::{engine::general_purpose::STANDARD, Engine as _};
             let encoded = STANDARD.encode(format!("{key}:"));
-            out.headers.insert("Authorization".into(), format!("Basic {encoded}"));
+            out.headers
+                .insert("Authorization".into(), format!("Basic {encoded}"));
         }
         ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
             // Same contract as `build_api_context_block`: the caller has
@@ -741,7 +792,9 @@ fn render_map(
     input: &Option<HashMap<String, String>>,
     ctx: &TemplateContext,
 ) -> anyhow::Result<HashMap<String, String>> {
-    let Some(map) = input else { return Ok(HashMap::new()); };
+    let Some(map) = input else {
+        return Ok(HashMap::new());
+    };
     let mut out = HashMap::with_capacity(map.len());
     for (k, v) in map {
         out.insert(k.clone(), ctx.render(v)?);
@@ -770,10 +823,7 @@ fn substitute_env_in_map(
 /// 0.8.6 — substitute `${ENV.X}` placeholders in every string leaf of
 /// a JSON value. Walks arrays/objects recursively. Non-string leaves
 /// pass through.
-fn substitute_env_in_value(
-    value: &Value,
-    env: &HashMap<String, String>,
-) -> anyhow::Result<Value> {
+fn substitute_env_in_value(value: &Value, env: &HashMap<String, String>) -> anyhow::Result<Value> {
     match value {
         Value::String(s) => {
             let resolved = crate::core::oauth2_cache::substitute_env_in_string(s, env)
@@ -782,12 +832,16 @@ fn substitute_env_in_value(
         }
         Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
-            for it in items { out.push(substitute_env_in_value(it, env)?); }
+            for it in items {
+                out.push(substitute_env_in_value(it, env)?);
+            }
             Ok(Value::Array(out))
         }
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
-            for (k, v) in map { out.insert(k.clone(), substitute_env_in_value(v, env)?); }
+            for (k, v) in map {
+                out.insert(k.clone(), substitute_env_in_value(v, env)?);
+            }
             Ok(Value::Object(out))
         }
         _ => Ok(value.clone()),
@@ -795,7 +849,9 @@ fn substitute_env_in_value(
 }
 
 fn render_body(body: &Option<Value>, ctx: &TemplateContext) -> anyhow::Result<Option<Value>> {
-    let Some(body) = body else { return Ok(None); };
+    let Some(body) = body else {
+        return Ok(None);
+    };
     Ok(Some(render_json_value(body, ctx)?))
 }
 
@@ -849,7 +905,9 @@ pub(crate) fn resolve_path_params(
             // Empty `{}` or non-identifier-ish (whitespace, slashes) keys
             // aren't ours — leave the literal `{` and keep scanning.
             let is_clean = !key.is_empty()
-                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
             if is_clean {
                 if let Some(raw_value) = path_params.get(key) {
                     let rendered = ctx.render(raw_value)?;
@@ -991,9 +1049,14 @@ fn resolve_method(
     // per endpoint; absent that, GET is the safe default (read-only —
     // a wrong GET can't mutate anything, unlike the old override path).
     if let Some(ep) = spec.endpoints.iter().find(|e| e.path == endpoint_path) {
-        return Method::from_bytes(ep.method.trim().to_ascii_uppercase().as_bytes()).map_err(|_| {
-            format!("Invalid HTTP method `{}` declared on endpoint `{endpoint_path}`", ep.method)
-        });
+        return Method::from_bytes(ep.method.trim().to_ascii_uppercase().as_bytes()).map_err(
+            |_| {
+                format!(
+                    "Invalid HTTP method `{}` declared on endpoint `{endpoint_path}`",
+                    ep.method
+                )
+            },
+        );
     }
     Ok(Method::GET)
 }
@@ -1047,16 +1110,40 @@ async fn walk_pages(
     // `step.api_query` — they keep control if they need a specific
     // resume point.
     match pagination {
-        PaginationSpec::Offset { start_param, limit_param, limit, .. } => {
-            current_query.entry(start_param.clone()).or_insert_with(|| "0".to_string());
-            current_query.entry(limit_param.clone()).or_insert_with(|| limit.to_string());
+        PaginationSpec::Offset {
+            start_param,
+            limit_param,
+            limit,
+            ..
+        } => {
+            current_query
+                .entry(start_param.clone())
+                .or_insert_with(|| "0".to_string());
+            current_query
+                .entry(limit_param.clone())
+                .or_insert_with(|| limit.to_string());
         }
-        PaginationSpec::Page { page_param, page_size_param, page_size, .. } => {
-            current_query.entry(page_param.clone()).or_insert_with(|| "1".to_string());
-            current_query.entry(page_size_param.clone()).or_insert_with(|| page_size.to_string());
+        PaginationSpec::Page {
+            page_param,
+            page_size_param,
+            page_size,
+            ..
+        } => {
+            current_query
+                .entry(page_param.clone())
+                .or_insert_with(|| "1".to_string());
+            current_query
+                .entry(page_size_param.clone())
+                .or_insert_with(|| page_size.to_string());
         }
-        PaginationSpec::LinkHeader { page_size_param: Some(p), page_size: Some(n), .. } => {
-            current_query.entry(p.clone()).or_insert_with(|| n.to_string());
+        PaginationSpec::LinkHeader {
+            page_size_param: Some(p),
+            page_size: Some(n),
+            ..
+        } => {
+            current_query
+                .entry(p.clone())
+                .or_insert_with(|| n.to_string());
         }
         _ => {}
     }
@@ -1075,15 +1162,27 @@ async fn walk_pages(
         // Inject pagination params on every page after the first.
         if page_idx > 0 {
             match pagination {
-                PaginationSpec::Offset { start_param, limit_param, limit, .. } => {
+                PaginationSpec::Offset {
+                    start_param,
+                    limit_param,
+                    limit,
+                    ..
+                } => {
                     current_query.insert(start_param.clone(), next_offset.to_string());
                     current_query.insert(limit_param.clone(), limit.to_string());
                 }
                 PaginationSpec::Cursor { cursor_param, .. } => {
-                    let Some(cursor) = next_cursor.as_ref() else { break };
+                    let Some(cursor) = next_cursor.as_ref() else {
+                        break;
+                    };
                     current_query.insert(cursor_param.clone(), cursor.clone());
                 }
-                PaginationSpec::Page { page_param, page_size_param, page_size, .. } => {
+                PaginationSpec::Page {
+                    page_param,
+                    page_size_param,
+                    page_size,
+                    ..
+                } => {
                     current_query.insert(page_param.clone(), next_page_num.to_string());
                     current_query.insert(page_size_param.clone(), page_size.to_string());
                 }
@@ -1112,12 +1211,16 @@ async fn walk_pages(
             body,
             timeout,
             max_retries,
-        ).await?;
+        )
+        .await?;
 
         // First-page handling: short-circuit for None/Auto, detect items
         // key for explicit pagination variants.
         if first_response.is_none() {
-            if matches!(pagination, PaginationSpec::None | PaginationSpec::Auto { .. }) {
+            if matches!(
+                pagination,
+                PaginationSpec::None | PaginationSpec::Auto { .. }
+            ) {
                 return Ok((resp, false));
             }
             bare_array = resp.is_array();
@@ -1139,21 +1242,29 @@ async fn walk_pages(
         // Pull the next-page anchor from THIS page's body. Each variant's
         // termination condition is what tells us to break.
         match pagination {
-            PaginationSpec::Offset { total_path, limit, .. } => {
+            PaginationSpec::Offset {
+                total_path, limit, ..
+            } => {
                 let total = jsonpath_first_u32(&resp, total_path).unwrap_or(0);
                 let consumed = accumulated_items.len() as u32;
-                if consumed >= total || consumed == 0 { break; }
+                if consumed >= total || consumed == 0 {
+                    break;
+                }
                 next_offset = consumed;
                 let _ = limit; // already injected via limit_param
             }
             PaginationSpec::Cursor { next_path, .. } => {
                 let cursor = jsonpath_first_string(&resp, next_path);
-                if cursor.is_none() { break; }
+                if cursor.is_none() {
+                    break;
+                }
                 next_cursor = cursor;
             }
             PaginationSpec::Page { has_more_path, .. } => {
                 let has_more = jsonpath_first_bool(&resp, has_more_path).unwrap_or(false);
-                if !has_more { break; }
+                if !has_more {
+                    break;
+                }
                 next_page_num += 1;
             }
             PaginationSpec::LinkHeader { .. } => {
@@ -1162,7 +1273,9 @@ async fn walk_pages(
                 // the next request re-sends the plugin's auth, so following a
                 // cross-origin `rel="next"` from a compromised/misbehaving
                 // server would exfiltrate the credentials to that host.
-                let next = link_header.as_deref().and_then(parse_link_next)
+                let next = link_header
+                    .as_deref()
+                    .and_then(parse_link_next)
                     .and_then(|u| page_url_base.join(&u).ok());
                 let Some(next) = next else { break };
                 let same_origin = next.scheme() == base_url.scheme()
@@ -1241,13 +1354,18 @@ fn extract_array_at(response: &Value, key: &str) -> Vec<Value> {
 fn jsonpath_first_u32(value: &Value, path: &str) -> Option<u32> {
     let p = serde_json_path::JsonPath::parse(path).ok()?;
     let nodes = p.query(value);
-    nodes.first().and_then(|v| v.as_u64()).and_then(|n| u32::try_from(n).ok())
+    nodes
+        .first()
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
 }
 
 fn jsonpath_first_string(value: &Value, path: &str) -> Option<String> {
     let p = serde_json_path::JsonPath::parse(path).ok()?;
     let nodes = p.query(value);
-    nodes.first().and_then(|v| v.as_str().map(|s| s.to_string()))
+    nodes
+        .first()
+        .and_then(|v| v.as_str().map(|s| s.to_string()))
 }
 
 fn jsonpath_first_bool(value: &Value, path: &str) -> Option<bool> {
@@ -1263,12 +1381,20 @@ fn jsonpath_first_bool(value: &Value, path: &str) -> Option<bool> {
 /// (`<https://api.github.com/…?page=2>; rel="next", <…>; rel="last"`).
 fn parse_link_next(link: &str) -> Option<String> {
     for part in link.split(',') {
-        let Some((target, params)) = part.split_once(';') else { continue };
+        let Some((target, params)) = part.split_once(';') else {
+            continue;
+        };
         if params.split(';').any(|p| {
             let p = p.trim();
             p == "rel=\"next\"" || p == "rel=next"
         }) {
-            return Some(target.trim().trim_start_matches('<').trim_end_matches('>').to_string());
+            return Some(
+                target
+                    .trim()
+                    .trim_start_matches('<')
+                    .trim_end_matches('>')
+                    .to_string(),
+            );
         }
     }
     None
@@ -1359,7 +1485,9 @@ async fn send_with_retry(
             Err(e) => {
                 // Network error — retryable within limits.
                 if attempt >= max_retries {
-                    return Err(format!("HTTP request failed after {max_retries} retries: {e}"));
+                    return Err(format!(
+                        "HTTP request failed after {max_retries} retries: {e}"
+                    ));
                 }
                 sleep_backoff(attempt).await;
                 attempt += 1;
@@ -1449,12 +1577,19 @@ async fn record_api_call_log(
     outcome: &StepOutcome,
     log_ctx: &ApiCallLogContext,
 ) {
-    let plugin_slug = step.api_plugin_slug.clone().unwrap_or_else(|| "unknown".into());
+    let plugin_slug = step
+        .api_plugin_slug
+        .clone()
+        .unwrap_or_else(|| "unknown".into());
     let config_id = step.api_config_id.clone();
     let endpoint_path = step.api_endpoint_path.clone().unwrap_or_default();
     let method = step.api_method.clone().unwrap_or_else(|| "GET".into());
     let success = outcome.result.status == RunStatus::Success;
-    let status = if success { ApiCallStatus::Ok } else { ApiCallStatus::Error };
+    let status = if success {
+        ApiCallStatus::Ok
+    } else {
+        ApiCallStatus::Error
+    };
     let http_status = extract_http_status_from_output(&outcome.result.output);
     let request_excerpt = step.api_body.as_ref().map(serde_json::Value::to_string);
     let response_excerpt = outcome.result.output.clone();
@@ -1464,28 +1599,38 @@ async fn record_api_call_log(
     let run_id = log_ctx.run_id.clone();
     let disc_id = log_ctx.disc_id.clone();
     let agent = log_ctx.agent.clone();
-    let error_message = if success { None } else { Some(outcome.result.output.clone()) };
+    let error_message = if success {
+        None
+    } else {
+        Some(outcome.result.output.clone())
+    };
 
-    let record_result = state.db.with_conn(move |conn| {
-        api_call_logs::record(conn, NewApiCallLog {
-            source,
-            project_id: project_id_for_log.as_deref(),
-            run_id: run_id.as_deref(),
-            disc_id: disc_id.as_deref(),
-            agent: agent.as_deref(),
-            plugin_slug: &plugin_slug,
-            config_id: config_id.as_deref(),
-            endpoint_path: &endpoint_path,
-            method: &method,
-            http_status,
-            status,
-            duration_ms,
-            request_excerpt: request_excerpt.as_deref(),
-            response_excerpt: Some(&response_excerpt),
-            error_message: error_message.as_deref(),
+    let record_result = state
+        .db
+        .with_conn(move |conn| {
+            api_call_logs::record(
+                conn,
+                NewApiCallLog {
+                    source,
+                    project_id: project_id_for_log.as_deref(),
+                    run_id: run_id.as_deref(),
+                    disc_id: disc_id.as_deref(),
+                    agent: agent.as_deref(),
+                    plugin_slug: &plugin_slug,
+                    config_id: config_id.as_deref(),
+                    endpoint_path: &endpoint_path,
+                    method: &method,
+                    http_status,
+                    status,
+                    duration_ms,
+                    request_excerpt: request_excerpt.as_deref(),
+                    response_excerpt: Some(&response_excerpt),
+                    error_message: error_message.as_deref(),
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("api_call_logs::record: {e}"))
         })
-        .map_err(|e| anyhow::anyhow!("api_call_logs::record: {e}"))
-    }).await;
+        .await;
     if let Err(e) = record_result {
         tracing::warn!("api_call_logs.record (workflow): {e}");
     }
@@ -1679,9 +1824,14 @@ mod tests {
         };
         let out = resolve_auth(&auth, &env).unwrap();
         assert!(out.bearer.is_none(), "Basic auth must not populate bearer");
-        let header = out.headers.get("Authorization")
+        let header = out
+            .headers
+            .get("Authorization")
             .expect("Authorization header must be set");
-        assert!(header.starts_with("Basic "), "header must use the Basic scheme: {header}");
+        assert!(
+            header.starts_with("Basic "),
+            "header must use the Basic scheme: {header}"
+        );
         // Decode the base64 portion and check the round-trip.
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let b64 = header.trim_start_matches("Basic ");
@@ -1699,7 +1849,10 @@ mod tests {
             password_env: "JIRA_API_TOKEN".into(),
         };
         let err = resolve_auth(&auth, &env).unwrap_err();
-        assert!(err.contains("JIRA_API_TOKEN"), "error should name the missing key: {err}");
+        assert!(
+            err.contains("JIRA_API_TOKEN"),
+            "error should name the missing key: {err}"
+        );
     }
 
     #[test]
@@ -1718,7 +1871,9 @@ mod tests {
     fn resolve_auth_bearer_populates_bearer() {
         let mut env = HashMap::new();
         env.insert("JIRA_TOKEN".into(), "tok-123".into());
-        let auth = ApiAuthKind::Bearer { env_key: "JIRA_TOKEN".into() };
+        let auth = ApiAuthKind::Bearer {
+            env_key: "JIRA_TOKEN".into(),
+        };
         let out = resolve_auth(&auth, &env).unwrap();
         assert_eq!(out.bearer.as_deref(), Some("tok-123"));
     }
@@ -1728,9 +1883,14 @@ mod tests {
         // Misconfigured env must surface a clear error, not silently send
         // an unauthenticated request.
         let env = HashMap::new();
-        let auth = ApiAuthKind::Bearer { env_key: "MISSING".into() };
+        let auth = ApiAuthKind::Bearer {
+            env_key: "MISSING".into(),
+        };
         let err = resolve_auth(&auth, &env).unwrap_err();
-        assert!(err.contains("MISSING"), "error hint should name the key: {err}");
+        assert!(
+            err.contains("MISSING"),
+            "error hint should name the key: {err}"
+        );
     }
 
     #[test]
@@ -1743,24 +1903,39 @@ mod tests {
         // every BasicApiKey-using plugin in production.
         let mut env = HashMap::new();
         env.insert("SPEEDCURVE_API_KEY".into(), "sc-abc-xyz".into());
-        let auth = ApiAuthKind::BasicApiKey { env_key: "SPEEDCURVE_API_KEY".into() };
+        let auth = ApiAuthKind::BasicApiKey {
+            env_key: "SPEEDCURVE_API_KEY".into(),
+        };
         let out = resolve_auth(&auth, &env).unwrap();
         assert!(out.bearer.is_none(), "BasicApiKey must not populate bearer");
-        let header = out.headers.get("Authorization")
+        let header = out
+            .headers
+            .get("Authorization")
             .expect("Authorization header must be set");
-        assert!(header.starts_with("Basic "), "header must use the Basic scheme: {header}");
+        assert!(
+            header.starts_with("Basic "),
+            "header must use the Basic scheme: {header}"
+        );
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         let b64 = header.trim_start_matches("Basic ");
         let decoded = String::from_utf8(STANDARD.decode(b64).unwrap()).unwrap();
-        assert_eq!(decoded, "sc-abc-xyz:", "must encode `KEY:` with the trailing colon (empty password half)");
+        assert_eq!(
+            decoded, "sc-abc-xyz:",
+            "must encode `KEY:` with the trailing colon (empty password half)"
+        );
     }
 
     #[test]
     fn resolve_auth_basic_apikey_missing_env_errors_with_actionable_message() {
         let env = HashMap::new();
-        let auth = ApiAuthKind::BasicApiKey { env_key: "SPEEDCURVE_API_KEY".into() };
+        let auth = ApiAuthKind::BasicApiKey {
+            env_key: "SPEEDCURVE_API_KEY".into(),
+        };
         let err = resolve_auth(&auth, &env).unwrap_err();
-        assert!(err.contains("SPEEDCURVE_API_KEY"), "error must name the missing key: {err}");
+        assert!(
+            err.contains("SPEEDCURVE_API_KEY"),
+            "error must name the missing key: {err}"
+        );
     }
 
     #[test]
@@ -1782,7 +1957,10 @@ mod tests {
         };
         let out = resolve_auth(&auth, &env).unwrap();
         assert_eq!(out.bearer.as_deref(), Some("resolved-oauth-bearer"));
-        assert_eq!(out.headers.get("x-api-key"), Some(&"client-abc".to_string()));
+        assert_eq!(
+            out.headers.get("x-api-key"),
+            Some(&"client-abc".to_string())
+        );
     }
 
     #[test]
@@ -1799,7 +1977,10 @@ mod tests {
             extra_headers: vec![],
         };
         let err = resolve_auth(&auth, &env).unwrap_err();
-        assert!(err.contains("invalid_client"), "error should carry token reason: {err}");
+        assert!(
+            err.contains("invalid_client"),
+            "error should carry token reason: {err}"
+        );
     }
 
     // ─── build_url ──────────────────────────────────────────────────
@@ -1826,7 +2007,13 @@ mod tests {
         auth.insert("apikey".into(), "cb-123".into());
         let mut step_q = HashMap::new();
         step_q.insert("host".into(), "euronews.com".into());
-        let url = build_url("https://api.chartbeat.com/", "/live/toppages/v4", &auth, &step_q).unwrap();
+        let url = build_url(
+            "https://api.chartbeat.com/",
+            "/live/toppages/v4",
+            &auth,
+            &step_q,
+        )
+        .unwrap();
         let q = url.query().unwrap();
         assert!(q.contains("apikey=cb-123"));
         assert!(q.contains("host=euronews.com"));
@@ -1834,7 +2021,13 @@ mod tests {
 
     #[test]
     fn build_url_normalizes_trailing_slash() {
-        let url = build_url("https://api.example/", "search", &HashMap::new(), &HashMap::new()).unwrap();
+        let url = build_url(
+            "https://api.example/",
+            "search",
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+        .unwrap();
         assert_eq!(url.path(), "/search");
     }
 
@@ -1846,11 +2039,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("owner".to_string(), "anthropics".to_string());
         params.insert("repo".to_string(), "anthropic-cookbook".to_string());
-        let out = resolve_path_params(
-            "/repos/{owner}/{repo}/issues",
-            &Some(params),
-            &ctx,
-        ).unwrap();
+        let out = resolve_path_params("/repos/{owner}/{repo}/issues", &Some(params), &ctx).unwrap();
         assert_eq!(out, "/repos/anthropics/anthropic-cookbook/issues");
     }
 
@@ -1861,11 +2050,7 @@ mod tests {
         let ctx = TemplateContext::new();
         let mut params = HashMap::new();
         params.insert("owner".to_string(), "x".to_string());
-        let out = resolve_path_params(
-            "/repos/{owner}/{repo}",
-            &Some(params),
-            &ctx,
-        ).unwrap();
+        let out = resolve_path_params("/repos/{owner}/{repo}", &Some(params), &ctx).unwrap();
         assert_eq!(out, "/repos/x/{repo}");
     }
 
@@ -1935,11 +2120,7 @@ mod tests {
         let ctx = TemplateContext::new();
         let mut params = HashMap::new();
         params.insert("steps".to_string(), "evil".to_string());
-        let out = resolve_path_params(
-            "/items/{{steps.X.data}}/sub",
-            &Some(params),
-            &ctx,
-        ).unwrap();
+        let out = resolve_path_params("/items/{{steps.X.data}}/sub", &Some(params), &ctx).unwrap();
         // The template var is preserved verbatim — TemplateContext will
         // expand it (or leave it) at the next layer.
         assert_eq!(out, "/items/{{steps.X.data}}/sub");
@@ -1952,11 +2133,7 @@ mod tests {
         let ctx = TemplateContext::new();
         let mut params = HashMap::new();
         params.insert("repo".to_string(), "name with spaces/sub".to_string());
-        let out = resolve_path_params(
-            "/repos/x/{repo}",
-            &Some(params),
-            &ctx,
-        ).unwrap();
+        let out = resolve_path_params("/repos/x/{repo}", &Some(params), &ctx).unwrap();
         assert_eq!(out, "/repos/x/name%20with%20spaces%2Fsub");
     }
 
@@ -1981,7 +2158,10 @@ mod tests {
         // Literal accented segments untouched; the value is percent-encoded.
         assert_eq!(out, "/articles/caché/caf%C3%A9-%C3%A9/résumé");
         assert!(out.contains("caché"), "literal accents must survive: {out}");
-        assert!(out.contains("résumé"), "trailing literal accents must survive: {out}");
+        assert!(
+            out.contains("résumé"),
+            "trailing literal accents must survive: {out}"
+        );
     }
 
     // ─── execute_api_call_step_core (HTTP wiremock) ─────────────────
@@ -2001,7 +2181,10 @@ mod tests {
 
         let plugin = mk_plugin(
             &server.uri(),
-            ApiAuthKind::ApiKeyQuery { param_name: "apikey".into(), env_key: "K".into() },
+            ApiAuthKind::ApiKeyQuery {
+                param_name: "apikey".into(),
+                env_key: "K".into(),
+            },
             vec![mk_endpoint("GET", "/search")],
         );
         let mut env = HashMap::new();
@@ -2014,7 +2197,14 @@ mod tests {
             fail_on_empty: false,
         });
 
-        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Success);
 
         let envelope = extract_envelope(&outcome.result.output);
@@ -2045,14 +2235,21 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"caught": "GET"}})))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"data": {"caught": "GET"}})),
+            )
             .mount(&server)
             .await;
 
         let plugin = mk_plugin(
             &server.uri(),
-            ApiAuthKind::Bearer { env_key: "SECRETKEY".into() },
-            vec![mk_endpoint("GET", "/v1/decks/:id"), mk_endpoint("PATCH", "/v1/decks/:id")],
+            ApiAuthKind::Bearer {
+                env_key: "SECRETKEY".into(),
+            },
+            vec![
+                mk_endpoint("GET", "/v1/decks/:id"),
+                mk_endpoint("PATCH", "/v1/decks/:id"),
+            ],
         );
         let mut env = HashMap::new();
         env.insert("SECRETKEY".into(), "sk-test".into());
@@ -2061,13 +2258,26 @@ mod tests {
         step.api_method = Some("PATCH".into());
         step.api_body = Some(json!({"title": "NEW"}));
 
-        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "output: {}", outcome.result.output);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "output: {}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
         // envelope.data = the full mock response body, which itself nests
         // its payload under "data" — hence the double hop.
         assert_eq!(
-            envelope["data"]["data"]["ok"], json!(true),
+            envelope["data"]["data"]["ok"],
+            json!(true),
             "the wire request must be PATCH with the JSON body — envelope: {envelope}"
         );
     }
@@ -2095,12 +2305,19 @@ mod tests {
         let env = HashMap::new();
         let step = mk_step("/ua-check");
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &env,
+            &step,
+            &plugin,
+            &env,
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "expected Kronn/X.Y.Z User-Agent, got: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "expected Kronn/X.Y.Z User-Agent, got: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2115,16 +2332,29 @@ mod tests {
 
         let plugin = mk_plugin(
             &server.uri(),
-            ApiAuthKind::Bearer { env_key: "T".into() },
+            ApiAuthKind::Bearer {
+                env_key: "T".into(),
+            },
             vec![mk_endpoint("GET", "/me")],
         );
         let mut env = HashMap::new();
         env.insert("T".into(), "real-token".into());
 
         let step = mk_step("/me");
-        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "bearer auth failed: {}", outcome.result.output);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "bearer auth failed: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2139,7 +2369,9 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/myself"))
             .and(header("Authorization", "Basic dXNlckB4LmlvOnQwazNu"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "displayName": "Test" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "displayName": "Test" })),
+            )
             .mount(&server)
             .await;
         let plugin = mk_plugin(
@@ -2154,9 +2386,20 @@ mod tests {
         env.insert("JIRA_USERNAME".into(), "user@x.io".into());
         env.insert("JIRA_API_TOKEN".into(), "t0k3n".into());
         let step = mk_step("/myself");
-        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "Basic auth failed: {}", outcome.result.output);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "Basic auth failed: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2179,9 +2422,20 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("JIRA_URL".into(), server.uri());
         let step = mk_step("/rest/api/3/myself");
-        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "templated base_url failed: {}", outcome.result.output);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "templated base_url failed: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2196,12 +2450,25 @@ mod tests {
         );
         let env: HashMap<String, String> = HashMap::new();
         let step = mk_step("/me");
-        let outcome = execute_api_call_step_core(&step, &plugin, &env, &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
-        assert!(outcome.result.output.contains("JIRA_URL"),
-            "error must name the missing key: {}", outcome.result.output);
-        assert!(outcome.result.output.contains("Settings"),
-            "error must point to Settings → APIs: {}", outcome.result.output);
+        assert!(
+            outcome.result.output.contains("JIRA_URL"),
+            "error must name the missing key: {}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("Settings"),
+            "error must point to Settings → APIs: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2220,12 +2487,25 @@ mod tests {
             vec![mk_endpoint("GET", "/nope")],
         );
         let step = mk_step("/nope");
-        let outcome = execute_api_call_step_core(&step, &plugin, &HashMap::new(), &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
-        assert!(outcome.result.output.contains("403"),
-            "expected 403 in output: {}", outcome.result.output);
-        assert!(outcome.result.output.contains("Forbidden"),
-            "expected body excerpt: {}", outcome.result.output);
+        assert!(
+            outcome.result.output.contains("403"),
+            "expected 403 in output: {}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("Forbidden"),
+            "expected body excerpt: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2250,9 +2530,20 @@ mod tests {
             vec![mk_endpoint("GET", "/flaky")],
         );
         let step = mk_step("/flaky");
-        let outcome = execute_api_call_step_core(&step, &plugin, &HashMap::new(), &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "retry path failed: {}", outcome.result.output);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "retry path failed: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2274,11 +2565,13 @@ mod tests {
             &HashMap::new(),
             &TemplateContext::new(),
             SecurityPolicy::production(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
         assert!(
             outcome.result.output.to_lowercase().contains("security"),
-            "expected security-tagged failure, got: {}", outcome.result.output,
+            "expected security-tagged failure, got: {}",
+            outcome.result.output,
         );
     }
 
@@ -2305,9 +2598,20 @@ mod tests {
         let mut ctx = TemplateContext::new();
         ctx.set("project_key", "KR-42");
 
-        let outcome = execute_api_call_step_core(&step, &plugin, &HashMap::new(), &ctx, SecurityPolicy::allow_loopback_for_tests()).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "template render path failed: {}", outcome.result.output);
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &ctx,
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "template render path failed: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -2331,7 +2635,14 @@ mod tests {
             fail_on_empty: true,
         });
 
-        let outcome = execute_api_call_step_core(&step, &plugin, &HashMap::new(), &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
         // Success at HTTP level, NO_RESULTS at business level — fires
         // Skip/Stop conditions downstream without marking the step Failed.
         assert_eq!(outcome.result.status, RunStatus::Success);
@@ -2399,9 +2710,14 @@ mod tests {
             &HashMap::new(),
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "offset walk failed: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "offset walk failed: {}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
         // All 5 keys merged from the 3 pages — the user's
         // `$.issues[*].key` extract sees the concatenated array.
@@ -2419,7 +2735,10 @@ mod tests {
         // Last page: no rel="next" at all.
         assert_eq!(parse_link_next(r#"<https://x/?page=1>; rel="first""#), None);
         // Unquoted rel param (RFC-legal) + garbage segments are tolerated.
-        assert_eq!(parse_link_next("garbage, <https://x/?page=2>; rel=next").as_deref(), Some("https://x/?page=2"));
+        assert_eq!(
+            parse_link_next("garbage, <https://x/?page=2>; rel=next").as_deref(),
+            Some("https://x/?page=2")
+        );
         assert_eq!(parse_link_next(""), None);
     }
 
@@ -2433,18 +2752,22 @@ mod tests {
             .and(path("/reviews"))
             .and(query_param("per_page", "2"))
             .and(wiremock::matchers::query_param_is_missing("page"))
-            .respond_with(ResponseTemplate::new(200)
-                .insert_header("Link", next1.as_str())
-                .set_body_json(json!([{ "id": 1 }, { "id": 2 }])))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Link", next1.as_str())
+                    .set_body_json(json!([{ "id": 1 }, { "id": 2 }])),
+            )
             .mount(&server)
             .await;
         let next2 = format!("<{}/reviews?page=3&per_page=2>; rel=\"next\"", server.uri());
         Mock::given(method("GET"))
             .and(path("/reviews"))
             .and(query_param("page", "2"))
-            .respond_with(ResponseTemplate::new(200)
-                .insert_header("Link", next2.as_str())
-                .set_body_json(json!([{ "id": 3 }, { "id": 4 }])))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Link", next2.as_str())
+                    .set_body_json(json!([{ "id": 3 }, { "id": 4 }])),
+            )
             .mount(&server)
             .await;
         // Terminal page: NO Link header at all.
@@ -2455,7 +2778,11 @@ mod tests {
             .mount(&server)
             .await;
 
-        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/reviews")]);
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/reviews")],
+        );
         let mut step = mk_step("/reviews");
         step.api_pagination = Some(PaginationSpec::LinkHeader {
             page_size_param: Some("per_page".into()),
@@ -2469,14 +2796,25 @@ mod tests {
         });
 
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "link-header walk failed: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "link-header walk failed: {}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
-        assert_eq!(envelope["data"], json!([1, 2, 3, 4, 5]),
-            "all three bare-array pages merged in order");
+        assert_eq!(
+            envelope["data"],
+            json!([1, 2, 3, 4, 5]),
+            "all three bare-array pages merged in order"
+        );
         assert!(!outcome.result.output.contains("PAGINATION_TRUNCATED"));
     }
 
@@ -2487,30 +2825,55 @@ mod tests {
         // re-sends the plugin's auth, so following would leak credentials.
         let api = MockServer::start().await;
         let attacker = MockServer::start().await;
-        Mock::given(method("GET")).and(path("/steal"))
+        Mock::given(method("GET"))
+            .and(path("/steal"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
             .expect(0) // the whole point: zero requests reach the attacker
-            .mount(&attacker).await;
+            .mount(&attacker)
+            .await;
         let evil_next = format!("<{}/steal?page=2>; rel=\"next\"", attacker.uri());
-        Mock::given(method("GET")).and(path("/items"))
-            .respond_with(ResponseTemplate::new(200)
-                .insert_header("Link", evil_next.as_str())
-                .set_body_json(json!([{ "id": 1 }])))
+        Mock::given(method("GET"))
+            .and(path("/items"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Link", evil_next.as_str())
+                    .set_body_json(json!([{ "id": 1 }])),
+            )
             .expect(1)
-            .mount(&api).await;
+            .mount(&api)
+            .await;
 
-        let plugin = mk_plugin(&api.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/items")]);
+        let plugin = mk_plugin(
+            &api.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/items")],
+        );
         let mut step = mk_step("/items");
         step.api_pagination = Some(PaginationSpec::LinkHeader {
-            page_size_param: None, page_size: None, max_pages: Some(10),
+            page_size_param: None,
+            page_size: None,
+            max_pages: Some(10),
         });
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "{}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
-        assert_eq!(envelope["data"], json!([{ "id": 1 }]), "page 1 kept, walk stopped at the boundary");
+        assert_eq!(
+            envelope["data"],
+            json!([{ "id": 1 }]),
+            "page 1 kept, walk stopped at the boundary"
+        );
         // MockServer::expect(0) on the attacker asserts on drop.
     }
 
@@ -2529,38 +2892,71 @@ mod tests {
         let next = format!("<{}/loop?page=2>; rel=\"next\"", server.uri());
         Mock::given(method("GET"))
             .and(path("/loop"))
-            .respond_with(ResponseTemplate::new(200)
-                .insert_header("Link", next.as_str())
-                .set_body_json(json!([{ "id": 9 }])))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Link", next.as_str())
+                    .set_body_json(json!([{ "id": 9 }])),
+            )
             .mount(&server)
             .await;
 
-        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None,
-            vec![mk_endpoint("GET", "/single"), mk_endpoint("GET", "/loop")]);
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/single"), mk_endpoint("GET", "/loop")],
+        );
 
         let mut step = mk_step("/single");
         step.api_pagination = Some(PaginationSpec::LinkHeader {
-            page_size_param: None, page_size: None, max_pages: Some(10),
+            page_size_param: None,
+            page_size: None,
+            max_pages: Some(10),
         });
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "{}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
-        assert_eq!(envelope["data"], json!([{ "id": 1 }]), "bare array preserved as-is");
+        assert_eq!(
+            envelope["data"],
+            json!([{ "id": 1 }]),
+            "bare array preserved as-is"
+        );
 
         let mut step = mk_step("/loop");
         step.api_pagination = Some(PaginationSpec::LinkHeader {
-            page_size_param: None, page_size: None, max_pages: Some(3),
+            page_size_param: None,
+            page_size: None,
+            max_pages: Some(3),
         });
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "{}", outcome.result.output);
-        assert!(outcome.result.output.contains("PAGINATION_TRUNCATED"),
-            "cap hit with a next still advertised must surface the truncation signal");
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "{}",
+            outcome.result.output
+        );
+        assert!(
+            outcome.result.output.contains("PAGINATION_TRUNCATED"),
+            "cap hit with a next still advertised must surface the truncation signal"
+        );
     }
 
     #[tokio::test]
@@ -2614,9 +3010,14 @@ mod tests {
             &HashMap::new(),
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "cursor walk failed: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "cursor walk failed: {}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
         assert_eq!(envelope["data"], json!([1, 2, 3]));
     }
@@ -2671,9 +3072,14 @@ mod tests {
             &HashMap::new(),
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success,
-            "page walk failed: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "page walk failed: {}",
+            outcome.result.output
+        );
         let envelope = extract_envelope(&outcome.result.output);
         assert_eq!(envelope["data"], json!([1, 2, 3]));
     }
@@ -2717,7 +3123,8 @@ mod tests {
             &HashMap::new(),
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Success);
         let envelope = extract_envelope(&outcome.result.output);
         // Cap = 3 pages → 3 items merged. Without the cap this would
@@ -2727,7 +3134,10 @@ mod tests {
         // partial, and the step must say so (branchable signal), not return
         // a silently-truncated payload that looks complete.
         assert!(
-            outcome.result.output.contains("[SIGNAL: PAGINATION_TRUNCATED]"),
+            outcome
+                .result
+                .output
+                .contains("[SIGNAL: PAGINATION_TRUNCATED]"),
             "hitting max_pages with more pages must emit PAGINATION_TRUNCATED; got:\n{}",
             outcome.result.output
         );
@@ -2781,7 +3191,8 @@ mod tests {
             &HashMap::new(),
             &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Success);
         let envelope = extract_envelope(&outcome.result.output);
         // Single match unwraps to the scalar — see `apply_extract` size-1
@@ -2805,7 +3216,14 @@ mod tests {
             vec![mk_endpoint("GET", "/raw")],
         );
         let step = mk_step("/raw");
-        let outcome = execute_api_call_step_core(&step, &plugin, &HashMap::new(), &TemplateContext::new(), SecurityPolicy::allow_loopback_for_tests()).await;
+        let outcome = execute_api_call_step_core(
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
+            SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Success);
         let envelope = extract_envelope(&outcome.result.output);
         assert_eq!(envelope["data"], json!({ "a": 1, "b": [2, 3] }));
@@ -2855,12 +3273,20 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "x": 1 })))
             .mount(&server)
             .await;
-        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/ok")]);
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/ok")],
+        );
         let step = mk_step("/ok");
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Success);
         assert!(outcome.result.output.contains("[SIGNAL: OK]"));
     }
@@ -2873,13 +3299,21 @@ mod tests {
             .respond_with(ResponseTemplate::new(503).set_body_string("upstream down"))
             .mount(&server)
             .await;
-        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/boom")]);
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/boom")],
+        );
         let mut step = mk_step("/boom");
         step.api_max_retries = Some(0); // skip backoff in tests
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
         assert!(outcome.result.output.contains("[SIGNAL: ERROR]"));
         assert!(outcome.result.output.contains("[SIGNAL: http_503]"));
@@ -2895,7 +3329,11 @@ mod tests {
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
-        let plugin = mk_plugin(&server.uri(), ApiAuthKind::None, vec![mk_endpoint("GET", "/locked")]);
+        let plugin = mk_plugin(
+            &server.uri(),
+            ApiAuthKind::None,
+            vec![mk_endpoint("GET", "/locked")],
+        );
         let mut step = mk_step("/locked");
         step.api_max_retries = Some(0);
         step.on_result = vec![StepConditionRule {
@@ -2906,18 +3344,28 @@ mod tests {
             },
         }];
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &HashMap::new(), &TemplateContext::new(),
+            &step,
+            &plugin,
+            &HashMap::new(),
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
         match outcome.condition_action {
-            Some(ConditionAction::Goto { step_name, max_iterations }) => {
+            Some(ConditionAction::Goto {
+                step_name,
+                max_iterations,
+            }) => {
                 assert_eq!(step_name, "refresh_auth");
                 assert_eq!(max_iterations, Some(2));
             }
             other => panic!("expected Goto on http_401, got {:?}", other),
         }
-        assert_eq!(outcome.result.condition_result.as_deref(), Some("Goto:refresh_auth"));
+        assert_eq!(
+            outcome.result.condition_result.as_deref(),
+            Some("Goto:refresh_auth")
+        );
     }
 
     // ─── ${ENV.X} substitution helpers (0.8.6) ──────────────────────
@@ -3032,10 +3480,19 @@ mod tests {
 
         let step = mk_step("/properties");
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &env, &TemplateContext::new(),
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "got: {}",
+            outcome.result.output
+        );
         assert!(outcome.result.output.contains("prop-1"));
     }
 
@@ -3060,10 +3517,19 @@ mod tests {
 
         let step = mk_step("/data");
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &env, &TemplateContext::new(),
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "got: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -3087,10 +3553,19 @@ mod tests {
 
         let step = mk_step("/items");
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &env, &TemplateContext::new(),
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
-        assert_eq!(outcome.result.status, RunStatus::Success, "got: {}", outcome.result.output);
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            RunStatus::Success,
+            "got: {}",
+            outcome.result.output
+        );
     }
 
     #[tokio::test]
@@ -3103,13 +3578,20 @@ mod tests {
         let plugin = mk_plugin(&server.uri(), auth, vec![mk_endpoint("GET", "/x")]);
 
         let mut env = HashMap::new();
-        env.insert("__token_error__".into(), "JSONPath `$.access_token` miss".into());
+        env.insert(
+            "__token_error__".into(),
+            "JSONPath `$.access_token` miss".into(),
+        );
 
         let step = mk_step("/x");
         let outcome = execute_api_call_step_core(
-            &step, &plugin, &env, &TemplateContext::new(),
+            &step,
+            &plugin,
+            &env,
+            &TemplateContext::new(),
             SecurityPolicy::allow_loopback_for_tests(),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
         assert!(
             outcome.result.output.contains("JSONPath"),
@@ -3128,7 +3610,8 @@ mod tests {
 
     #[test]
     fn extract_http_status_parses_error_envelope() {
-        let output = "HTTP 503 on POST /widgets — service unavailable\n[SIGNAL: ERROR]\n[SIGNAL: http_503]";
+        let output =
+            "HTTP 503 on POST /widgets — service unavailable\n[SIGNAL: ERROR]\n[SIGNAL: http_503]";
         assert_eq!(extract_http_status_from_output(output), Some(503));
     }
 
@@ -3212,13 +3695,18 @@ mod tests {
             &TemplateContext::new(),
             SecurityPolicy::production(),
             ApiCallLogContext::workflow_for_run("run-001"),
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.result.status, RunStatus::Failed);
         // Verify a row was persisted with source=workflow + run_id.
-        let rows = state.db.with_conn(|conn| {
-            crate::db::api_call_logs::list(conn, Default::default())
-                .map_err(|e| anyhow::anyhow!("list: {e}"))
-        }).await.unwrap();
+        let rows = state
+            .db
+            .with_conn(|conn| {
+                crate::db::api_call_logs::list(conn, Default::default())
+                    .map_err(|e| anyhow::anyhow!("list: {e}"))
+            })
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1, "expected exactly 1 audit row");
         assert_eq!(rows[0].source, "workflow");
         assert_eq!(rows[0].run_id.as_deref(), Some("run-001"));
@@ -3236,11 +3724,16 @@ mod tests {
             &TemplateContext::new(),
             SecurityPolicy::production(),
             ApiCallLogContext::manual_test(),
-        ).await;
-        let rows = state.db.with_conn(|conn| {
-            crate::db::api_call_logs::list(conn, Default::default())
-                .map_err(|e| anyhow::anyhow!("list: {e}"))
-        }).await.unwrap();
+        )
+        .await;
+        let rows = state
+            .db
+            .with_conn(|conn| {
+                crate::db::api_call_logs::list(conn, Default::default())
+                    .map_err(|e| anyhow::anyhow!("list: {e}"))
+            })
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "manual_test");
         // run_id stays None for manual_test path.
@@ -3259,11 +3752,16 @@ mod tests {
             &state,
             &TemplateContext::new(),
             SecurityPolicy::production(),
-        ).await;
-        let rows = state.db.with_conn(|conn| {
-            crate::db::api_call_logs::list(conn, Default::default())
-                .map_err(|e| anyhow::anyhow!("list: {e}"))
-        }).await.unwrap();
+        )
+        .await;
+        let rows = state
+            .db
+            .with_conn(|conn| {
+                crate::db::api_call_logs::list(conn, Default::default())
+                    .map_err(|e| anyhow::anyhow!("list: {e}"))
+            })
+            .await
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "workflow");
         assert!(rows[0].run_id.is_none());
@@ -3285,7 +3783,11 @@ mod tests {
         let out = render_json_value(&body, &ctx).unwrap();
         assert_eq!(out["event"], "APPROVE");
         assert_eq!(out["body"], "LGTM");
-        assert!(out["comments"].is_array(), "nested array must inject as real JSON, got: {}", out["comments"]);
+        assert!(
+            out["comments"].is_array(),
+            "nested array must inject as real JSON, got: {}",
+            out["comments"]
+        );
         assert_eq!(out["comments"][0]["line"], 4);
         assert_eq!(out["comments"][0]["path"], "a.rs");
     }

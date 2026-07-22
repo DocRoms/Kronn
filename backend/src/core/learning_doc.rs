@@ -1,4 +1,4 @@
-//! 0.9.0 — Continual Learning doc-wiring (PR4c, spec §0).
+//! 0.10.0 — Continual Learning doc-wiring (PR4c, spec §0).
 //!
 //! Maintains a `<!-- kronn:section name="learnings" curated="ai" -->` block in
 //! `docs/AGENTS.md` that POINTS at `docs/learnings.md` — so agents reading the

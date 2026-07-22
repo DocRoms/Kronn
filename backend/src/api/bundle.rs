@@ -133,9 +133,12 @@ pub async fn create_bundle(
     // ref-capable field names, and future-proof against new fields.
     let workflow_value = match serde_json::to_value(&req.workflow) {
         Ok(v) => v,
-        Err(e) => return Json(ApiResponse::err(format!(
-            "Workflow payload is not valid JSON: {}", e
-        ))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "Workflow payload is not valid JSON: {}",
+                e
+            )))
+        }
     };
     let mut missing_refs: Vec<String> = Vec::new();
     collect_bundle_refs(&workflow_value, &mut |bid| {
@@ -167,9 +170,12 @@ pub async fn create_bundle(
     substitute_bundle_refs(&mut substituted, &id_map);
     let workflow_req: CreateWorkflowRequest = match serde_json::from_value(substituted) {
         Ok(w) => w,
-        Err(e) => return Json(ApiResponse::err(format!(
-            "Workflow shape broke after @bundle: substitution: {}", e
-        ))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "Workflow shape broke after @bundle: substitution: {}",
+                e
+            )))
+        }
     };
 
     // Replace the request's workflow with the substituted one (so the
@@ -269,22 +275,31 @@ pub async fn create_bundle(
         let real_id = id_map[&cw.bundle_id].clone();
         let mut cv = match serde_json::to_value(&cw.request) {
             Ok(v) => v,
-            Err(e) => return Json(ApiResponse::err(format!(
-                "Child workflow `{}` is not valid JSON: {}", cw.bundle_id, e
-            ))),
+            Err(e) => {
+                return Json(ApiResponse::err(format!(
+                    "Child workflow `{}` is not valid JSON: {}",
+                    cw.bundle_id, e
+                )))
+            }
         };
         substitute_bundle_refs(&mut cv, &id_map);
         let creq: CreateWorkflowRequest = match serde_json::from_value(cv) {
             Ok(w) => w,
-            Err(e) => return Json(ApiResponse::err(format!(
-                "Child workflow `{}` shape broke after @bundle: substitution: {}", cw.bundle_id, e
-            ))),
+            Err(e) => {
+                return Json(ApiResponse::err(format!(
+                    "Child workflow `{}` shape broke after @bundle: substitution: {}",
+                    cw.bundle_id, e
+                )))
+            }
         };
         prepared_children.push(Workflow {
             pinned: false,
             id: real_id,
             name: creq.name.clone(),
-            project_id: creq.project_id.clone().or_else(|| parent_project_id.clone()),
+            project_id: creq
+                .project_id
+                .clone()
+                .or_else(|| parent_project_id.clone()),
             trigger: creq.trigger.clone(),
             steps: creq.steps.clone(),
             actions: creq.actions.clone(),
@@ -312,8 +327,15 @@ pub async fn create_bundle(
     // child workflows in play it MUST run. Build the graph from existing
     // DB workflows overlaid with the bundle's children (by their pre-
     // allocated real ids), then validate from the parent.
-    if wf_to_insert.steps.iter().any(|s| matches!(s.step_type, StepType::SubWorkflow))
-        || prepared_children.iter().any(|c| c.steps.iter().any(|s| matches!(s.step_type, StepType::SubWorkflow)))
+    if wf_to_insert
+        .steps
+        .iter()
+        .any(|s| matches!(s.step_type, StepType::SubWorkflow))
+        || prepared_children.iter().any(|c| {
+            c.steps
+                .iter()
+                .any(|s| matches!(s.step_type, StepType::SubWorkflow))
+        })
     {
         let db_workflows = match state
             .db
@@ -321,47 +343,57 @@ pub async fn create_bundle(
             .await
         {
             Ok(all) => all,
-            Err(e) => return Json(ApiResponse::err(format!(
-                "DB error loading workflows for sub-workflow validation: {e}"
-            ))),
+            Err(e) => {
+                return Json(ApiResponse::err(format!(
+                    "DB error loading workflows for sub-workflow validation: {e}"
+                )))
+            }
         };
         let mut graph: std::collections::HashMap<String, Vec<WorkflowStep>> =
             db_workflows.into_iter().map(|w| (w.id, w.steps)).collect();
         for child in &prepared_children {
             graph.insert(child.id.clone(), child.steps.clone());
         }
-        if let Err(e) = crate::api::workflows::validate_sub_workflow_graph(
-            &wf_id,
-            &wf_to_insert.steps,
-            &graph,
-        ) {
+        if let Err(e) =
+            crate::api::workflows::validate_sub_workflow_graph(&wf_id, &wf_to_insert.steps, &graph)
+        {
             return Json(ApiResponse::err(e));
         }
     }
 
     // ── 5. Single transaction — atomic insert across all artifacts ─
-    let qps_for_response: Vec<BundleCreated> = req.quick_prompts.iter().zip(prepared_qps.iter())
+    let qps_for_response: Vec<BundleCreated> = req
+        .quick_prompts
+        .iter()
+        .zip(prepared_qps.iter())
         .map(|(declared, inserted)| BundleCreated {
             bundle_id: declared.bundle_id.clone(),
             id: inserted.id.clone(),
             name: inserted.name.clone(),
         })
         .collect();
-    let qas_for_response: Vec<BundleCreated> = req.quick_apis.iter().zip(prepared_qas.iter())
+    let qas_for_response: Vec<BundleCreated> = req
+        .quick_apis
+        .iter()
+        .zip(prepared_qas.iter())
         .map(|(declared, inserted)| BundleCreated {
             bundle_id: declared.bundle_id.clone(),
             id: inserted.id.clone(),
             name: inserted.name.clone(),
         })
         .collect();
-    let custom_apis_for_response: Vec<BundleCreated> = custom_servers.iter()
+    let custom_apis_for_response: Vec<BundleCreated> = custom_servers
+        .iter()
         .map(|(bundle_id, server, _)| BundleCreated {
             bundle_id: bundle_id.clone(),
             id: server.id.clone(),
             name: server.name.clone(),
         })
         .collect();
-    let children_for_response: Vec<BundleCreated> = req.child_workflows.iter().zip(prepared_children.iter())
+    let children_for_response: Vec<BundleCreated> = req
+        .child_workflows
+        .iter()
+        .zip(prepared_children.iter())
         .map(|(declared, inserted)| BundleCreated {
             bundle_id: declared.bundle_id.clone(),
             id: inserted.id.clone(),
@@ -400,7 +432,10 @@ pub async fn create_bundle(
         })
         .await;
     if let Err(e) = insert_result {
-        return Json(ApiResponse::err(format!("Bundle insert failed (rolled back): {}", e)));
+        return Json(ApiResponse::err(format!(
+            "Bundle insert failed (rolled back): {}",
+            e
+        )));
     }
 
     Json(ApiResponse::ok(BundleResponse {
@@ -419,7 +454,10 @@ pub async fn create_bundle(
 /// grammar as Quick Prompt variable names so the architect can pick
 /// a single naming convention.
 fn validate_bundle_id(id: &str) -> bool {
-    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 /// Walk a serde_json::Value tree, calling `cb` on every string value
@@ -531,7 +569,9 @@ mod tests {
         let id_map: HashMap<String, String> = vec![
             ("foo".into(), "uuid-real-1".into()),
             ("bar".into(), "custom-bar-12345678".into()),
-        ].into_iter().collect();
+        ]
+        .into_iter()
+        .collect();
         substitute_bundle_refs(&mut v, &id_map);
         assert_eq!(v["field_a"], "uuid-real-1");
         assert_eq!(v["field_b"], "not-a-ref");
@@ -573,10 +613,16 @@ mod tests {
         // collect
         let mut found = Vec::new();
         collect_bundle_refs(&v, &mut |bid| found.push(bid.to_string()));
-        assert_eq!(found, vec!["impl-verify"], "sub_workflow_id ref must be collected");
+        assert_eq!(
+            found,
+            vec!["impl-verify"],
+            "sub_workflow_id ref must be collected"
+        );
         // substitute
         let id_map: HashMap<String, String> =
-            vec![("impl-verify".to_string(), "real-child-uuid".to_string())].into_iter().collect();
+            vec![("impl-verify".to_string(), "real-child-uuid".to_string())]
+                .into_iter()
+                .collect();
         substitute_bundle_refs(&mut v, &id_map);
         assert_eq!(v["steps"][0]["sub_workflow_id"], "real-child-uuid");
     }
@@ -595,7 +641,9 @@ mod tests {
         // Only field_c is a real prefix match — but wait, it doesn't
         // start with `@bundle:`, it has the marker mid-string. We use
         // `strip_prefix`, not `contains`. So field_c also doesn't match.
-        assert!(found.is_empty(),
-            "prefix match must be strict (no plural, no mid-string), got: {found:?}");
+        assert!(
+            found.is_empty(),
+            "prefix match must be strict (no plural, no mid-string), got: {found:?}"
+        );
     }
 }

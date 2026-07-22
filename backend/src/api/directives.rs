@@ -20,13 +20,20 @@ pub async fn create(
     _state: State<AppState>,
     Json(req): Json<CreateDirectiveRequest>,
 ) -> Json<ApiResponse<Directive>> {
-    match directives::save_custom_directive(&req.name, &req.description, &req.icon, &req.category, &req.content, &req.conflicts) {
-        Ok(id) => {
-            match directives::get_directive(&id) {
-                Some(directive) => Json(ApiResponse::ok(directive)),
-                None => Json(ApiResponse::err("Directive created but could not be loaded")),
-            }
-        }
+    match directives::save_custom_directive(
+        &req.name,
+        &req.description,
+        &req.icon,
+        &req.category,
+        &req.content,
+        &req.conflicts,
+    ) {
+        Ok(id) => match directives::get_directive(&id) {
+            Some(directive) => Json(ApiResponse::ok(directive)),
+            None => Json(ApiResponse::err(
+                "Directive created but could not be loaded",
+            )),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -43,22 +50,26 @@ pub async fn update(
 
     let _ = directives::delete_custom_directive(&id);
 
-    match directives::save_custom_directive(&req.name, &req.description, &req.icon, &req.category, &req.content, &req.conflicts) {
-        Ok(new_id) => {
-            match directives::get_directive(&new_id) {
-                Some(directive) => Json(ApiResponse::ok(directive)),
-                None => Json(ApiResponse::err("Directive updated but could not be loaded")),
-            }
-        }
+    match directives::save_custom_directive(
+        &req.name,
+        &req.description,
+        &req.icon,
+        &req.category,
+        &req.content,
+        &req.conflicts,
+    ) {
+        Ok(new_id) => match directives::get_directive(&new_id) {
+            Some(directive) => Json(ApiResponse::ok(directive)),
+            None => Json(ApiResponse::err(
+                "Directive updated but could not be loaded",
+            )),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
 
 /// DELETE /api/directives/:id — delete a custom directive
-pub async fn delete(
-    Path(id): Path<String>,
-    _state: State<AppState>,
-) -> Json<ApiResponse<bool>> {
+pub async fn delete(Path(id): Path<String>, _state: State<AppState>) -> Json<ApiResponse<bool>> {
     match directives::delete_custom_directive(&id) {
         Ok(deleted) => Json(ApiResponse::ok(deleted)),
         Err(e) => Json(ApiResponse::err(e)),

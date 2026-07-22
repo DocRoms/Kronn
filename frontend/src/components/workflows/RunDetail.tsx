@@ -23,6 +23,51 @@ const STATUS_COLORS: Record<string, string> = {
   Interrupted: 'var(--kr-text-ghost)',
 };
 
+const RUN_RESUME_HISTORY_KEY = '__kronn.resume_history';
+
+export function runStatusTimeline(run: WorkflowRun): string[] {
+  const raw = run.state?.[RUN_RESUME_HISTORY_KEY];
+  if (!raw) return [run.status];
+  try {
+    const parsed = JSON.parse(raw) as {
+      events?: Array<{ status?: unknown }>;
+    };
+    const timeline = (parsed.events ?? [])
+      .map(event => event.status)
+      .filter((status): status is string => typeof status === 'string' && status.length > 0);
+    if (timeline[timeline.length - 1] !== run.status) timeline.push(run.status);
+    return timeline.length > 0 ? timeline : [run.status];
+  } catch {
+    return [run.status];
+  }
+}
+
+export function RunStatusTrail({
+  run,
+  timeline = runStatusTimeline(run),
+}: {
+  run: WorkflowRun;
+  timeline?: string[];
+}) {
+  const { t } = useT();
+  return (
+    <span className="wf-run-status-trail" data-testid="wf-run-status-trail">
+      {timeline.map((status, index) => (
+        <span className="wf-run-status-transition" key={`${status}:${index}`}>
+          {index > 0 && <ChevronRight className="wf-run-status-arrow" size={11} aria-hidden />}
+          <span
+            className="wf-run-status-chip"
+            data-status={status}
+            data-current={index === timeline.length - 1}
+          >
+            {status === 'StoppedByGuard' ? t('wf.guards.stoppedBy.title') : status}
+          </span>
+        </span>
+      ))}
+    </span>
+  );
+}
+
 export interface RunDetailProps {
   run: WorkflowRun;
   workflowSteps?: WorkflowStep[];
@@ -30,7 +75,7 @@ export interface RunDetailProps {
   /** Cancel a Running workflow run. Button is only rendered for Running status. */
   onCancel?: () => void;
   /** A2 — resume an Interrupted run. Button is only rendered for Interrupted
-   *  status; the top-level runs only (children resume through their parent). */
+   *  status; child callbacks delegate the resume to their parent run. */
   onResume?: () => void;
   /** 0.7.0 Phase 4 — submit a gate decision (approve / request_changes / reject). */
   onDecide?: (payload: DecideRunRequest) => Promise<void> | void;
@@ -683,6 +728,7 @@ function ProducedBranchesPanel({
 export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, onDecide, onNavigateToWorkflow, onNavigateToRun }: RunDetailProps) {
   const { t } = useT();
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
+  const statusTimeline = runStatusTimeline(run);
 
   const CONDITION_LABELS: Record<string, string> = {
     Stop: 'Stop',
@@ -717,9 +763,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             {t('wf.runStatusToReview')}
           </span>
         ) : (
-          <span className="font-semibold text-base" style={{ color: STATUS_COLORS[run.status] ?? 'var(--kr-text-faint)' }}>
-            {run.status === 'StoppedByGuard' ? t('wf.guards.stoppedBy.title') : run.status}
-          </span>
+          <RunStatusTrail run={run} timeline={statusTimeline} />
         )}
         <span className="text-xs text-muted flex-1">
           {new Date(run.started_at).toLocaleString()}
@@ -781,7 +825,7 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
             {t('wf.cancelRun')}
           </button>
         )}
-        {run.status === 'Interrupted' && !run.parent_run_id && run.run_type !== 'batch' && onResume && (
+        {run.status === 'Interrupted' && run.run_type !== 'batch' && onResume && (
           <button
             className="wf-run-cancel-btn"
             onClick={(e) => { e.stopPropagation(); onResume(); }}

@@ -114,7 +114,11 @@ pub fn build_feasibility_workflow(params: FeasibilityWorkflowParams) -> CreateWo
         // REPLACES the old `plan_review → Goto(triage)` file-relay loop (which
         // re-read everything from scratch each round). Cheaper + a real
         // back-and-forth. The deterministic plan_lint stays as a 0-token guard.
-        build_triage_step(agent.clone(), &ticket_ref, params.reviewer_agent.clone().unwrap_or(AgentType::Codex)),
+        build_triage_step(
+            agent.clone(),
+            &ticket_ref,
+            params.reviewer_agent.clone().unwrap_or(AgentType::Codex),
+        ),
         build_plan_lint_step(),
         build_gate_step(),
         // run-14 finding: capture the tests ALREADY red on the approved base
@@ -228,7 +232,11 @@ pub fn build_feasibility_child(
 ///    reconstructing the old `BLOCKED → Goto(triage)` across the boundary.
 ///    `sub_workflow_id` is filled by the endpoint after the child is created.
 fn build_feasibility_impl_step(decomposed: bool) -> WorkflowStep {
-    let mut s = blank_step("feasibility_impl", StepType::SubWorkflow, AgentType::ClaudeCode);
+    let mut s = blank_step(
+        "feasibility_impl",
+        StepType::SubWorkflow,
+        AgentType::ClaudeCode,
+    );
     if decomposed {
         // Phase 3b — fan-out: one child run per implementable sub-task of the
         // manifest. Triage writes `.kronn/tasks.json`; each iteration gets its
@@ -256,7 +264,10 @@ fn build_feasibility_impl_step(decomposed: bool) -> WorkflowStep {
 /// per-minute limit clear. A sustained account-wide exhaustion still fails
 /// (correctly), but transient blips no longer throw away an 800k-token run.
 fn agent_retry() -> Option<crate::models::workflows::RetryConfig> {
-    Some(crate::models::workflows::RetryConfig { max_retries: 2, backoff: "exponential".into() })
+    Some(crate::models::workflows::RetryConfig {
+        max_retries: 2,
+        backoff: "exponential".into(),
+    })
 }
 
 fn blank_agent_settings() -> AgentSettings {
@@ -394,7 +405,10 @@ fn build_triage_step(agent: AgentType, ticket_ref: &str, reviewer: AgentType) ->
     // « Deux cerveaux » (2026-06-12) — the PLAN must come from the strongest
     // reasoning tier; execution is then routed to cheap tiers per item.
     s.agent_settings = Some(AgentSettings {
-        model: None, tier: Some(ModelTier::Reasoning), reasoning_effort: None, max_tokens: None,
+        model: None,
+        tier: Some(ModelTier::Reasoning),
+        reasoning_effort: None,
+        max_tokens: None,
     });
     s.stall_timeout_secs = Some(900);
     s.retry = agent_retry();
@@ -426,9 +440,15 @@ fn build_triage_step(agent: AgentType, ticket_ref: &str, reviewer: AgentType) ->
 /// human gate can reference it via `{{steps.plan_lint.output}}`.
 fn build_plan_lint_step() -> WorkflowStep {
     let mut s = blank_step("plan_lint", StepType::Exec, AgentType::ClaudeCode);
-    s.description = Some("Deterministic plan-shape report (stats + outlier/overlap/deps warnings). 0 tokens.".into());
+    s.description = Some(
+        "Deterministic plan-shape report (stats + outlier/overlap/deps warnings). 0 tokens.".into(),
+    );
     s.exec_command = Some("bash".into());
-    s.exec_args = vec!["-c".into(), "cat .kronn/plan_lint.txt 2>/dev/null || echo 'no lint report (manifest derive missing?)'".into()];
+    s.exec_args = vec![
+        "-c".into(),
+        "cat .kronn/plan_lint.txt 2>/dev/null || echo 'no lint report (manifest derive missing?)'"
+            .into(),
+    ];
     s.exec_timeout_secs = Some(30);
     s
 }
@@ -519,7 +539,10 @@ fn build_implement_task_step(agent: AgentType, ticket_ref: &str) -> WorkflowStep
          The worktree already contains the previously completed tasks' code — build on it, don't redo it. End with a 2-3 line summary + `[SIGNAL: CONTINUE]`.",
     );
     let mut s = blank_step("implement", StepType::Agent, agent);
-    s.description = Some("Implement ONE manifest sub-task (read from .kronn/current_task.json — scoped context).".into());
+    s.description = Some(
+        "Implement ONE manifest sub-task (read from .kronn/current_task.json — scoped context)."
+            .into(),
+    );
     s.prompt_template = prompt;
     s.agent_settings = Some(blank_agent_settings());
     // run-14 finding: a hung re-implement sat ~20min before the stall fired.
@@ -648,7 +671,10 @@ fn build_item_tests_step() -> WorkflowStep {
     s.exec_timeout_secs = Some(600);
     s.on_result = vec![StepConditionRule {
         contains: "exit_2".into(),
-        action: ConditionAction::Goto { step_name: "implement".into(), max_iterations: Some(3) },
+        action: ConditionAction::Goto {
+            step_name: "implement".into(),
+            max_iterations: Some(3),
+        },
     }];
     s
 }
@@ -873,7 +899,10 @@ fn build_completeness_check_step() -> WorkflowStep {
     s.exec_timeout_secs = Some(120);
     s.on_result = vec![StepConditionRule {
         contains: "exit_3".into(),
-        action: ConditionAction::Goto { step_name: "implement".into(), max_iterations: Some(2) },
+        action: ConditionAction::Goto {
+            step_name: "implement".into(),
+            max_iterations: Some(2),
+        },
     }];
     s
 }
@@ -994,7 +1023,10 @@ mod tests {
     }
 
     fn decomposed_params() -> FeasibilityWorkflowParams {
-        FeasibilityWorkflowParams { decomposed: true, ..default_params() }
+        FeasibilityWorkflowParams {
+            decomposed: true,
+            ..default_params()
+        }
     }
 
     #[test]
@@ -1002,33 +1034,62 @@ mod tests {
         // Phase 3b — parent's SubWorkflow step iterates .kronn/tasks.json;
         // the child's implement reads ONLY its current_task slice.
         let parent = build_feasibility_workflow(decomposed_params());
-        let sw = parent.steps.iter().find(|s| s.name == "feasibility_impl").unwrap();
-        assert_eq!(sw.sub_workflow_foreach_file.as_deref(), Some(".kronn/tasks.json"));
+        let sw = parent
+            .steps
+            .iter()
+            .find(|s| s.name == "feasibility_impl")
+            .unwrap();
+        assert_eq!(
+            sw.sub_workflow_foreach_file.as_deref(),
+            Some(".kronn/tasks.json")
+        );
         // Baseline (monolith) has NO foreach — the A/B comparison hinge.
         let mono = build_feasibility_workflow(default_params());
-        let sw2 = mono.steps.iter().find(|s| s.name == "feasibility_impl").unwrap();
+        let sw2 = mono
+            .steps
+            .iter()
+            .find(|s| s.name == "feasibility_impl")
+            .unwrap();
         assert!(sw2.sub_workflow_foreach_file.is_none());
 
         let child = build_feasibility_child(
-            AgentType::ClaudeCode, "TEST-1", Some("proj".into()), "X", true,
+            AgentType::ClaudeCode,
+            "TEST-1",
+            Some("proj".into()),
+            "X",
+            true,
         );
         let imp = &child.steps[0];
-        assert!(imp.prompt_template.contains(".kronn/current_task.json"),
-            "per-task implement must read its slice");
+        assert!(
+            imp.prompt_template.contains(".kronn/current_task.json"),
+            "per-task implement must read its slice"
+        );
         // Shared-state contract (user decision 2026-06-12): always READ the
         // running deviations log; the full plan stays opt-in (scoped context).
-        assert!(imp.prompt_template.contains("decisions.md"),
-            "per-task implement must read the shared decisions log (current state)");
-        assert!(imp.prompt_template.contains("ONLY if your task references"),
-            "the full manifest must be referenced as OPT-IN, not loaded by default");
+        assert!(
+            imp.prompt_template.contains("decisions.md"),
+            "per-task implement must read the shared decisions log (current state)"
+        );
+        assert!(
+            imp.prompt_template.contains("ONLY if your task references"),
+            "the full manifest must be referenced as OPT-IN, not loaded by default"
+        );
         // Triage (both variants) writes ONLY the human manifest; the machine
         // files (tasks.json…) are engine-DERIVED from the validated envelope
         // (critical fix #1 — trust boundary).
-        assert!(parent.steps[1].prompt_template.contains("DERIVED automatically"));
-        assert!(parent.steps[1].prompt_template.contains("do NOT write them yourself"));
+        assert!(parent.steps[1]
+            .prompt_template
+            .contains("DERIVED automatically"));
+        assert!(parent.steps[1]
+            .prompt_template
+            .contains("do NOT write them yourself"));
         assert!(parent.steps[1].prompt_template.contains("depends_on"));
         // completeness_check is per-task aware (current_task.json branch).
-        let cc = child.steps.iter().find(|s| s.name == "completeness_check").unwrap();
+        let cc = child
+            .steps
+            .iter()
+            .find(|s| s.name == "completeness_check")
+            .unwrap();
         assert!(cc.exec_args.last().unwrap().contains("current_task.json"));
     }
 
@@ -1039,13 +1100,26 @@ mod tests {
         let names: Vec<&str> = wf.steps.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(
             names,
-            vec!["fetch_issue", "triage", "plan_lint", "review_triage", "test_baseline", "feasibility_impl", "run_tests", "drift_check", "pr_draft"]
+            vec![
+                "fetch_issue",
+                "triage",
+                "plan_lint",
+                "review_triage",
+                "test_baseline",
+                "feasibility_impl",
+                "run_tests",
+                "drift_check",
+                "pr_draft"
+            ]
         );
         // run_tests is a READ-ONLY integration verdict (no fix loop at the
         // parent — the per-task test→fix loop belongs in the child). It exits
         // 0 always and flows linearly to drift_check.
         let rt = wf.steps.iter().find(|s| s.name == "run_tests").unwrap();
-        assert!(rt.on_result.is_empty(), "run_tests must not branch — read-only verdict");
+        assert!(
+            rt.on_result.is_empty(),
+            "run_tests must not branch — read-only verdict"
+        );
         assert!(rt.exec_args.last().unwrap().trim_end().ends_with("exit 0"));
     }
 
@@ -1053,15 +1127,34 @@ mod tests {
     fn child_has_implement_test_drift_loop_no_gate() {
         let child = default_child();
         let names: Vec<&str> = child.steps.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["implement", "item_tests", "scope_check", "completeness_check", "commit"]);
+        assert_eq!(
+            names,
+            vec![
+                "implement",
+                "item_tests",
+                "scope_check",
+                "completeness_check",
+                "commit"
+            ]
+        );
         // `commit` is a deterministic Exec (git via bash subprocess) — last step.
         assert_eq!(child.steps.last().unwrap().step_type, StepType::Exec);
         // completeness_check loops back to implement on a missing marker (anti-skip).
-        let cc = child.steps.iter().find(|s| s.name == "completeness_check").unwrap();
-        let rule = cc.on_result.first().expect("completeness_check needs an exit_3 rule");
+        let cc = child
+            .steps
+            .iter()
+            .find(|s| s.name == "completeness_check")
+            .unwrap();
+        let rule = cc
+            .on_result
+            .first()
+            .expect("completeness_check needs an exit_3 rule");
         assert_eq!(rule.contains, "exit_3");
         match &rule.action {
-            ConditionAction::Goto { step_name, max_iterations } => {
+            ConditionAction::Goto {
+                step_name,
+                max_iterations,
+            } => {
                 assert_eq!(step_name, "implement");
                 assert_eq!(*max_iterations, Some(2));
             }
@@ -1069,7 +1162,10 @@ mod tests {
         }
         // No Gate inside a child (forbidden in a sub-workflow, validated server-side).
         assert!(!child.steps.iter().any(|s| s.step_type == StepType::Gate));
-        assert!(child.project_id.is_some(), "child inherits the parent project_id");
+        assert!(
+            child.project_id.is_some(),
+            "child inherits the parent project_id"
+        );
     }
 
     #[test]
@@ -1080,7 +1176,10 @@ mod tests {
         let wf = build_feasibility_workflow(default_params());
         let s = &wf.steps[0];
         assert_eq!(s.step_type, StepType::JsonData);
-        let payload = s.json_data_payload.as_ref().expect("JsonData step needs payload");
+        let payload = s
+            .json_data_payload
+            .as_ref()
+            .expect("JsonData step needs payload");
         assert_eq!(payload["key"].as_str(), Some("TEST-1"));
         assert_eq!(payload["body"].as_str(), Some("Body of the ticket"));
     }
@@ -1107,7 +1206,9 @@ mod tests {
         // to the agent.
         let wf = build_feasibility_workflow(default_params());
         assert!(
-            wf.steps[1].prompt_template.contains("{{steps.fetch_issue.data"),
+            wf.steps[1]
+                .prompt_template
+                .contains("{{steps.fetch_issue.data"),
             "triage prompt must reference fetch_issue data"
         );
     }
@@ -1126,7 +1227,9 @@ mod tests {
         // can't see the parent's {{steps.triage.data}} across the boundary.
         let wf = build_feasibility_workflow(default_params());
         assert!(
-            wf.steps[1].prompt_template.contains(".kronn/triage-manifest.md"),
+            wf.steps[1]
+                .prompt_template
+                .contains(".kronn/triage-manifest.md"),
             "triage must write the manifest to the shared file the child reads"
         );
     }
@@ -1136,12 +1239,22 @@ mod tests {
         // PR-C — the old `implement BLOCKED → Goto(triage)` is reconstructed
         // at the parent: a failed child run (SUBWF_FAILED) re-triages.
         let wf = build_feasibility_workflow(default_params());
-        let s = wf.steps.iter().find(|s| s.name == "feasibility_impl").unwrap();
+        let s = wf
+            .steps
+            .iter()
+            .find(|s| s.name == "feasibility_impl")
+            .unwrap();
         assert_eq!(s.step_type, StepType::SubWorkflow);
-        let rule = s.on_result.first().expect("feasibility_impl needs a SUBWF_FAILED rule");
+        let rule = s
+            .on_result
+            .first()
+            .expect("feasibility_impl needs a SUBWF_FAILED rule");
         assert_eq!(rule.contains, "SUBWF_FAILED");
         match &rule.action {
-            ConditionAction::Goto { step_name, max_iterations } => {
+            ConditionAction::Goto {
+                step_name,
+                max_iterations,
+            } => {
                 assert_eq!(step_name, "triage");
                 assert_eq!(*max_iterations, Some(3));
             }
@@ -1154,9 +1267,15 @@ mod tests {
         let child = default_child();
         let prompt = &child.steps[0].prompt_template;
         assert_eq!(child.steps[0].step_type, StepType::Agent);
-        assert!(prompt.contains(".kronn/triage-manifest.md"), "implement must read the manifest file");
+        assert!(
+            prompt.contains(".kronn/triage-manifest.md"),
+            "implement must read the manifest file"
+        );
         // Must NOT reach across the parent boundary (unresolvable in the child).
-        assert!(!prompt.contains("{{steps.triage.data"), "implement must not reference parent step data");
+        assert!(
+            !prompt.contains("{{steps.triage.data"),
+            "implement must not reference parent step data"
+        );
         // The linked_repos evidence-lift rule is preserved (anti-MOCKED regression).
         assert!(prompt.contains("evidence:"));
         assert!(prompt.contains("Linked repositories"));
@@ -1173,14 +1292,29 @@ mod tests {
         assert_eq!(s.name, "item_tests");
         assert_eq!(s.step_type, StepType::Exec);
         let script = s.exec_args.last().expect("bash needs a -c script");
-        assert!(script.contains("command -v php"), "php -l guarded by runtime presence");
-        assert!(script.contains("jest --findRelatedTests"), "JS tests scoped to the item's changed files");
-        assert!(script.contains("--filter"), "PHP scoped to the item's changed test classes");
-        assert!(script.contains("item-test-failures.txt"), "failures fed back to implement");
+        assert!(
+            script.contains("command -v php"),
+            "php -l guarded by runtime presence"
+        );
+        assert!(
+            script.contains("jest --findRelatedTests"),
+            "JS tests scoped to the item's changed files"
+        );
+        assert!(
+            script.contains("--filter"),
+            "PHP scoped to the item's changed test classes"
+        );
+        assert!(
+            script.contains("item-test-failures.txt"),
+            "failures fed back to implement"
+        );
         let rule = s.on_result.first().expect("item_tests needs exit_2 rule");
         assert_eq!(rule.contains, "exit_2");
         match &rule.action {
-            ConditionAction::Goto { step_name, max_iterations } => {
+            ConditionAction::Goto {
+                step_name,
+                max_iterations,
+            } => {
                 assert_eq!(step_name, "implement");
                 assert_eq!(*max_iterations, Some(3)); // "until green", bounded
             }
@@ -1193,7 +1327,11 @@ mod tests {
         // run-14 fix: a parent test_baseline step records pre-existing failures;
         // item_tests only loops on NET-NEW ones (ignores the repo's own debt).
         let wf = build_feasibility_workflow(default_params());
-        let base = wf.steps.iter().find(|s| s.name == "test_baseline").expect("parent has a test_baseline step");
+        let base = wf
+            .steps
+            .iter()
+            .find(|s| s.name == "test_baseline")
+            .expect("parent has a test_baseline step");
         assert_eq!(base.step_type, StepType::Exec);
         assert!(base.exec_args.last().unwrap().contains("known-failing.txt"));
         // test_baseline runs BEFORE the fan-out.
@@ -1203,7 +1341,10 @@ mod tests {
         let child = default_child();
         let it = child.steps.iter().find(|s| s.name == "item_tests").unwrap();
         let script = it.exec_args.last().unwrap();
-        assert!(script.contains("known-failing.txt"), "subtracts the pre-existing baseline");
+        assert!(
+            script.contains("known-failing.txt"),
+            "subtracts the pre-existing baseline"
+        );
         assert!(script.contains("NET-NEW"), "loops only on net-new failures");
     }
 
@@ -1215,21 +1356,57 @@ mod tests {
         let s = wf.steps.iter().find(|s| s.name == "run_tests").unwrap();
         let script = s.exec_args.last().unwrap();
         // JS: jest in-container, coverage gate ≠ test failure (run-10 fix)
-        assert!(script.contains("--coverage=false"), "coverage gate must not mask a real test pass/fail");
-        assert!(script.contains("lint/coverage gate"), "non-test exit with 0 failures classified as PASS");
-        assert!(script.contains("command -v yarn"), "yarn falls back to npm when absent");
+        assert!(
+            script.contains("--coverage=false"),
+            "coverage gate must not mask a real test pass/fail"
+        );
+        assert!(
+            script.contains("lint/coverage gate"),
+            "non-test exit with 0 failures classified as PASS"
+        );
+        assert!(
+            script.contains("command -v yarn"),
+            "yarn falls back to npm when absent"
+        );
         // PHP: project's dockerized php service, worktree-mounted (no local install)
-        assert!(script.contains("docker compose -f"), "PHP runs in the project's docker stack");
-        assert!(script.contains("vendor/bin/phpunit -c phpunit.xml.dist"), "PHP suite actually runs");
-        assert!(script.contains("hosttr"), "container→host path translation for bind mounts");
-        assert!(script.contains("no dockerized php stack"), "honest SKIP when no stack — never a false FAIL");
+        assert!(
+            script.contains("docker compose -f"),
+            "PHP runs in the project's docker stack"
+        );
+        assert!(
+            script.contains("vendor/bin/phpunit -c phpunit.xml.dist"),
+            "PHP suite actually runs"
+        );
+        assert!(
+            script.contains("hosttr"),
+            "container→host path translation for bind mounts"
+        );
+        assert!(
+            script.contains("no dockerized php stack"),
+            "honest SKIP when no stack — never a false FAIL"
+        );
         // 0.8.8 fignolage — robust PHP verdict:
-        assert!(script.contains("--colors=never"), "ANSI-free phpunit output → reliable summary parse");
-        assert!(script.contains("composer install"), "absent vendor → honest SKIP, not a scary ERROR(harness)");
+        assert!(
+            script.contains("--colors=never"),
+            "ANSI-free phpunit output → reliable summary parse"
+        );
+        assert!(
+            script.contains("composer install"),
+            "absent vendor → honest SKIP, not a scary ERROR(harness)"
+        );
         assert!(script.contains("$wt$base/vendor"), "vendor resolved via CONTAINER path (worktree first) — no fragile host→container back-substitution");
-        assert!(!script.contains("${vend/#"), "the fragile parameter back-substitution is gone");
-        assert!(!script.contains("no php runtime in the Kronn container"), "no longer installs/needs local php");
-        assert!(script.contains("TEST VERDICT"), "per-suite verdict for the PR");
+        assert!(
+            !script.contains("${vend/#"),
+            "the fragile parameter back-substitution is gone"
+        );
+        assert!(
+            !script.contains("no php runtime in the Kronn container"),
+            "no longer installs/needs local php"
+        );
+        assert!(
+            script.contains("TEST VERDICT"),
+            "per-suite verdict for the PR"
+        );
     }
 
     #[test]
@@ -1238,7 +1415,10 @@ mod tests {
         // Codex (different model family → no same-model blind spots).
         let wf = build_feasibility_workflow(default_params());
         let triage = wf.steps.iter().find(|s| s.name == "triage").unwrap();
-        assert_eq!(triage.multi_agent_review.as_ref().unwrap().reviewer_agent, AgentType::Codex);
+        assert_eq!(
+            triage.multi_agent_review.as_ref().unwrap().reviewer_agent,
+            AgentType::Codex
+        );
     }
 
     #[test]
@@ -1249,13 +1429,23 @@ mod tests {
         let wf = build_feasibility_workflow(default_params());
         for name in ["triage", "pr_draft"] {
             let s = wf.steps.iter().find(|s| s.name == name).unwrap();
-            assert!(s.retry.as_ref().map(|r| r.max_retries >= 2).unwrap_or(false),
-                "parent agent step `{name}` must retry ≥2× on transient failure");
+            assert!(
+                s.retry
+                    .as_ref()
+                    .map(|r| r.max_retries >= 2)
+                    .unwrap_or(false),
+                "parent agent step `{name}` must retry ≥2× on transient failure"
+            );
         }
         let child = default_child();
         let imp = child.steps.iter().find(|s| s.name == "implement").unwrap();
-        assert!(imp.retry.as_ref().map(|r| r.max_retries >= 2).unwrap_or(false),
-            "child `implement` must retry — a rate-limit kill loses one fan-out item otherwise");
+        assert!(
+            imp.retry
+                .as_ref()
+                .map(|r| r.max_retries >= 2)
+                .unwrap_or(false),
+            "child `implement` must retry — a rate-limit kill loses one fan-out item otherwise"
+        );
     }
 
     // (child drift_check removed — the parent-level drift_check covers the
@@ -1274,7 +1464,8 @@ mod tests {
             "pr_draft must quote the dual-suite TEST VERDICT verbatim"
         );
         assert!(
-            s.prompt_template.contains("{{steps.feasibility_impl.summary}}"),
+            s.prompt_template
+                .contains("{{steps.feasibility_impl.summary}}"),
             "pr_draft must surface the sub-workflow outcome"
         );
         assert!(
@@ -1282,7 +1473,8 @@ mod tests {
             "pr_draft must surface the PARENT-level drift_check (regenerated over the final worktree)"
         );
         assert!(
-            s.prompt_template.contains("{{steps.feasibility_impl.data.failed}}"),
+            s.prompt_template
+                .contains("{{steps.feasibility_impl.data.failed}}"),
             "pr_draft must surface failed sub-tasks when the fan-out is PARTIAL"
         );
     }
@@ -1290,7 +1482,9 @@ mod tests {
     #[test]
     fn child_exec_allowlist_covers_runners_parent_has_none() {
         let child = default_child();
-        for needed in ["bash", "grep", "make", "cargo", "pnpm", "composer", "pytest"] {
+        for needed in [
+            "bash", "grep", "make", "cargo", "pnpm", "composer", "pytest",
+        ] {
             assert!(
                 child.exec_allowlist.iter().any(|s| s == needed),
                 "child exec_allowlist must include '{needed}'"
@@ -1299,10 +1493,20 @@ mod tests {
         // Parent no longer runs Exec — the loop is in the child.
         let parent = build_feasibility_workflow(default_params());
         // Parent now runs ONE Exec: the final drift_check (bash+grep only).
-        assert_eq!(parent.exec_allowlist, vec!["bash".to_string(), "grep".to_string()]);
-        let parent_execs: Vec<&str> = parent.steps.iter()
-            .filter(|s| s.step_type == StepType::Exec).map(|s| s.name.as_str()).collect();
-        assert_eq!(parent_execs, vec!["plan_lint", "test_baseline", "run_tests", "drift_check"]);
+        assert_eq!(
+            parent.exec_allowlist,
+            vec!["bash".to_string(), "grep".to_string()]
+        );
+        let parent_execs: Vec<&str> = parent
+            .steps
+            .iter()
+            .filter(|s| s.step_type == StepType::Exec)
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(
+            parent_execs,
+            vec!["plan_lint", "test_baseline", "run_tests", "drift_check"]
+        );
     }
 
     #[test]
@@ -1324,12 +1528,20 @@ mod tests {
         // triage + pr_draft, child pays for implement. Everything else is
         // deterministic (Gate / SubWorkflow / Exec / JsonData).
         let parent = build_feasibility_workflow(default_params());
-        let parent_agents: Vec<&str> = parent.steps.iter()
-            .filter(|s| s.step_type == StepType::Agent).map(|s| s.name.as_str()).collect();
+        let parent_agents: Vec<&str> = parent
+            .steps
+            .iter()
+            .filter(|s| s.step_type == StepType::Agent)
+            .map(|s| s.name.as_str())
+            .collect();
         assert_eq!(parent_agents, vec!["triage", "pr_draft"]);
         let child = default_child();
-        let child_agents: Vec<&str> = child.steps.iter()
-            .filter(|s| s.step_type == StepType::Agent).map(|s| s.name.as_str()).collect();
+        let child_agents: Vec<&str> = child
+            .steps
+            .iter()
+            .filter(|s| s.step_type == StepType::Agent)
+            .map(|s| s.name.as_str())
+            .collect();
         assert_eq!(child_agents, vec!["implement"]);
     }
 
@@ -1341,18 +1553,28 @@ mod tests {
         let wf = build_feasibility_workflow(default_params());
         let triage = wf.steps.iter().find(|s| s.name == "triage").unwrap();
         // PLAN comes from the strongest tier — guaranteed.
-        assert!(matches!(triage.agent_settings.as_ref().unwrap().tier, Some(ModelTier::Reasoning)));
+        assert!(matches!(
+            triage.agent_settings.as_ref().unwrap().tier,
+            Some(ModelTier::Reasoning)
+        ));
         // Debate config: reviewer = Codex (cross-model) on the reasoning tier.
-        let mar = triage.multi_agent_review.as_ref().expect("triage debates with a reviewer");
+        let mar = triage
+            .multi_agent_review
+            .as_ref()
+            .expect("triage debates with a reviewer");
         assert_eq!(mar.reviewer_agent, AgentType::Codex);
         assert!(matches!(mar.reviewer_tier, Some(ModelTier::Reasoning)));
         assert!(mar.debate_prompt.contains("manifest"));
         // reviewer override respected
         let custom = build_feasibility_workflow(FeasibilityWorkflowParams {
-            reviewer_agent: Some(AgentType::ClaudeCode), ..default_params()
+            reviewer_agent: Some(AgentType::ClaudeCode),
+            ..default_params()
         });
         let t2 = custom.steps.iter().find(|s| s.name == "triage").unwrap();
-        assert_eq!(t2.multi_agent_review.as_ref().unwrap().reviewer_agent, AgentType::ClaudeCode);
+        assert_eq!(
+            t2.multi_agent_review.as_ref().unwrap().reviewer_agent,
+            AgentType::ClaudeCode
+        );
         // No separate plan_review step anymore.
         assert!(wf.steps.iter().all(|s| s.name != "plan_review"));
         // plan_lint stays as the deterministic 0-token guard.
@@ -1361,7 +1583,9 @@ mod tests {
         // The human gate sees the converged manifest + lint.
         let gate = wf.steps.iter().find(|s| s.name == "review_triage").unwrap();
         let msg = gate.gate_message.as_deref().unwrap();
-        assert!(msg.contains("{{steps.plan_lint.output}}") && msg.contains("{{steps.triage.data}}"));
+        assert!(
+            msg.contains("{{steps.plan_lint.output}}") && msg.contains("{{steps.triage.data}}")
+        );
     }
 
     #[test]
@@ -1370,6 +1594,8 @@ mod tests {
         let wf = build_feasibility_workflow(default_params());
         let triage = wf.steps.iter().find(|s| s.name == "triage").unwrap();
         assert!(triage.prompt_template.contains("reviewer) will challenge"));
-        assert!(triage.prompt_template.contains("re-emit the COMPLETE updated manifest"));
+        assert!(triage
+            .prompt_template
+            .contains("re-emit the COMPLETE updated manifest"));
     }
 }

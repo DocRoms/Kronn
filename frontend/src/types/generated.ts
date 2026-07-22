@@ -965,6 +965,14 @@ gate_step?: string | null, };
  */
 export type DecideRunResponse = { run_id: string, new_status: RunStatus, };
 
+export type DependencyCheckStatus = "UpToDate" | "UpdatesAvailable" | "Unsupported" | "Unavailable" | "Error" | "TimedOut";
+
+export type DependencyManagerUpdate = { manager: string, manifest: string, status: DependencyCheckStatus, outdated: number, major: number, packages?: Array<DependencyUpdatePackage>, };
+
+export type DependencyUpdatePackage = { name: string, current: string, latest: string, major: boolean, };
+
+export type DependencyUpdateSummary = { managers: Array<DependencyManagerUpdate>, total_outdated: number, total_major: number, checked_at: string, cached: boolean, };
+
 /**
  * A detected network IP with its type.
  */
@@ -1411,6 +1419,12 @@ text: string,
  */
 reason: string, };
 
+export type GitBlameLine = { line_number: number, commit: string, author: string, author_time: number, };
+
+export type GitBlameQuery = { path: string, };
+
+export type GitBlameResponse = { path: string, lines: Array<GitBlameLine>, };
+
 export type GitBranchRequest = { name: string, };
 
 export type GitBranchResponse = { branch: string, };
@@ -1441,7 +1455,37 @@ export type GitStatusResponse = { branch: string, default_branch: string, is_def
  * Lets the "Fichiers" panel surface the disc's cumulative work
  * (what would land in the next merge), not just the uncommitted slice.
  */
-committed_files: Array<GitFileStatus>, ahead: number, behind: number, has_upstream: boolean, provider: string, pr_url: string | null, };
+committed_files: Array<GitFileStatus>, ahead: number, behind: number, has_upstream: boolean,
+/**
+ * Tracking ref for the current branch (for example `origin/main`).
+ */
+upstream: string | null, provider: string,
+/**
+ * Browser-safe repository URL derived from `remote.origin.url`.
+ * Credentials embedded in HTTPS remotes are deliberately stripped.
+ */
+remote_url: string | null,
+/**
+ * Provider-specific shortcut to the repository's PR/MR listing.
+ */
+pull_requests_url: string | null,
+/**
+ * Most recently created tag in the local Git object database.
+ */
+last_tag: string | null, pr_url: string | null,
+/**
+ * Lightweight source-language breakdown, enriched for project requests.
+ * Discussion Git panels leave it empty.
+ */
+languages?: Array<ProjectLanguageStat>,
+/**
+ * Timestamp of the source-language scan. Absent on discussion Git panels.
+ */
+languages_checked_at: string | null,
+/**
+ * True when `languages` came from the bounded in-memory project cache.
+ */
+languages_cached: boolean, };
 
 /**
  * Which guard tripped — surfaced verbatim in the SSE `GuardTriggered`
@@ -2055,7 +2099,14 @@ export type PeerLeaveResponse = {
  */
 left: boolean, };
 
-export type PeerResumeRequest = { agent_type: string, session_id: string, resume_token: string, };
+export type PeerResumeRequest = { agent_type: string, session_id: string, resume_token: string,
+/**
+ * Client-prepared successor credential. The bridge persists it as a
+ * pending value *before* this request, making the rotation retryable if
+ * the response is lost. Omitted by legacy bridges, which resume without
+ * rotation rather than risking a server-first, unacknowledged cut-over.
+ */
+next_resume_token?: string | null, };
 
 export type PeerResumeResponse = { disc_id: string, session_pk: number,
 /**
@@ -2133,6 +2184,8 @@ path_exists: boolean, default_skill_ids?: Array<string>, default_profile_id?: st
  * projects rarely have more than 5 links).
  */
 linked_repos?: Array<LinkedRepo>, created_at: string, updated_at: string, };
+
+export type ProjectLanguageStat = { language: string, bytes: number, };
 
 export type ProjectUsage = { project_id: string, project_name: string, tokens_used: number, cost_usd: number, };
 
@@ -2468,13 +2521,13 @@ global_context_mode: string,
  */
 anti_hallucination_mode: string,
 /**
- * 0.9.0 — Continual Learning master toggle. **Default OFF (beta)**: the
+ * 0.10.0 — Continual Learning master toggle. **Default OFF (beta)**: the
  * feature writes agent-proposed learnings into injected truth files
  * (`docs/learnings.md` / user-context), so it ships opt-in to avoid a bug
  * polluting a user's docs. Gates capture (`learning_propose`), the
  * `kronn:section name="learnings"` doc pointer, and the UI badge/modal.
  * Validating/rejecting EXISTING pending candidates stays allowed when off
- * (drain, don't capture). See docs/research/continual-learning-0.9.0-spec.md §0.
+ * (drain, don't capture). See docs/research/continual-learning-0.10.0-spec.md §0.
  */
 continual_learning_enabled: boolean,
 /**
@@ -2605,6 +2658,14 @@ raw: string, kind: SourceKind, status: SourceStatus,
  * Human-readable reason (shown in the pill drawer).
  */
 detail: string, };
+
+/**
+ * A file-system node exposed by the project source browser.
+ *
+ * Kept separate from `AiFileNode` because source entries also carry Git
+ * metadata while documentation nodes intentionally remain repository-agnostic.
+ */
+export type SourceFileNode = { path: string, name: string, is_dir: boolean, children?: Array<SourceFileNode>, git_ignored?: boolean, };
 
 /**
  * What kind of source a `[src: …]` marker points at.

@@ -37,9 +37,7 @@ use std::path::{Path, PathBuf};
 /// `{{PLACEHOLDERS}}`, never the header). Stable across 0.7+ — if we
 /// change the header line in a future template revision, ALSO add the
 /// old line here so older bootstrapped projects keep being detected.
-const KRONN_SIGNATURE_LINES: &[&str] = &[
-    "# AI agent context — Entry point",
-];
+const KRONN_SIGNATURE_LINES: &[&str] = &["# AI agent context — Entry point"];
 
 /// Names directly under `docs/` that the migration MUST NOT move:
 ///   - `legacy` — our own destination; recursing in would shuffle
@@ -85,12 +83,13 @@ impl LegacyMigrationReport {
 /// `docs/AGENTS.md` is missing entirely).
 pub fn is_kronn_managed_docs(docs_dir: &Path) -> bool {
     let agents = docs_dir.join("AGENTS.md");
-    let Ok(content) = fs::read_to_string(&agents) else { return false; };
-    let first_line = content
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or("");
-    KRONN_SIGNATURE_LINES.iter().any(|s| first_line.trim() == *s)
+    let Ok(content) = fs::read_to_string(&agents) else {
+        return false;
+    };
+    let first_line = content.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
+    KRONN_SIGNATURE_LINES
+        .iter()
+        .any(|s| first_line.trim() == *s)
 }
 
 /// Run the migration on the given `docs/` directory. Idempotent: a
@@ -184,7 +183,8 @@ pub fn migrate_user_docs_to_legacy(docs_dir: &Path) -> std::io::Result<LegacyMig
 ///   - it must not be confused with the project's templated docs
 ///   - we want a single source of truth for the wording (one place
 ///     to update if the message changes across releases)
-pub(crate) const LEGACY_README_BODY: &str = "# Legacy docs — preserved from before Kronn bootstrap\n\
+pub(crate) const LEGACY_README_BODY: &str =
+    "# Legacy docs — preserved from before Kronn bootstrap\n\
 \n\
 This folder holds documentation that lived in `docs/` BEFORE this project was \
 onboarded to Kronn. The audit moved it here automatically so the freshly-\
@@ -271,8 +271,10 @@ mod tests {
         // Even with user content nearby, we DON'T move anything.
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
-        write(&docs.join("AGENTS.md"),
-              "\n# AI agent context — Entry point\n\nSome filled content...\n");
+        write(
+            &docs.join("AGENTS.md"),
+            "\n# AI agent context — Entry point\n\nSome filled content...\n",
+        );
         write(&docs.join("user-doc.md"), "user-curated content");
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(!r.migrated);
@@ -291,7 +293,10 @@ mod tests {
         let docs = tmp.path().join("docs");
         write(&docs.join("installation.md"), "1. Clone the repo\n2. ...");
         write(&docs.join("api.md"), "## Endpoints\n...");
-        write(&docs.join("architecture/overview.md"), "We use hexagonal arch");
+        write(
+            &docs.join("architecture/overview.md"),
+            "We use hexagonal arch",
+        );
         write(&docs.join("internal/onboarding.md"), "Welcome new hires");
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
@@ -300,8 +305,10 @@ mod tests {
         // with its subtree intact.
         assert!(docs.join("legacy/installation.md").exists());
         assert!(docs.join("legacy/api.md").exists());
-        assert!(docs.join("legacy/architecture/overview.md").exists(),
-            "directory subtrees must be moved whole");
+        assert!(
+            docs.join("legacy/architecture/overview.md").exists(),
+            "directory subtrees must be moved whole"
+        );
         assert!(docs.join("legacy/internal/onboarding.md").exists());
         // Originals are gone from docs/ root.
         assert!(!docs.join("installation.md").exists());
@@ -318,14 +325,18 @@ mod tests {
         // audit would have a Frankenstein file.
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
-        write(&docs.join("architecture/overview.md"),
-              "USER'S 200-line architecture doc, predates Kronn");
+        write(
+            &docs.join("architecture/overview.md"),
+            "USER'S 200-line architecture doc, predates Kronn",
+        );
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
         assert!(docs.join("legacy/architecture/overview.md").exists());
         let lifted = fs::read_to_string(docs.join("legacy/architecture/overview.md")).unwrap();
-        assert!(lifted.contains("USER'S 200-line"),
-            "user content must be preserved verbatim under legacy/");
+        assert!(
+            lifted.contains("USER'S 200-line"),
+            "user content must be preserved verbatim under legacy/"
+        );
     }
 
     #[test]
@@ -342,10 +353,16 @@ mod tests {
         assert!(r.migrated);
         // var/ stays in place
         assert!(docs.join("var/cache.json").exists());
-        assert!(!docs.join("legacy/var").exists(), "var/ must NOT be wrapped under legacy/");
+        assert!(
+            !docs.join("legacy/var").exists(),
+            "var/ must NOT be wrapped under legacy/"
+        );
         // prior legacy/ content preserved
         assert!(docs.join("legacy/prior-run.md").exists());
-        assert!(!docs.join("legacy/legacy").exists(), "must not recurse into our own destination");
+        assert!(
+            !docs.join("legacy/legacy").exists(),
+            "must not recurse into our own destination"
+        );
         // user-doc.md got moved
         assert!(docs.join("legacy/user-doc.md").exists());
     }
@@ -362,8 +379,10 @@ mod tests {
         let r1 = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r1.migrated);
         // Audit pipeline installs templates AFTER us; emulate that.
-        write(&docs.join("AGENTS.md"),
-              "# AI agent context — Entry point\n\n{{PROJECT_NAME}} — ...\n");
+        write(
+            &docs.join("AGENTS.md"),
+            "# AI agent context — Entry point\n\n{{PROJECT_NAME}} — ...\n",
+        );
         write(&docs.join("glossary.md"), "{{PLACEHOLDER}}");
         // Re-run migration (e.g. user clicks Re-audit later).
         let r2 = migrate_user_docs_to_legacy(&docs).unwrap();
@@ -396,18 +415,24 @@ mod tests {
         // as Kronn-managed.
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
-        write(&docs.join("AGENTS.md"),
-              "\n   \n   # AI agent context — Entry point   \n\nrest");
-        assert!(is_kronn_managed_docs(&docs),
-            "leading whitespace/blank lines must not defeat detection");
+        write(
+            &docs.join("AGENTS.md"),
+            "\n   \n   # AI agent context — Entry point   \n\nrest",
+        );
+        assert!(
+            is_kronn_managed_docs(&docs),
+            "leading whitespace/blank lines must not defeat detection"
+        );
     }
 
     #[test]
     fn is_kronn_managed_docs_returns_false_when_first_line_is_user_content() {
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
-        write(&docs.join("AGENTS.md"),
-              "# My project's docs\n\nI wrote this before Kronn existed.");
+        write(
+            &docs.join("AGENTS.md"),
+            "# My project's docs\n\nI wrote this before Kronn existed.",
+        );
         assert!(!is_kronn_managed_docs(&docs));
     }
 
@@ -423,8 +448,14 @@ mod tests {
         }
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
-        assert_eq!(r.moved_count, 100, "full count must reach the UI even when list is truncated");
-        assert!(r.moved_entries.len() <= 50, "surfaced list must be bounded for SSE payload size");
+        assert_eq!(
+            r.moved_count, 100,
+            "full count must reach the UI even when list is truncated"
+        );
+        assert!(
+            r.moved_entries.len() <= 50,
+            "surfaced list must be bounded for SSE payload size"
+        );
     }
 
     // ── Data-safety tests — the migration MOVES user files, so any
@@ -452,10 +483,17 @@ mod tests {
         assert_eq!(r.moved_count, names.len());
         for n in &names {
             let moved = docs.join("legacy").join(n);
-            assert!(moved.exists(), "{} must be preserved verbatim under legacy/", n);
+            assert!(
+                moved.exists(),
+                "{} must be preserved verbatim under legacy/",
+                n
+            );
             let body = fs::read_to_string(&moved).unwrap();
-            assert!(body.contains(&format!("body of {n}")),
-                "{} content must be byte-identical to source", n);
+            assert!(
+                body.contains(&format!("body of {n}")),
+                "{} content must be byte-identical to source",
+                n
+            );
         }
     }
 
@@ -492,12 +530,16 @@ mod tests {
         assert!(r.migrated);
         // OLD file untouched
         let old = fs::read_to_string(docs.join("legacy/installation.md")).unwrap();
-        assert_eq!(old, "OLD legacy content",
-            "pre-existing legacy/ content must NEVER be overwritten");
+        assert_eq!(
+            old, "OLD legacy content",
+            "pre-existing legacy/ content must NEVER be overwritten"
+        );
         // NEW arrival lives at legacy/installation.md-1
         let new = fs::read_to_string(docs.join("legacy/installation.md-1")).unwrap();
-        assert_eq!(new, "NEW content to migrate",
-            "new collisions take the next available suffix");
+        assert_eq!(
+            new, "NEW content to migrate",
+            "new collisions take the next available suffix"
+        );
     }
 
     #[test]
@@ -513,8 +555,10 @@ mod tests {
         write(&docs.join("a/peer.md"), "peer content");
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
-        assert!(docs.join("legacy/a/b/c/d/leaf.md").exists(),
-            "deep nested files survive the move");
+        assert!(
+            docs.join("legacy/a/b/c/d/leaf.md").exists(),
+            "deep nested files survive the move"
+        );
         assert!(docs.join("legacy/a/b/sibling.md").exists());
         assert!(docs.join("legacy/a/peer.md").exists());
         // Originals are gone
@@ -535,13 +579,17 @@ mod tests {
         // fills → Frankenstein file.
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
-        write(&docs.join("AGENTS.md"),
-              "# My homebrew AI guidance\n\nWe use Symfony 6.4 ...");
+        write(
+            &docs.join("AGENTS.md"),
+            "# My homebrew AI guidance\n\nWe use Symfony 6.4 ...",
+        );
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
         let moved = fs::read_to_string(docs.join("legacy/AGENTS.md")).unwrap();
-        assert!(moved.contains("My homebrew AI guidance"),
-            "user's AGENTS.md must end up under legacy/ verbatim");
+        assert!(
+            moved.contains("My homebrew AI guidance"),
+            "user's AGENTS.md must end up under legacy/ verbatim"
+        );
         // Root AGENTS.md is gone — about to be re-installed from
         // Kronn template by the caller.
         assert!(!docs.join("AGENTS.md").exists());
@@ -559,7 +607,10 @@ mod tests {
         write(&outside, "PROJECT README — must NEVER move");
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
-        assert!(outside.exists(), "README.md outside docs/ must NEVER be touched");
+        assert!(
+            outside.exists(),
+            "README.md outside docs/ must NEVER be touched"
+        );
         let body = fs::read_to_string(&outside).unwrap();
         assert_eq!(body, "PROJECT README — must NEVER move");
     }
@@ -577,18 +628,25 @@ mod tests {
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r.migrated);
         let readme = docs.join("legacy/README.md");
-        assert!(readme.exists(),
-            "migration must drop a navigational README in legacy/");
+        assert!(
+            readme.exists(),
+            "migration must drop a navigational README in legacy/"
+        );
         let body = fs::read_to_string(&readme).unwrap();
         // Critical wording the user must see: it's pre-Kronn, it's
         // safe to delete after audit validation.
-        assert!(body.contains("preserved from before Kronn"),
-            "README must explain provenance: {body}");
-        assert!(body.contains("you can safely delete `docs/legacy/`")
-                || body.contains("safely delete"),
-            "README must spell out the retire-when-validated path");
-        assert!(body.contains("Do NOT edit"),
-            "README must warn against editing the snapshot");
+        assert!(
+            body.contains("preserved from before Kronn"),
+            "README must explain provenance: {body}"
+        );
+        assert!(
+            body.contains("you can safely delete `docs/legacy/`") || body.contains("safely delete"),
+            "README must spell out the retire-when-validated path"
+        );
+        assert!(
+            body.contains("Do NOT edit"),
+            "README must warn against editing the snapshot"
+        );
     }
 
     #[test]
@@ -601,12 +659,16 @@ mod tests {
         // moved.
         let tmp = TempDir::new().unwrap();
         let docs = tmp.path().join("docs");
-        write(&docs.join("AGENTS.md"),
-              "# AI agent context — Entry point\n\nfilled content");
+        write(
+            &docs.join("AGENTS.md"),
+            "# AI agent context — Entry point\n\nfilled content",
+        );
         let r = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(!r.migrated);
-        assert!(!docs.join("legacy").exists(),
-            "skipped migration must NEVER create a docs/legacy/ folder");
+        assert!(
+            !docs.join("legacy").exists(),
+            "skipped migration must NEVER create a docs/legacy/ folder"
+        );
     }
 
     #[test]
@@ -634,8 +696,10 @@ mod tests {
         let r2 = migrate_user_docs_to_legacy(&docs).unwrap();
         assert!(r2.migrated, "fresh user files in docs/ → migration runs");
         let preserved = fs::read_to_string(docs.join("legacy/README.md")).unwrap();
-        assert_eq!(preserved, custom,
-            "hand-edited legacy/README.md must NEVER be clobbered by a later migration");
+        assert_eq!(
+            preserved, custom,
+            "hand-edited legacy/README.md must NEVER be clobbered by a later migration"
+        );
     }
 
     #[cfg(unix)]
@@ -665,14 +729,21 @@ mod tests {
 
         // External target file UNTOUCHED (byte-identical).
         let target_body = fs::read_to_string(&target).unwrap();
-        assert_eq!(target_body, "REAL TARGET — must never be touched",
-            "symlink target outside docs/ must never be overwritten or deleted");
+        assert_eq!(
+            target_body, "REAL TARGET — must never be touched",
+            "symlink target outside docs/ must never be overwritten or deleted"
+        );
         // Link itself moved to legacy/, still a symlink, still
         // pointing at the original target.
         let moved_link = docs.join("legacy/spec.md");
-        assert!(moved_link.exists(), "the symlink itself must end up under legacy/");
+        assert!(
+            moved_link.exists(),
+            "the symlink itself must end up under legacy/"
+        );
         let meta = fs::symlink_metadata(&moved_link).unwrap();
-        assert!(meta.file_type().is_symlink(),
-            "the moved entry must remain a symlink (never deref'd)");
+        assert!(
+            meta.file_type().is_symlink(),
+            "the moved entry must remain a symlink (never deref'd)"
+        );
     }
 }

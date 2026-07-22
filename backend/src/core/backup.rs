@@ -24,7 +24,10 @@ const BACKUP_EXT: &str = "db";
 /// (same place as the manual backup — in-volume, logged as a warning). Returns
 /// `(dir, is_external)`.
 pub fn resolve_backup_dir(data_dir: &Path) -> (PathBuf, bool) {
-    match std::env::var("KRONN_BACKUP_DIR").ok().filter(|s| !s.trim().is_empty()) {
+    match std::env::var("KRONN_BACKUP_DIR")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+    {
         Some(dir) => (PathBuf::from(dir.trim()), true),
         None => (data_dir.join("backups"), false),
     }
@@ -32,7 +35,10 @@ pub fn resolve_backup_dir(data_dir: &Path) -> (PathBuf, bool) {
 
 /// Timestamped backup filename for a given instant.
 pub fn backup_filename(now: DateTime<Utc>) -> String {
-    format!("{BACKUP_PREFIX}{}.{BACKUP_EXT}", now.format("%Y%m%d-%H%M%S"))
+    format!(
+        "{BACKUP_PREFIX}{}.{BACKUP_EXT}",
+        now.format("%Y%m%d-%H%M%S")
+    )
 }
 
 /// True when `name` is one of our scheduled backup files.
@@ -79,7 +85,11 @@ pub fn prune_old_backups(dir: &Path, keep_n: usize) -> usize {
 
 /// Run one backup now: SQLite online-copy the live DB into `dir`, then prune to
 /// `keep_n`. Returns the written path. Skips (Ok(None)) for an in-memory DB.
-pub async fn perform_backup(db: &Database, dir: &Path, keep_n: usize) -> anyhow::Result<Option<PathBuf>> {
+pub async fn perform_backup(
+    db: &Database,
+    dir: &Path,
+    keep_n: usize,
+) -> anyhow::Result<Option<PathBuf>> {
     if db.path().to_string_lossy() == ":memory:" {
         return Ok(None);
     }
@@ -166,7 +176,11 @@ impl BackupScheduler {
             return None;
         }
         let keep_n: usize = env_or_default("KRONN_BACKUP_KEEP", 7);
-        Some(Arc::new(Self { db, interval: Duration::from_secs(hours * 3600), keep_n }))
+        Some(Arc::new(Self {
+            db,
+            interval: Duration::from_secs(hours * 3600),
+            keep_n,
+        }))
     }
 
     pub async fn start(self: Arc<Self>) {
@@ -197,7 +211,9 @@ impl BackupScheduler {
                 }
             }
             match perform_backup(&self.db, &dir, self.keep_n).await {
-                Ok(Some(p)) => tracing::info!(target: "backup", "scheduled backup written: {}", p.display()),
+                Ok(Some(p)) => {
+                    tracing::info!(target: "backup", "scheduled backup written: {}", p.display())
+                }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(target: "backup", "{e}"),
             }
@@ -231,13 +247,18 @@ mod tests {
         // The copy is a valid SQLite DB with the migrated schema.
         let copy = rusqlite::Connection::open(&written).unwrap();
         let n: i64 = copy
-            .query_row("SELECT count(*) FROM sqlite_master WHERE type='table'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(n > 0, "backup carries the schema ({n} tables)");
 
         // And the source connection is still usable afterwards (not poisoned).
         db.with_conn(|conn| {
-            conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0)).map_err(Into::into)
+            conn.query_row("SELECT 1", [], |r| r.get::<_, i64>(0))
+                .map_err(Into::into)
         })
         .await
         .expect("source DB usable after backup");
@@ -260,17 +281,28 @@ mod tests {
 
     #[test]
     fn backup_filename_is_prefixed_and_timestamped() {
-        let ts = DateTime::parse_from_rfc3339("2026-07-07T06:05:04Z").unwrap().with_timezone(&Utc);
+        let ts = DateTime::parse_from_rfc3339("2026-07-07T06:05:04Z")
+            .unwrap()
+            .with_timezone(&Utc);
         assert_eq!(backup_filename(ts), "kronn-auto-20260707-060504.db");
     }
 
     #[test]
     fn should_skip_backup_only_when_newest_is_younger_than_half_interval() {
         let day = Duration::from_secs(24 * 3600);
-        assert!(should_skip_backup(Duration::from_secs(60), day), "restart 1min after a backup → skip");
+        assert!(
+            should_skip_backup(Duration::from_secs(60), day),
+            "restart 1min after a backup → skip"
+        );
         assert!(should_skip_backup(day / 2 - Duration::from_secs(1), day));
-        assert!(!should_skip_backup(day / 2, day), "at half the interval → back up");
-        assert!(!should_skip_backup(day * 7, day), "boot after long downtime → back up");
+        assert!(
+            !should_skip_backup(day / 2, day),
+            "at half the interval → back up"
+        );
+        assert!(
+            !should_skip_backup(day * 7, day),
+            "boot after long downtime → back up"
+        );
     }
 
     #[test]
@@ -278,11 +310,17 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("kronn-newest-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("important.db"), b"foreign").unwrap();
-        assert!(newest_backup_age(&tmp).is_none(), "foreign files must not count as backups");
+        assert!(
+            newest_backup_age(&tmp).is_none(),
+            "foreign files must not count as backups"
+        );
 
         std::fs::write(tmp.join("kronn-auto-20260101-000000.db"), b"x").unwrap();
         let age = newest_backup_age(&tmp).expect("our backup must be seen");
-        assert!(age < Duration::from_secs(60), "just-written backup must have ~zero age");
+        assert!(
+            age < Duration::from_secs(60),
+            "just-written backup must have ~zero age"
+        );
         std::fs::remove_dir_all(&tmp).ok();
     }
 
@@ -291,16 +329,31 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("kronn-prune-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         // 5 of ours + 1 foreign.
-        for ts in ["20260101-000000","20260102-000000","20260103-000000","20260104-000000","20260105-000000"] {
+        for ts in [
+            "20260101-000000",
+            "20260102-000000",
+            "20260103-000000",
+            "20260104-000000",
+            "20260105-000000",
+        ] {
             std::fs::write(tmp.join(format!("kronn-auto-{ts}.db")), b"x").unwrap();
         }
         std::fs::write(tmp.join("important.db"), b"keep").unwrap();
 
         let removed = prune_old_backups(&tmp, 2);
         assert_eq!(removed, 3, "5 ours, keep 2 → remove 3");
-        assert!(tmp.join("kronn-auto-20260104-000000.db").exists(), "newest kept");
-        assert!(tmp.join("kronn-auto-20260105-000000.db").exists(), "newest kept");
-        assert!(!tmp.join("kronn-auto-20260101-000000.db").exists(), "oldest pruned");
+        assert!(
+            tmp.join("kronn-auto-20260104-000000.db").exists(),
+            "newest kept"
+        );
+        assert!(
+            tmp.join("kronn-auto-20260105-000000.db").exists(),
+            "newest kept"
+        );
+        assert!(
+            !tmp.join("kronn-auto-20260101-000000.db").exists(),
+            "oldest pruned"
+        );
         assert!(tmp.join("important.db").exists(), "foreign file untouched");
 
         // Under the keep count → no-op.

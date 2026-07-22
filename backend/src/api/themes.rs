@@ -51,12 +51,28 @@ use crate::AppState;
 /// BOTH the "batman" profile AND the "gotham" theme).
 const BUILT_IN_UNLOCK_HASHES: &[(&str, &str, &str)] = &[
     // ── kronnMatrix ──
-    ("theme",   "matrix", "4eda5940efa96ee10b1e15e17b8ef44a182adaedd905d358313cec34f37ae971"),
+    (
+        "theme",
+        "matrix",
+        "4eda5940efa96ee10b1e15e17b8ef44a182adaedd905d358313cec34f37ae971",
+    ),
     // ── kronnSakura ──
-    ("theme",   "sakura", "0cf0d64c6ede3ad870a872f14600e4970b3b4809a80be27aa93bbebce351ac97"),
+    (
+        "theme",
+        "sakura",
+        "0cf0d64c6ede3ad870a872f14600e4970b3b4809a80be27aa93bbebce351ac97",
+    ),
     // ── kronnBatman (bundle: Batman profile + Gotham theme) ──
-    ("profile", "batman", "2c367c31a68a254729e77cce88c9025b1f21183d2ab2675924899f52bc8296a7"),
-    ("theme",   "gotham", "2c367c31a68a254729e77cce88c9025b1f21183d2ab2675924899f52bc8296a7"),
+    (
+        "profile",
+        "batman",
+        "2c367c31a68a254729e77cce88c9025b1f21183d2ab2675924899f52bc8296a7",
+    ),
+    (
+        "theme",
+        "gotham",
+        "2c367c31a68a254729e77cce88c9025b1f21183d2ab2675924899f52bc8296a7",
+    ),
 ];
 
 #[derive(Debug, Deserialize)]
@@ -88,7 +104,11 @@ fn hash_code(code: &str) -> String {
     hasher.update(code.as_bytes());
     // sha2 0.11 dropped `LowerHex` on the new `hybrid_array::Array`
     // return — manual hex encode (no extra dep).
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Collect EVERY built-in match for the given code (a bundle code
@@ -136,7 +156,11 @@ pub async fn unlock(
     {
         let cfg = state.config.read().await;
         for (theme, stored) in cfg.secret_themes.iter() {
-            if stored == code && !matches.iter().any(|m| m.kind == "theme" && &m.name == theme) {
+            if stored == code
+                && !matches
+                    .iter()
+                    .any(|m| m.kind == "theme" && &m.name == theme)
+            {
                 matches.push(UnlockedItem {
                     kind: "theme".into(),
                     name: theme.clone(),

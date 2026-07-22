@@ -2,20 +2,21 @@ import { useState, useRef, useEffect, useMemo, Fragment } from 'react';
 import { useT } from '../../lib/I18nContext';
 import { workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../../lib/api';
 import type { BatchPreview } from '../../lib/api';
-import { AGENT_COLORS, AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
+import { AGENT_LABELS, isAgentRestricted } from '../../lib/constants';
 import { extractLikelyOutput } from '../../lib/extractLikelyOutput';
 import type { Workflow, WorkflowRun, StepResult, AgentsConfig, WorkflowStep, QuickPrompt, BatchRunSummary, AgentType } from '../../types/generated';
 import {
-  Trash2, Play, Loader2, Check, X, ChevronRight, ChevronDown,
+  Trash2, Play, Loader2, Check, X, ChevronLeft, ChevronRight, ChevronDown,
   Settings, RefreshCw, AlertTriangle, FlaskConical,
   Layers, GitBranch, MessageSquare, Plug, Send,
   Download, Square, Hand, Terminal, Braces, Sparkles, Zap, Search,
 } from 'lucide-react';
 import { filterRuns, groupRunsByParent, RUN_PAGE_SIZE, type RunStatusFilter } from '../../lib/runFilters';
 import { formatDurationCompact } from '../../lib/kronnToolParser';
-import { hasBranches } from '../../lib/stepGraph';
+import { computeGotoEdges } from '../../lib/stepGraph';
 import { StepBranchMap } from './StepBranchMap';
-import { RunDetail } from './RunDetail';
+import { RunDetail, RunStatusTrail, runStatusTimeline } from './RunDetail';
+import { AgentSwitchPicker } from '../AgentSwitchPicker';
 import '../../pages/WorkflowsPage.css';
 
 const checkAgentRestricted = isAgentRestricted;
@@ -146,6 +147,12 @@ export interface LiveRunState {
 export interface WorkflowDetailProps {
   workflow: Workflow;
   runs: WorkflowRun[];
+  availableAgentTypes?: AgentType[];
+  onChangeStepAgent?: (stepIndex: number, agent: AgentType) => Promise<void>;
+  totalRuns?: number;
+  hasMoreRuns?: boolean;
+  loadingMoreRuns?: boolean;
+  onLoadMoreRuns?: (amount: number | 'all') => void;
   liveRun: LiveRunState | null;
   onTrigger: () => void;
   onRefresh: () => void;
@@ -320,10 +327,13 @@ export function BatchItemsList({
   );
 }
 
-function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, nested = false }: {
+function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, workflowId, allSteps, availableAgentTypes, onChangeAgent, onSelectStep, nested = false }: {
   step: WorkflowStep; index: number; agentAccess?: AgentsConfig | null;
   projectId?: string | null; t: (key: string, ...args: (string | number)[]) => string;
   quickPromptsById?: Map<string, QuickPrompt>;
+  availableAgentTypes?: AgentType[];
+  onChangeAgent?: (stepIndex: number, agent: AgentType) => Promise<void>;
+  onSelectStep?: (stepIndex: number) => void;
   /** Workflow id is needed to key the dry-run test state cache (see module
    *  comment on `stepTestCache`) so the panel survives navigation. */
   workflowId: string;
@@ -566,7 +576,23 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
     }
   };
 
-  const cardKind = isBatch ? 'batch-qp' : isApi ? 'api' : isNotify ? 'notify' : isGate ? 'gate' : isExec ? 'exec' : 'agent';
+  const cardKind = isBatch
+    ? 'batch-qp'
+    : isApi
+      ? 'api'
+      : isBatchApi
+        ? 'batch-api'
+        : isNotify
+          ? 'notify'
+          : isGate
+            ? 'gate'
+            : isExec
+              ? 'exec'
+              : isJsonData
+                ? 'json-data'
+                : isSubWorkflow
+                  ? 'subworkflow'
+                  : 'agent';
   return (
     <div className="wf-step-card" data-step-type={cardKind}>
       <div className="flex-row gap-4">
@@ -652,9 +678,13 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
           </span>
         )}
         {isAgentLike && (
-          <span className="text-xs font-semibold" style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}>
-            {AGENT_LABELS[step.agent] ?? step.agent}
-          </span>
+          <StepAgentSwitcher
+            step={step}
+            stepIndex={index}
+            availableAgentTypes={availableAgentTypes}
+            onChange={onChangeAgent}
+            t={t}
+          />
         )}
         {isAgentLike && <TierBadge step={step} t={t} />}
         {isAgentLike && checkAgentRestricted(agentAccess ?? undefined, step.agent) && (
@@ -776,43 +806,30 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
             </p>
           ) : childWf ? (
             <>
-              <div className="text-2xs text-ghost" style={{ marginBottom: 6 }}>
-                {t('wf.subWorkflowChildSteps', childWf.name, childWf.steps.length)}
-              </div>
               {nested ? (
                 // Already inside a sub-workflow expansion — don't recurse a
                 // 3rd level of cards; show a compact list to bound depth.
-                childWf.steps.map((cs, ci) => (
-                  <div key={ci} className="flex-row gap-2" style={{ alignItems: 'center', padding: '2px 0' }}>
-                    <span className="text-2xs text-ghost" style={{ minWidth: 14 }}>{ci + 1}.</span>
-                    <span className="wf-step-kind-badge" data-kind={(cs.step_type?.type ?? 'Agent').toLowerCase()} style={{ fontSize: 10 }}>
-                      {cs.step_type?.type ?? 'Agent'}
-                    </span>
-                    <span className="text-xs">{cs.name}</span>
+                <>
+                  <div className="text-2xs text-ghost" style={{ marginBottom: 6 }}>
+                    {t('wf.subWorkflowChildSteps', childWf.name, childWf.steps.length)}
                   </div>
-                ))
-              ) : (
-                // Top level — render each child step as a FULL StepCard, like
-                // a normal workflow, indented to show it lives in the child.
-                <div
-                  className="wf-subworkflow-nested"
-                  style={{ borderLeft: '2px solid var(--kr-border-medium)', paddingLeft: 12, marginLeft: 2, display: 'flex', flexDirection: 'column', gap: 8 }}
-                >
                   {childWf.steps.map((cs, ci) => (
-                    <StepCard
-                      key={ci}
-                      step={cs}
-                      index={ci}
-                      nested
-                      agentAccess={agentAccess}
-                      projectId={childWf.project_id}
-                      t={t}
-                      quickPromptsById={quickPromptsById}
-                      workflowId={childWf.id}
-                      allSteps={childWf.steps}
-                    />
+                    <div key={ci} className="flex-row gap-2" style={{ alignItems: 'center', padding: '2px 0' }}>
+                      <span className="text-2xs text-ghost" style={{ minWidth: 14 }}>{ci + 1}.</span>
+                      <span className="wf-step-kind-badge" data-kind={(cs.step_type?.type ?? 'Agent').toLowerCase()} style={{ fontSize: 10 }}>
+                        {cs.step_type?.type ?? 'Agent'}
+                      </span>
+                      <span className="text-xs">{cs.name}</span>
+                    </div>
                   ))}
-                </div>
+                </>
+              ) : (
+                <SubWorkflowOverview
+                  workflow={childWf}
+                  agentAccess={agentAccess}
+                  quickPromptsById={quickPromptsById}
+                  t={t}
+                />
               )}
             </>
           ) : (
@@ -840,27 +857,27 @@ function StepCard({ step, index, agentAccess, projectId, t, quickPromptsById, wo
         </>
       )}
       {step.on_result && step.on_result.length > 0 && (
-        <div className="mt-2 text-xs text-warning flex-row" style={{ gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+        <div className="wf-step-result-rules">
           {step.on_result.map((r, j) => {
-            // For Goto: resolve target name → 1-based index so we can
-            // render a step-number chip (same circular badge as the
-            // step row) instead of a bare "Goto". Without this, the
-            // recap showed "→ Goto" twice in a row with no hint at
-            // which step the run jumps to (UX feedback 2026-04-29).
             const targetName = r.action.type === 'Goto' ? r.action.step_name : null;
             const targetIdx = targetName !== null
               ? allSteps.findIndex(s => s.name === targetName)
               : -1;
             return (
-              <span key={j} className="flex-row" style={{ gap: 4, alignItems: 'center' }}>
+              <span key={j} className="wf-step-result-rule">
                 {t('wiz.ifContains')} "{r.contains}" &rarr; {r.action.type}
                 {targetName !== null && targetIdx >= 0 && (
-                  <span
-                    className="wf-step-number wf-step-number-chip"
-                    title={targetName}
+                  <button
+                    type="button"
+                    className="wf-goto-target-chip"
+                    onClick={() => onSelectStep?.(targetIdx)}
+                    disabled={!onSelectStep}
+                    title={t('wf.gotoTargetHint', targetName)}
+                    aria-label={t('wf.gotoTargetHint', targetName)}
                   >
-                    {targetIdx + 1}
-                  </span>
+                    <span className="wf-goto-target-index">{targetIdx + 1}</span>
+                    {targetName}
+                  </button>
                 )}
                 {targetName !== null && targetIdx < 0 && (
                   /* Dangling reference — the target step was renamed or
@@ -1148,20 +1165,239 @@ function TierBadge({ step, t, chip }: { step: WorkflowStep; t: (k: string) => st
     : <span className="wf-step-tier" title={label}>{TIER_EMOTE[tr]} {label}</span>;
 }
 
-function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug; usesTokens: boolean } {
+function StepAgentSwitcher({
+  step,
+  stepIndex,
+  availableAgentTypes = [],
+  onChange,
+  t,
+  compact = false,
+}: {
+  step: WorkflowStep;
+  stepIndex: number;
+  availableAgentTypes?: AgentType[];
+  onChange?: (stepIndex: number, agent: AgentType) => Promise<void>;
+  t: (key: string, ...args: (string | number)[]) => string;
+  compact?: boolean;
+}) {
+  return (
+    <AgentSwitchPicker
+      currentAgent={step.agent}
+      availableAgents={availableAgentTypes}
+      onChange={onChange ? agent => onChange(stepIndex, agent) : undefined}
+      compact={compact}
+      title={t('disc.switchAgent')}
+      ariaLabel={t('wf.stepAgentSwitchLabel', step.name, AGENT_LABELS[step.agent] ?? step.agent)}
+      staticClassName={compact ? 'wf-pipe-chip-agent' : 'wf-step-agent-static'}
+    />
+  );
+}
+
+function compactStepMeta(step: WorkflowStep): {
+  kind: string;
+  Icon: typeof Plug;
+  usesTokens: boolean;
+  labelKey: string;
+} {
   switch (step.step_type?.type) {
-    case 'ApiCall': return { kind: 'api', Icon: Plug, usesTokens: false };
-    case 'BatchApiCall': return { kind: 'batch-api', Icon: Layers, usesTokens: false };
-    case 'Notify': return { kind: 'notify', Icon: Send, usesTokens: false };
-    case 'Gate': return { kind: 'gate', Icon: Hand, usesTokens: false };
-    case 'Exec': return { kind: 'exec', Icon: Terminal, usesTokens: false };
-    case 'JsonData': return { kind: 'json-data', Icon: Braces, usesTokens: false };
-    case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true };
-    default: return { kind: 'agent', Icon: Sparkles, usesTokens: true }; // Agent (or legacy undefined)
+    case 'ApiCall': return { kind: 'api', Icon: Plug, usesTokens: false, labelKey: 'wiz.stepTypeApiCall' };
+    case 'BatchApiCall': return { kind: 'batch-api', Icon: Layers, usesTokens: false, labelKey: 'wiz.stepTypeBatchApi' };
+    case 'Notify': return { kind: 'notify', Icon: Send, usesTokens: false, labelKey: 'wiz.stepTypeNotify' };
+    case 'Gate': return { kind: 'gate', Icon: Hand, usesTokens: false, labelKey: 'wiz.stepTypeGate' };
+    case 'Exec': return { kind: 'exec', Icon: Terminal, usesTokens: false, labelKey: 'wiz.stepTypeExec' };
+    case 'JsonData': return { kind: 'json-data', Icon: Braces, usesTokens: false, labelKey: 'wiz.stepTypeJsonData' };
+    case 'SubWorkflow': return { kind: 'subworkflow', Icon: GitBranch, usesTokens: false, labelKey: 'wiz.stepTypeSubWorkflow' };
+    case 'BatchQuickPrompt': return { kind: 'batch-qp', Icon: Layers, usesTokens: true, labelKey: 'wiz.stepTypeBatchQP' };
+    default: return { kind: 'agent', Icon: Sparkles, usesTokens: true, labelKey: 'wiz.stepTypeAgent' }; // Agent (or legacy undefined)
   }
 }
 
-export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
+function SubWorkflowOverview({
+  workflow,
+  agentAccess,
+  quickPromptsById,
+  t,
+}: {
+  workflow: Workflow;
+  agentAccess?: AgentsConfig | null;
+  quickPromptsById?: Map<string, QuickPrompt>;
+  t: (key: string, ...args: (string | number)[]) => string;
+}) {
+  const [selectedIndexRaw, setSelectedIndex] = useState(0);
+  const [provenanceOpenFor, setProvenanceOpenFor] = useState<number | null>(null);
+  const gotoEdges = useMemo(() => computeGotoEdges(workflow.steps), [workflow.steps]);
+  const selectedIndex = Math.min(
+    selectedIndexRaw,
+    Math.max(workflow.steps.length - 1, 0),
+  );
+  const selectedStep = workflow.steps[selectedIndex];
+  const selectedMeta = selectedStep ? compactStepMeta(selectedStep) : null;
+  const SelectedIcon = selectedMeta?.Icon;
+  const incomingEdges = gotoEdges.filter(edge => edge.toIndex === selectedIndex);
+  const provenanceExpanded = provenanceOpenFor === selectedIndex;
+
+  if (!selectedStep || !selectedMeta || !SelectedIcon) return null;
+
+  return (
+    <div className="wf-subworkflow-overview" data-testid="wf-subworkflow-overview">
+      <div className="wf-subworkflow-overview-head">
+        <span className="wf-subworkflow-overview-kind">
+          <GitBranch size={12} />
+          {t('wiz.stepTypeSubWorkflow')}
+        </span>
+        <strong>{workflow.name}</strong>
+        <span className="wf-subworkflow-overview-count">
+          {t('wf.stepsTitle', workflow.steps.length)}
+        </span>
+      </div>
+
+      <div className="wf-steps-overview wf-subworkflow-overview-grid">
+        <StepBranchMap
+          steps={workflow.steps}
+          selectedStepIndex={selectedIndex}
+          onSelectStep={setSelectedIndex}
+          t={t}
+        />
+        <div className="wf-steps-pipeline" data-layout="index" role="list">
+          {workflow.steps.map((step, index) => {
+            const meta = compactStepMeta(step);
+            const Icon = meta.Icon;
+            const isAgentStep = !step.step_type || step.step_type.type === 'Agent';
+            return (
+              <div
+                className="wf-pipe-chip"
+                data-kind={meta.kind}
+                data-class={meta.usesTokens ? 'agent' : 'determ'}
+                data-selected={selectedIndex === index}
+                role="listitem"
+                key={index}
+              >
+                <button
+                  type="button"
+                  className="wf-pipe-chip-open"
+                  title={`${index + 1}. ${step.name}`}
+                  aria-current={selectedIndex === index ? 'step' : undefined}
+                  onClick={() => setSelectedIndex(index)}
+                >
+                  <span className="wf-pipe-chip-row">
+                    <span className="wf-pipe-chip-num">{index + 1}</span>
+                    <Icon size={11} />
+                    <span className="wf-pipe-chip-name">{step.name}</span>
+                    <span className="wf-pipe-chip-type" data-kind={meta.kind}>
+                      {t(meta.labelKey)}
+                    </span>
+                  </span>
+                </button>
+                {isAgentStep && (
+                  <span className="wf-pipe-chip-meta">
+                    <StepAgentSwitcher step={step} stepIndex={index} t={t} compact />
+                    <TierBadge step={step} t={t} chip />
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="wf-step-inspector wf-subworkflow-inspector">
+        <div className="wf-step-inspector-head">
+          <div className="wf-step-inspector-title">
+            <span className="wf-step-inspector-kicker">
+              {t('wf.stepPosition', selectedIndex + 1, workflow.steps.length)}
+            </span>
+            <span className="wf-step-inspector-name">
+              <SelectedIcon size={13} />
+              {selectedStep.name}
+            </span>
+          </div>
+          {incomingEdges.length > 0 && (
+            <button
+              type="button"
+              className="wf-step-provenance-toggle"
+              data-expanded={provenanceExpanded}
+              aria-expanded={provenanceExpanded}
+              onClick={() => setProvenanceOpenFor(provenanceExpanded ? null : selectedIndex)}
+            >
+              <GitBranch size={12} />
+              {provenanceExpanded
+                ? t('wf.provenanceHide')
+                : t('wf.provenanceShow', incomingEdges.length)}
+              <ChevronDown size={12} aria-hidden />
+            </button>
+          )}
+          <div className="wf-step-inspector-nav">
+            <button
+              type="button"
+              className="wf-step-nav-btn"
+              disabled={selectedIndex === 0}
+              onClick={() => setSelectedIndex(index => Math.max(0, index - 1))}
+              aria-label={t('wf.stepPrevious')}
+            >
+              <ChevronLeft size={13} /> {t('wf.previous')}
+            </button>
+            <button
+              type="button"
+              className="wf-step-nav-btn"
+              disabled={selectedIndex === workflow.steps.length - 1}
+              onClick={() => setSelectedIndex(index => Math.min(workflow.steps.length - 1, index + 1))}
+              aria-label={t('wf.stepNext')}
+            >
+              {t('wf.next')} <ChevronRight size={13} />
+            </button>
+          </div>
+        </div>
+
+        {provenanceExpanded && incomingEdges.length > 0 && (
+          <div className="wf-step-origins">
+            <div className="wf-step-origins-copy">
+              <strong>{t('wf.provenanceTitle')}</strong>
+              <span>{t('wf.provenanceHint')}</span>
+            </div>
+            <div className="wf-step-origin-list">
+              {incomingEdges.map((edge, edgeIndex) => (
+                <button
+                  type="button"
+                  className="wf-step-origin-chip"
+                  key={`${edge.fromIndex}:${edge.label}:${edgeIndex}`}
+                  onClick={() => setSelectedIndex(edge.fromIndex)}
+                  title={t('wf.provenanceSourceHint', edge.fromName)}
+                  aria-label={t('wf.provenanceSourceHint', edge.fromName)}
+                >
+                  <span className="wf-step-origin-index">{edge.fromIndex + 1}</span>
+                  <span className="wf-step-origin-name">{edge.fromName}</span>
+                  {edge.label && (
+                    <span className="wf-step-origin-condition">
+                      {t('wf.branchMap.onTrigger', edge.label)}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className="wf-step-inspector-body">
+          <StepCard
+            key={`${workflow.id}:${selectedIndex}`}
+            step={selectedStep}
+            index={selectedIndex}
+            nested
+            agentAccess={agentAccess}
+            projectId={workflow.project_id}
+            t={t}
+            quickPromptsById={quickPromptsById}
+            workflowId={workflow.id}
+            allSteps={workflow.steps}
+            onSelectStep={setSelectedIndex}
+          />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export function WorkflowDetail({ workflow, runs, availableAgentTypes, onChangeStepAgent, totalRuns, hasMoreRuns = false, loadingMoreRuns = false, onLoadMoreRuns, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
   const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
@@ -1185,7 +1421,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
   // Pure in-memory over `runs` already fetched — no backend round-trip.
   const [runFilter, setRunFilter] = useState<RunStatusFilter>('all');
   const [runSearch, setRunSearch] = useState('');
-  const [showAllRuns, setShowAllRuns] = useState(false);
+  const [runLoadAmount, setRunLoadAmount] = useState<'10' | '50' | '100' | 'all'>('10');
   // #6 — runs render as dense compact rows, expandable to the full RunDetail.
   // Terminal runs collapse (the 151-sub-run case); non-terminal ones stay open
   // by default because they need attention.
@@ -1218,7 +1454,6 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
     if (!target) return;
     setRunFilter('all');
     setRunSearch('');
-    setShowAllRuns(true);
     setExpandedRunIds(prev => new Set(prev).add(focusRunId));
     setGroupOverride(prev => ({ ...prev, [target.parent_run_id ?? focusRunId]: true }));
     const raf = requestAnimationFrame(() => {
@@ -1235,6 +1470,17 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
   // you want at a glance, especially while a run is in flight. "Voir en
   // détails" expands the legacy card list.
   const [stepsExpanded, setStepsExpanded] = useState(false);
+  const [selectedStepIndexRaw, setSelectedStepIndex] = useState(0);
+  const [provenanceOpenFor, setProvenanceOpenFor] = useState<number | null>(null);
+  const gotoEdges = useMemo(() => computeGotoEdges(workflow.steps), [workflow.steps]);
+  const selectedStepIndex = Math.min(
+    selectedStepIndexRaw,
+    Math.max(workflow.steps.length - 1, 0),
+  );
+  const selectStep = (index: number, openDetails = true) => {
+    setSelectedStepIndex(index);
+    if (openDetails) setStepsExpanded(true);
+  };
   // Per-step expand state for the live run view. Keyed by step name (not
   // index — order can shift if Goto loops re-fire a step). The user
   // clicks a completed step to inspect its output without leaving the
@@ -1249,20 +1495,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
     });
   };
 
-  // 1Hz tick to refresh the live elapsed-time badges (workflow total +
-  // current step) without storing a recomputed string in state. Cheap
-  // re-render — only the two duration spans depend on it. Stops as soon
-  // as the live run finishes (cleared by the !active branch in the
-  // effect's deps).
   const [, tickElapsed] = useState(0);
-  // 1Hz tick to refresh elapsed badges. Runs whenever this detail page is
-  // mounted — cost is one re-render per second of a single component,
-  // cheap. The render itself short-circuits to nothing when no live view
-  // is active (the live block is gated on `effectiveLiveRun`).
-  useEffect(() => {
-    const id = setInterval(() => tickElapsed(t => t + 1), 1000);
-    return () => clearInterval(id);
-  }, []);
 
   /** Format a millisecond duration as `Xs` for short, `MmSSs` past 60s. */
   const fmtDuration = (ms: number): string => {
@@ -1334,6 +1567,15 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
     };
   }, [liveRun, runs, workflow.id, workflow.steps]);
 
+  // Elapsed badges only need a clock while a run is active. Keeping this
+  // interval alive on a 500-run history repainted the whole detail tree every
+  // second even though no visible value changed.
+  useEffect(() => {
+    if (!effectiveLiveRun) return;
+    const id = setInterval(() => tickElapsed(t => t + 1), 1000);
+    return () => clearInterval(id);
+  }, [effectiveLiveRun]);
+
   // Resolve Quick Prompts referenced by BatchQuickPrompt steps so the step card
   // can show the QP name/icon/description instead of just an opaque id. One
   // fetch per workflow view is fine; the list is small (<100 QPs typically).
@@ -1378,64 +1620,67 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
 
   return (
     <div className="wf-detail-panel">
-      <div className="flex-row gap-6 mb-8">
-        <h2 className="text-lg font-bold" style={{ margin: 0 }}>{workflow.name}</h2>
-        {/* Short workflow-id pill — same affordance as the disc-id pill:
-            click copies the full id for pasting into a disc, a CLI or a
-            linked issue (the title alone is ambiguous across variants). */}
-        <button
-          type="button"
-          className="wf-id-pill"
-          data-copied={isWorkflowIdCopied}
-          onClick={() => void copyWorkflowId()}
-          title={t('disc.idPillTooltip', workflow.id)}
-          aria-label={t('disc.idPillTooltip', workflow.id)}
-        >
-          {isWorkflowIdCopied ? <Check size={8} /> : null}
-          #{workflow.id.slice(0, 8)}
-        </button>
-        <span className="flex-1" />
-        <button className="wf-small-btn" onClick={onEdit}>
-          <Settings size={10} /> {t('wf.edit')}
-        </button>
-        {/* 0.7.0 UX pass — export button bundles the workflow + any
-            referenced QPs into a single JSON file for sharing across
-            instances. The download is triggered by the parent page. */}
-        {onExport && (
-          <button className="wf-small-btn" onClick={onExport} title={t('wf.exportHint')}>
-            <Download size={10} /> {t('wf.export')}
-          </button>
-        )}
-        <button className="wf-small-btn" onClick={onRefresh}>
-          <RefreshCw size={10} /> {t('wf.refresh')}
-        </button>
-        <button
-          className="wf-small-btn wf-small-btn-accent"
-          onClick={onTrigger}
-          disabled={!workflow.enabled || triggering}
-          title={!workflow.enabled ? t('wf.launchDisabledHint') : undefined}
-        >
-          {triggering ? <Loader2 size={10} /> : <Play size={10} />}
-          {t('wf.launch')}
-        </button>
-        {/* 0.8.11 UX — a disabled workflow used to leave "Lancer" silently
-            inert (clone lands disabled by design → user clicks, nothing
-            happens, no clue why). Make the state VISIBLE and actionable:
-            an explanatory chip + a one-click enable. */}
-        {!workflow.enabled && (
-          <span className="wf-disabled-chip" title={t('wf.launchDisabledHint')}>
-            ⏸ {t('wf.disabledChip')}
-          </span>
-        )}
-        {!workflow.enabled && onToggleEnabled && (
+      <div className="wf-detail-header">
+        <div className="wf-detail-heading">
+          <h2 className="text-lg font-bold" style={{ margin: 0 }}>{workflow.name}</h2>
+          {/* Short workflow-id pill — same affordance as the disc-id pill:
+              click copies the full id for pasting into a disc, a CLI or a
+              linked issue (the title alone is ambiguous across variants). */}
           <button
-            className="wf-small-btn wf-enable-btn"
-            onClick={() => onToggleEnabled(true)}
-            title={t('wf.launchDisabledHint')}
+            type="button"
+            className="wf-id-pill"
+            data-copied={isWorkflowIdCopied}
+            onClick={() => void copyWorkflowId()}
+            title={t('disc.idPillTooltip', workflow.id)}
+            aria-label={t('disc.idPillTooltip', workflow.id)}
           >
-            {t('wf.enableNow')}
+            {isWorkflowIdCopied ? <Check size={8} /> : null}
+            #{workflow.id.slice(0, 8)}
           </button>
-        )}
+        </div>
+        <div className="wf-detail-actions">
+          <button className="wf-small-btn" onClick={onEdit}>
+            <Settings size={10} /> {t('wf.edit')}
+          </button>
+          {/* 0.7.0 UX pass — export button bundles the workflow + any
+              referenced QPs into a single JSON file for sharing across
+              instances. The download is triggered by the parent page. */}
+          {onExport && (
+            <button className="wf-small-btn" onClick={onExport} title={t('wf.exportHint')}>
+              <Download size={10} /> {t('wf.export')}
+            </button>
+          )}
+          <button className="wf-small-btn" onClick={onRefresh}>
+            <RefreshCw size={10} /> {t('wf.refresh')}
+          </button>
+          <button
+            className="wf-small-btn wf-small-btn-accent"
+            onClick={onTrigger}
+            disabled={!workflow.enabled || triggering}
+            title={!workflow.enabled ? t('wf.launchDisabledHint') : undefined}
+          >
+            {triggering ? <Loader2 size={10} /> : <Play size={10} />}
+            {t('wf.launch')}
+          </button>
+          {/* 0.8.11 UX — a disabled workflow used to leave "Lancer" silently
+              inert (clone lands disabled by design → user clicks, nothing
+              happens, no clue why). Make the state VISIBLE and actionable:
+              an explanatory chip + a one-click enable. */}
+          {!workflow.enabled && (
+            <span className="wf-disabled-chip" title={t('wf.launchDisabledHint')}>
+              ⏸ {t('wf.disabledChip')}
+            </span>
+          )}
+          {!workflow.enabled && onToggleEnabled && (
+            <button
+              className="wf-small-btn wf-enable-btn"
+              onClick={() => onToggleEnabled(true)}
+              title={t('wf.launchDisabledHint')}
+            >
+              {t('wf.enableNow')}
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Trigger info */}
@@ -1456,8 +1701,17 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
       {(() => {
         const agentCount = workflow.steps.filter(s => compactStepMeta(s).usesTokens).length;
         const determCount = workflow.steps.length - agentCount;
+        const selectedStep = workflow.steps[selectedStepIndex];
+        const selectedMeta = selectedStep ? compactStepMeta(selectedStep) : null;
+        const selectedIncomingEdges = gotoEdges.filter(edge => edge.toIndex === selectedStepIndex);
+        const provenanceExpanded = provenanceOpenFor === selectedStepIndex;
+        const SelectedIcon = selectedMeta?.Icon;
         return (
-          <div className="wf-steps-section" data-testid="wf-steps-section">
+          <div
+            className="wf-steps-section"
+            data-testid="wf-steps-section"
+            data-expanded={stepsExpanded}
+          >
             <div className="wf-steps-head">
               <h3 className="wf-section-title" style={{ margin: 0 }}>
                 {t('wf.stepsTitle', workflow.steps.length)}
@@ -1483,56 +1737,159 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               </button>
             </div>
 
-            {/* Compact horizontal pipeline — number + kind icon + name. Click
-                any chip to open the full detail. */}
-            <div className="wf-steps-pipeline" role="list">
-              {workflow.steps.map((step, i) => {
-                const meta = compactStepMeta(step);
-                const Icon = meta.Icon;
-                // Show the agent identity (name + brand color) only on genuine
-                // Agent steps — same whitelist as the detail card's `isAgentLike`
-                // so both views read the same label. Batch/Exec/etc. delegate
-                // and don't run `step.agent` directly.
-                const isAgentStep = !step.step_type || step.step_type.type === 'Agent';
-                return (
-                  <Fragment key={i}>
-                    {i > 0 && <ChevronRight size={13} className="wf-pipe-arrow" aria-hidden />}
-                    <button
-                      type="button"
-                      className="wf-pipe-chip"
-                      data-kind={meta.kind}
-                      data-class={meta.usesTokens ? 'agent' : 'determ'}
-                      role="listitem"
-                      title={`${i + 1}. ${step.name}`}
-                      onClick={() => setStepsExpanded(true)}
-                    >
-                      <span className="wf-pipe-chip-row">
-                        <span className="wf-pipe-chip-num">{i + 1}</span>
-                        <Icon size={11} />
-                        <span className="wf-pipe-chip-name">{step.name}</span>
-                      </span>
-                      {isAgentStep && (
-                        <span
-                          className="wf-pipe-chip-agent"
-                          style={{ color: AGENT_COLORS[step.agent] ?? 'var(--kr-text-faint)' }}
+            <div className="wf-steps-overview">
+              <StepBranchMap
+                steps={workflow.steps}
+                selectedStepIndex={selectedStepIndex}
+                onSelectStep={index => selectStep(index)}
+                t={t}
+              />
+              {/* Compact pipeline — the map explains control flow, while these
+                  chips are the step selector and retain one-click agent swaps. */}
+              <div className="wf-steps-pipeline" data-layout="index" role="list">
+                {workflow.steps.map((step, i) => {
+                  const meta = compactStepMeta(step);
+                  const Icon = meta.Icon;
+                  const isAgentStep = !step.step_type || step.step_type.type === 'Agent';
+                  return (
+                    <Fragment key={i}>
+                      <div
+                        className="wf-pipe-chip"
+                        data-kind={meta.kind}
+                        data-class={meta.usesTokens ? 'agent' : 'determ'}
+                        data-selected={selectedStepIndex === i}
+                        role="listitem"
+                      >
+                        <button
+                          type="button"
+                          className="wf-pipe-chip-open"
+                          title={`${i + 1}. ${step.name}`}
+                          aria-current={selectedStepIndex === i ? 'step' : undefined}
+                          onClick={() => selectStep(i)}
                         >
-                          {AGENT_LABELS[step.agent] ?? step.agent}
-                        </span>
-                      )}
-                      {isAgentStep && <TierBadge step={step} t={t} chip />}
-                    </button>
-                  </Fragment>
-                );
-              })}
+                          <span className="wf-pipe-chip-row">
+                            <span className="wf-pipe-chip-num">{i + 1}</span>
+                            <Icon size={11} />
+                            <span className="wf-pipe-chip-name">{step.name}</span>
+                            <span className="wf-pipe-chip-type" data-kind={meta.kind}>
+                              {t(meta.labelKey)}
+                            </span>
+                          </span>
+                        </button>
+                        {isAgentStep && (
+                          <span className="wf-pipe-chip-meta">
+                            <StepAgentSwitcher
+                              step={step}
+                              stepIndex={i}
+                              availableAgentTypes={availableAgentTypes}
+                              onChange={onChangeStepAgent}
+                              t={t}
+                              compact
+                            />
+                            <TierBadge step={step} t={t} chip />
+                          </span>
+                        )}
+                      </div>
+                    </Fragment>
+                  );
+                })}
+              </div>
             </div>
 
-            {stepsExpanded && (
-              <div className="wf-steps-detail" data-testid="wf-steps-detail">
-                {/* #15 — branch map, only for workflows that actually branch. */}
-                {hasBranches(workflow.steps) && <StepBranchMap steps={workflow.steps} t={t} />}
-                {workflow.steps.map((step, i) => (
-                  <StepCard key={i} step={step} index={i} agentAccess={agentAccess} projectId={workflow.project_id} t={t} quickPromptsById={quickPromptsById} workflowId={workflow.id} allSteps={workflow.steps} />
-                ))}
+            {stepsExpanded && selectedStep && selectedMeta && SelectedIcon && (
+              <div className="wf-step-inspector" data-testid="wf-steps-detail">
+                <div className="wf-step-inspector-head">
+                  <div className="wf-step-inspector-title">
+                    <span className="wf-step-inspector-kicker">
+                      {t('wf.stepPosition', selectedStepIndex + 1, workflow.steps.length)}
+                    </span>
+                    <span className="wf-step-inspector-name">
+                      <SelectedIcon size={13} />
+                      {selectedStep.name}
+                    </span>
+                  </div>
+                  {selectedIncomingEdges.length > 0 && (
+                    <button
+                      type="button"
+                      className="wf-step-provenance-toggle"
+                      data-expanded={provenanceExpanded}
+                      aria-expanded={provenanceExpanded}
+                      onClick={() => setProvenanceOpenFor(
+                        provenanceExpanded ? null : selectedStepIndex,
+                      )}
+                    >
+                      <GitBranch size={12} />
+                      {provenanceExpanded
+                        ? t('wf.provenanceHide')
+                        : t('wf.provenanceShow', selectedIncomingEdges.length)}
+                      <ChevronDown size={12} aria-hidden />
+                    </button>
+                  )}
+                  <div className="wf-step-inspector-nav">
+                    <button
+                      type="button"
+                      className="wf-step-nav-btn"
+                      disabled={selectedStepIndex === 0}
+                      onClick={() => setSelectedStepIndex(index => Math.max(0, index - 1))}
+                      aria-label={t('wf.stepPrevious')}
+                    >
+                      <ChevronLeft size={13} /> {t('wf.previous')}
+                    </button>
+                    <button
+                      type="button"
+                      className="wf-step-nav-btn"
+                      disabled={selectedStepIndex === workflow.steps.length - 1}
+                      onClick={() => setSelectedStepIndex(index => Math.min(workflow.steps.length - 1, index + 1))}
+                      aria-label={t('wf.stepNext')}
+                    >
+                      {t('wf.next')} <ChevronRight size={13} />
+                    </button>
+                  </div>
+                </div>
+                {provenanceExpanded && selectedIncomingEdges.length > 0 && (
+                  <div className="wf-step-origins" data-testid="wf-step-origins">
+                    <div className="wf-step-origins-copy">
+                      <strong>{t('wf.provenanceTitle')}</strong>
+                      <span>{t('wf.provenanceHint')}</span>
+                    </div>
+                    <div className="wf-step-origin-list">
+                      {selectedIncomingEdges.map((edge, edgeIndex) => (
+                        <button
+                          type="button"
+                          className="wf-step-origin-chip"
+                          key={`${edge.fromIndex}:${edge.label}:${edgeIndex}`}
+                          onClick={() => selectStep(edge.fromIndex)}
+                          title={t('wf.provenanceSourceHint', edge.fromName)}
+                          aria-label={t('wf.provenanceSourceHint', edge.fromName)}
+                        >
+                          <span className="wf-step-origin-index">{edge.fromIndex + 1}</span>
+                          <span className="wf-step-origin-name">{edge.fromName}</span>
+                          {edge.label && (
+                            <span className="wf-step-origin-condition">
+                              {t('wf.branchMap.onTrigger', edge.label)}
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="wf-step-inspector-body">
+                  <StepCard
+                    key={`${workflow.id}:${selectedStepIndex}`}
+                    step={selectedStep}
+                    index={selectedStepIndex}
+                    agentAccess={agentAccess}
+                    projectId={workflow.project_id}
+                    t={t}
+                    quickPromptsById={quickPromptsById}
+                    workflowId={workflow.id}
+                    allSteps={workflow.steps}
+                    availableAgentTypes={availableAgentTypes}
+                    onChangeAgent={onChangeStepAgent}
+                    onSelectStep={index => selectStep(index)}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -1764,7 +2121,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
       {/* Runs */}
       <div className="flex-row gap-4 mt-8">
         <h3 className="wf-section-title flex-1" style={{ margin: 0 }}>
-          Runs ({runs.length})
+          Runs ({totalRuns ?? runs.length})
         </h3>
         {runs.length > 0 && (
           <button
@@ -1784,7 +2141,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
       )}
 
       {/* #2 — control bar: only when the list is long enough to warrant it. */}
-      {showRuns && runs.length > RUN_PAGE_SIZE && (
+      {showRuns && (totalRuns ?? runs.length) > RUN_PAGE_SIZE && (
         <div className="wf-runs-controls">
           <div className="wf-runs-filter" role="group" aria-label={t('wf.runs.filterLabel')}>
             {(['all', 'failed', 'waiting', 'stopped'] as const).map(f => (
@@ -1793,7 +2150,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
                 type="button"
                 className="wf-runs-filter-btn"
                 data-active={runFilter === f}
-                onClick={() => { setRunFilter(f); setShowAllRuns(false); }}
+                onClick={() => setRunFilter(f)}
               >{t(`wf.runs.filter.${f}`)}</button>
             ))}
           </div>
@@ -1804,7 +2161,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               className="wf-runs-search-input"
               placeholder={t('wf.runs.searchPlaceholder')}
               value={runSearch}
-              onChange={e => { setRunSearch(e.target.value); setShowAllRuns(false); }}
+              onChange={e => setRunSearch(e.target.value)}
               aria-label={t('wf.runs.searchPlaceholder')}
             />
           </div>
@@ -1814,14 +2171,13 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
       {(() => {
         if (!showRuns) return null;
         const visible = filterRuns(runs, runFilter, runSearch);
-        const shown = showAllRuns ? visible : visible.slice(0, RUN_PAGE_SIZE);
-        const hidden = visible.length - shown.length;
-        const groups = groupRunsByParent(shown);
+        const groups = groupRunsByParent(visible);
         const renderRunItem = (run: WorkflowRun) => {
         // If this linear run spawned a batch (BatchQuickPrompt step), show a
         // "📋 N conversations" chip pointing to the discussions tab.
         const childBatch = batchByParentRunId.get(run.id);
         const expanded = isRunExpanded(run);
+        const statusTimeline = runStatusTimeline(run);
         const durMs = run.finished_at
           ? new Date(run.finished_at).getTime() - new Date(run.started_at).getTime()
           : null;
@@ -1836,7 +2192,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               onClick={() => toggleRunExpanded(run.id)}
             >
               <span className="wf-step-dot wf-run-compact-dot" style={{ width: 8, height: 8 }} />
-              <span className="wf-run-compact-status">{run.status}</span>
+              <RunStatusTrail run={run} timeline={statusTimeline} />
               {run.parent_workflow_name && (
                 <span className="wf-run-compact-parent" title={run.parent_workflow_name}>↳ {run.parent_workflow_name}</span>
               )}
@@ -1871,8 +2227,12 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               }}
               onResume={async () => {
                 try {
-                  await workflowsApi.resumeRun(run.id);
+                  const resumeRunId = run.parent_run_id ?? run.id;
+                  await workflowsApi.resumeRun(resumeRunId);
                   onRefresh();
+                  if (run.parent_run_id && run.parent_workflow_id) {
+                    onNavigateToRun?.(run.parent_workflow_id, resumeRunId);
+                  }
                 } catch (e) {
                   // Claim lost (double-click, benign: the other click won) or
                   // worktree gone — same silent-refresh convention as onCancel
@@ -1911,7 +2271,7 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         };
         return (
           <>
-            {runs.length > RUN_PAGE_SIZE && visible.length === 0 && (
+            {(totalRuns ?? runs.length) > RUN_PAGE_SIZE && visible.length === 0 && (
               <p className="text-sm text-faint mt-4">{t('wf.runs.noMatch')}</p>
             )}
             {groups.map(g => {
@@ -1943,12 +2303,37 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
               }
               return <Fragment key={g.key}>{g.runs.map(renderRunItem)}</Fragment>;
             })}
-            {hidden > 0 && (
-              <button
-                type="button"
-                className="wf-runs-show-more"
-                onClick={() => setShowAllRuns(true)}
-              >{t('wf.runs.showMore', hidden)}</button>
+            {hasMoreRuns && (
+              <div
+                className="wf-runs-load-more"
+                onClick={event => {
+                  if ((event.target as HTMLElement).closest('select')) return;
+                  if (loadingMoreRuns || !onLoadMoreRuns) return;
+                  onLoadMoreRuns(runLoadAmount === 'all' ? 'all' : Number(runLoadAmount));
+                }}
+              >
+                <button
+                  type="button"
+                  className="wf-runs-load-action"
+                  disabled={loadingMoreRuns || !onLoadMoreRuns}
+                >
+                  {loadingMoreRuns && <Loader2 size={11} className="wf-spin" />}
+                  {t('wf.runs.loadPrefix')}
+                </button>
+                <select
+                  className="wf-runs-load-select"
+                  value={runLoadAmount}
+                  onChange={event => setRunLoadAmount(event.target.value as typeof runLoadAmount)}
+                  aria-label={t('wf.runs.loadAmountLabel')}
+                  disabled={loadingMoreRuns}
+                >
+                  <option value="10">10</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="all">{t('wf.runs.loadAll')}</option>
+                </select>
+                <span>{t('wf.runs.loadSuffix')}</span>
+              </div>
             )}
           </>
         );

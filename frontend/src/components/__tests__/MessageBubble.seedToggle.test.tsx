@@ -15,7 +15,15 @@
 import { describe, it, expect } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { useState } from 'react';
-import { splitMessageSeed } from '../MessageBubble';
+import { splitMessageSeed, stripAgentHandoff } from '../MessageBubble';
+
+describe('stripAgentHandoff', () => {
+  it('hides only the leading agent-facing handoff from the human message', () => {
+    const raw = '<!-- KRONN_AGENT_HANDOFF: ClaudeCode -> Codex. Continue from context. -->\nCorrige la CI';
+    expect(stripAgentHandoff(raw)).toBe('Corrige la CI');
+    expect(stripAgentHandoff('Message normal')).toBe('Message normal');
+  });
+});
 
 describe('splitMessageSeed (0.8.5)', () => {
   it('returns content as-is when no marker is present', () => {

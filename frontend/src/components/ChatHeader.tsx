@@ -2,19 +2,20 @@ import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
 import type { Project, AgentDetection, Discussion, AgentType, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact } from '../types/generated';
-import { agentColor, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, AGENT_LABELS } from '../lib/constants';
+import { isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, AGENT_LABELS } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Cpu, GitBranch, Server,
+  GitBranch, Server,
   Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Settings, Rocket,
-  Menu, Lock, Unlock, RefreshCw, Share2, Users2, Star,
+  Menu, Lock, Unlock, Share2, Users2, Star,
   FlaskConical, Info, ChevronRight, UserCircle,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
 import { ProfileTooltip } from './ProfileTooltip';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
+import { AgentSwitchPicker } from './AgentSwitchPicker';
 
 export interface ChatHeaderProps {
   discussion: Discussion;
@@ -84,7 +85,6 @@ export function ChatHeader({
   // collapsed; the operator clicks the section they want to edit).
   const [expandedConfigSection, setExpandedConfigSection] =
     useState<'profiles' | 'skills' | 'directives' | null>(null);
-  const [showAgentSwitch, setShowAgentSwitch] = useState(false);
   const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
   const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Which inline badge popover is currently open, if any. Encoded as
@@ -277,40 +277,22 @@ export function ChatHeader({
         <div className="disc-chat-header-sub">
           <span>{discussion.project_id ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?') : t('disc.general')} · </span>
           <span className="relative flex-row gap-1">
-            <button
-              className="disc-agent-switch-btn"
-              onClick={() => setShowAgentSwitch(prev => !prev)}
+            <AgentSwitchPicker
+              currentAgent={discussion.agent}
+              availableAgents={installedAgentsList.map(agent => agent.agent_type)}
               disabled={sending}
               title={t('disc.switchAgent')}
-              style={{ color: agentColor(discussion.agent) }}
-            >
-              {discussion.agent} <RefreshCw size={8} className="opacity-50" />
-            </button>
-            {showAgentSwitch && (
-              <div className="disc-agent-switch-popover">
-                {installedAgentsList.map(a => (
-                  <button
-                    key={a.agent_type}
-                    disabled={a.agent_type === discussion.agent}
-                    className="disc-agent-switch-item"
-                    data-current={a.agent_type === discussion.agent}
-                    onClick={async () => {
-                      setShowAgentSwitch(false);
-                      try {
-                        await discussionsApi.update(discussion.id, { agent: a.agent_type });
-                        onAgentSwitch(a.agent_type);
-                      } catch (err) {
-                        toast(String(err), 'error');
-                      }
-                    }}
-                  >
-                    <Cpu size={10} style={{ color: agentColor(a.agent_type) }} />
-                    {a.name}
-                    {a.agent_type === discussion.agent && <Check size={10} style={{ marginLeft: 'auto', color: 'var(--kr-accent-ink)' }} />}
-                  </button>
-                ))}
-              </div>
-            )}
+              ariaLabel={t('disc.switchAgent')}
+              onChange={async agent => {
+                try {
+                  await discussionsApi.update(discussion.id, { agent });
+                  onAgentSwitch(agent);
+                } catch (err) {
+                  toast(String(err), 'error');
+                  throw err;
+                }
+              }}
+            />
           </span>
           {discussion.workspace_mode === 'Isolated' && discussion.worktree_branch && (
             <span className="disc-worktree-badge" data-locked={!!discussion.workspace_path}>
@@ -500,7 +482,7 @@ export function ChatHeader({
         </div>
       </div>
       <div className="disc-chat-header-actions">
-        {/* 0.9.0 — pending-learnings badge (self-contained; hidden when 0). */}
+        {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
         <LearningsBadge t={t} toast={toast} />
         {/* MCP info button */}
         <div className="relative">

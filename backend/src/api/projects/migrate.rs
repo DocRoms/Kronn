@@ -4,7 +4,10 @@
 // cross-ref rewrite lives in `core::docs_migration`; this is the HTTP
 // glue + response shape.
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 
 use crate::core::scanner;
 use crate::models::*;
@@ -18,7 +21,9 @@ pub struct MigrateDocsRequest {
     pub create_symlink: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, serde::Serialize)]
 pub struct MigrateDocsResponse {
@@ -47,29 +52,38 @@ pub async fn migrate_docs(
     Path(id): Path<String>,
     body: Option<Json<MigrateDocsRequest>>,
 ) -> Json<ApiResponse<MigrateDocsResponse>> {
-    let req = body.map(|Json(b)| b).unwrap_or(MigrateDocsRequest { create_symlink: true });
+    let req = body.map(|Json(b)| b).unwrap_or(MigrateDocsRequest {
+        create_symlink: true,
+    });
 
     let pid = id.clone();
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     let project_path = scanner::resolve_host_path(&project.path);
-    let outcome = crate::core::docs_migration::migrate_project(&project_path, req.create_symlink).await;
+    let outcome =
+        crate::core::docs_migration::migrate_project(&project_path, req.create_symlink).await;
 
     use crate::core::docs_migration::MigrationOutcome;
     let response = match outcome {
-        MigrationOutcome::Migrated { files_moved, refs_rewritten, symlink_created } => {
-            MigrateDocsResponse {
-                status: "migrated",
-                files_moved: Some(files_moved),
-                refs_rewritten: Some(refs_rewritten),
-                symlink_created: Some(symlink_created),
-                reason: None,
-            }
-        }
+        MigrationOutcome::Migrated {
+            files_moved,
+            refs_rewritten,
+            symlink_created,
+        } => MigrateDocsResponse {
+            status: "migrated",
+            files_moved: Some(files_moved),
+            refs_rewritten: Some(refs_rewritten),
+            symlink_created: Some(symlink_created),
+            reason: None,
+        },
         MigrationOutcome::AlreadyMigrated { refs_rewritten } => MigrateDocsResponse {
             // 0.8.1: even when the folder migration is already done, we
             // re-run the ref-rewrite pass and surface the count so the
@@ -83,7 +97,9 @@ pub async fn migrate_docs(
         },
         MigrationOutcome::NotApplicable => MigrateDocsResponse {
             status: "not_applicable",
-            files_moved: None, refs_rewritten: None, symlink_created: None,
+            files_moved: None,
+            refs_rewritten: None,
+            symlink_created: None,
             reason: Some("Project has no `ai/` directory to migrate.".into()),
         },
         MigrationOutcome::Failed { reason } => {

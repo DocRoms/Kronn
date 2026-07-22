@@ -86,7 +86,8 @@ fn cjk_filename_out_of_bounds_line_is_fabricated() {
         check.status,
         SourceStatus::OutOfBounds,
         "a CJK-named file cited beyond its length must be OutOfBounds, got {:?} ({})",
-        check.status, check.detail
+        check.status,
+        check.detail
     );
     assert!(check.status.is_fabricated());
     cleanup(&root);
@@ -104,7 +105,8 @@ fn emoji_filename_verifies_and_missing_is_not_found() {
         ok.status,
         SourceStatus::Verified,
         "real emoji-named file must verify, got {:?} ({})",
-        ok.status, ok.detail
+        ok.status,
+        ok.detail
     );
     let missing = verify_source_marker("file: src/missing_💥.rs", Some(&root));
     assert_eq!(
@@ -132,7 +134,10 @@ fn analyze_mixed_script_prose_with_accented_inline_anchor() {
         report.sources
     );
     // No fabricated formal markers in this prose.
-    assert_eq!(report.fabricated_count, 0, "no formal [src:] here, so 0 fabricated");
+    assert_eq!(
+        report.fabricated_count, 0,
+        "no formal [src:] here, so 0 fabricated"
+    );
     cleanup(&root);
 }
 
@@ -143,7 +148,8 @@ fn analyze_mixed_script_prose_with_accented_inline_anchor() {
 #[test]
 fn lint_emoji_cjk_rtl_prose_no_panic_sane_count() {
     // RTL Arabic + Hebrew + emoji + CJK, with an English claim cue ("the function").
-    let text = "مرحبا بالعالم 🌍 שלום עולם 你好世界 — the function handles every request reliably here.";
+    let text =
+        "مرحبا بالعالم 🌍 שלום עולם 你好世界 — the function handles every request reliably here.";
     let report = lint_assertions(text);
     // Exactly one claim-cue sentence, no anchor/hedge → expect a flag, but the
     // hard guarantee is: no panic and the count stays bounded/sane.
@@ -204,7 +210,10 @@ fn combining_chars_in_path_and_prose_no_panic() {
     // wrong file. (On case/normalization-insensitive FSes this could verify;
     // accept either Verified or NotFound — but NEVER OutsideProject/panic.)
     assert!(
-        matches!(check.status, SourceStatus::Verified | SourceStatus::NotFound),
+        matches!(
+            check.status,
+            SourceStatus::Verified | SourceStatus::NotFound
+        ),
         "NFD combining path must be Verified or NotFound, never escape/panic, got {:?}",
         check.status
     );
@@ -212,7 +221,11 @@ fn combining_chars_in_path_and_prose_no_panic() {
     // Combining chars in prose with a claim cue — must not panic.
     let prose = "Le cafe\u{0301} ☕ : the function returns a value, e\u{0301}videmment.";
     let r = lint_assertions(prose);
-    assert!(r.unsourced_count <= 3, "sane count, got {}", r.unsourced_count);
+    assert!(
+        r.unsourced_count <= 3,
+        "sane count, got {}",
+        r.unsourced_count
+    );
     cleanup(&root);
 }
 
@@ -315,13 +328,13 @@ fn pathological_multibyte_inputs_no_panic() {
     let root = temp_project();
     let big = "é".repeat(5000); // big multibyte blob (no cue)
     let payloads = [
-        "\u{FEFF}[src: file: café\u{0301}",          // BOM + unterminated marker, NFD tail
-        "the function\u{0000}returns 🚀 [src:",       // NUL + unterminated [src:
+        "\u{FEFF}[src: file: café\u{0301}", // BOM + unterminated marker, NFD tail
+        "the function\u{0000}returns 🚀 [src:", // NUL + unterminated [src:
         "\u{202E}gnp.elif :rraw\u{202C} the endpoint", // RTL override wrapping
-        "👨‍👩‍👧‍👦 the table is defined 你好",        // ZWJ family emoji + cue
-        "[src: file: ../é/../🚀.rs:1]",               // traversal w/ multibyte
-        "[src::::é:::]",                               // degenerate colons + accent
-        "",                                            // empty
+        "👨‍👩‍👧‍👦 the table is defined 你好",     // ZWJ family emoji + cue
+        "[src: file: ../é/../🚀.rs:1]",     // traversal w/ multibyte
+        "[src::::é:::]",                    // degenerate colons + accent
+        "",                                 // empty
         big.as_str(),
     ];
     for (i, p) in payloads.iter().enumerate() {

@@ -115,7 +115,7 @@ describe('api module', () => {
 
     it('workflows has expected methods', async () => {
       const { workflows } = await getApi();
-      const expected = ['list', 'get', 'create', 'update', 'delete', 'trigger', 'triggerStream', 'listRuns', 'getRun', 'deleteRun', 'deleteAllRuns'];
+      const expected = ['list', 'get', 'create', 'update', 'delete', 'trigger', 'triggerStream', 'listRuns', 'countRuns', 'getRun', 'deleteRun', 'deleteAllRuns'];
       for (const method of expected) {
         expect(typeof (workflows as Record<string, unknown>)[method]).toBe('function');
       }

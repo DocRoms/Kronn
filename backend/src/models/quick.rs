@@ -39,7 +39,9 @@ pub struct PromptVariable {
     pub pattern: Option<String>,
 }
 
-fn default_variable_required() -> bool { true }
+fn default_variable_required() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -247,7 +249,6 @@ pub struct QuickPromptVersionMetrics {
 }
 
 // Skills / Profiles / Directives extracted to `agents.rs` (TD-models-monolith).
-
 
 // ─── Quick Prompts / APIs API requests ────────────────────────────────────
 

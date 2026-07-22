@@ -22,10 +22,14 @@ use crate::agents::runner;
 use crate::models::*;
 use crate::AppState;
 
-use crate::api::disc_helpers::{agent_display_name, auth_mode_for, summary_cooldown, summary_msg_threshold};
-use crate::api::disc_prompts::{build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext};
 use super::streaming::{run_agent_collect, run_agent_streaming, AgentStreamMeta};
 use super::{AgentStreamEvent, SseStream};
+use crate::api::disc_helpers::{
+    agent_display_name, auth_mode_for, summary_cooldown, summary_msg_threshold,
+};
+use crate::api::disc_prompts::{
+    build_orchestration_prompt, build_synthesis_prompt, OrchestrationContext,
+};
 
 pub async fn orchestrate(
     State(state): State<AppState>,
@@ -40,20 +44,33 @@ pub async fn orchestrate(
 
     if agents.len() < 2 {
         let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(Event::default().event("error").data("{\"error\":\"At least 2 agents required\"}"))
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("error")
+                    .data("{\"error\":\"At least 2 agents required\"}"),
+            )
         }));
         return Sse::new(stream);
     }
 
     // Extract discussion info from DB
-    let disc = state.db.with_conn({
-        let did = id.clone();
-        move |conn| crate::db::discussions::get_discussion(conn, &did)
-    }).await.ok().flatten();
+    let disc = state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| crate::db::discussions::get_discussion(conn, &did)
+        })
+        .await
+        .ok()
+        .flatten();
 
     if disc.is_none() {
         let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(Event::default().event("error").data("{\"error\":\"Discussion not found\"}"))
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("error")
+                    .data("{\"error\":\"Discussion not found\"}"),
+            )
         }));
         return Sse::new(stream);
     }
@@ -62,15 +79,20 @@ pub async fn orchestrate(
         Some(d) => d,
         None => {
             let stream: SseStream = Box::pin(futures::stream::once(async {
-                Ok::<_, Infallible>(Event::default().event("error").data(
-                    serde_json::json!({ "error": "Discussion not found" }).to_string()
-                ))
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({ "error": "Discussion not found" }).to_string()),
+                )
             }));
             return Sse::new(stream);
         }
     };
     let orch_workspace_path = disc.workspace_path.clone();
-    let original_question = disc.messages.iter().rev()
+    let original_question = disc
+        .messages
+        .iter()
+        .rev()
         .find(|m| matches!(m.role, MessageRole::User))
         .map(|m| m.content.clone())
         .unwrap_or_default();
@@ -78,7 +100,9 @@ pub async fn orchestrate(
     // This will be summarized by the primary agent before injection into the debate.
     let raw_conv_context = {
         let msgs = &disc.messages;
-        let last_user_idx = msgs.iter().rposition(|m| matches!(m.role, MessageRole::User));
+        let last_user_idx = msgs
+            .iter()
+            .rposition(|m| matches!(m.role, MessageRole::User));
         let prior_msgs: Vec<_> = match last_user_idx {
             Some(idx) => msgs[..idx].to_vec(),
             None => vec![],
@@ -91,7 +115,9 @@ pub async fn orchestrate(
                 match msg.role {
                     MessageRole::User => ctx.push_str(&format!("User: {}\n\n", msg.content)),
                     MessageRole::Agent => {
-                        let label = msg.agent_type.as_ref()
+                        let label = msg
+                            .agent_type
+                            .as_ref()
                             .map(agent_display_name)
                             .unwrap_or_else(|| "Agent".into());
                         ctx.push_str(&format!("{}: {}\n\n", label, msg.content));
@@ -106,13 +132,29 @@ pub async fn orchestrate(
     let disc_tier = disc.tier;
     let primary_agent_type = disc.agent.clone();
     // Use skills from the orchestration request if provided, otherwise fall back to discussion skills
-    let orch_skill_ids = if req_skill_ids.is_empty() { disc.skill_ids.clone() } else { req_skill_ids };
-    let orch_directive_ids = if req_directive_ids.is_empty() { disc.directive_ids.clone() } else { req_directive_ids };
-    let orch_profile_ids = if req_profile_ids.is_empty() { disc.profile_ids.clone() } else { req_profile_ids };
+    let orch_skill_ids = if req_skill_ids.is_empty() {
+        disc.skill_ids.clone()
+    } else {
+        req_skill_ids
+    };
+    let orch_directive_ids = if req_directive_ids.is_empty() {
+        disc.directive_ids.clone()
+    } else {
+        req_directive_ids
+    };
+    let orch_profile_ids = if req_profile_ids.is_empty() {
+        disc.profile_ids.clone()
+    } else {
+        req_profile_ids
+    };
 
     // Reorder agents: non-primary first, primary last
     let agents = {
-        let mut others: Vec<_> = agents.iter().filter(|a| **a != primary_agent_type).cloned().collect();
+        let mut others: Vec<_> = agents
+            .iter()
+            .filter(|a| **a != primary_agent_type)
+            .cloned()
+            .collect();
         others.push(primary_agent_type.clone());
         others
     };
@@ -127,12 +169,18 @@ pub async fn orchestrate(
     {
         // AgentType doesn't impl Hash/Eq, so we build a small Vec instead.
         let detections = crate::agents::detect_all_cached(false).await;
-        let usable: Vec<AgentType> = detections.iter()
+        let usable: Vec<AgentType> = detections
+            .iter()
             .filter(|d| (d.installed || d.runtime_available) && d.enabled)
             .map(|d| d.agent_type.clone())
             .collect();
-        let missing: Vec<_> = agents.iter()
-            .filter(|a| !usable.iter().any(|u| std::mem::discriminant(u) == std::mem::discriminant(*a)))
+        let missing: Vec<_> = agents
+            .iter()
+            .filter(|a| {
+                !usable
+                    .iter()
+                    .any(|u| std::mem::discriminant(u) == std::mem::discriminant(*a))
+            })
             .map(|a| format!("{:?}", a))
             .collect();
         if !missing.is_empty() {
@@ -141,9 +189,11 @@ pub async fn orchestrate(
                 missing.join(", ")
             );
             let stream: SseStream = Box::pin(futures::stream::once(async move {
-                Ok::<_, Infallible>(Event::default().event("error").data(
-                    serde_json::json!({ "error": msg }).to_string()
-                ))
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({ "error": msg }).to_string()),
+                )
             }));
             return Sse::new(stream);
         }
@@ -151,10 +201,14 @@ pub async fn orchestrate(
 
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
-        state.db.with_conn(move |conn| {
-            let p = crate::db::projects::get_project(conn, &pid)?;
-            Ok(p.map(|p| p.path).unwrap_or_default())
-        }).await.unwrap_or_default()
+        state
+            .db
+            .with_conn(move |conn| {
+                let p = crate::db::projects::get_project(conn, &pid)?;
+                Ok(p.map(|p| p.path).unwrap_or_default())
+            })
+            .await
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -165,10 +219,8 @@ pub async fn orchestrate(
     // the DB hits per agent. Internal summarization calls (line 286,
     // 689, 864) do NOT receive this — they compress conversation
     // history and don't reason about the project's companions.
-    let companion_context = crate::api::projects::compute_companion_context(
-        &state,
-        disc.project_id.as_deref(),
-    ).await;
+    let companion_context =
+        crate::api::projects::compute_companion_context(&state, disc.project_id.as_deref()).await;
 
     // For general discussions (no project), write .mcp.json + build MCP context
     let global_mcp_context = if project_path.is_empty() {
@@ -179,10 +231,15 @@ pub async fn orchestrate(
 
     let (tokens, agent_access, model_tiers_config) = {
         let config = state.config.read().await;
-        let access_map: std::collections::HashMap<String, bool> = agents.iter()
+        let access_map: std::collections::HashMap<String, bool> = agents
+            .iter()
             .map(|a| (format!("{:?}", a), config.agents.full_access_for(a)))
             .collect();
-        (config.tokens.clone(), access_map, config.agents.model_tiers.clone())
+        (
+            config.tokens.clone(),
+            access_map,
+            config.agents.model_tiers.clone(),
+        )
     };
 
     // Update participants
@@ -195,9 +252,13 @@ pub async fn orchestrate(
                 participants.push(a.clone());
             }
         }
-        if let Err(e) = state.db.with_conn(move |conn| {
-            crate::db::discussions::update_discussion_participants(conn, &did, &participants)
-        }).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::update_discussion_participants(conn, &did, &participants)
+            })
+            .await
+        {
             tracing::error!("Failed to update discussion participants: {e}");
         }
     }
@@ -213,9 +274,11 @@ pub async fn orchestrate(
         let _permit = match semaphore.acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
-                let _ = tx.send(AgentStreamEvent::Error {
-                    data: serde_json::json!({ "error": "Server shutting down" }),
-                }).await;
+                let _ = tx
+                    .send(AgentStreamEvent::Error {
+                        data: serde_json::json!({ "error": "Server shutting down" }),
+                    })
+                    .await;
                 return;
             }
         };
@@ -232,9 +295,12 @@ pub async fn orchestrate(
         let agent_names: Vec<String> = agents.iter().map(agent_display_name).collect();
         let sys_text = format!(
             "Mode orchestration active avec {}. Les agents vont debattre sur {} rounds maximum.",
-            agent_names.join(", "), max_rounds
+            agent_names.join(", "),
+            max_rounds
         );
-        emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": sys_text, "agents": agent_names }) });
+        emit!(AgentStreamEvent::System {
+            data: serde_json::json!({ "text": sys_text, "agents": agent_names })
+        });
 
         // Save system message
         {
@@ -248,12 +314,19 @@ pub async fn orchestrate(
                 timestamp: Utc::now(),
                 tokens_used: 0,
                 auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                model_tier: None,
+                cost_usd: None,
+                author_pseudo: None,
+                author_avatar_email: None,
+                source_msg_id: None,
+                duration_ms: None,
             };
             let did = disc_id.clone();
-            if let Err(e) = state.db.with_conn(move |conn| {
-                crate::db::discussions::insert_message(conn, &did, &msg)
-            }).await {
+            if let Err(e) = state
+                .db
+                .with_conn(move |conn| crate::db::discussions::insert_message(conn, &did, &msg))
+                .await
+            {
                 tracing::error!("Failed to save orchestration system message: {e}");
             }
         }
@@ -289,33 +362,57 @@ pub async fn orchestrate(
                 ),
             };
 
-            emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": match disc_language.as_str() {
-                "fr" => "Resume de la conversation en cours...",
-                "es" => "Resumiendo la conversacion...",
-                _ => "Summarizing conversation...",
-            }})});
+            emit!(AgentStreamEvent::System {
+                data: serde_json::json!({ "text": match disc_language.as_str() {
+                    "fr" => "Resume de la conversation en cours...",
+                    "es" => "Resumiendo la conversacion...",
+                    _ => "Summarizing conversation...",
+                }})
+            });
 
-            let fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
+            let fa = *agent_access
+                .get(&format!("{:?}", primary_agent_type))
+                .unwrap_or(&false);
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: fa,
                 mcp_context_override: global_mcp_context.as_deref(),
-                tier: disc_tier, model_tiers: Some(&model_tiers_config),
+                tier: disc_tier,
+                model_tiers: Some(&model_tiers_config),
                 // Internal summarisation pass — keep disc_id off to avoid
                 // recursion (agent shouldn't call disc_summarize on itself
                 // while running this very prompt).
-                ..runner::AgentStartConfig::new(&primary_agent_type, &project_path, &summary_prompt, &tokens)
-            }).await {
+                ..runner::AgentStartConfig::new(
+                    &primary_agent_type,
+                    &project_path,
+                    &summary_prompt,
+                    &tokens,
+                )
+            })
+            .await
+            {
                 Ok(process) => {
                     let summary = run_agent_collect(process).await;
-                    if summary.is_empty() { String::new() } else { summary }
+                    if summary.is_empty() {
+                        String::new()
+                    } else {
+                        summary
+                    }
                 }
                 Err(e) => {
-                    tracing::warn!("Failed to summarize conversation: {}. Using last messages as fallback.", e);
-                    let lines: Vec<&str> = raw_conv_context.split("\n\n").filter(|s| !s.is_empty()).collect();
+                    tracing::warn!(
+                        "Failed to summarize conversation: {}. Using last messages as fallback.",
+                        e
+                    );
+                    let lines: Vec<&str> = raw_conv_context
+                        .split("\n\n")
+                        .filter(|s| !s.is_empty())
+                        .collect();
                     let mut fallback = String::new();
                     for line in lines.iter().rev() {
-                        if fallback.len() + line.len() + 2 > 800 { break; }
+                        if fallback.len() + line.len() + 2 > 800 {
+                            break;
+                        }
                         fallback = if fallback.is_empty() {
                             line.to_string()
                         } else {
@@ -330,32 +427,48 @@ pub async fn orchestrate(
         let mut round_responses: Vec<Vec<(String, String)>> = Vec::new();
 
         for round in 1..=max_rounds {
-            emit!(AgentStreamEvent::Round { data: serde_json::json!({ "round": round, "total": max_rounds }) });
+            emit!(AgentStreamEvent::Round {
+                data: serde_json::json!({ "round": round, "total": max_rounds })
+            });
 
             let mut this_round: Vec<(String, String)> = Vec::new();
 
             for agent_type in &agents {
                 let agent_name = agent_display_name(agent_type);
 
-                emit!(AgentStreamEvent::AgentStart { data: serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round }) });
+                emit!(AgentStreamEvent::AgentStart {
+                    data: serde_json::json!({ "agent": agent_name, "agent_type": agent_type, "round": round })
+                });
 
                 let prompt = build_orchestration_prompt(&OrchestrationContext {
-                    question: &original_question, current_agent: agent_type, all_agents: &agent_names,
-                    previous_rounds: &round_responses, round, max_rounds, lang: &disc_language,
+                    question: &original_question,
+                    current_agent: agent_type,
+                    all_agents: &agent_names,
+                    previous_rounds: &round_responses,
+                    round,
+                    max_rounds,
+                    lang: &disc_language,
                     conversation_context: &conv_context,
                 });
 
-                let fa = *agent_access.get(&format!("{:?}", agent_type)).unwrap_or(&false);
+                let fa = *agent_access
+                    .get(&format!("{:?}", agent_type))
+                    .unwrap_or(&false);
                 match runner::start_agent_with_config(runner::AgentStartConfig {
                     work_dir: orch_workspace_path.as_deref(),
                     full_access: fa,
-                    skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
+                    skill_ids: &orch_skill_ids,
+                    directive_ids: &orch_directive_ids,
+                    profile_ids: &orch_profile_ids,
                     mcp_context_override: global_mcp_context.as_deref(),
-                    tier: disc_tier, model_tiers: Some(&model_tiers_config),
+                    tier: disc_tier,
+                    model_tiers: Some(&model_tiers_config),
                     context_files_prompt: &companion_context,
                     discussion_id: Some(&id),
                     ..runner::AgentStartConfig::new(agent_type, &project_path, &prompt, &tokens)
-                }).await {
+                })
+                .await
+                {
                     Ok(process) => {
                         let meta = AgentStreamMeta {
                             agent_name: agent_name.clone(),
@@ -386,12 +499,14 @@ pub async fn orchestrate(
                                 response_excerpt = %trimmed.chars().take(200).collect::<String>(),
                                 "Agent finished orchestration round with no usable output — likely rate-limit, silent CLI crash, or auth failure (other agents in the same debate may still succeed; orchestration continues)."
                             );
-                            emit!(AgentStreamEvent::System { data: serde_json::json!({
-                                "kind": "agent_empty_output",
-                                "agent": agent_name,
-                                "round": round,
-                                "message": format!("⚠️ {} produced no content this round ({}). Other agents in this debate may still succeed; the orchestration continues. Re-launch the debate to retry this agent.", agent_name, trimmed.chars().take(80).collect::<String>()),
-                            })});
+                            emit!(AgentStreamEvent::System {
+                                data: serde_json::json!({
+                                    "kind": "agent_empty_output",
+                                    "agent": agent_name,
+                                    "round": round,
+                                    "message": format!("⚠️ {} produced no content this round ({}). Other agents in this debate may still succeed; the orchestration continues. Re-launch the debate to retry this agent.", agent_name, trimmed.chars().take(80).collect::<String>()),
+                                })
+                            });
                         }
 
                         // Save to DB — always runs even if client is gone
@@ -406,19 +521,30 @@ pub async fn orchestrate(
                                 timestamp: Utc::now(),
                                 tokens_used: result.tokens_used,
                                 auth_mode: Some(auth_mode_for(agent_type, &tokens)),
-                                model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                                model_tier: None,
+                                cost_usd: None,
+                                author_pseudo: None,
+                                author_avatar_email: None,
+                                source_msg_id: None,
+                                duration_ms: None,
                             };
                             let did = disc_id.clone();
-                            if let Err(e) = state.db.with_conn(move |conn| {
-                                crate::db::discussions::insert_message(conn, &did, &msg)
-                            }).await {
+                            if let Err(e) = state
+                                .db
+                                .with_conn(move |conn| {
+                                    crate::db::discussions::insert_message(conn, &did, &msg)
+                                })
+                                .await
+                            {
                                 tracing::error!("Failed to save orchestration agent message: {e}");
                             }
                         }
 
-                        emit!(AgentStreamEvent::AgentDone { data: serde_json::json!({
-                            "agent": agent_name, "agent_type": agent_type, "round": round,
-                        })});
+                        emit!(AgentStreamEvent::AgentDone {
+                            data: serde_json::json!({
+                                "agent": agent_name, "agent_type": agent_type, "round": round,
+                            })
+                        });
 
                         this_round.push((agent_name.clone(), result.response));
                     }
@@ -427,10 +553,12 @@ pub async fn orchestrate(
                         let err_text = format!("[Erreur: {}]", e);
                         this_round.push((agent_name.clone(), err_text));
 
-                        emit!(AgentStreamEvent::AgentDone { data: serde_json::json!({
-                            "agent": agent_name, "agent_type": agent_type,
-                            "round": round, "error": e,
-                        })});
+                        emit!(AgentStreamEvent::AgentDone {
+                            data: serde_json::json!({
+                                "agent": agent_name, "agent_type": agent_type,
+                                "round": round, "error": e,
+                            })
+                        });
                     }
                 }
             }
@@ -438,7 +566,9 @@ pub async fn orchestrate(
             round_responses.push(this_round);
 
             if round >= 2 {
-                emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": format!("Round {} termine. Analyse de la convergence...", round) }) });
+                emit!(AgentStreamEvent::System {
+                    data: serde_json::json!({ "text": format!("Round {} termine. Analyse de la convergence...", round) })
+                });
             }
         }
 
@@ -446,29 +576,47 @@ pub async fn orchestrate(
         {
             let primary_name = agent_display_name(&primary_agent_type);
 
-            emit!(AgentStreamEvent::System { data: serde_json::json!({ "text": format!("{} synthetise le debat...", primary_name) }) });
+            emit!(AgentStreamEvent::System {
+                data: serde_json::json!({ "text": format!("{} synthetise le debat...", primary_name) })
+            });
 
-            emit!(AgentStreamEvent::AgentStart { data: serde_json::json!({ "agent": primary_name, "agent_type": primary_agent_type, "round": "synthesis" }) });
+            emit!(AgentStreamEvent::AgentStart {
+                data: serde_json::json!({ "agent": primary_name, "agent_type": primary_agent_type, "round": "synthesis" })
+            });
 
-            let synth_prompt = build_synthesis_prompt(&original_question, &round_responses, &disc_language);
-            let synth_fa = *agent_access.get(&format!("{:?}", primary_agent_type)).unwrap_or(&false);
+            let synth_prompt =
+                build_synthesis_prompt(&original_question, &round_responses, &disc_language);
+            let synth_fa = *agent_access
+                .get(&format!("{:?}", primary_agent_type))
+                .unwrap_or(&false);
             match runner::start_agent_with_config(runner::AgentStartConfig {
                 work_dir: orch_workspace_path.as_deref(),
                 full_access: synth_fa,
-                skill_ids: &orch_skill_ids, directive_ids: &orch_directive_ids, profile_ids: &orch_profile_ids,
+                skill_ids: &orch_skill_ids,
+                directive_ids: &orch_directive_ids,
+                profile_ids: &orch_profile_ids,
                 mcp_context_override: global_mcp_context.as_deref(),
-                tier: disc_tier, model_tiers: Some(&model_tiers_config),
+                tier: disc_tier,
+                model_tiers: Some(&model_tiers_config),
                 context_files_prompt: &companion_context,
                 discussion_id: Some(&id),
-                ..runner::AgentStartConfig::new(&primary_agent_type, &project_path, &synth_prompt, &tokens)
-            }).await {
+                ..runner::AgentStartConfig::new(
+                    &primary_agent_type,
+                    &project_path,
+                    &synth_prompt,
+                    &tokens,
+                )
+            })
+            .await
+            {
                 Ok(process) => {
                     let meta = AgentStreamMeta {
                         agent_name: primary_name.clone(),
                         agent_type: primary_agent_type.clone(),
                         round_label: serde_json::json!("synthesis"),
                     };
-                    let result = run_agent_streaming(process, &tx, &meta, &primary_agent_type).await;
+                    let result =
+                        run_agent_streaming(process, &tx, &meta, &primary_agent_type).await;
 
                     // Save synthesis to DB — always runs even if client is gone
                     {
@@ -482,26 +630,41 @@ pub async fn orchestrate(
                             timestamp: Utc::now(),
                             tokens_used: result.tokens_used,
                             auth_mode: Some(auth_mode_for(&primary_agent_type, &tokens)),
-                            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                            model_tier: None,
+                            cost_usd: None,
+                            author_pseudo: None,
+                            author_avatar_email: None,
+                            source_msg_id: None,
+                            duration_ms: None,
                         };
                         let did = disc_id.clone();
-                        if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::discussions::insert_message(conn, &did, &msg)
-                        }).await {
+                        if let Err(e) = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::discussions::insert_message(conn, &did, &msg)
+                            })
+                            .await
+                        {
                             tracing::error!("Failed to save synthesis message: {e}");
                         }
                     }
 
-                    emit!(AgentStreamEvent::AgentDone { data: serde_json::json!({ "agent": primary_name, "round": "synthesis" }) });
+                    emit!(AgentStreamEvent::AgentDone {
+                        data: serde_json::json!({ "agent": primary_name, "round": "synthesis" })
+                    });
                 }
                 Err(e) => {
                     tracing::error!("Synthesis failed: {}", e);
-                    emit!(AgentStreamEvent::Error { data: serde_json::json!({ "error": format!("Synthesis failed: {}", e) }) });
+                    emit!(AgentStreamEvent::Error {
+                        data: serde_json::json!({ "error": format!("Synthesis failed: {}", e) })
+                    });
                 }
             }
         }
 
-        emit!(AgentStreamEvent::Done { data: serde_json::json!({ "status": "complete" }) });
+        emit!(AgentStreamEvent::Done {
+            data: serde_json::json!({ "status": "complete" })
+        });
     });
 
     // Thin SSE reader — just maps channel events to SSE
@@ -549,7 +712,6 @@ pub async fn orchestrate(
     Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
-
 /// Summary generation threshold: min messages before first summary.
 /// Adaptive: agents with large budgets can wait longer, small-budget agents need it sooner.
 /// Background task: generate a conversation summary if the discussion is long enough.
@@ -564,10 +726,14 @@ pub(super) async fn maybe_generate_summary(
     let cooldown = summary_cooldown(agent_type);
 
     // Load discussion to check if summary is needed
-    let disc = match state.db.with_conn({
-        let did = discussion_id.to_string();
-        move |conn| crate::db::discussions::get_discussion(conn, &did)
-    }).await {
+    let disc = match state
+        .db
+        .with_conn({
+            let did = discussion_id.to_string();
+            move |conn| crate::db::discussions::get_discussion(conn, &did)
+        })
+        .await
+    {
         Ok(Some(d)) => d,
         _ => return,
     };
@@ -585,13 +751,17 @@ pub(super) async fn maybe_generate_summary(
     if !crate::models::SummaryStrategy::auto_fires(global_default, disc.summary_strategy) {
         tracing::debug!(
             "Summary auto-fire suppressed for {} (global: {:?}, disc: {:?})",
-            discussion_id, global_default, disc.summary_strategy
+            discussion_id,
+            global_default,
+            disc.summary_strategy
         );
         return;
     }
 
     // Count non-System messages (same domain as summary_up_to_msg_idx)
-    let non_system_msgs: Vec<&crate::models::DiscussionMessage> = disc.messages.iter()
+    let non_system_msgs: Vec<&crate::models::DiscussionMessage> = disc
+        .messages
+        .iter()
         .filter(|m| !matches!(m.role, MessageRole::System))
         .collect();
     let non_system_count = non_system_msgs.len() as u32;
@@ -599,7 +769,10 @@ pub(super) async fn maybe_generate_summary(
     if non_system_count < threshold {
         tracing::debug!(
             "Summary skip for {}: {} msgs < {} threshold (agent: {:?})",
-            discussion_id, non_system_count, threshold, agent_type
+            discussion_id,
+            non_system_count,
+            threshold,
+            agent_type
         );
         return;
     }
@@ -610,22 +783,31 @@ pub(super) async fn maybe_generate_summary(
     if disc.summary_cache.is_some() && msgs_since_summary < cooldown {
         tracing::debug!(
             "Summary cooldown for {}: {} new msgs < {} cooldown (agent: {:?})",
-            discussion_id, msgs_since_summary, cooldown, agent_type
+            discussion_id,
+            msgs_since_summary,
+            cooldown,
+            agent_type
         );
         return;
     }
 
     tracing::info!(
         "Generating summary for {} ({} msgs, threshold {}, agent {:?})",
-        discussion_id, non_system_count, threshold, agent_type
+        discussion_id,
+        non_system_count,
+        threshold,
+        agent_type
     );
     let skip_pinned = if disc.pin_first_message { 1 } else { 0 };
-    let new_msgs: Vec<String> = non_system_msgs.iter()
+    let new_msgs: Vec<String> = non_system_msgs
+        .iter()
         .skip(last_summary_non_sys.max(skip_pinned))
         .map(|m| {
             let role = match m.role {
                 MessageRole::User => "User".to_string(),
-                MessageRole::Agent => m.agent_type.as_ref()
+                MessageRole::Agent => m
+                    .agent_type
+                    .as_ref()
                     .map(agent_display_name)
                     .unwrap_or_else(|| "Agent".into()),
                 MessageRole::System => "System".to_string(),
@@ -710,7 +892,9 @@ pub(super) async fn maybe_generate_summary(
         tier: crate::models::ModelTier::Economy,
         model_tiers: Some(&model_tiers),
         ..runner::AgentStartConfig::new(agent_type, "", &summary_prompt, tokens)
-    }).await {
+    })
+    .await
+    {
         Ok(mut process) => {
             let mut summary = String::new();
             // Ollama streams raw token fragments (no '\n' re-join); CLI text
@@ -718,11 +902,15 @@ pub(super) async fn maybe_generate_summary(
             let raw_stream = process.raw_token_stream();
             while let Some(line) = process.next_line().await {
                 if process.output_mode == runner::OutputMode::StreamJson {
-                    if let runner::StreamJsonEvent::Text(text) = runner::parse_claude_stream_line(&line) {
+                    if let runner::StreamJsonEvent::Text(text) =
+                        runner::parse_claude_stream_line(&line)
+                    {
                         summary.push_str(&text);
                     }
                 } else {
-                    if !raw_stream && !summary.is_empty() { summary.push('\n'); }
+                    if !raw_stream && !summary.is_empty() {
+                        summary.push('\n');
+                    }
                     summary.push_str(&line);
                 }
             }
@@ -736,55 +924,77 @@ pub(super) async fn maybe_generate_summary(
                     agent_type,
                     crate::models::ModelTier::Economy,
                     Some(&model_tiers),
-                ).unwrap_or_else(|| format!("{:?} (default)", agent_type));
+                )
+                .unwrap_or_else(|| format!("{:?} (default)", agent_type));
 
                 let did2 = did.clone();
                 let model_name2 = model_name.clone();
                 let agent_type_owned = agent_type.clone();
-                if let Err(e) = state.db.with_conn(move |conn| {
-                    // Wrap both operations in a transaction: either both succeed or neither
-                    conn.execute_batch("BEGIN")?;
-                    if let Err(e) = (|| -> anyhow::Result<()> {
-                        crate::db::discussions::update_summary_cache(conn, &did, &summary, non_system_count)?;
-                        let sys_msg = crate::models::DiscussionMessage {
-                            model: None,
-                            lint_report: None,
-                            id: uuid::Uuid::new_v4().to_string(),
-                            role: MessageRole::System,
-                            content: format!(
-                                "summary cached | model: {} | {} chars | {} messages",
-                                model_name2, summary.len(), non_system_count
-                            ),
-                            agent_type: Some(agent_type_owned),
-                            timestamp: chrono::Utc::now(),
-                            tokens_used: 0,
-                            auth_mode: None,
-                            model_tier: Some("economy".into()), cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
-                        };
-                        crate::db::discussions::insert_message(conn, &did2, &sys_msg)?;
+                if let Err(e) = state
+                    .db
+                    .with_conn(move |conn| {
+                        // Wrap both operations in a transaction: either both succeed or neither
+                        conn.execute_batch("BEGIN")?;
+                        if let Err(e) = (|| -> anyhow::Result<()> {
+                            crate::db::discussions::update_summary_cache(
+                                conn,
+                                &did,
+                                &summary,
+                                non_system_count,
+                            )?;
+                            let sys_msg = crate::models::DiscussionMessage {
+                                model: None,
+                                lint_report: None,
+                                id: uuid::Uuid::new_v4().to_string(),
+                                role: MessageRole::System,
+                                content: format!(
+                                    "summary cached | model: {} | {} chars | {} messages",
+                                    model_name2,
+                                    summary.len(),
+                                    non_system_count
+                                ),
+                                agent_type: Some(agent_type_owned),
+                                timestamp: chrono::Utc::now(),
+                                tokens_used: 0,
+                                auth_mode: None,
+                                model_tier: Some("economy".into()),
+                                cost_usd: None,
+                                author_pseudo: None,
+                                author_avatar_email: None,
+                                source_msg_id: None,
+                                duration_ms: None,
+                            };
+                            crate::db::discussions::insert_message(conn, &did2, &sys_msg)?;
+                            Ok(())
+                        })() {
+                            let _ = conn.execute_batch("ROLLBACK");
+                            return Err(e);
+                        }
+                        conn.execute_batch("COMMIT")?;
                         Ok(())
-                    })() {
-                        let _ = conn.execute_batch("ROLLBACK");
-                        return Err(e);
-                    }
-                    conn.execute_batch("COMMIT")?;
-                    Ok(())
-                }).await {
+                    })
+                    .await
+                {
                     tracing::error!("Failed to save summary cache: {e}");
                 }
                 tracing::info!("Summary generated for discussion {} ({} chars, model: {}, up to non-system msg {})",
                     discussion_id, summary_len, model_name, non_system_count);
             } else {
-                tracing::warn!("Summary generation produced empty or oversized result for {}",
-                    discussion_id);
+                tracing::warn!(
+                    "Summary generation produced empty or oversized result for {}",
+                    discussion_id
+                );
             }
         }
         Err(e) => {
-            tracing::warn!("Summary generation failed for {}: {} (fallback: truncation only)", discussion_id, e);
+            tracing::warn!(
+                "Summary generation failed for {}: {} (fallback: truncation only)",
+                discussion_id,
+                e
+            );
         }
     }
 }
-
 
 /// On-demand summarizer used by `disc_introspection::disc_summarize`.
 ///
@@ -809,7 +1019,9 @@ pub async fn generate_summary_on_demand(
     if from_idx >= to_idx {
         return Err(format!("Invalid range: from {} >= to {}", from_idx, to_idx));
     }
-    let non_system: Vec<&DiscussionMessage> = disc.messages.iter()
+    let non_system: Vec<&DiscussionMessage> = disc
+        .messages
+        .iter()
         .filter(|m| !matches!(m.role, MessageRole::System))
         .collect();
     let total = non_system.len() as u32;
@@ -822,16 +1034,21 @@ pub async fn generate_summary_on_demand(
     if slice.is_empty() {
         return Err("Empty message slice".into());
     }
-    let lines: Vec<String> = slice.iter().map(|m| {
-        let role = match m.role {
-            MessageRole::User => "User".to_string(),
-            MessageRole::Agent => m.agent_type.as_ref()
-                .map(agent_display_name)
-                .unwrap_or_else(|| "Agent".into()),
-            MessageRole::System => "System".to_string(),
-        };
-        format!("{}: {}", role, m.content)
-    }).collect();
+    let lines: Vec<String> = slice
+        .iter()
+        .map(|m| {
+            let role = match m.role {
+                MessageRole::User => "User".to_string(),
+                MessageRole::Agent => m
+                    .agent_type
+                    .as_ref()
+                    .map(agent_display_name)
+                    .unwrap_or_else(|| "Agent".into()),
+                MessageRole::System => "System".to_string(),
+            };
+            format!("{}: {}", role, m.content)
+        })
+        .collect();
     let block = lines.join("\n\n");
     // UTF-8-safe truncation at 20K chars.
     let max_input = 20_000usize;
@@ -880,7 +1097,9 @@ pub async fn generate_summary_on_demand(
         tier: ModelTier::Economy,
         model_tiers: Some(&model_tiers),
         ..runner::AgentStartConfig::new(&disc.agent, "", &summary_prompt, tokens)
-    }).await.map_err(|e| format!("agent start failed: {}", e))?;
+    })
+    .await
+    .map_err(|e| format!("agent start failed: {}", e))?;
 
     let mut out = String::new();
     // Stream-json reports token counts inline via the `result` event.
@@ -896,14 +1115,20 @@ pub async fn generate_summary_on_demand(
         if is_stream_json {
             match runner::parse_claude_stream_line(&line) {
                 runner::StreamJsonEvent::Text(text) => out.push_str(&text),
-                runner::StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
+                runner::StreamJsonEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    ..
+                } => {
                     let total = input_tokens.saturating_add(output_tokens);
                     stream_json_tokens = stream_json_tokens.max(total);
                 }
                 _ => {}
             }
         } else {
-            if !raw_stream && !out.is_empty() { out.push('\n'); }
+            if !raw_stream && !out.is_empty() {
+                out.push('\n');
+            }
             out.push_str(&line);
         }
     }
@@ -921,12 +1146,16 @@ pub async fn generate_summary_on_demand(
     // ranged-cache row so usage dashboards can attribute the call.
     let stderr_lines = process.captured_stderr_flushed().await;
     let (_cleaned, parsed_tokens) = runner::parse_token_usage(&disc.agent, &out, &stderr_lines);
-    let tokens_used = if stream_json_tokens > 0 { stream_json_tokens } else { parsed_tokens };
-    let model_name = runner::resolve_model_flag(&disc.agent, ModelTier::Economy, Some(&model_tiers))
-        .map(|s| s.to_string());
+    let tokens_used = if stream_json_tokens > 0 {
+        stream_json_tokens
+    } else {
+        parsed_tokens
+    };
+    let model_name =
+        runner::resolve_model_flag(&disc.agent, ModelTier::Economy, Some(&model_tiers))
+            .map(|s| s.to_string());
     Ok((out, tokens_used, model_name))
 }
-
 
 /// Provider status page URL for the given agent. Used to point users at
 /// the right "is the API down right now?" dashboard when an error hint
@@ -942,10 +1171,15 @@ fn provider_status_line(agent_type: &crate::models::AgentType) -> String {
         AgentType::CopilotCli => "https://www.githubstatus.com",
         AgentType::Vibe => "https://status.mistral.ai",
         AgentType::Kiro => "https://kiro.dev",
-        AgentType::Ollama => return "Local Ollama server — check `ollama serve` is running.".to_string(),
+        AgentType::Ollama => {
+            return "Local Ollama server — check `ollama serve` is running.".to_string()
+        }
         // Custom agents have no canonical status page — punt to a generic
         // hint. Better than guessing a URL the operator can't act on.
-        _ => return "Check the provider status page (custom agent — varies by configuration).".to_string(),
+        _ => {
+            return "Check the provider status page (custom agent — varies by configuration)."
+                .to_string()
+        }
     };
     format!("Provider status: {url}")
 }
@@ -954,11 +1188,15 @@ fn provider_status_line(agent_type: &crate::models::AgentType) -> String {
 /// `agent_type` is used to point error messages at the right provider
 /// status page (Anthropic / OpenAI / Google / GitHub / …) — see
 /// [`provider_status_line`].
-pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::AgentType) -> Option<String> {
+pub(crate) fn detect_agent_error_hint(
+    output: &str,
+    agent_type: &crate::models::AgentType,
+) -> Option<String> {
     let lower = output.to_lowercase();
 
     // MCP configuration errors
-    if lower.contains("invalid mcp configuration") || lower.contains("mcp config file not found")
+    if lower.contains("invalid mcp configuration")
+        || lower.contains("mcp config file not found")
         || lower.contains("mcp server") && lower.contains("failed to start")
     {
         return Some(
@@ -966,7 +1204,8 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
              An MCP server failed to start. Possible causes:\n\
              - MCP command not installed (npx/uvx not found)\n\
              - Invalid project path (Docker mount)\n\
-             - Corrupted `.mcp.json` → re-sync from MCPs > Refresh".to_string()
+             - Corrupted `.mcp.json` → re-sync from MCPs > Refresh"
+                .to_string(),
         );
     }
 
@@ -981,13 +1220,16 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
         return Some(
             "⚠️ **Expired session or invalid API key.**\n\
              Re-authenticate by running `/login` in the agent's CLI.\n\
-             Also check your API keys in Config > Tokens.".to_string()
+             Also check your API keys in Config > Tokens."
+                .to_string(),
         );
     }
 
     // Rate limiting / overloaded
-    if lower.contains("rate_limit") || lower.contains("rate limit")
-        || lower.contains("429") || lower.contains("too many requests")
+    if lower.contains("rate_limit")
+        || lower.contains("rate limit")
+        || lower.contains("429")
+        || lower.contains("too many requests")
     {
         return Some(format!(
             "⚠️ **Rate limit reached.**\n\
@@ -998,8 +1240,10 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
     }
 
     // Server overloaded
-    if lower.contains("overloaded") || lower.contains("529")
-        || lower.contains("capacity") || lower.contains("server_busy")
+    if lower.contains("overloaded")
+        || lower.contains("529")
+        || lower.contains("capacity")
+        || lower.contains("server_busy")
     {
         return Some(format!(
             "⚠️ **Servers overloaded.**\n\
@@ -1010,8 +1254,10 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
     }
 
     // Server errors (500, 502, 503)
-    if lower.contains("internal server error") || lower.contains("502 bad gateway")
-        || lower.contains("503 service unavailable") || lower.contains("api error: 500")
+    if lower.contains("internal server error")
+        || lower.contains("502 bad gateway")
+        || lower.contains("503 service unavailable")
+        || lower.contains("api error: 500")
     {
         return Some(format!(
             "⚠️ **API server error.**\n\
@@ -1024,18 +1270,30 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
     // Credit / billing / usage-limit. Codex (ChatGPT plan) phrases it
     // "You've hit your usage limit … purchase more credits … try again at <time>";
     // OpenAI API says "insufficient_quota"; others "billing"/"402". Catch all.
-    if lower.contains("insufficient_quota") || lower.contains("billing")
-        || lower.contains("payment required") || lower.contains("402")
-        || lower.contains("usage limit") || lower.contains("hit your limit")
-        || lower.contains("purchase more credits") || lower.contains("upgrade to pro")
-        || lower.contains("quota") || lower.contains("out of credits")
+    if lower.contains("insufficient_quota")
+        || lower.contains("billing")
+        || lower.contains("payment required")
+        || lower.contains("402")
+        || lower.contains("usage limit")
+        || lower.contains("hit your limit")
+        || lower.contains("purchase more credits")
+        || lower.contains("upgrade to pro")
+        || lower.contains("quota")
+        || lower.contains("out of credits")
     {
         // Surface the "try again at <time>" the provider gives, if present.
-        let retry_at = output.lines()
+        let retry_at = output
+            .lines()
             .find(|l| l.to_lowercase().contains("try again at"))
-            .and_then(|l| l.split_once("try again at").or_else(|| l.split_once("réessaie")).map(|(_, t)| t.trim().trim_end_matches('.').to_string()))
+            .and_then(|l| {
+                l.split_once("try again at")
+                    .or_else(|| l.split_once("réessaie"))
+                    .map(|(_, t)| t.trim().trim_end_matches('.').to_string())
+            })
             .filter(|s| !s.is_empty() && s.len() < 40);
-        let when = retry_at.map(|t| format!(" Réessaie après **{t}**.")).unwrap_or_default();
+        let when = retry_at
+            .map(|t| format!(" Réessaie après **{t}**."))
+            .unwrap_or_default();
         return Some(format!(
             "⛔ **Limite du plan atteinte.** Le quota/les crédits de cet agent sont épuisés.{when}\n\
              Recharge des crédits ou attends le reset, puis relance.",
@@ -1043,13 +1301,17 @@ pub(crate) fn detect_agent_error_hint(output: &str, agent_type: &crate::models::
     }
 
     // Network errors
-    if lower.contains("econnrefused") || lower.contains("enotfound")
-        || lower.contains("network error") || lower.contains("dns resolution")
-        || lower.contains("timeout") || lower.contains("timed out")
+    if lower.contains("econnrefused")
+        || lower.contains("enotfound")
+        || lower.contains("network error")
+        || lower.contains("dns resolution")
+        || lower.contains("timeout")
+        || lower.contains("timed out")
     {
         return Some(
             "⚠️ **Network error.**\n\
-             Unable to reach the API. Check your internet connection.".to_string()
+             Unable to reach the API. Check your internet connection."
+                .to_string(),
         );
     }
 
@@ -1077,8 +1339,13 @@ mod orchestrate_validation_tests {
     use crate::models::AgentType;
 
     fn missing_agents(requested: &[AgentType], usable: &[AgentType]) -> Vec<AgentType> {
-        requested.iter()
-            .filter(|a| !usable.iter().any(|u| std::mem::discriminant(u) == std::mem::discriminant(*a)))
+        requested
+            .iter()
+            .filter(|a| {
+                !usable
+                    .iter()
+                    .any(|u| std::mem::discriminant(u) == std::mem::discriminant(*a))
+            })
             .cloned()
             .collect()
     }
@@ -1131,11 +1398,18 @@ mod error_hint_tests {
         let stderr = "API error: 429 too many requests";
         let hint = detect_agent_error_hint(stderr, &AgentType::GeminiCli)
             .expect("rate-limit pattern should match");
-        assert!(hint.contains("Rate limit reached"), "hint header missing: {hint}");
-        assert!(hint.contains("status.cloud.google.com"),
-            "Gemini hint must point at Google status, got: {hint}");
-        assert!(!hint.contains("status.anthropic.com"),
-            "Gemini hint must NOT mention Anthropic status: {hint}");
+        assert!(
+            hint.contains("Rate limit reached"),
+            "hint header missing: {hint}"
+        );
+        assert!(
+            hint.contains("status.cloud.google.com"),
+            "Gemini hint must point at Google status, got: {hint}"
+        );
+        assert!(
+            !hint.contains("status.anthropic.com"),
+            "Gemini hint must NOT mention Anthropic status: {hint}"
+        );
     }
 
     #[test]
@@ -1173,11 +1447,14 @@ mod error_hint_tests {
 
     #[test]
     fn mcp_config_error_surfaces_actionable_hint() {
-        let hint = detect_agent_error_hint("Invalid MCP configuration: foo", &AgentType::ClaudeCode)
-            .expect("MCP config pattern should match");
+        let hint =
+            detect_agent_error_hint("Invalid MCP configuration: foo", &AgentType::ClaudeCode)
+                .expect("MCP config pattern should match");
         assert!(hint.contains("MCP"), "hint should mention MCP: {hint}");
-        assert!(hint.contains("Refresh") || hint.contains("re-sync"),
-            "hint should suggest re-sync: {hint}");
+        assert!(
+            hint.contains("Refresh") || hint.contains("re-sync"),
+            "hint should suggest re-sync: {hint}"
+        );
     }
 
     #[test]
@@ -1185,7 +1462,8 @@ mod error_hint_tests {
         let hint = detect_agent_error_hint(
             "MCP server github failed to start: command not found",
             &AgentType::ClaudeCode,
-        ).expect("MCP server pattern should match");
+        )
+        .expect("MCP server pattern should match");
         assert!(hint.contains("MCP"));
     }
 
@@ -1193,16 +1471,21 @@ mod error_hint_tests {
     fn auth_error_401_returns_session_hint() {
         let hint = detect_agent_error_hint("API error: 401 Unauthorized", &AgentType::ClaudeCode)
             .expect("401 should match");
-        assert!(hint.contains("session") || hint.contains("API key"),
-            "auth error should mention session/key: {hint}");
+        assert!(
+            hint.contains("session") || hint.contains("API key"),
+            "auth error should mention session/key: {hint}"
+        );
         assert!(hint.contains("/login"), "should suggest /login command");
     }
 
     #[test]
     fn auth_error_authentication_error_keyword() {
         // Common Anthropic SDK error string.
-        let hint = detect_agent_error_hint("authentication_error: invalid token", &AgentType::ClaudeCode)
-            .expect("authentication_error should match");
+        let hint = detect_agent_error_hint(
+            "authentication_error: invalid token",
+            &AgentType::ClaudeCode,
+        )
+        .expect("authentication_error should match");
         assert!(hint.contains("session") || hint.contains("API key"));
     }
 
@@ -1217,8 +1500,10 @@ mod error_hint_tests {
     fn server_overloaded_pattern_covers_capacity_keyword() {
         let hint = detect_agent_error_hint("server at capacity", &AgentType::ClaudeCode)
             .expect("capacity should match overloaded");
-        assert!(hint.contains("overloaded") || hint.contains("at capacity"),
-            "got: {hint}");
+        assert!(
+            hint.contains("overloaded") || hint.contains("at capacity"),
+            "got: {hint}"
+        );
     }
 
     #[test]
@@ -1230,8 +1515,11 @@ mod error_hint_tests {
 
     #[test]
     fn server_error_500_pattern_matches() {
-        let hint = detect_agent_error_hint("API error: 500 Internal Server Error", &AgentType::ClaudeCode)
-            .expect("500 should match");
+        let hint = detect_agent_error_hint(
+            "API error: 500 Internal Server Error",
+            &AgentType::ClaudeCode,
+        )
+        .expect("500 should match");
         assert!(hint.contains("server error") || hint.contains("unavailable"));
     }
 
@@ -1251,10 +1539,13 @@ mod error_hint_tests {
 
     #[test]
     fn quota_exhausted_insufficient_quota_matches() {
-        let hint = detect_agent_error_hint("insufficient_quota: free tier exhausted", &AgentType::Codex)
-            .expect("quota should match");
-        assert!(hint.contains("Limite du plan") || hint.to_lowercase().contains("quota"),
-            "got: {hint}");
+        let hint =
+            detect_agent_error_hint("insufficient_quota: free tier exhausted", &AgentType::Codex)
+                .expect("quota should match");
+        assert!(
+            hint.contains("Limite du plan") || hint.to_lowercase().contains("quota"),
+            "got: {hint}"
+        );
     }
 
     #[test]
@@ -1264,7 +1555,10 @@ mod error_hint_tests {
                    (https://chatgpt.com/explore/pro), visit … to purchase more credits \
                    or try again at 5:04 PM.";
         let hint = detect_agent_error_hint(out, &AgentType::Codex).expect("usage limit must match");
-        assert!(hint.contains("Limite du plan atteinte"), "clean headline, got: {hint}");
+        assert!(
+            hint.contains("Limite du plan atteinte"),
+            "clean headline, got: {hint}"
+        );
         // The "try again at <time>" is surfaced so the user knows when.
         assert!(hint.contains("5:04 PM"), "retry time surfaced, got: {hint}");
     }
@@ -1278,15 +1572,19 @@ mod error_hint_tests {
 
     #[test]
     fn network_econnrefused_pattern_matches() {
-        let hint = detect_agent_error_hint("Error: ECONNREFUSED 127.0.0.1:443", &AgentType::ClaudeCode)
-            .expect("ECONNREFUSED should match");
+        let hint =
+            detect_agent_error_hint("Error: ECONNREFUSED 127.0.0.1:443", &AgentType::ClaudeCode)
+                .expect("ECONNREFUSED should match");
         assert!(hint.contains("Network"));
     }
 
     #[test]
     fn network_dns_resolution_matches() {
-        let hint = detect_agent_error_hint("DNS resolution failed for api.anthropic.com", &AgentType::ClaudeCode)
-            .expect("DNS pattern should match");
+        let hint = detect_agent_error_hint(
+            "DNS resolution failed for api.anthropic.com",
+            &AgentType::ClaudeCode,
+        )
+        .expect("DNS pattern should match");
         assert!(hint.contains("Network"));
     }
 
@@ -1299,11 +1597,16 @@ mod error_hint_tests {
 
     #[test]
     fn permission_denied_pattern_matches() {
-        let hint = detect_agent_error_hint("Error: permission denied on /workspace/repos", &AgentType::ClaudeCode)
-            .expect("permission denied should match");
+        let hint = detect_agent_error_hint(
+            "Error: permission denied on /workspace/repos",
+            &AgentType::ClaudeCode,
+        )
+        .expect("permission denied should match");
         assert!(hint.contains("Permission denied"), "got: {hint}");
-        assert!(hint.contains("KRONN_REPOS_DIR") || hint.contains("Docker"),
-            "should give actionable Docker/repos guidance: {hint}");
+        assert!(
+            hint.contains("KRONN_REPOS_DIR") || hint.contains("Docker"),
+            "should give actionable Docker/repos guidance: {hint}"
+        );
     }
 
     #[test]

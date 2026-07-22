@@ -12,12 +12,16 @@
 import { useApi } from '../hooks/useApi';
 import { quickPrompts as quickPromptsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
+import { useEffect } from 'react';
 
 interface Props {
   qpId: string;
   /** Optional refreshKey: bump from the parent to force a refetch
    *  (e.g. after a deploy of an improved version). */
   refreshKey?: number;
+  /** Reports total launches across every version so the parent list can offer
+   *  a reliable "most used" sort without issuing a second metrics request. */
+  onUsageLoaded?: (qpId: string, launches: number) => void;
 }
 
 function fmtTokens(n: number): string {
@@ -36,9 +40,16 @@ function fmtDuration(ms: number | null | undefined): string {
   return `${m}m${String(rs).padStart(2, '0')}`;
 }
 
-export default function QPCardMetricsChip({ qpId, refreshKey }: Props) {
+export default function QPCardMetricsChip({ qpId, refreshKey, onUsageLoaded }: Props) {
   const { t } = useT();
   const { data: metrics } = useApi(() => quickPromptsApi.metrics(qpId), [qpId, refreshKey]);
+  useEffect(() => {
+    if (!metrics) return;
+    onUsageLoaded?.(
+      qpId,
+      metrics.reduce((total, version) => total + version.launches, 0),
+    );
+  }, [metrics, onUsageLoaded, qpId]);
   // Pick the newest version's row (the backend returns DESC by
   // version_index). When there are no launches → hide the chip.
   const current = metrics && metrics.length > 0 ? metrics[0] : null;

@@ -63,11 +63,19 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
 /// Broadcast a `FileAttached` for every `context_file` pinned to `message_id`,
 /// so peers of the shared disc can fetch the binary. No-op when the message has
 /// no attachments. Shared by the live-federation and the catch-up re-send paths.
-async fn emit_attachments(state: &AppState, shared_id: &str, message_id: &str, our_invite_code: &str) {
+async fn emit_attachments(
+    state: &AppState,
+    shared_id: &str,
+    message_id: &str,
+    our_invite_code: &str,
+) {
     let mid = message_id.to_string();
     let files = state
         .db
-        .with_conn(move |conn| crate::db::discussions::list_context_files_for_message(conn, &mid).map_err(|e| anyhow::anyhow!(e)))
+        .with_conn(move |conn| {
+            crate::db::discussions::list_context_files_for_message(conn, &mid)
+                .map_err(|e| anyhow::anyhow!(e))
+        })
         .await
         .unwrap_or_default();
     for f in files {
@@ -123,7 +131,10 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
         .into_iter()
         .filter(|m| m.timestamp.timestamp_millis() > since_timestamp)
     {
-        let from_pseudo = m.author_pseudo.clone().unwrap_or_else(|| our_pseudo.clone());
+        let from_pseudo = m
+            .author_pseudo
+            .clone()
+            .unwrap_or_else(|| our_pseudo.clone());
         let from_avatar_email = m.author_avatar_email.clone().or_else(|| our_avatar.clone());
         let _ = state.ws_broadcast.send(WsMessage::ChatMessage {
             shared_discussion_id: shared_id.to_string(),
@@ -168,7 +179,9 @@ pub async fn fetch_and_store_attachment(
     let fid = file_id.to_string();
     if state
         .db
-        .with_conn(move |conn| crate::db::discussions::context_file_exists(conn, &fid).map_err(|e| anyhow::anyhow!(e)))
+        .with_conn(move |conn| {
+            crate::db::discussions::context_file_exists(conn, &fid).map_err(|e| anyhow::anyhow!(e))
+        })
         .await
         .unwrap_or(false)
     {
@@ -212,7 +225,10 @@ pub async fn fetch_and_store_attachment(
         Ok(c) => c,
         Err(_) => return,
     };
-    let url = format!("{}/api/disc/fetch-file", host.kronn_url.trim_end_matches('/'));
+    let url = format!(
+        "{}/api/disc/fetch-file",
+        host.kronn_url.trim_end_matches('/')
+    );
     let body = serde_json::json!({ "file_id": file_id, "from_invite_code": our_code });
     let resp = match client.post(&url).json(&body).send().await {
         Ok(r) => r,
@@ -337,17 +353,36 @@ mod transfer_cap_tests {
 
     #[test]
     fn fetch_cap_scales_with_announcement_within_bounds() {
-        assert_eq!(fetch_cap_bytes(0), 1024 * 1024, "no/zero announcement → 1MB floor");
-        assert_eq!(fetch_cap_bytes(-5), 1024 * 1024, "negative announcement → floor");
-        assert_eq!(fetch_cap_bytes(10 * 1024 * 1024), 20 * 1024 * 1024, "2× announced");
-        assert_eq!(fetch_cap_bytes(i64::MAX), 64 * 1024 * 1024, "absolute ceiling");
+        assert_eq!(
+            fetch_cap_bytes(0),
+            1024 * 1024,
+            "no/zero announcement → 1MB floor"
+        );
+        assert_eq!(
+            fetch_cap_bytes(-5),
+            1024 * 1024,
+            "negative announcement → floor"
+        );
+        assert_eq!(
+            fetch_cap_bytes(10 * 1024 * 1024),
+            20 * 1024 * 1024,
+            "2× announced"
+        );
+        assert_eq!(
+            fetch_cap_bytes(i64::MAX),
+            64 * 1024 * 1024,
+            "absolute ceiling"
+        );
     }
 
     #[test]
     fn b64_precheck_refuses_oversized_and_accepts_valid() {
         let cap = fetch_cap_bytes(6); // tiny announcement → 1MB floor
         assert!(b64_len_within_cap(8, cap), "a valid tiny payload passes");
-        assert!(!b64_len_within_cap(cap * 2, cap), "a payload twice the cap is refused pre-decode");
+        assert!(
+            !b64_len_within_cap(cap * 2, cap),
+            "a payload twice the cap is refused pre-decode"
+        );
         // Boundary: exactly the b64 expansion of the cap passes.
         assert!(b64_len_within_cap(cap * 4 / 3, cap));
     }
