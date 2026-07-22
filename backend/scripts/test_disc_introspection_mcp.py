@@ -4240,6 +4240,59 @@ class StableIdentityKeyTests(unittest.TestCase):
         self.assertEqual(len(k), 16)
         self.assertTrue(all(c in "0123456789abcdef" for c in k))
 
+    def test_claude_logical_session_wins_over_process_topology(self):
+        # Claude can route MCP through a long-lived bg-spare whose ancestor is
+        # unrelated to the foreground process.  Its logical session UUID is
+        # the durable boundary and must win over either process tree.
+        sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        with mock.patch.dict(self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(10, "spare")):
+            first = self.mod._binding_identity()
+        with mock.patch.dict(self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(20, "foreground")):
+            second = self.mod._binding_identity()
+        self.assertEqual(first, ("claude-session", sid))
+        self.assertEqual(first, second)
+        self.assertEqual(
+            self.mod._identity_key_from(first),
+            self.mod._identity_key_from(second),
+        )
+
+    def test_distinct_claude_sessions_never_share_a_binding(self):
+        a = self.mod._identity_key_from(
+            ("claude-session", "baa5dce7-f178-4e7d-b35f-34ee2db6b33d")
+        )
+        b = self.mod._identity_key_from(
+            ("claude-session", "c7648454-7f13-4488-b17c-1b4fb7e32935")
+        )
+        self.assertNotEqual(a, b)
+
+    def test_invalid_claude_session_id_falls_back_to_cli_ancestor(self):
+        ancestor = (4321, "starttok")
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        for value in ("", "not-a-uuid", "baa5dce7f1784e7db35f34ee2db6b33d"):
+            with self.subTest(value=value), \
+                 mock.patch.dict(
+                     self.mod.os.environ,
+                     {"CLAUDE_CODE_SESSION_ID": value},
+                     clear=False,
+                 ), \
+                 mock.patch.object(
+                     self.mod, "_cli_ancestor_identity", return_value=ancestor
+                ):
+                self.assertEqual(self.mod._binding_identity(), ancestor)
+
+    def test_inherited_claude_session_id_is_ignored_for_another_cli(self):
+        sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
+        ancestor = (9876, "codex-start")
+        self.mod._CLIENT_INFO["name"] = "Codex"
+        with mock.patch.dict(self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}), \
+             mock.patch.object(
+                 self.mod, "_cli_ancestor_identity", return_value=ancestor
+             ):
+            self.assertEqual(self.mod._binding_identity(), ancestor)
+
     def test_ancestor_walk_returns_outermost_match_not_nearest(self):
         # A reconnect may respawn an intermediate runner whose cmdline also
         # carries the CLI name; the NEAREST match would then rotate on reload.

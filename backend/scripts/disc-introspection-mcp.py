@@ -2187,15 +2187,57 @@ def _cli_ancestor_identity():
     return outermost
 
 
-def _identity_key_from(ancestor):
+def _platform_session_identity():
+    """Return a CLI-provided logical session identity when one is available.
+
+    Claude Code exports ``CLAUDE_CODE_SESSION_ID`` to MCP sidecars.  Unlike a
+    process ancestor, that UUID follows the logical conversation when Claude's
+    daemon dispatches MCP work through a ``bg-spare`` process.  Treat the value
+    as a best-effort platform hint: validate it strictly and fall back to the
+    process-tree identity if Claude removes or changes the variable.
+    """
+    raw = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not raw:
+        return None
+    # Environment variables are inherited.  A different CLI launched from a
+    # Claude shell must not accidentally reuse Claude's binding credential.
+    client_agent = _infer_agent_type_from_client_name(_CLIENT_INFO.get("name"))
+    if client_agent == "Unknown":
+        client_agent = _infer_agent_type_from_client_name(_parent_process_cmdline())
+    if client_agent != "ClaudeCode":
+        return None
+    try:
+        canonical = str(uuid.UUID(raw))
+    except (AttributeError, ValueError):
+        return None
+    if raw.lower() != canonical:
+        return None
+    return ("claude-session", canonical)
+
+
+def _binding_identity():
+    """Best available identity for this logical CLI session.
+
+    Prefer a platform session id because daemon/spare process topology is not
+    a logical-session boundary.  Other clients retain the proven outermost-CLI
+    fallback, so existing Codex and generic CLI binding keys do not rotate.
+    """
+    return _platform_session_identity() or _cli_ancestor_identity()
+
+
+def _identity_key_from(identity):
     """Hash a stable CLI identity into a short filesystem-safe binding key.
     `None` in → `None` out (fail-closed: no durable identity ⇒ no persisted
     resume). Pure (no I/O) so the stable/distinct invariants are unit-testable:
-    a given ancestor always maps to the same key, distinct ancestors to
-    distinct keys."""
-    if ancestor is None:
+    a given identity always maps to the same key, distinct identities to
+    distinct keys.  Preserve the historical process-key encoding so clients
+    without a platform session id keep finding their existing binding file."""
+    if identity is None:
         return None
-    raw = f"pid:{ancestor[0]}:{ancestor[1]}"
+    if len(identity) == 2 and identity[0] == "claude-session":
+        raw = f"claude-session:{identity[1]}"
+    else:
+        raw = f"pid:{identity[0]}:{identity[1]}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -2311,7 +2353,7 @@ def _set_current_disc_id(disc_id):
 # in-memory `_CURRENT_DISC_ID` AND rotating the fallback session_id — the
 # human then had to paste a fresh kr-join token every time. Instead, at join
 # we stash `{disc_id, resume_token}` in a 0600 file keyed by the STABLE CLI
-# identity (`_cli_ancestor_identity`); on the next tool call after a reload,
+# identity (`_binding_identity`); on the next tool call after a reload,
 # `_disc_id()` re-attaches to the same server row via `/peer-resume` — no
 # token, and the backend rebinds the row in place (no ghost participant).
 # The resume_token is a CREDENTIAL: 0600, never logged, never shown to the model.
@@ -2324,7 +2366,7 @@ def _binding_path():
     """Absolute path of this session's binding file, or `None` when no durable
     CLI identity resolved (fail-closed — persisted resume is then disabled)."""
     if not _BINDING_PATH_CACHE["computed"]:
-        key = _identity_key_from(_cli_ancestor_identity())
+        key = _identity_key_from(_binding_identity())
         _BINDING_PATH_CACHE["path"] = (
             os.path.join(_BINDING_DIR, f"disc-binding-{key}.json") if key else None
         )
