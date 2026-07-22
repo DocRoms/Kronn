@@ -4246,10 +4246,14 @@ class StableIdentityKeyTests(unittest.TestCase):
         # the durable boundary and must win over either process tree.
         sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
         self.mod._CLIENT_INFO["name"] = "ClaudeCode"
-        with mock.patch.dict(self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}), \
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
              mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(10, "spare")):
             first = self.mod._binding_identity()
-        with mock.patch.dict(self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}), \
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
              mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(20, "foreground")):
             second = self.mod._binding_identity()
         self.assertEqual(first, ("claude-session", sid))
@@ -4276,7 +4280,7 @@ class StableIdentityKeyTests(unittest.TestCase):
                  mock.patch.dict(
                      self.mod.os.environ,
                      {"CLAUDE_CODE_SESSION_ID": value},
-                     clear=False,
+                     clear=True,
                  ), \
                  mock.patch.object(
                      self.mod, "_cli_ancestor_identity", return_value=ancestor
@@ -4287,11 +4291,79 @@ class StableIdentityKeyTests(unittest.TestCase):
         sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
         ancestor = (9876, "codex-start")
         self.mod._CLIENT_INFO["name"] = "Codex"
-        with mock.patch.dict(self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}), \
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
              mock.patch.object(
                  self.mod, "_cli_ancestor_identity", return_value=ancestor
              ):
             self.assertEqual(self.mod._binding_identity(), ancestor)
+
+    def test_terminal_project_scope_survives_bg_spare_and_conversation_rotation(self):
+        common = {
+            "TERM_SESSION_ID": "w0t0p0:11111111-1111-1111-1111-111111111111",
+            "CLAUDE_PROJECT_DIR": "/workspace/Kronn",
+        }
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        with mock.patch.dict(
+                 self.mod.os.environ,
+                 {**common, "CLAUDE_CODE_SESSION_ID": "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"},
+                 clear=True,
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(10, "spare")):
+            first = self.mod._binding_identity()
+        with mock.patch.dict(
+                 self.mod.os.environ,
+                 {**common, "CLAUDE_CODE_SESSION_ID": "c7648454-7f13-4488-b17c-1b4fb7e32935"},
+                 clear=True,
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(20, "foreground")):
+            second = self.mod._binding_identity()
+        self.assertEqual(first, second)
+        self.assertEqual(first[0], "claude-terminal")
+        self.assertEqual(
+            self.mod._identity_key_from(first),
+            self.mod._identity_key_from(second),
+        )
+
+    def test_terminal_scope_isolated_by_terminal_pane_and_project(self):
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+
+        def key(**overrides):
+            env = {
+                "TERM_SESSION_ID": "terminal-a",
+                "TMUX_PANE": "%1",
+                "CLAUDE_PROJECT_DIR": "/workspace/Kronn",
+                **overrides,
+            }
+            with mock.patch.dict(self.mod.os.environ, env, clear=True):
+                return self.mod._identity_key_from(self.mod._binding_identity())
+
+        self.assertEqual(len({
+            key(),
+            key(TERM_SESSION_ID="terminal-b"),
+            key(TMUX_PANE="%2"),
+            key(CLAUDE_PROJECT_DIR="/workspace/Other"),
+        }), 4)
+
+    def test_incomplete_terminal_scope_falls_back_to_logical_session(self):
+        sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        for env in (
+            {"TERM_SESSION_ID": "terminal-a", "CLAUDE_CODE_SESSION_ID": sid},
+            {"CLAUDE_PROJECT_DIR": "/workspace/Kronn", "CLAUDE_CODE_SESSION_ID": sid},
+            {
+                "TERM_SESSION_ID": " bad ",
+                "CLAUDE_PROJECT_DIR": "/workspace/Kronn",
+                "CLAUDE_CODE_SESSION_ID": sid,
+            },
+        ):
+            with self.subTest(env=env), \
+                 mock.patch.dict(self.mod.os.environ, env, clear=True):
+                self.assertEqual(
+                    self.mod._binding_identity(),
+                    ("claude-session", sid),
+                )
 
     def test_ancestor_walk_returns_outermost_match_not_nearest(self):
         # A reconnect may respawn an intermediate runner whose cmdline also

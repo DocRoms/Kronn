@@ -2188,23 +2188,50 @@ def _cli_ancestor_identity():
 
 
 def _platform_session_identity():
-    """Return a CLI-provided logical session identity when one is available.
+    """Return the strongest Claude-provided session scope available.
 
-    Claude Code exports ``CLAUDE_CODE_SESSION_ID`` to MCP sidecars.  Unlike a
-    process ancestor, that UUID follows the logical conversation when Claude's
-    daemon dispatches MCP work through a ``bg-spare`` process.  Treat the value
-    as a best-effort platform hint: validate it strictly and fall back to the
-    process-tree identity if Claude removes or changes the variable.
+    On desktop terminals Claude's foreground process and daemon ``bg-spare``
+    inherit the same terminal id and project directory even though they have
+    different process trees *and* conversation UUIDs.  That pair is the right
+    continuity boundary: it survives ``/clear`` and daemon dispatch, while a
+    second terminal/project remains isolated.  A tmux pane further scopes a
+    terminal id shared by sibling panes.
+
+    When no complete terminal scope is available, Claude Code's logical
+    ``CLAUDE_CODE_SESSION_ID`` is still stronger than a daemon PID.  Treat all
+    values as best-effort platform hints and fall back to the process tree if
+    Claude removes or changes them.
     """
-    raw = os.environ.get("CLAUDE_CODE_SESSION_ID")
-    if not raw:
-        return None
     # Environment variables are inherited.  A different CLI launched from a
     # Claude shell must not accidentally reuse Claude's binding credential.
     client_agent = _infer_agent_type_from_client_name(_CLIENT_INFO.get("name"))
     if client_agent == "Unknown":
         client_agent = _infer_agent_type_from_client_name(_parent_process_cmdline())
     if client_agent != "ClaudeCode":
+        return None
+
+    def safe_part(name, max_length):
+        value = os.environ.get(name)
+        if not value or len(value) > max_length or value.strip() != value:
+            return None
+        if not value.isprintable():
+            return None
+        return value
+
+    project = safe_part("CLAUDE_PROJECT_DIR", 4096)
+    terminal_kind = None
+    terminal_id = None
+    for candidate in ("TERM_SESSION_ID", "WT_SESSION"):
+        value = safe_part(candidate, 512)
+        if value:
+            terminal_kind, terminal_id = candidate, value
+            break
+    if terminal_id and project:
+        pane = safe_part("TMUX_PANE", 128) or ""
+        return ("claude-terminal", terminal_kind, terminal_id, pane, project)
+
+    raw = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not raw:
         return None
     try:
         canonical = str(uuid.UUID(raw))
@@ -2234,8 +2261,8 @@ def _identity_key_from(identity):
     without a platform session id keep finding their existing binding file."""
     if identity is None:
         return None
-    if len(identity) == 2 and identity[0] == "claude-session":
-        raw = f"claude-session:{identity[1]}"
+    if identity[0] in ("claude-terminal", "claude-session"):
+        raw = json.dumps(identity, separators=(",", ":"), ensure_ascii=False)
     else:
         raw = f"pid:{identity[0]}:{identity[1]}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
