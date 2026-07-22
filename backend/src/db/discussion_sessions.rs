@@ -682,42 +682,70 @@ pub fn join_via_token(
 
 /// Resume a host-launched peer after its MCP bridge reloads. The opaque
 /// credential identifies exactly one logical session row; a successful resume
-/// updates that row in place and rotates the credential atomically. The old
-/// `session_id` immediately loses the ability to refresh activity/presence.
+/// updates that row in place. New bridges prepare and durably persist
+/// `next_resume_token` before calling: the transaction atomically rotates to
+/// that exact successor, while an exact replay `(old, next)` is idempotent.
+/// This closes the response-loss window where the server had committed a
+/// random successor the client could no longer recover. Legacy callers that
+/// omit a successor resume without rotation (availability over fake safety).
+/// The old `session_id` immediately loses the ability to refresh presence.
 pub fn resume_disc_session(
     conn: &Connection,
     agent_type: &str,
     resume_token: &str,
     new_session_id: &str,
+    next_resume_token: Option<&str>,
 ) -> Result<JoinViaTokenResult> {
     let old_hash = sha256_hex(resume_token);
-    let (next_token, next_hash) = new_resume_credential();
+    let next_token = next_resume_token.unwrap_or(resume_token).to_string();
+    let next_hash = sha256_hex(&next_token);
     let now = Utc::now().to_rfc3339();
     let tx = conn.unchecked_transaction()?;
 
-    let row: Option<(i64, String)> = tx
+    // Match either the current credential (first commit) or the exact
+    // client-prepared successor (response-loss replay). A divergent successor
+    // cannot match and is rejected, so concurrent writers never silently
+    // overwrite the credential another bridge persisted.
+    let row: Option<(i64, String, String)> = tx
         .query_row(
-            "SELECT id, disc_id FROM discussion_sessions
-              WHERE resume_token_hash = ?1 AND agent_type = ?2 AND status != 'left'
+            "SELECT id, disc_id, resume_token_hash FROM discussion_sessions
+              WHERE resume_token_hash IN (?1, ?2)
+                AND agent_type = ?3 AND status != 'left'
+              ORDER BY CASE WHEN resume_token_hash = ?1 THEN 0 ELSE 1 END
               LIMIT 1",
-            params![&old_hash, agent_type],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            params![&old_hash, &next_hash, agent_type],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let (session_pk, disc_id) =
+    let (session_pk, disc_id, stored_hash) =
         row.ok_or_else(|| anyhow!("resume credential invalid, replayed, or no longer active"))?;
 
-    let updated = tx.execute(
-        "UPDATE discussion_sessions
-            SET session_id = ?2,
-                last_seen = ?3,
-                activity = NULL,
-                activity_expires_at = NULL,
-                resume_token_hash = ?4,
-                resume_rotated_at = ?3
-          WHERE id = ?1 AND resume_token_hash = ?5 AND status != 'left'",
-        params![session_pk, new_session_id, &now, &next_hash, &old_hash],
-    )?;
+    let updated = if stored_hash == old_hash {
+        tx.execute(
+            "UPDATE discussion_sessions
+                SET session_id = ?2,
+                    last_seen = ?3,
+                    activity = NULL,
+                    activity_expires_at = NULL,
+                    resume_token_hash = ?4,
+                    resume_rotated_at = ?3
+              WHERE id = ?1 AND resume_token_hash = ?5 AND status != 'left'",
+            params![session_pk, new_session_id, &now, &next_hash, &old_hash],
+        )?
+    } else {
+        // Exact replay after the first transaction committed but its response
+        // was lost. Keep the already-selected successor and only rebind the
+        // caller identity/heartbeat.
+        tx.execute(
+            "UPDATE discussion_sessions
+                SET session_id = ?2,
+                    last_seen = ?3,
+                    activity = NULL,
+                    activity_expires_at = NULL
+              WHERE id = ?1 AND resume_token_hash = ?4 AND status != 'left'",
+            params![session_pk, new_session_id, &now, &next_hash],
+        )?
+    };
     if updated != 1 {
         return Err(anyhow!("resume credential was rotated concurrently"));
     }
@@ -898,8 +926,15 @@ mod tests {
             .unwrap();
         assert_ne!(stored, joined.resume_token, "database stores only a digest");
 
-        let resumed =
-            resume_disc_session(&conn, "Codex", &joined.resume_token, "new-child-ppid").unwrap();
+        let successor = "kr-resume-11111111111111111111111111111111";
+        let resumed = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "new-child-ppid",
+            Some(successor),
+        )
+        .unwrap();
         assert_eq!(
             resumed.session_pk, joined.session_pk,
             "resume updates the same row"
@@ -910,12 +945,25 @@ mod tests {
             "credential rotates"
         );
 
-        let replay =
-            resume_disc_session(&conn, "Codex", &joined.resume_token, "replay-child").unwrap_err();
+        assert_eq!(resumed.resume_token, successor);
+
+        let replay = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "replay-child",
+            Some("kr-resume-22222222222222222222222222222222"),
+        )
+        .unwrap_err();
         assert!(replay.to_string().contains("invalid, replayed"));
-        let wrong_agent =
-            resume_disc_session(&conn, "ClaudeCode", &resumed.resume_token, "attacker-child")
-                .unwrap_err();
+        let wrong_agent = resume_disc_session(
+            &conn,
+            "ClaudeCode",
+            &resumed.resume_token,
+            "attacker-child",
+            Some("kr-resume-33333333333333333333333333333333"),
+        )
+        .unwrap_err();
         assert!(wrong_agent.to_string().contains("invalid, replayed"));
 
         set_session_activity(
@@ -936,14 +984,87 @@ mod tests {
     }
 
     #[test]
+    fn resume_exact_successor_replay_is_idempotent_but_divergence_is_rejected() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Codex", "before").unwrap();
+        let next = "kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let first = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "after-first",
+            Some(next),
+        )
+        .unwrap();
+        let replay = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "after-response-loss",
+            Some(next),
+        )
+        .unwrap();
+        assert_eq!(replay.session_pk, first.session_pk);
+        assert_eq!(replay.resume_token, next);
+
+        let divergent = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "racer",
+            Some("kr-resume-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .unwrap_err();
+        assert!(divergent.to_string().contains("invalid, replayed"));
+
+        let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("after-response-loss"));
+    }
+
+    #[test]
+    fn legacy_resume_without_successor_is_non_rotating_and_retryable() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Codex", "before").unwrap();
+
+        let first = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "legacy-one",
+            None,
+        )
+        .unwrap();
+        let retry = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "legacy-two",
+            None,
+        )
+        .unwrap();
+        assert_eq!(first.resume_token, joined.resume_token);
+        assert_eq!(retry.resume_token, joined.resume_token);
+        assert_eq!(first.session_pk, retry.session_pk);
+    }
+
+    #[test]
     fn resuming_one_same_agent_peer_never_supersedes_its_sibling() {
         let conn = setup_db();
         let invite = create_invite_token(&conn, "d1").unwrap();
         let first = join_via_token(&conn, &invite.token, "Codex", "codex-a-old").unwrap();
         let second = join_via_token(&conn, &invite.token, "Codex", "codex-b").unwrap();
 
-        let resumed =
-            resume_disc_session(&conn, "Codex", &first.resume_token, "codex-a-new").unwrap();
+        let resumed = resume_disc_session(
+            &conn,
+            "Codex",
+            &first.resume_token,
+            "codex-a-new",
+            Some("kr-resume-cccccccccccccccccccccccccccccccc"),
+        )
+        .unwrap();
         assert_eq!(resumed.session_pk, first.session_pk);
 
         let rows = list_sessions(&conn, "d1", false).unwrap();

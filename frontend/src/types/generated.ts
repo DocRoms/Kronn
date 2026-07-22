@@ -2055,7 +2055,14 @@ export type PeerLeaveResponse = {
  */
 left: boolean, };
 
-export type PeerResumeRequest = { agent_type: string, session_id: string, resume_token: string, };
+export type PeerResumeRequest = { agent_type: string, session_id: string, resume_token: string,
+/**
+ * Client-prepared successor credential. The bridge persists it as a
+ * pending value *before* this request, making the rotation retryable if
+ * the response is lost. Omitted by legacy bridges, which resume without
+ * rotation rather than risking a server-first, unacknowledged cut-over.
+ */
+next_resume_token?: string | null, };
 
 export type PeerResumeResponse = { disc_id: string, session_pk: number,
 /**

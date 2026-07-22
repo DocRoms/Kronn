@@ -105,6 +105,12 @@ pub struct PeerResumeRequest {
     pub agent_type: String,
     pub session_id: String,
     pub resume_token: String,
+    /// Client-prepared successor credential. The bridge persists it as a
+    /// pending value *before* this request, making the rotation retryable if
+    /// the response is lost. Omitted by legacy bridges, which resume without
+    /// rotation rather than risking a server-first, unacknowledged cut-over.
+    #[serde(default)]
+    pub next_resume_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -302,9 +308,18 @@ pub async fn peer_resume(
     if req.resume_token.trim().is_empty() {
         return Json(ApiResponse::err("resume_token required"));
     }
+    if let Some(next) = req.next_resume_token.as_deref() {
+        let suffix = next.strip_prefix("kr-resume-").unwrap_or_default();
+        if suffix.len() != 32 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Json(ApiResponse::err(
+                "next_resume_token must be kr-resume- followed by 32 hex characters",
+            ));
+        }
+    }
     let agent_type = req.agent_type;
     let session_id = req.session_id;
     let resume_token = req.resume_token;
+    let next_resume_token = req.next_resume_token;
     match state
         .db
         .with_conn(move |conn| {
@@ -313,6 +328,7 @@ pub async fn peer_resume(
                 &agent_type,
                 &resume_token,
                 &session_id,
+                next_resume_token.as_deref(),
             )
         })
         .await
@@ -1361,12 +1377,14 @@ mod tests {
         .data
         .unwrap();
 
+        let successor = "kr-resume-11111111111111111111111111111111".to_string();
         let resumed = peer_resume(
             State(state.clone()),
             Json(PeerResumeRequest {
                 agent_type: "Codex".into(),
                 session_id: "child-after-reload".into(),
                 resume_token: joined.resume_token.clone(),
+                next_resume_token: Some(successor.clone()),
             }),
         )
         .await
@@ -1375,7 +1393,22 @@ mod tests {
         .expect("resume succeeds");
         assert_eq!(resumed.disc_id, "d-resume-1");
         assert_eq!(resumed.session_pk, joined.session_pk);
-        assert_ne!(resumed.resume_token, joined.resume_token);
+        assert_eq!(resumed.resume_token, successor);
+
+        let exact_replay = peer_resume(
+            State(state.clone()),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "child-after-response-loss".into(),
+                resume_token: joined.resume_token.clone(),
+                next_resume_token: Some(successor),
+            }),
+        )
+        .await
+        .0
+        .data
+        .expect("the exact prepared successor is an idempotent replay");
+        assert_eq!(exact_replay.session_pk, joined.session_pk);
 
         let replay = peer_resume(
             State(state.clone()),
@@ -1383,6 +1416,9 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "replay".into(),
                 resume_token: joined.resume_token,
+                next_resume_token: Some(
+                    "kr-resume-22222222222222222222222222222222".into(),
+                ),
             }),
         )
         .await
@@ -1396,7 +1432,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].session_id.as_deref(), Some("child-after-reload"));
+        assert_eq!(
+            rows[0].session_id.as_deref(),
+            Some("child-after-response-loss")
+        );
+    }
+
+    #[tokio::test]
+    async fn peer_resume_rejects_malformed_successor_without_consuming_current() {
+        let state = make_state_with_disc("d-resume-invalid-next").await;
+        let token = invite_peer(
+            State(state.clone()),
+            Path("d-resume-invalid-next".to_string()),
+        )
+        .await
+        .0
+        .data
+        .unwrap()
+        .token;
+        let joined = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token,
+                agent_type: "Codex".into(),
+                session_id: "before".into(),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+
+        let invalid = peer_resume(
+            State(state.clone()),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "invalid".into(),
+                resume_token: joined.resume_token.clone(),
+                next_resume_token: Some("kr-resume-not-hex".into()),
+            }),
+        )
+        .await
+        .0;
+        assert!(!invalid.success);
+        assert!(invalid.error.unwrap().contains("32 hex"));
+
+        let valid = peer_resume(
+            State(state),
+            Json(PeerResumeRequest {
+                agent_type: "Codex".into(),
+                session_id: "valid".into(),
+                resume_token: joined.resume_token,
+                next_resume_token: Some(
+                    "kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                ),
+            }),
+        )
+        .await
+        .0;
+        assert!(valid.success, "validation failure must not consume current token");
     }
 
     #[tokio::test]
