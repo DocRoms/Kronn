@@ -1928,6 +1928,7 @@ suggestion KRONN:APPLY ; cela écraserait la vraie valeur par un placeholder
   'wf.nextStepArrow': 'suite',
   'wf.status': 'Statut',
   'wf.duration': 'Durée',
+  'wf.tokens': 'Tokens',
   'wf.noProject': 'Sans projet',
 
   // ── Workflow wizard ──
@@ -4560,6 +4561,7 @@ suggestion; that would overwrite the real value with a placeholder
   'wf.nextStepArrow': 'next',
   'wf.status': 'Status',
   'wf.duration': 'Duration',
+  'wf.tokens': 'Tokens',
   'wf.noProject': 'No project',
 
   // ── Workflow wizard ──
@@ -7192,6 +7194,7 @@ KRONN:APPLY; eso sobreescribiría el valor real con un placeholder
   'wf.nextStepArrow': 'siguiente',
   'wf.status': 'Estado',
   'wf.duration': 'Duración',
+  'wf.tokens': 'Tokens',
   'wf.noProject': 'Sin proyecto',
 
   // ── Workflow wizard ──

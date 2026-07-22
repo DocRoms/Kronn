@@ -74,3 +74,6 @@ docker-compose.override.yml
 frontend/coverage/
 backend/coverage/
 .rtk/
+
+# TypeScript incremental build cache (never commit)
+*.tsbuildinfo

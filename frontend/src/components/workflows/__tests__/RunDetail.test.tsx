@@ -10,7 +10,7 @@
 //     counter instead of the static "running…" placeholder.
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, act, fireEvent } from '@testing-library/react';
+import { render, screen, act, fireEvent, within } from '@testing-library/react';
 import { buildApiMock } from '../../../test/apiMock';
 import type { WorkflowRun, WorkflowStep, StepResult } from '../../../types/generated';
 
@@ -149,7 +149,7 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
         mode: 'foreach', total: 3, succeeded: 2, failed: 1,
         items: [
           { item: 0, id: 'scss-tokens', status: 'MechanicalApplied', child_run_id: null, files: 1 },
-          { item: 1, id: 'brand-context', status: 'Success', child_run_id: 'aaaabbbb-1111' },
+          { item: 1, id: 'brand-context', status: 'Success', child_run_id: 'aaaabbbb-1111', tokens: 750, duration_ms: 45200 },
           { item: 2, id: 'twig-loader', status: 'Failed', child_run_id: 'ccccdddd-2222' },
         ],
       },
@@ -174,6 +174,13 @@ describe('RunDetail — step_kind snapshot badges (run history honesty)', () => 
     expect(screen.getByText('MechanicalApplied · 0 tk')).toBeInTheDocument();
     expect(screen.getByText('Failed')).toBeInTheDocument();
     expect(screen.getByText('aaaabbbb…')).toBeInTheDocument();
+    // per-sub-run metrics columns: real values for a child run…
+    const brandRow = screen.getByText('brand-context').closest('tr')!;
+    expect(within(brandRow).getByText('750')).toBeInTheDocument();
+    expect(within(brandRow).getByText('45.2s')).toBeInTheDocument();
+    // …and an em-dash fallback (tokens + duration) for an item with no child run.
+    const scssRow = screen.getByText('scss-tokens').closest('tr')!;
+    expect(within(scssRow).getAllByText('—').length).toBeGreaterThanOrEqual(2);
   });
 
   it('per-task child_run_id links to the child sub-workflow when nav + steps provided', async () => {

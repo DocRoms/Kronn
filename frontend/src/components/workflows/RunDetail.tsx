@@ -1093,6 +1093,8 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                             <th>#</th>
                             <th>{t('wf.foreachTaskCol')}</th>
                             <th>{t('wf.status')}</th>
+                            <th style={{ textAlign: 'right' }}>{t('wf.tokens')}</th>
+                            <th style={{ textAlign: 'right' }}>{t('wf.duration')}</th>
                             <th>{t('wf.subRun')}</th>
                           </tr>
                         </thead>
@@ -1105,6 +1107,15 @@ export function RunDetail({ run, workflowSteps, onDelete, onCancel, onResume, on
                                   hint carries the per-type detail */}
                               <td style={{ color: it.status === 'Failed' ? (STATUS_COLORS['Failed'] ?? 'var(--kr-warning)') : (STATUS_COLORS['Success'] ?? 'var(--kr-success)') }}>
                                 {it.status}{isZeroTokenItem(it.status) ? ' · 0 tk' : ''}
+                              </td>
+                              {/* per-sub-run cost/timing — absent on runs from
+                                  before the engine surfaced them, and on
+                                  engine-applied items (no child run) → em dash */}
+                              <td className="text-ghost" style={{ textAlign: 'right', fontFamily: 'var(--kr-font-mono)' }}>
+                                {it.tokens != null ? it.tokens.toLocaleString() : '—'}
+                              </td>
+                              <td className="text-ghost" style={{ textAlign: 'right', fontFamily: 'var(--kr-font-mono)' }}>
+                                {it.duration_ms != null ? `${(it.duration_ms / 1000).toFixed(1)}s` : '—'}
                               </td>
                               <td className="text-ghost" style={{ fontFamily: 'var(--kr-font-mono)' }} title={it.child_run_id ?? undefined}>
                                 {it.child_run_id
