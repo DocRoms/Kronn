@@ -4249,3 +4249,136 @@ fn create_batch_run_subsequent_call_after_rollback_succeeds_cleanly() {
     assert_eq!(out.batch_total, 1);
     assert_eq!(out.discussion_ids.len(), 1);
 }
+
+// ── foreach per-sub-run metrics backfill (read-time) ────────────────────────
+
+/// Minimal StepResult carrying a foreach envelope — serde defaults fill the
+/// many optional snapshot fields so the test isn't a fragile 15-field literal.
+fn foreach_step_result(output: String) -> StepResult {
+    serde_json::from_value(serde_json::json!({
+        "step_name": "fanout",
+        "status": "Success",
+        "output": output,
+        "tokens_used": 0,
+        "duration_ms": 0,
+    })).expect("minimal StepResult")
+}
+
+fn foreach_envelope(items: serde_json::Value) -> String {
+    let data = serde_json::json!({
+        "mode": "foreach", "total": 2, "succeeded": 2, "failed": 0,
+        // last_output embeds a nested ---END_STEP_OUTPUT--- (run-15 shape) so
+        // every test exercises the "slice on the LAST end marker" path.
+        "last_output": "child done\n---STEP_OUTPUT---\n{\"data\":{},\"status\":\"OK\"}\n---END_STEP_OUTPUT---",
+        "child_run_id": "child-b",
+        "items": items,
+    });
+    crate::workflows::step_output_format::format_step_output(data, "OK", "sum", None, &["OK"])
+}
+
+#[test]
+fn backfill_foreach_output_fills_missing_metrics_and_preserves_markers() {
+    let output = foreach_envelope(serde_json::json!([
+        {"item": 0, "id": "pr-1", "status": "Success", "child_run_id": "child-a"},
+        {"item": 1, "id": "pr-2", "status": "MechanicalApplied", "child_run_id": null},
+    ]));
+    let mut metrics = std::collections::HashMap::new();
+    metrics.insert("child-a".to_string(), (1500u64, Some(45200u64)));
+
+    let patched = crate::db::workflows::backfill_foreach_output(&output, &metrics)
+        .expect("child-a item enriched");
+
+    // Wrapper is untouched: markers, signal, and the nested last_output survive.
+    assert!(patched.contains("---STEP_OUTPUT---"));
+    assert!(patched.ends_with("[SIGNAL: OK]"));
+    let env = crate::workflows::step_output_format::parse_envelope_for_test(&patched);
+    assert!(env["data"]["last_output"].as_str().unwrap().contains("---END_STEP_OUTPUT---"));
+
+    let items = env["data"]["items"].as_array().unwrap();
+    assert_eq!(items[0]["tokens"], 1500);
+    assert_eq!(items[0]["duration_ms"], 45200);
+    // MechanicalApplied item has no child run → left as "—" (no tokens key).
+    assert!(items[1].get("tokens").is_none());
+}
+
+#[test]
+fn backfill_foreach_output_leaves_already_stamped_items_untouched() {
+    // A NEW-run envelope: the writer already embedded authoritative values.
+    let output = foreach_envelope(serde_json::json!([
+        {"item": 0, "id": "pr-1", "status": "Success", "child_run_id": "child-a", "tokens": 42, "duration_ms": 1000},
+        {"item": 1, "id": "pr-2", "status": "Success", "child_run_id": "child-b", "tokens": 7, "duration_ms": 500},
+    ]));
+    let mut metrics = std::collections::HashMap::new();
+    metrics.insert("child-a".to_string(), (9999u64, Some(9999u64)));
+    // Nothing missing → no rewrite, and the writer value is never overridden.
+    assert!(crate::db::workflows::backfill_foreach_output(&output, &metrics).is_none());
+}
+
+#[test]
+fn backfill_foreach_output_fills_only_the_missing_field() {
+    // Partial item: has `tokens` but NOT `duration_ms` → the duration must still
+    // be backfilled, and the existing tokens must not be overridden (per-field
+    // contract; matches the fn's docstring).
+    let output = foreach_envelope(serde_json::json!([
+        {"item": 0, "id": "pr-1", "status": "Success", "child_run_id": "child-a", "tokens": 111},
+    ]));
+    let mut metrics = std::collections::HashMap::new();
+    metrics.insert("child-a".to_string(), (999u64, Some(45200u64)));
+
+    let patched = crate::db::workflows::backfill_foreach_output(&output, &metrics)
+        .expect("missing duration_ms is backfilled even though tokens is present");
+    let env = crate::workflows::step_output_format::parse_envelope_for_test(&patched);
+    let it = &env["data"]["items"][0];
+    assert_eq!(it["tokens"], 111, "existing tokens must not be overridden");
+    assert_eq!(it["duration_ms"], 45200, "missing duration backfilled from child metrics");
+}
+
+#[test]
+fn backfill_foreach_output_ignores_non_foreach_and_junk() {
+    let m: std::collections::HashMap<String, (u64, Option<u64>)> = std::collections::HashMap::new();
+    let single = crate::workflows::step_output_format::format_step_output(
+        serde_json::json!({"child_run_id": "x", "child_status": "Success"}), "OK", "s", None, &["OK"]);
+    assert!(crate::db::workflows::backfill_foreach_output(&single, &m).is_none(), "non-foreach envelope");
+    assert!(crate::db::workflows::backfill_foreach_output("free text", &m).is_none(), "no markers");
+    assert!(
+        crate::db::workflows::backfill_foreach_output("---STEP_OUTPUT---\n{not json\n---END_STEP_OUTPUT---", &m).is_none(),
+        "unparseable inner JSON"
+    );
+}
+
+#[test]
+fn get_run_backfills_foreach_child_metrics_from_child_rows() {
+    let conn = test_db();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("parent-wf")).unwrap();
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("child-wf")).unwrap();
+
+    // Parent run with a foreach step whose items lack tokens/duration
+    // (a run produced before the writer embedded them).
+    let output = foreach_envelope(serde_json::json!([
+        {"item": 0, "id": "pr-1", "status": "Success", "child_run_id": "child-a"},
+        {"item": 1, "id": "pr-2", "status": "Success", "child_run_id": "child-b"},
+    ]));
+    let mut parent = sample_run("parent-run-1", "parent-wf");
+    parent.step_results = vec![foreach_step_result(output)];
+    crate::db::workflows::insert_run(&conn, &parent).unwrap();
+
+    let mk_child = |id: &str, tokens: u64, dur_ms: i64| {
+        let mut c = sample_run(id, "child-wf");
+        c.run_type = "subworkflow".into();
+        c.parent_run_id = Some("parent-run-1".into());
+        c.status = RunStatus::Success;
+        c.tokens_used = tokens;
+        c.finished_at = Some(c.started_at + chrono::Duration::milliseconds(dur_ms));
+        c
+    };
+    crate::db::workflows::insert_run(&conn, &mk_child("child-a", 1500, 45200)).unwrap();
+    crate::db::workflows::insert_run(&conn, &mk_child("child-b", 900, 12000)).unwrap();
+
+    let run = crate::db::workflows::get_run(&conn, "parent-run-1").unwrap().unwrap();
+    let env = crate::workflows::step_output_format::parse_envelope_for_test(&run.step_results[0].output);
+    let items = env["data"]["items"].as_array().unwrap();
+    assert_eq!(items[0]["tokens"], 1500, "child-a tokens joined from its run row");
+    assert_eq!(items[0]["duration_ms"], 45200, "child-a duration = finished - started");
+    assert_eq!(items[1]["tokens"], 900);
+    assert_eq!(items[1]["duration_ms"], 12000);
+}

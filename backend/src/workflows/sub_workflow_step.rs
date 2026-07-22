@@ -608,12 +608,26 @@ async fn execute_foreach(
         total_tokens += child_run.tokens_used;
         last_output = child_run.step_results.last().map(|s| s.output.clone());
         last_child_id = Some(child_run.id.clone());
-        results.push(json!({
+        // Surface per-child cost/timing so the parent run's foreach table can
+        // show tokens + duration per sub-run (else the UI only has the aggregate).
+        // duration_ms is OMITTED when the child never finished (no finished_at) —
+        // consistent with the read-time backfill, and never fabricates a duration
+        // from `now()` for an unfinished/errored child (the UI then shows "—").
+        let mut item = json!({
             "item": idx,
             "id": item_id,
             "child_run_id": child_run.id,
             "status": format!("{:?}", child_run.status),
-        }));
+            "tokens": child_run.tokens_used,
+        });
+        if let Some(finished_at) = child_run.finished_at {
+            let duration_ms = finished_at
+                .signed_duration_since(child_run.started_at)
+                .num_milliseconds()
+                .max(0) as u64;
+            item["duration_ms"] = json!(duration_ms);
+        }
+        results.push(item);
         // Done ONLY on child Success — a Failed child must be re-attempted
         // by a resume, never skipped on the strength of a stale marker.
         if ok {

@@ -772,6 +772,135 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
     Ok(())
 }
 
+/// Read-time backfill of per-sub-run `tokens` + `duration_ms` on a foreach
+/// step's envelope. Runs produced before the writer started embedding those
+/// fields (2026-07) have envelopes without them; the data still lives on each
+/// child `WorkflowRun` row, so we join it back at read time — same
+/// derived-not-persisted pattern as `enrich_parent_provenance`. Cheap: one
+/// indexed query on `parent_run_id`, and only when the run carries a foreach
+/// step. Idempotent — items the writer already stamped (new runs) keep their
+/// authoritative value and are left untouched.
+fn backfill_foreach_child_metrics(conn: &Connection, run: &mut WorkflowRun) -> Result<()> {
+    let has_foreach = run.step_results.iter().any(|s| s.output.contains("\"mode\":\"foreach\""));
+    if !has_foreach {
+        return Ok(());
+    }
+    let metrics = child_run_metrics(conn, &run.id)?;
+    if metrics.is_empty() {
+        return Ok(());
+    }
+    for sr in run.step_results.iter_mut() {
+        // Cheap guard: only a foreach step carries the envelope worth rewriting —
+        // skip the JSON parse/serialize on every other (often large) step output.
+        if !sr.output.contains("\"mode\":\"foreach\"") {
+            continue;
+        }
+        if let Some(patched) = backfill_foreach_output(&sr.output, &metrics) {
+            sr.output = patched;
+        }
+    }
+    Ok(())
+}
+
+/// child run id → (tokens_used, duration_ms). `duration_ms` is `None` when the
+/// child never finished (no `finished_at`) — we surface tokens without faking
+/// a duration.
+fn child_run_metrics(
+    conn: &Connection,
+    parent_run_id: &str,
+) -> Result<std::collections::HashMap<String, (u64, Option<u64>)>> {
+    use std::collections::HashMap;
+    let mut stmt = conn.prepare(
+        "SELECT id, tokens_used, started_at, finished_at FROM workflow_runs WHERE parent_run_id = ?1",
+    )?;
+    let rows = stmt.query_map(params![parent_run_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)? as u64,
+            row.get::<_, String>(2)?,
+            row.get::<_, Option<String>>(3)?,
+        ))
+    })?;
+    let mut map: HashMap<String, (u64, Option<u64>)> = HashMap::new();
+    for r in rows.filter_map(|r| r.ok()) {
+        let (id, tokens, started, finished) = r;
+        let duration_ms = finished
+            .map(|f| (parse_dt(f) - parse_dt(started.clone())).num_milliseconds().max(0) as u64);
+        map.insert(id, (tokens, duration_ms));
+    }
+    Ok(map)
+}
+
+/// Pure rewrite: splice `tokens`/`duration_ms` into each foreach item that
+/// lacks them, keyed by `child_run_id`. `Some(new_output)` when ≥1 item was
+/// enriched; `None` otherwise (not a foreach envelope, nothing missing, or
+/// unparseable). Only the inner envelope JSON is re-serialized — the markers,
+/// human prefix and `[SIGNAL: …]` lines are preserved by slicing on the FIRST
+/// start marker and the LAST end marker, mirroring the frontend parser
+/// (`foreach-envelope.ts`) so the nested-marker case (`last_output` embedding a
+/// child's own `---END_STEP_OUTPUT---`) is left intact. Marker format is owned
+/// by `workflows::step_output_format::format_step_output`.
+pub(crate) fn backfill_foreach_output(
+    output: &str,
+    metrics: &std::collections::HashMap<String, (u64, Option<u64>)>,
+) -> Option<String> {
+    const START: &str = "---STEP_OUTPUT---\n";
+    const END: &str = "---END_STEP_OUTPUT---";
+    let start = output.find(START)? + START.len();
+    let end = output.rfind(END)?;
+    if end < start {
+        return None;
+    }
+    let inner = output[start..end].trim_end_matches('\n');
+    let mut envelope: serde_json::Value = serde_json::from_str(inner).ok()?;
+    let mut changed = false;
+    {
+        let data = envelope.get_mut("data")?;
+        if data.get("mode").and_then(|m| m.as_str()) != Some("foreach") {
+            return None;
+        }
+        let items = data.get_mut("items")?.as_array_mut()?;
+        for it in items.iter_mut() {
+            // Fill only the fields that are MISSING — never override a value the
+            // writer already stamped (new run). Per-field so an item that somehow
+            // carries `tokens` but not `duration_ms` (or vice-versa) still gets
+            // the missing one backfilled, matching this fn's contract.
+            let has_tokens = it.get("tokens").is_some();
+            let has_duration = it.get("duration_ms").is_some();
+            if has_tokens && has_duration {
+                continue;
+            }
+            let cid = match it.get("child_run_id").and_then(|c| c.as_str()) {
+                Some(c) => c.to_string(),
+                None => continue,
+            };
+            if let Some(&(tokens, duration_ms)) = metrics.get(&cid) {
+                let obj = it.as_object_mut()?;
+                if !has_tokens {
+                    obj.insert("tokens".to_string(), serde_json::json!(tokens));
+                    changed = true;
+                }
+                if !has_duration {
+                    if let Some(d) = duration_ms {
+                        obj.insert("duration_ms".to_string(), serde_json::json!(d));
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    if !changed {
+        return None;
+    }
+    let new_inner = serde_json::to_string(&envelope).ok()?;
+    let mut out = String::with_capacity(output.len() + 64);
+    out.push_str(&output[..start]);
+    out.push_str(&new_inner);
+    out.push('\n');
+    out.push_str(&output[end..]);
+    Some(out)
+}
+
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
     let sql = format!("SELECT {} FROM workflow_runs WHERE id = ?1", WORKFLOW_RUN_COLS);
     let mut stmt = conn.prepare(&sql)?;
@@ -784,6 +913,9 @@ pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
     let mut run = run;
     if let Some(r) = run.as_mut() {
         enrich_parent_provenance(conn, std::slice::from_mut(r))?;
+        // Backfill per-sub-run tokens/duration for runs predating the writer
+        // embedding them (foreach table columns show real values, not "—").
+        backfill_foreach_child_metrics(conn, r)?;
     }
     Ok(run)
 }

@@ -68,6 +68,23 @@ describe('parseForeachEnvelope', () => {
     expect(f.failed).toBe(1);
     expect(f.items[0].id).toBe('item-0');
   });
+
+  it('carries per-sub-run tokens and duration_ms, undefined when absent', () => {
+    const out = envelope({
+      mode: 'foreach', total: 2, succeeded: 2, failed: 0,
+      items: [
+        // new run: writer embedded (or read-time backfill added) the metrics
+        { item: 0, id: 'pr-1', status: 'Success', child_run_id: 'r1', tokens: 1500, duration_ms: 45200 },
+        // old run / engine-applied: no metrics → stays undefined → renders "—"
+        { item: 1, id: 'pr-2', status: 'Success', child_run_id: 'r2' },
+      ],
+    });
+    const f = parseForeachEnvelope(out)!;
+    expect(f.items[0].tokens).toBe(1500);
+    expect(f.items[0].duration_ms).toBe(45200);
+    expect(f.items[1].tokens).toBeUndefined();
+    expect(f.items[1].duration_ms).toBeUndefined();
+  });
 });
 
 describe('isZeroTokenItem', () => {

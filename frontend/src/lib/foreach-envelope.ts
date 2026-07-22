@@ -15,6 +15,10 @@ export interface ForeachItem {
   child_run_id: string | null;
   /** Files written when the engine applied the item directly. */
   files?: number;
+  /** Tokens spent by this sub-run (absent on older runs / engine-applied items). */
+  tokens?: number;
+  /** Wall-clock of this sub-run in ms (absent on older runs / engine-applied items). */
+  duration_ms?: number;
 }
 
 export interface ForeachSummary {
@@ -56,6 +60,8 @@ export function parseForeachEnvelope(output: string | null | undefined): Foreach
     status: typeof it.status === 'string' ? it.status : '?',
     child_run_id: typeof it.child_run_id === 'string' ? it.child_run_id : null,
     files: typeof it.files === 'number' ? it.files : undefined,
+    tokens: typeof it.tokens === 'number' ? it.tokens : undefined,
+    duration_ms: typeof it.duration_ms === 'number' ? it.duration_ms : undefined,
   }));
   return {
     total: typeof data.total === 'number' ? data.total : items.length,
