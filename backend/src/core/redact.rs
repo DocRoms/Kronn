@@ -183,7 +183,9 @@ pub fn looks_like_secret(input: &str) -> bool {
 // (regex_lite has no subroutines). We mask ANY non-empty value — quoted (may
 // contain spaces/specials) or bare — because a short PIN or a symbol-laden
 // password is just as much a leak (Codex review P0#4); no length floor.
-//   1. quoted:   NAME [:=] "…"  → keep the quotes, mask the inside.
+//   1. quoted:   NAME [:=] "…"  → keep the quotes, mask the inside. Each
+//      delimiter has its own pattern so a different quote inside the secret
+//      cannot terminate the match early and leak the remaining suffix.
 //   2. unquoted: NAME [:=] token → mask the token up to the next whitespace
 //      / quote / separator.
 // Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
@@ -193,10 +195,14 @@ const ASSIGNMENT_NAME: &str =
     r"[a-z0-9_.-]*(?:secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token)";
 
 static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
-    let quoted = format!(r#"(?i)(\b{ASSIGNMENT_NAME}\b\s*[:=]\s*)(["'`])([^"'`]+)(["'`])"#);
+    let quoted_dq = format!("(?i)(\\b{ASSIGNMENT_NAME}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
+    let quoted_sq = format!("(?i)(\\b{ASSIGNMENT_NAME}\\b\\s*[:=]\\s*)'((?:\\\\.|[^'\\\\])+)'");
+    let quoted_bt = format!("(?i)(\\b{ASSIGNMENT_NAME}\\b\\s*[:=]\\s*)`((?:\\\\.|[^`\\\\])+)`");
     let unquoted = format!(r#"(?i)(\b{ASSIGNMENT_NAME}\b\s*[:=]\s*)([^\s"'`,;]+)"#);
     [
-        (quoted, "$1$2***REDACTED***$4"),
+        (quoted_dq, "$1\"***REDACTED***\""),
+        (quoted_sq, "$1'***REDACTED***'"),
+        (quoted_bt, "$1`***REDACTED***`"),
         (unquoted, "$1***REDACTED***"),
     ]
     .into_iter()
@@ -346,6 +352,21 @@ mod tests {
         ] {
             let (out, n) = redact_for_audit_artifact(line);
             assert!(!out.contains(leak), "value {leak:?} must be masked in {line:?}: {out}");
+            assert!(n >= 1, "{line:?} should redact");
+        }
+    }
+
+    #[test]
+    fn audit_artifact_mixed_quotes_cannot_leak_a_secret_suffix() {
+        for (line, leak, expected) in [
+            (r#"password="pa'ss""#, "pa'ss", r#"password="***REDACTED***""#),
+            (r#"client_secret='pa"ss'"#, r#"pa"ss"#, "client_secret='***REDACTED***'"),
+            ("signing_key=`pa'\"ss`", "pa'\"ss", "signing_key=`***REDACTED***`"),
+            (r#"password="pa\"ss""#, r#"pa\"ss"#, r#"password="***REDACTED***""#),
+        ] {
+            let (out, n) = redact_for_audit_artifact(line);
+            assert_eq!(out, expected, "mixed quote value must be fully masked: {line:?}");
+            assert!(!out.contains(leak), "secret suffix leaked from {line:?}: {out}");
             assert!(n >= 1, "{line:?} should redact");
         }
     }
