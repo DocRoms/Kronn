@@ -559,10 +559,17 @@ pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
             target.display()
         ));
     }
-    let unchanged = std::fs::read(target)
-        .map(|current| current == observed)
-        .unwrap_or(false);
-    if !unchanged {
+    let current = match std::fs::read(target) {
+        Ok(current) => current,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "Failed to read {} before atomic rename: {e}",
+                target.display()
+            ));
+        }
+    };
+    if current != observed {
         let _ = std::fs::remove_file(&tmp);
         return Err(format!(
             "{} changed concurrently while its audit artifact was being sanitized; refusing overwrite",
