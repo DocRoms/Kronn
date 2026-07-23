@@ -2023,10 +2023,9 @@ mod tests {
 
     // ─── Document generation endpoints ────────────────────────────────
 
-    /// Without a running sidecar (the default in tests — no Python venv
-    /// created), `POST /api/docs/pdf` must return an actionable error
-    /// instead of hanging or crashing. The message must point at
-    /// `make docs-setup` so users know what to do.
+    /// Without a running sidecar, `POST /api/docs/pdf` must return an
+    /// end-user action instead of asking someone using an installer to
+    /// execute a repository-only Make target.
     #[tokio::test]
     async fn docs_pdf_returns_actionable_error_when_sidecar_absent() {
         let state = test_state();
@@ -2044,9 +2043,10 @@ mod tests {
         assert_eq!(body["success"], false, "must fail gracefully: {body}");
         let err = body["error"].as_str().unwrap_or_default();
         assert!(
-            err.contains("make docs-setup"),
-            "error must hint at the setup command, got: {err}"
+            err.contains("Update or reinstall Kronn"),
+            "error must give an installer-level recovery action, got: {err}"
         );
+        assert!(!err.contains("make docs-setup"), "must not expose a developer command");
     }
 
     /// Reject requests with traversal payloads in `discussion_id` before
@@ -2072,7 +2072,7 @@ mod tests {
         // get as far as path building.
         let err = body["error"].as_str().unwrap_or_default();
         assert!(
-            err.contains("make docs-setup") || err.contains("invalid discussion_id"),
+            err.contains("Update or reinstall Kronn") || err.contains("invalid discussion_id"),
             "expected sidecar-absent OR traversal-guard error, got: {err}"
         );
     }
@@ -2099,7 +2099,7 @@ mod tests {
     }
 
     /// Each of the 5 document-generation endpoints must surface the
-    /// same actionable "install the sidecar" error when the Python
+    /// same actionable reinstall/update error when the document
     /// sidecar isn't running. Parametrized so a single matrix covers
     /// all formats and catches a new endpoint silently forgetting the
     /// sidecar check.
@@ -2125,9 +2125,10 @@ mod tests {
             assert_eq!(resp["success"], false, "[{fmt}] should fail without sidecar: {resp}");
             let err = resp["error"].as_str().unwrap_or_default();
             assert!(
-                err.contains("make docs-setup"),
-                "[{fmt}] error must point at the setup command, got: {err}"
+                err.contains("Update or reinstall Kronn"),
+                "[{fmt}] error must give an installer-level recovery action, got: {err}"
             );
+            assert!(!err.contains("make docs-setup"), "[{fmt}] leaked a developer command");
         }
     }
 

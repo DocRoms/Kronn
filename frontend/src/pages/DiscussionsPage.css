@@ -1115,6 +1115,7 @@
 .disc-id-pill {
   display: inline-flex;
   align-items: center;
+  gap: 2px;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
@@ -1135,6 +1136,11 @@
 .disc-id-pill:focus-visible {
   outline: 2px solid var(--kr-accent);
   outline-offset: 1px;
+}
+.disc-id-pill[data-copied="true"] {
+  color: var(--kr-success);
+  border-color: rgba(var(--kr-success-rgb), 0.35);
+  background: rgba(var(--kr-success-rgb), 0.08);
 }
 
 /* Inline notice rendered under a popover section when the active
@@ -1848,6 +1854,24 @@
   display: flex;
   align-items: center;
   gap: var(--kr-sp-3);
+}
+
+.disc-msg-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--kr-sp-5);
+  margin-bottom: 4px;
+}
+
+.disc-msg-header-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.disc-msg-header-main > .disc-msg-author,
+.disc-msg-header-main > .disc-msg-agent-label {
+  margin-bottom: 0;
 }
 
 .disc-msg-token-count {
@@ -3849,9 +3873,18 @@
   overflow: hidden;
 }
 
+/* A document is the one message type where the 90ch reading-width cap is
+   actively harmful. Keep the sidebar and composer in place, but let the
+   containing bubble fill the entire conversation pane while expanded. */
+.disc-msg-bubble:has(.doc-preview[data-expanded="true"]) {
+  width: 100%;
+  max-width: 100%;
+}
+
 .doc-preview-header {
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--kr-sp-3);
   padding: var(--kr-sp-3) var(--kr-sp-6);
   font-size: var(--kr-fs-xs);
@@ -3862,12 +3895,45 @@
   letter-spacing: 0.05em;
 }
 
+.doc-preview-header-label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+}
+
+.doc-preview-expand-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin: -4px 0 -4px auto;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s, border-color 0.15s;
+}
+
+.doc-preview-expand-btn:hover,
+.doc-preview-expand-btn:focus-visible {
+  color: var(--kr-accent);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  border-color: var(--kr-accent-border);
+  outline: none;
+}
+
 .doc-preview-iframe {
   display: block;
   width: 100%;
   height: 400px;
   border: 0;
   background: #fff;
+}
+
+.doc-preview[data-expanded="true"] .doc-preview-iframe {
+  height: min(72vh, 760px);
 }
 
 .doc-preview-actions {

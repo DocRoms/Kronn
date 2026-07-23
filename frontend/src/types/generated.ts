@@ -1258,16 +1258,30 @@ duration_ms?: number | null,
 lint_report?: LintReport | null, };
 
 /**
+ * Lean surrounding-message shape for a `disc_get_message` window.
+ */
+export type DiscussionMessageContextItem = { idx: number, id: string, message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, };
+
+/**
  * Single-message read shape — same fields as the underlying
  * `DiscussionMessage` minus internal-only metadata.
  */
-export type DiscussionMessageRead = { idx: number, id: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number,
+export type DiscussionMessageRead = { idx: number, id: string,
+/**
+ * Stable compact reference accepted by `disc_get_message`.
+ */
+message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number,
 /**
  * Files attached to this message (0.8.8). Lets an agent that navigates to
  * an old message see what was uploaded with it instead of being blind to
  * a discussed image. Empty for messages with no attachments.
  */
-attachments?: Array<MessageAttachment>, };
+attachments?: Array<MessageAttachment>,
+/**
+ * Optional compact context requested by the caller. Attachments stay on
+ * the target message only so a small window does not fan out DB reads.
+ */
+before?: Array<DiscussionMessageContextItem>, after?: Array<DiscussionMessageContextItem>, };
 
 /**
  * Compact metadata returned by `disc_meta` — everything the agent might
@@ -2116,8 +2130,7 @@ path_exists: boolean, default_skill_ids?: Array<string>, default_profile_id?: st
  * system repo. The audit pipeline + every discussion / QP /
  * workflow running on this project picks up this list in its
  * system prompt prelude. Stored as in-row JSON (small data,
- * projects rarely have more than 5 links). See
- * [[TD-20260512-linked-repos-companions]].
+ * projects rarely have more than 5 links).
  */
 linked_repos?: Array<LinkedRepo>, created_at: string, updated_at: string, };
 

@@ -7261,6 +7261,71 @@ mod cold_api_handlers_tests {
     }
 
     #[tokio::test]
+    async fn disc_get_message_short_ref_returns_bounded_context() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 5).await;
+        let app = build_router_with_auth(state, false);
+
+        let (_, target) = get_json(
+            app.clone(),
+            &format!("/api/discussions/{}/message/2", disc_id),
+        ).await;
+        let message_ref = target["data"]["message_ref"]
+            .as_str()
+            .expect("target should expose a short message reference");
+
+        let (st, json) = get_json(
+            app,
+            &format!(
+                "/api/discussions/{}/message/{}?before=2&after=1",
+                disc_id, message_ref
+            ),
+        ).await;
+        assert_eq!(st, StatusCode::OK);
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["data"]["idx"], 2);
+        assert_eq!(json["data"]["before"].as_array().unwrap().len(), 2);
+        assert_eq!(json["data"]["before"][0]["idx"], 0);
+        assert_eq!(json["data"]["before"][1]["idx"], 1);
+        assert_eq!(json["data"]["after"].as_array().unwrap().len(), 1);
+        assert_eq!(json["data"]["after"][0]["idx"], 3);
+        assert!(json["data"]["before"][0].get("attachments").is_none());
+    }
+
+    #[tokio::test]
+    async fn disc_get_message_full_id_resolves_target() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 2).await;
+        let app = build_router_with_auth(state, false);
+        let (_, target) = get_json(
+            app.clone(),
+            &format!("/api/discussions/{}/message/1", disc_id),
+        ).await;
+        let full_id = target["data"]["id"].as_str().unwrap();
+
+        let (_, json) = get_json(
+            app,
+            &format!("/api/discussions/{}/message/{}", disc_id, full_id),
+        ).await;
+        assert_eq!(json["success"], serde_json::Value::Bool(true));
+        assert_eq!(json["data"]["idx"], 1);
+    }
+
+    #[tokio::test]
+    async fn disc_get_message_rejects_oversized_context_window() {
+        let state = test_state();
+        let disc_id = seed_disc_with_messages(&state, 2).await;
+        let app = build_router_with_auth(state, false);
+
+        let (_, json) = get_json(
+            app,
+            &format!("/api/discussions/{}/message/0?before=11", disc_id),
+        ).await;
+        assert_eq!(json["success"], serde_json::Value::Bool(false));
+        assert!(json["error"].as_str().unwrap().contains("limited"));
+    }
+
+    #[tokio::test]
     async fn disc_get_message_out_of_range_returns_err() {
         let state = test_state();
         let disc_id = seed_disc_with_messages(&state, 2).await;

@@ -61,8 +61,7 @@ pub struct Project {
     /// system repo. The audit pipeline + every discussion / QP /
     /// workflow running on this project picks up this list in its
     /// system prompt prelude. Stored as in-row JSON (small data,
-    /// projects rarely have more than 5 links). See
-    /// [[TD-20260512-linked-repos-companions]].
+    /// projects rarely have more than 5 links).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub linked_repos: Vec<LinkedRepo>,
     pub created_at: DateTime<Utc>,

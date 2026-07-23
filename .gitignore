@@ -11,10 +11,14 @@ desktop/src-tauri/icons/android/
 desktop/src-tauri/icons/ios/
 desktop/src-tauri/icons/appx/
 desktop/node_modules/
+desktop/src-tauri/resources/docs-sidecar/*
+!desktop/src-tauri/resources/docs-sidecar/.gitkeep
 
 # Python — bytecode cache (regenerated on every MCP script run)
 __pycache__/
 *.pyc
+backend/sidecars/docs/build/
+backend/sidecars/docs/*.egg-info/
 
 # Node
 frontend/node_modules/

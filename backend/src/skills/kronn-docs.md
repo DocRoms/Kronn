@@ -26,9 +26,9 @@ auto_triggers:
 You have access to Kronn's built-in document generation endpoints. The
 user doesn't need to install anything — Kronn ships a Python sidecar
 (WeasyPrint + python-docx + XlsxWriter + python-pptx) that handles every
-format out of the box. If the endpoints respond with
-"Document sidecar unavailable" tell the user to run `make docs-setup`
-once and restart Kronn; it's a one-time thing.
+format out of the box. If an installed release reports that document
+export is unavailable, tell the user to update or reinstall Kronn and
+restart it. `make docs-setup` is only a source-development fallback.
 
 ## Workflow — HTML preview + export (recommended)
 
@@ -214,14 +214,21 @@ curl -X POST .../api/docs/pptx -d '{"discussion_id":"...","slides":[{"title":"T"
   relative `<img src="./chart.png">`).
 - **Page size**: default A4 portrait. Pass `"page_size": "Letter"` or
   `"page_size": "A4 landscape"` when the content needs it.
+- **Margins**: PDF and DOCX add no implicit page margin. Use HTML padding for
+  intentional content spacing, or an explicit `@page { margin: ... }` rule
+  for print margins.
+- **DOCX styling**: the PDF renderer is reused and each rendered page is
+  placed edge to edge in Word. This keeps complex HTML/CSS visually faithful,
+  including variables, gradients, grid/flex, and positioned elements. The
+  result is visually fixed rather than editable text.
 
 ## If something fails
 
 The sidecar's error messages are relayed verbatim. Common cases:
 
-- **"weasyprint not installed"** → operator ran setup before installing
-  system deps. Tell the user to run the apt/brew commands from
-  `make docs-setup` output.
+- **"weasyprint not installed"** → the install is incomplete. In a
+  packaged release, tell the user to update/reinstall Kronn. In a source
+  checkout, the developer can follow `make docs-setup` output.
 - **"Sidecar request failed"** → the sidecar crashed or was killed.
   Restart Kronn to respawn it.
 - **"PDF rendering failed: unsupported font"** → your HTML references a

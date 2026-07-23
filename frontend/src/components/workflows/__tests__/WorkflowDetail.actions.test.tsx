@@ -152,6 +152,22 @@ afterEach(() => {
 // ---- header actions ---------------------------------------------------
 
 describe('WorkflowDetail — header actions', () => {
+  it('shows copied feedback on the workflow ID pill while copying the full ID', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const id = '12345678-90ab-cdef-1234-567890abcdef';
+    const { container } = renderDetail({ workflow: mkWorkflow({ id }) });
+    const pill = container.querySelector<HTMLButtonElement>('.wf-id-pill');
+
+    fireEvent.click(pill!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(id));
+    expect(pill?.getAttribute('data-copied')).toBe('true');
+    expect(pill?.querySelector('svg')).not.toBeNull();
+  });
+
   it('renders the workflow name and the Manual trigger label', () => {
     renderDetail();
     expect(screen.getByText('Ticket Autopilot')).toBeInTheDocument();

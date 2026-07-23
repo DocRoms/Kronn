@@ -14,23 +14,11 @@
  *   4. `introspection_call_count` bumps and the `🔧 N` pill renders
  *      in `ChatHeader.tsx`.
  *
- * # Why ClaudeCode and not Codex
+ * # Scope
  *
- * Codex 0.121 *does* see the kronn-internal MCP server (verified via
- * `codex mcp list`) and *attempts* the tool call when prompted (the
- * runner log shows `mcp: kronn-internal/disc_meta started`). But the
- * call dies with "user cancelled MCP tool call" before the bridge
- * gets HTTP traffic — Codex's sandbox/approval system in `exec` mode
- * blocks MCP subprocess spawning even with `approval: never`.
- *
- * That's an extra Codex-side blocker on top of Kronn's wiring fix
- * (writing the entry to `~/.codex/config.toml`). The wiring is right;
- * Codex's sandbox layer needs to allow the bridge spawn. Tracked in
- * `docs/tech-debt/TD-20260510-codex-mcp-sandbox-block.md`.
- *
- * Claude Code respects `cwd/.mcp.json` natively, has `--dangerously-
- * skip-permissions` set by Kronn for full_access agents, and reliably
- * calls the tool — so it's the canary for the introspection feature.
+ * This older canary remains ClaudeCode-only. Codex support is covered by
+ * `per-agent-mcp-introspection.spec.ts`; Codex 0.132 fixed the exec-mode
+ * MCP spawn blocker that existed in 0.121.
  *
  * # Cost
  *

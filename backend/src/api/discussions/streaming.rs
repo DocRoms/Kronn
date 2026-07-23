@@ -1286,9 +1286,7 @@ pub(crate) async fn make_agent_stream(
                 // `slash_markers.rs` for the parser + resolver.
                 //
                 // Gated on the same agent set that *doesn't* get the
-                // MCP notice in `disc_prompts.rs` — Vibe + Ollama +
-                // Codex (the latter currently blocked by upstream
-                // sandbox; see TD-20260510-codex-mcp-sandbox-block).
+                // MCP notice in `disc_prompts.rs` — Vibe + Ollama.
                 // For other agents we still scan (cheap regex) but
                 // only respect markers if the agent actually emitted
                 // one — defensive, no behaviour change for them.
@@ -1854,9 +1852,20 @@ fn pretty_kronn_args(tool_name: &str, raw_json: &str) -> String {
     };
     match tool_name {
         "disc_meta" => String::new(),
-        "disc_get_message" => val.get("idx")
-            .map(|i| i.to_string())
-            .unwrap_or_default(),
+        "disc_get_message" => {
+            let selector = val
+                .get("message_id")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .or_else(|| val.get("idx").map(|value| value.to_string()))
+                .unwrap_or_default();
+            let before = val.get("before").and_then(|value| value.as_u64()).unwrap_or(0);
+            let after = val.get("after").and_then(|value| value.as_u64()).unwrap_or(0);
+            match (before, after) {
+                (0, 0) => selector,
+                _ => format!("{}, -{}/+{}", selector, before, after),
+            }
+        }
         "disc_summarize" => {
             let from = val.get("from").and_then(|v| v.as_i64());
             let to = val.get("to").and_then(|v| v.as_i64());
@@ -1886,6 +1895,17 @@ mod pretty_kronn_args_tests {
     fn get_message_extracts_idx() {
         assert_eq!(pretty_kronn_args("disc_get_message", r#"{"idx":4}"#), "4");
         assert_eq!(pretty_kronn_args("disc_get_message", r#"{"idx":-1}"#), "-1");
+    }
+
+    #[test]
+    fn get_message_renders_reference_and_context_window() {
+        assert_eq!(
+            pretty_kronn_args(
+                "disc_get_message",
+                r#"{"message_id":"MSG-12345678","before":2,"after":3}"#,
+            ),
+            "MSG-12345678, -2/+3",
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "tauri dev",
     "build": "tauri build",
+    "build:sidecar": "node scripts/build-docs-sidecar.mjs",
     "build:frontend": "cd ../frontend && pnpm build"
   },
   "dependencies": {

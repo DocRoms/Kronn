@@ -192,8 +192,8 @@ pub struct AppState {
     /// Handle to the kronn-docs Python sidecar (PDF/DOCX/XLSX/… gen).
     /// Always allocated — whether the sidecar is actually running is
     /// stored INSIDE the handle. Routes in `api::docs` probe it at
-    /// call time and return a 503 hint if the sidecar was never
-    /// brought up (e.g. `make docs-setup` was never run).
+    /// call time and return a 503 if the bundled/runtime sidecar could
+    /// not be started.
     pub docs_sidecar: Arc<crate::core::docs_sidecar::DocsSidecar>,
 }
 

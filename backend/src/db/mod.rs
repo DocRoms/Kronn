@@ -20,9 +20,22 @@ mod tests;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use rusqlite::Connection;
 
 use crate::core::config;
+
+fn parse_dt(s: String) -> DateTime<Utc> {
+    if let Ok(dt) = DateTime::parse_from_rfc3339(&s) {
+        return dt.with_timezone(&Utc);
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S") {
+        return dt.and_utc();
+    }
+
+    tracing::warn!("Failed to parse datetime '{}', using now()", s);
+    Utc::now()
+}
 
 /// Thread-safe database handle.
 /// Uses std::sync::Mutex so the lock can be held inside spawn_blocking

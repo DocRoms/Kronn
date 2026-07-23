@@ -8,8 +8,8 @@
  *
  * # What this catches
  *
- *   • Form inputs missing labels (TD-20260510-a11y-form-labels — was
- *     a known partial sweep; this spec gives us a per-PR diff).
+ *   • Form inputs missing labels (the form sweep is complete; this
+ *     spec keeps it from regressing).
  *   • Color contrast regressions when tweaking design tokens.
  *   • Buttons relying on icon-only with no aria-label.
  *   • Heading-order skips inside dialogs.

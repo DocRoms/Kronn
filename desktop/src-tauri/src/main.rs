@@ -192,6 +192,20 @@ fn extract_dir(dir: &Dir<'_>, root_target: &std::path::Path) {
     }
 }
 
+/// Location produced by `backend/sidecars/docs/build_bundle.py` after Tauri
+/// copies it under the platform-specific resource directory.
+fn bundled_docs_sidecar_path(resource_dir: &std::path::Path) -> std::path::PathBuf {
+    resource_dir
+        .join("sidecars")
+        .join("docs")
+        .join("kronn-docs")
+        .join(if cfg!(windows) {
+            "kronn-docs.exe"
+        } else {
+            "kronn-docs"
+        })
+}
+
 // ── PATH enrichment for desktop apps ───────────────────────────────────────
 
 /// Maximum time we wait for the user's login shell to print its PATH.
@@ -657,31 +671,6 @@ fn main() {
     // Extract frontend dist (embedded in binary for production, filesystem for dev)
     let dist_dir = extract_frontend_dist();
 
-    // Start the backend in a background thread with its own tokio runtime
-    let backend_port = port;
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .expect("Failed to create Tokio runtime");
-        rt.block_on(async {
-            if let Err(e) = start_backend(backend_port, dist_dir).await {
-                tracing::error!("Backend failed: {}", e);
-            }
-        });
-    });
-
-    // Wait for backend to be ready (TCP check).
-    // First launch on Windows can be slow (Defender scan, DB creation, key discovery).
-    for i in 0..150 {
-        // 150 × 100ms = 15 seconds max
-        if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
-            tracing::info!("Backend ready after {}ms", i * 100);
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-
     // Launch Tauri app — webview loads from the backend HTTP server (not custom protocol)
     // This ensures SharedArrayBuffer is available for WASM threading (TTS/STT)
     tauri::Builder::default()
@@ -690,6 +679,49 @@ fn main() {
         .invoke_handler(tauri::generate_handler![get_backend_url, open_url, restart_app])
         .setup(move |app| {
             use tauri::Manager;
+
+            // Resolve resources through Tauri instead of guessing AppImage/.app/
+            // NSIS layouts. The backend is started only after this environment
+            // override is ready, so its DocsSidecar always sees the bundled
+            // executable on first boot.
+            let resource_dir = app.path().resource_dir()?;
+            let docs_sidecar = bundled_docs_sidecar_path(&resource_dir);
+            if docs_sidecar.is_file() {
+                std::env::set_var("KRONN_DOCS_SIDECAR", &docs_sidecar);
+                tracing::info!(
+                    "Bundled document sidecar configured at {}",
+                    docs_sidecar.display()
+                );
+            } else {
+                tracing::warn!(
+                    "Bundled document sidecar missing at {}",
+                    docs_sidecar.display()
+                );
+            }
+
+            // Start the backend after the resource path is configured.
+            let backend_port = port;
+            std::thread::spawn(move || {
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .build()
+                    .expect("Failed to create Tokio runtime");
+                rt.block_on(async {
+                    if let Err(e) = start_backend(backend_port, dist_dir).await {
+                        tracing::error!("Backend failed: {}", e);
+                    }
+                });
+            });
+
+            // First launch on Windows can be slow (Defender scan, DB creation,
+            // key discovery), so allow 15 seconds before navigating the webview.
+            for i in 0..150 {
+                if std::net::TcpStream::connect(format!("127.0.0.1:{}", port)).is_ok() {
+                    tracing::info!("Backend ready after {}ms", i * 100);
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
 
             // Navigate main window to backend URL
             if let Some(window) = app.get_webview_window("main") {
@@ -762,6 +794,20 @@ fn main() {
 mod enrich_path_tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn bundled_docs_sidecar_uses_tauri_resource_layout() {
+        let resource_dir = std::path::Path::new("/tmp/kronn-resources");
+        let path = bundled_docs_sidecar_path(resource_dir);
+        assert!(path.starts_with(resource_dir));
+        assert!(path.to_string_lossy().contains("sidecars"));
+        assert!(path.to_string_lossy().contains("kronn-docs"));
+        if cfg!(windows) {
+            assert!(path.ends_with("kronn-docs.exe"));
+        } else {
+            assert!(path.ends_with("kronn-docs"));
+        }
+    }
 
     #[test]
     fn discover_versioned_bins_finds_nvm_layout() {

@@ -45,6 +45,32 @@ describe('DocPreview', () => {
     expect(btn).not.toBeDisabled();
   });
 
+  it('expands to full conversation width and collapses again', () => {
+    render(<DocPreview html="<p>x</p>" discussionId="disc-1" />);
+    const preview = document.querySelector('.doc-preview');
+    const expand = screen.getByRole('button', { name: 'disc.docPreviewExpand' });
+
+    expect(preview?.getAttribute('data-expanded')).toBe('false');
+    expect(expand).toHaveAttribute('aria-expanded', 'false');
+
+    fireEvent.click(expand);
+    expect(preview?.getAttribute('data-expanded')).toBe('true');
+    expect(screen.getByRole('button', { name: 'disc.docPreviewCollapse' }))
+      .toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.docPreviewCollapse' }));
+    expect(preview?.getAttribute('data-expanded')).toBe('false');
+  });
+
+  it('collapses an expanded preview with Escape', () => {
+    render(<DocPreview html="<p>x</p>" discussionId="disc-1" />);
+    fireEvent.click(screen.getByRole('button', { name: 'disc.docPreviewExpand' }));
+
+    fireEvent.keyDown(window, { key: 'Escape' });
+
+    expect(document.querySelector('.doc-preview')?.getAttribute('data-expanded')).toBe('false');
+  });
+
   it('calls docs.generatePdf with the html + discussionId on click', async () => {
     vi.mocked(docsApi.generatePdf).mockResolvedValueOnce({
       path: '/home/user/.kronn/generated/disc-1/report-abcd.pdf',

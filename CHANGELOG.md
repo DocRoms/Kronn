@@ -7,16 +7,46 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.8.13] - 2026-07-20
+## [0.8.13]
 
 ### Added
+
+- **Desktop document export works out of the box.** The PDF/DOCX Python sidecar
+  is frozen for Tauri builds and bundled as an application resource; Docker
+  keeps its image-baked runtime and source development keeps `make docs-setup`
+  as a fallback. Release users no longer need to install Python dependencies.
+- **Stable message references.** Every message has the same copyable short-ID
+  affordance as discussions and workflows. `disc_get_message` accepts a full
+  UUID or `MSG-xxxxxxxx` reference and can return a bounded before/after window,
+  so agents can recover local context without copying a transcript.
+- **Complete Agent-library reads.** `skill_get`, `profile_get` and
+  `directive_get` return the full selected object while list tools stay compact.
 
 - **Chained audit: one launch, every dimension** (0.8.13). A `full` audit now runs the 9 docs steps then chains the 7 sub-audits (Security, Docker, Performance, Accessibility, Database, ApiDesign and the new **CodeQuality** kind — templates/CSS/JS/backend/perf-eco checklist; RGAA stays on-demand): 16 steps, one SSE stream, one validation discussion covering every TD. Each sub-audit opens with a relevance gate — "if this dimension does not apply, write one line and move on" — so a static site gets a one-line Database section instead of hallucinated findings. Dogfooded live: 43 TDs found on a real project vs 12 with the old scattered flow.
 - **First-contact MCP onboarding** (`kronn_intro`). New bridge tool giving a beginner-friendly "Kronn en 2 minutes" tour — désagentification, saved discussions, join/rooms, workflows, quick prompts/APIs, audits — with 5 concrete starter asks. Auto-suggested at the first `initialize` of a client (per-client marker in `~/.config/kronn/mcp-onboarded.json`); points anything secret-related at the UI, never the chat. Plus `bridge_info` (bridge staleness vs the script on disk) and a `docs/design/headless-backend.md` design note (lazy `--headless` profile, UI launching rules) sized for 0.8.14.
 - **E2E specs for audit card & tab states** (`frontend/e2e/specs/audit-card-states.spec.ts`). Route-mocked, zero-token: a card must adopt an audit launched outside the UI (MCP bridge), lock its CTAs while running, release them after; the drift-refresh cycle must go stale → update → clean without phantom badges.
 
+### Changed
+
+- **Export fidelity matches the HTML preview.** PDF page sizing/margins and the
+  DOCX HTML mapping now preserve the generated document's layout, colors,
+  typography, tables and spacing much more closely.
+- **ID-copy feedback is consistent.** Discussion, workflow and message IDs use
+  the same short pill and transient copied animation.
+- **Safer Agent+Exec workflows.** The wizard warns when Agent and Exec steps
+  coexist without required isolation and offers a one-click action to enable
+  it.
+- **Workflow forms are labelled.** Native inputs/selects/textareas in the
+  wizard now expose meaningful accessible names; an AST regression test keeps
+  the sweep complete.
+
 ### Fixed
 
+- **SQLite timestamps no longer drift on read.** One shared parser accepts both
+  RFC3339 and legacy SQLite UTC values; migration 078 normalizes existing rows
+  once instead of falling back to the current time and flooding logs.
+- Removed stale Codex MCP-blocker behavior/comments now that Codex supports the
+  bridge, and restored Codex to the per-agent MCP introspection matrix.
 - **Audit artifacts never carry credential literals across an agent boundary.** Full, partial/drift and linked validation-discussion runs now redact Kronn-managed audit outputs before the first spawn, after every attempt (before validation/retry), and before publication. The sweep is fail-closed, covers the complete chained target set plus TD details, rejects escaping/symlinked/non-UTF-8/non-regular targets, preserves permissions atomically, and invalidates `KRONN:VALIDATION_COMPLETE` if the final validation sweep cannot prove the artifacts clean.
 - **MCP discussion presence survives bridge reloads without ghost participants.** A host-launched CLI now persists an owner-only, symlink-safe resume credential keyed to its outermost durable CLI ancestor; reload resumes the original participant row with atomic credential rotation instead of requiring a fresh invite. Replay, wrong-agent and sibling-session takeover attempts fail closed, `disc_append`/long-poll heartbeats update only the exact session, and paced peers expose an expiring `waiting` state so the UI can show “dormant” honestly between polls. Legacy unrecoverable `adhoc-*` rows are retired once at migration.
 - **Project-local MCP sync is ownership-aware and fail-closed.** Kronn no longer rewrites whole `.mcp.json`, Gemini/Kiro JSON, or Vibe TOML files: unrelated settings and manual MCP entries survive, while a mode-`0600` sidecar records only the entries Kronn may later rotate or remove. Invalid files are backed up byte-for-byte and refused instead of replaced with an empty config; symlinked path components, predictable temp-file attacks and concurrent edits are refused; Claude's whitelist is derived from the merged file so preserved manual servers remain enabled.
@@ -40,9 +70,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`make run-backend`** — builds then runs the bare binary (no cargo-watch): the exploitation mode for long audits, after two runs died to watcher-triggered rebuilds. Backend also writes a persistent plain-text log to `<data_dir>/kronn.log`.
 - **Templates directory resolves from the binary** (not the CWD) and the repo scanner skips MCP-context injection for template/`{{`-placeholder files.
 
+### Documentation
+
+- Reconciled the technical-debt index: completed/obsolete TDs were removed,
+  partial items now describe only their remaining scope, and previously
+  unindexed open TDs are included.
+- Added the validated Planning/discussion-plan brief and a complete roadmap
+  from the 0.8.13 release train through the Planning evolution, with every open
+  TD assigned to a delivery track.
+
 ### Tests
 
-- Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, session isolation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs. Full suite: backend 4239 passed / 4 ignored, frontend 2611 passed, sidecar 282 passed; TypeScript build and Clippy also pass.
+- Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, session isolation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs.
+- Full suite: backend 4,274 passed / 4 ignored; frontend 2,619 passed; MCP
+  bridge 290 passed. Clippy, production build, ESLint (0 errors), i18n parity,
+  the frozen PDF/DOCX smoke test and Tauri `cargo check` also pass.
 
 ## [0.8.12] - 2026-07-19
 

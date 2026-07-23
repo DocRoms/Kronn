@@ -279,6 +279,9 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
   // (no silent main-tree fallback). Carried from the preset; persisted in
   // workspace_config.require_isolation.
   const [requireIsolation, setRequireIsolation] = useState<boolean>(editWorkflow?.workspace_config?.require_isolation ?? false);
+  const hasAgentExecMix =
+    steps.some(step => !step.step_type || step.step_type.type === 'Agent') &&
+    steps.some(step => step.step_type?.type === 'Exec');
   // 0.6.0 UX pass — workflow-level launch variables (mirrors QP variables).
   // When the user clicks "Lancer" with trigger=Manual + non-empty list,
   // a form asks for one value per variable before the run starts.
@@ -1061,7 +1064,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
 
           {triggerType === 'Cron' && (cronIsRaw ? (
             <div className="mb-2">
-              <label className="text-xs text-muted mb-1" style={{ display: 'block' }}>Cron expression</label>
+              <label className="text-xs text-muted mb-1" style={{ display: 'block' }}>{t('wiz.cronExpression')}</label>
               <div className="flex-row gap-4" style={{ alignItems: 'center' }}>
                 <input
                   className="wf-input"
@@ -1069,6 +1072,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   value={cronRaw}
                   onChange={e => setCronRaw(e.target.value)}
                   placeholder="0 7,10,13,16,19 * * 1-5"
+                  aria-label={t('wiz.cronExpression')}
                 />
                 <button
                   type="button"
@@ -1092,11 +1096,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   disabled={hasSpecificDays}
                   onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
                   title={hasSpecificDays ? t('wiz.cronEveryDisabledHint') : undefined}
+                  aria-label={t('wiz.every')}
                 />
                 <select
                   className="wf-select"
                   style={{ width: 130 }}
                   value={cronUnit}
+                  aria-label={t('wiz.frequency')}
                   onChange={e => {
                     const u = e.target.value as typeof cronUnit;
                     setCronUnit(u);
@@ -1119,6 +1125,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       style={{ width: 100 }}
                       value={cronAt}
                       onChange={e => setCronAt(e.target.value)}
+                      aria-label={t('wiz.at')}
                     />
                   </>
                 )}
@@ -1210,6 +1217,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={cronRaw}
                       onChange={e => setCronRaw(e.target.value)}
                       placeholder="0 7,10,13,16,19 * * 1-5"
+                      aria-label={t('wiz.cronExpression')}
                     />
                     <button
                       type="button"
@@ -1233,11 +1241,13 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       disabled={hasSpecificDays}
                       onChange={e => setCronEvery(Math.max(1, parseInt(e.target.value) || 1))}
                       title={hasSpecificDays ? t('wiz.cronEveryDisabledHint') : undefined}
+                      aria-label={t('wiz.every')}
                     />
                     <select
                       className="wf-select"
                       style={{ width: 130 }}
                       value={cronUnit}
+                      aria-label={t('wiz.frequency')}
                       onChange={e => {
                     const u = e.target.value as typeof cronUnit;
                     setCronUnit(u);
@@ -1262,6 +1272,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           style={{ width: 100 }}
                           value={cronAt}
                           onChange={e => setCronAt(e.target.value)}
+                          aria-label={t('wiz.at')}
                         />
                       </>
                     )}
@@ -1321,18 +1332,18 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             <>
               <div className="flex-row gap-4">
                 <div className="flex-1">
-                  <label className="wf-label">Owner</label>
-                  <input className="wf-input" value={trackerOwner} onChange={e => setTrackerOwner(e.target.value)} placeholder="owner" />
+                  <label className="wf-label">{t('wiz.trackerOwner')}</label>
+                  <input className="wf-input" value={trackerOwner} onChange={e => setTrackerOwner(e.target.value)} placeholder="owner" aria-label={t('wiz.trackerOwner')} />
                 </div>
                 <div className="flex-1">
-                  <label className="wf-label">Repo</label>
-                  <input className="wf-input" value={trackerRepo} onChange={e => setTrackerRepo(e.target.value)} placeholder="repo" />
+                  <label className="wf-label">{t('wiz.trackerRepo')}</label>
+                  <input className="wf-input" value={trackerRepo} onChange={e => setTrackerRepo(e.target.value)} placeholder="repo" aria-label={t('wiz.trackerRepo')} />
                 </div>
               </div>
               <label className="wf-label mt-4">{t('wiz.labels')}</label>
-              <input className="wf-input" value={trackerLabels} onChange={e => setTrackerLabels(e.target.value)} placeholder="bug-5xx, auto-fix" />
+              <input className="wf-input" value={trackerLabels} onChange={e => setTrackerLabels(e.target.value)} placeholder="bug-5xx, auto-fix" aria-label={t('wiz.labels')} />
               <label className="wf-label mt-4">{t('wiz.pollInterval')}</label>
-              <input className="wf-input" value={trackerInterval} onChange={e => setTrackerInterval(e.target.value)} placeholder="*/5 * * * *" />
+              <input className="wf-input" value={trackerInterval} onChange={e => setTrackerInterval(e.target.value)} placeholder="*/5 * * * *" aria-label={t('wiz.pollInterval')} />
             </>
           )}
         </div>
@@ -1347,6 +1358,20 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
               shown at the TOP of step 0. Discovery in three different
               places (and one of them buried in advanced > step 2) was
               the worst pain point of the wizard. */}
+
+          {hasAgentExecMix && !requireIsolation && (
+            <div className="wf-isolation-warning mb-5" role="status">
+              <AlertTriangle size={14} />
+              <span>{t('wiz.agentExecIsolationWarning')}</span>
+              <button
+                type="button"
+                className="wf-isolation-warning-action"
+                onClick={() => setRequireIsolation(true)}
+              >
+                {t('wiz.requireIsolationAction')}
+              </button>
+            </div>
+          )}
 
           {/* Worktree isolation hint — visible whenever a project is bound.
               Each WorkflowRun creates its own git worktree at
@@ -1494,6 +1519,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     value={step.name}
                     onChange={e => updateStep(i, { name: e.target.value })}
                     placeholder={t('wiz.stepName')}
+                    aria-label={t('wiz.stepName')}
                   />
                   {(!step.step_type || step.step_type.type === 'Agent') && (
                     <>
@@ -1502,6 +1528,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         style={{ width: 120 }}
                         value={step.agent}
                         onChange={e => updateStep(i, { agent: e.target.value as AgentType })}
+                        aria-label={t('wiz.agentLabel')}
                       >
                         {availableAgents.map(a => (
                           <option key={a.type} value={a.type}>{a.label}</option>
@@ -1651,6 +1678,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                     value={step.description ?? ''}
                     onChange={e => updateStep(i, { description: e.target.value || null })}
                     placeholder={t('wiz.stepDescriptionPlaceholder')}
+                    aria-label={t('wiz.stepDescriptionPlaceholder')}
                   />
                 </div>
                 {step.step_type?.type !== 'BatchQuickPrompt' && checkAgentRestricted(agentAccess, step.agent) && (
@@ -1723,6 +1751,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           data-invalid={qpMissing}
                           value={step.batch_quick_prompt_id ?? ''}
                           onChange={e => updateStep(i, { batch_quick_prompt_id: e.target.value || null })}
+                          aria-label={t('wiz.batchQPPicker')}
                         >
                           <option value="">— {t('wiz.batchQPPickerEmpty')} —</option>
                           {availableQuickPrompts.map(qp => (
@@ -1765,6 +1794,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             ? `{{steps.${steps[i - 1].name}.data.items}}`
                             : '{{steps.fetch.data.items}}'
                           }
+                          aria-label={t('wiz.batchItemsFrom')}
                         />
                         {itemsFromEmpty && (
                           <p className="wf-field-error">{t('wiz.batchItemsFromRequired')}</p>
@@ -1936,6 +1966,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <select
                                   className="wf-select text-sm"
                                   value=""
+                                  aria-label={t('wiz.batchChainAdd')}
                                   onChange={e => {
                                     if (!e.target.value) return;
                                     updateStep(i, { batch_chain_prompt_ids: [...chain, e.target.value] });
@@ -1985,6 +2016,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={step.notify_config?.url ?? ''}
                       onChange={e => updateStep(i, { notify_config: { ...step.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, url: e.target.value } })}
                       placeholder="https://hooks.slack.com/services/... ou {{steps.fetch.data.webhook_url}}"
+                      aria-label={t('wiz.notifyUrl')}
                     />
                     <div className="flex-row gap-4 mb-2">
                       <div>
@@ -1993,6 +2025,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           className="wf-select text-sm"
                           value={step.notify_config?.method ?? 'POST'}
                           onChange={e => updateStep(i, { notify_config: { ...step.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, method: e.target.value } })}
+                          aria-label={t('wiz.notifyMethod')}
                         >
                           <option value="POST">POST</option>
                           <option value="PUT">PUT</option>
@@ -2007,6 +2040,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={step.notify_config?.body_template ?? ''}
                       onChange={e => updateStep(i, { notify_config: { ...step.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, body_template: e.target.value } })}
                       placeholder={`{"text": "Workflow terminé : {{previous_step.summary}}"}`}
+                      aria-label={t('wiz.notifyBody')}
                     />
                     {i > 0 && (
                       <div className="mt-1 text-xs text-ghost flex-wrap flex-row gap-1">
@@ -2037,6 +2071,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={step.gate_message ?? ''}
                       onChange={e => updateStep(i, { gate_message: e.target.value || null })}
                       placeholder={t('wiz.gateMessagePlaceholder')}
+                      aria-label={t('wiz.gateMessage')}
                     />
                     {i > 0 && (
                       <div className="mt-1 mb-2 text-xs text-ghost flex-wrap flex-row gap-1">
@@ -2055,6 +2090,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       className="wf-select text-sm mb-2"
                       value={step.gate_request_changes_target ?? ''}
                       onChange={e => updateStep(i, { gate_request_changes_target: e.target.value || null })}
+                      aria-label={t('wiz.gateRequestChangesTarget')}
                     >
                       <option value="">{t('wiz.gateRequestChangesDefault')}</option>
                       {steps.map((s, j) => j !== i && (
@@ -2071,6 +2107,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={step.gate_notify_url ?? ''}
                       onChange={e => updateStep(i, { gate_notify_url: e.target.value || null })}
                       placeholder={t('wiz.gateNotifyUrlPlaceholder')}
+                      aria-label={t('wiz.gateNotifyUrl')}
                     />
                     <p className="text-2xs text-ghost mt-1">{t('wiz.gateNotifyUrlHint')}</p>
                   </div>
@@ -2158,6 +2195,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               <select
                                 className="wf-select text-sm mb-2"
                                 value=""
+                                aria-label={t('wiz.execSetupPreset')}
                                 onChange={e => {
                                   const v = e.target.value;
                                   if (!v) return;
@@ -2186,6 +2224,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 className="wf-select text-sm mb-2"
                                 value={step.exec_setup_command ?? ''}
                                 onChange={e => updateStep(i, { exec_setup_command: e.target.value || null })}
+                                aria-label={t('wiz.execSetupCommand')}
                               >
                                 <option value="">—</option>
                                 {execAllowlist.map(bin => (
@@ -2199,6 +2238,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 value={(step.exec_setup_args ?? []).join('\n')}
                                 onChange={e => updateStep(i, { exec_setup_args: e.target.value.split('\n').filter(s => s.length > 0) })}
                                 placeholder="install&#10;--no-interaction&#10;--prefer-dist"
+                                aria-label={t('wiz.execSetupArgs')}
                               />
                             </div>
                           )}
@@ -2208,6 +2248,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           className="wf-select text-sm mb-2"
                           value={step.exec_command ?? ''}
                           onChange={e => updateStep(i, { exec_command: e.target.value || null })}
+                          aria-label={t('wiz.execCommand')}
                         >
                           <option value="">— {t('wiz.execCommandSelect')} —</option>
                           {execAllowlist.map(bin => (
@@ -2221,6 +2262,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           value={(step.exec_args ?? []).join('\n')}
                           onChange={e => updateStep(i, { exec_args: e.target.value.split('\n').filter(s => s.length > 0) })}
                           placeholder={t('wiz.execArgsPlaceholder')}
+                          aria-label={t('wiz.execArgs')}
                         />
                         <div className="mt-1 mb-2 text-xs text-ghost flex-wrap flex-row gap-1">
                           <span>{t('wiz.clickToInsert')} :</span>
@@ -2240,6 +2282,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           value={step.exec_timeout_secs ?? ''}
                           onChange={e => updateStep(i, { exec_timeout_secs: e.target.value ? parseInt(e.target.value) : null })}
                           placeholder="300"
+                          aria-label={t('wiz.execTimeoutSecs')}
                         />
                       </>
                     )}
@@ -2264,6 +2307,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           className="wf-select text-sm"
                           value={step.quick_api_id ?? ''}
                           onChange={e => updateStep(i, { quick_api_id: e.target.value || null })}
+                          aria-label={t('wiz.batchApiQaPicker')}
                         >
                           <option value="">{t('wiz.batchApiQaPickerInline')}</option>
                           {availableQuickApis.map(qa => (
@@ -2284,6 +2328,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={step.batch_items_from ?? ''}
                       onChange={e => updateStep(i, { batch_items_from: e.target.value || null })}
                       placeholder={t('wiz.batchApiItemsFromPlaceholder')}
+                      aria-label={t('wiz.batchApiItemsFrom')}
                     />
                     {i > 0 && (
                       <div className="mt-1 mb-3 text-xs text-ghost flex-wrap flex-row gap-1">
@@ -2305,6 +2350,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           value={step.batch_concurrent_limit ?? ''}
                           onChange={e => updateStep(i, { batch_concurrent_limit: e.target.value ? parseInt(e.target.value) : null })}
                           placeholder="5"
+                          aria-label={t('wiz.batchApiConcurrentLimit')}
                         />
                         <p className="text-2xs text-ghost mt-1">{t('wiz.batchApiConcurrentLimitHint')}</p>
                       </div>
@@ -2317,6 +2363,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           value={step.batch_max_items ?? ''}
                           onChange={e => updateStep(i, { batch_max_items: e.target.value ? parseInt(e.target.value) : null })}
                           placeholder="50"
+                          aria-label={t('wiz.batchApiMaxItems')}
                         />
                         <p className="text-2xs text-ghost mt-1">{t('wiz.batchApiMaxItemsHint')}</p>
                       </div>
@@ -2404,6 +2451,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           }
                         }}
                         placeholder={t('wiz.jsonDataPlaceholder')}
+                        aria-label={t('wiz.jsonDataPayload')}
                       />
                       {parseError && (
                         <div className="wf-restricted-warning" style={{ marginTop: 6 }}>
@@ -2448,6 +2496,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         value={step.sub_workflow_id ?? ''}
                         data-invalid={!step.sub_workflow_id}
                         onChange={e => updateStep(i, { sub_workflow_id: e.target.value || null })}
+                        aria-label={t('wiz.subWorkflowPicker')}
                       >
                         <option value="">{t('wiz.subWorkflowPickerPlaceholder')}</option>
                         {bundleRef && (
@@ -2503,6 +2552,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           className="wf-select text-sm"
                           value={step.quick_prompt_id ?? ''}
                           onChange={e => updateStep(i, { quick_prompt_id: e.target.value || null })}
+                          aria-label={t('wiz.agentQpPicker')}
                         >
                           <option value="">{t('wiz.agentQpPickerInline')}</option>
                           {availableQuickPrompts.map(qp => (
@@ -2562,6 +2612,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             value={step.prompt_template}
                             onChange={e => updateStep(i, { prompt_template: e.target.value })}
                             placeholder={t('wiz.agentQpOverridePlaceholder')}
+                            aria-label={t('wiz.promptLabel')}
                           />
                         </div>
                       </details>
@@ -2572,6 +2623,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       rows={3}
                       value={step.prompt_template}
                       onChange={e => updateStep(i, { prompt_template: e.target.value })}
+                      aria-label={t('wiz.promptLabel')}
                       placeholder={i === 0
                         ? 'Prompt template... ex: Analyse le bug {{issue.title}}. Trouve la cause racine.'
                         : `Prompt template... ex: Voici l'analyse : {{previous_step.output}}. Ecris le correctif.`
@@ -2933,6 +2985,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               })}
                               placeholder={step.agent === 'Ollama' ? 'ex: qwen3:8b' : 'ex: o3'}
                               list={step.agent === 'Ollama' ? `ollama-models-${i}` : undefined}
+                              aria-label={t('wiz.model')}
                             />
                             {step.agent === 'Ollama' && ollamaModels.length > 0 && (
                               <datalist id={`ollama-models-${i}`}>
@@ -2941,10 +2994,11 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             )}
                           </div>
                           <div className="flex-1">
-                            <label className="wf-label text-2xs">Reasoning effort</label>
+                            <label className="wf-label text-2xs">{t('wiz.reasoningEffort')}</label>
                             <select
                               className="wf-select"
                               value={step.agent_settings?.reasoning_effort ?? ''}
+                              aria-label={t('wiz.reasoningEffort')}
                               onChange={e => updateStep(i, {
                                 agent_settings: { ...step.agent_settings, reasoning_effort: e.target.value || null }
                               })}
@@ -2956,7 +3010,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             </select>
                           </div>
                           <div className="flex-1">
-                            <label className="wf-label text-2xs">Max tokens</label>
+                            <label className="wf-label text-2xs">{t('wiz.maxTokens')}</label>
                             <input
                               type="number"
                               className="wf-input"
@@ -2965,6 +3019,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 agent_settings: { ...step.agent_settings, max_tokens: e.target.value ? parseInt(e.target.value) : null }
                               })}
                               placeholder="ex: 16000"
+                              aria-label={t('wiz.maxTokens')}
                             />
                           </div>
                         </div>
@@ -3004,6 +3059,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <select
                                   className="wf-select"
                                   value={step.multi_agent_review.reviewer_agent}
+                                  aria-label={t('wiz.multiReview.reviewer')}
                                   onChange={e => updateStep(i, {
                                     multi_agent_review: { ...step.multi_agent_review!, reviewer_agent: e.target.value as AgentType },
                                   })}
@@ -3018,6 +3074,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <select
                                   className="wf-select"
                                   value={step.multi_agent_review.reviewer_tier ?? ''}
+                                  aria-label={t('wiz.multiReview.tier')}
                                   onChange={e => updateStep(i, {
                                     multi_agent_review: { ...step.multi_agent_review!, reviewer_tier: (e.target.value || null) as typeof step.multi_agent_review.reviewer_tier },
                                   })}
@@ -3033,6 +3090,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                   type="number" min={1} max={5}
                                   className="wf-input"
                                   value={step.multi_agent_review.max_rounds ?? 3}
+                                  aria-label={t('wiz.multiReview.rounds')}
                                   onChange={e => updateStep(i, {
                                     multi_agent_review: { ...step.multi_agent_review!, max_rounds: e.target.value ? parseInt(e.target.value) : null },
                                   })}
@@ -3045,6 +3103,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 className="wf-textarea"
                                 rows={3}
                                 value={step.multi_agent_review.debate_prompt}
+                                aria-label={t('wiz.multiReview.prompt')}
                                 onChange={e => updateStep(i, {
                                   multi_agent_review: { ...step.multi_agent_review!, debate_prompt: e.target.value },
                                 })}
@@ -3068,6 +3127,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             stall_timeout_secs: e.target.value ? parseInt(e.target.value) : null,
                           })}
                           placeholder="600"
+                          aria-label={t('wiz.stallTimeout')}
                         />
                       </div>
 
@@ -3082,6 +3142,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             delay_after_secs: e.target.value ? parseInt(e.target.value) : null,
                           })}
                           placeholder="0"
+                          aria-label={t('wiz.delayAfter')}
                         />
                       </div>
 
@@ -3101,6 +3162,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               });
                             }}
                             placeholder="0"
+                            aria-label={t('wiz.retry')}
                           />
                           <select
                             className="wf-select"
@@ -3112,6 +3174,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               }
                             }}
                             disabled={!step.retry}
+                            aria-label={t('wiz.retry')}
                           >
                             <option value="exponential">exponential</option>
                             <option value="fixed">fixed</option>
@@ -3139,6 +3202,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               value={cond.contains}
                               onChange={e => updateCondition(i, j, { contains: e.target.value })}
                               placeholder={t('wiz.ifContainsPlaceholder')}
+                              aria-label={t('wiz.ifContains')}
                             />
                             <button
                               className="wf-icon-btn"
@@ -3157,6 +3221,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                             <select
                               className="wf-select text-sm wf-condition-action-select"
                               value={cond.action.type}
+                              aria-label={t('wiz.conditions')}
                               onChange={e => {
                                 const type = e.target.value as 'Stop' | 'Skip' | 'Goto';
                                 const action = type === 'Goto' ? { type: 'Goto' as const, step_name: '', max_iterations: null } : { type };
@@ -3173,6 +3238,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <select
                                   className="wf-select text-sm wf-condition-goto-select"
                                   value={cond.action.type === 'Goto' ? cond.action.step_name : ''}
+                                  aria-label={t('wiz.gotoTargetSelect')}
                                   onChange={e => updateCondition(i, j, { action: { type: 'Goto', step_name: e.target.value, max_iterations: cond.action.type === 'Goto' ? cond.action.max_iterations ?? null : null } })}
                                 >
                                   <option value="">— {t('wiz.gotoTargetSelect')} —</option>
@@ -3195,6 +3261,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                   }}
                                   placeholder={t('wiz.gotoMaxIterPlaceholder')}
                                   title={t('wiz.gotoMaxIterHint')}
+                                  aria-label={t('wiz.gotoMaxIterHint')}
                                 />
                                 <span className="text-2xs text-ghost">{t('wiz.gotoMaxIterUnit')}</span>
                               </>
@@ -3276,6 +3343,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={rb.name}
                       onChange={e => updateRb({ name: e.target.value })}
                       placeholder="notify_ops"
+                      aria-label={t('wiz.stepName')}
                     />
                     {/* Step-type pills: Notify / Agent / ApiCall.
                         Switching resets type-specific config to a sane
@@ -3328,6 +3396,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         value={rb.notify_config?.url ?? ''}
                         onChange={e => updateRb({ notify_config: { ...rb.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, url: e.target.value } })}
                         placeholder="https://hooks.slack.com/services/..."
+                        aria-label={t('wiz.notifyUrl')}
                       />
                       <textarea
                         className="wf-textarea text-sm"
@@ -3335,6 +3404,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         value={rb.notify_config?.body_template ?? ''}
                         onChange={e => updateRb({ notify_config: { ...rb.notify_config ?? { url: '', method: 'POST', headers: {}, body_template: '' }, body_template: e.target.value } })}
                         placeholder={`{"text": "🚨 Workflow ${name || 'X'} échoué : {{failed_step.name}} — {{failed_step.output}}"}`}
+                        aria-label={t('wiz.notifyBody')}
                       />
                     </>
                   )}
@@ -3347,6 +3417,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           style={{ width: 180 }}
                           value={rb.agent}
                           onChange={e => updateRb({ agent: e.target.value as AgentType })}
+                          aria-label={t('wiz.agentLabel')}
                         >
                           {ALL_AGENT_TYPES.map(a => (
                             <option key={a} value={a}>{AGENT_LABELS[a] ?? a}</option>
@@ -3359,6 +3430,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                         value={rb.prompt_template}
                         onChange={e => updateRb({ prompt_template: e.target.value })}
                         placeholder={t('wiz.rollbackAgentPromptPlaceholder')}
+                        aria-label={t('wiz.rollbackAgentPromptPlaceholder')}
                       />
                     </>
                   )}
@@ -3435,6 +3507,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   value={safety.max_files ?? ''}
                   onChange={e => setSafety({ ...safety, max_files: e.target.value ? parseInt(e.target.value) : null })}
                   placeholder="illimite"
+                  aria-label={t('wiz.maxFiles')}
                 />
               </div>
               <div>
@@ -3446,6 +3519,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   value={safety.max_lines ?? ''}
                   onChange={e => setSafety({ ...safety, max_lines: e.target.value ? parseInt(e.target.value) : null })}
                   placeholder="illimite"
+                  aria-label={t('wiz.maxLines')}
                 />
               </div>
             </div>
@@ -3475,6 +3549,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                 e.target.value.split(',').map(s => s.trim()).filter(s => s.length > 0)
               )}
               placeholder={t('wiz.execAllowlistPlaceholder')}
+              aria-label={t('wiz.execAllowlistTitle')}
             />
           </div>
 
@@ -3501,18 +3576,21 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       j === idx ? { ...pv, name: e.target.value.replace(/[^a-zA-Z0-9_]/g, '') } : pv
                     ))}
                     placeholder="ticket_id"
+                    aria-label={t('qp.varName')}
                   />
                   <input
                     className="wf-input flex-1 text-sm"
                     value={v.label}
                     onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, label: e.target.value } : pv))}
                     placeholder={t('qp.varLabel')}
+                    aria-label={t('qp.varLabel')}
                   />
                   <input
                     className="wf-input flex-1 text-sm"
                     value={v.placeholder}
                     onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, placeholder: e.target.value } : pv))}
                     placeholder={t('qp.varPlaceholder')}
+                    aria-label={t('qp.varPlaceholder')}
                   />
                   <label className="flex-row gap-2 text-xs" style={{ whiteSpace: 'nowrap', cursor: 'pointer' }}>
                     <input
@@ -3535,6 +3613,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   onChange={e => setWfVariables(prev => prev.map((pv, j) => j === idx ? { ...pv, description: e.target.value || null } : pv))}
                   placeholder={t('qp.varDescriptionPlaceholder')}
                   style={{ opacity: 0.85 }}
+                  aria-label={t('qp.varDescriptionPlaceholder')}
                 />
               </div>
             ))}
@@ -3575,6 +3654,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                   value={concurrencyLimit}
                   onChange={e => setConcurrencyLimit(e.target.value)}
                   placeholder="illimite"
+                  aria-label={t('wiz.concurrency')}
                 />
               </div>
 
@@ -3601,6 +3681,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                       value={value}
                       onChange={e => setter(e.target.value)}
                       placeholder={placeholder}
+                      aria-label={label}
                     />
                   </div>
                 ))}

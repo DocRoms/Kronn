@@ -1,8 +1,9 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::models::{*, ModelTier};
+use super::parse_dt;
 
 // ─── Discussions ────────────────────────────────────────────────────────────
 
@@ -1070,17 +1071,6 @@ pub fn update_message_tokens(conn: &Connection, message_id: &str, tokens_used: u
         params![tokens_used as i64, auth_mode, message_id],
     )?;
     Ok(())
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-fn parse_dt(s: String) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(&s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to parse datetime '{}': {}, using now()", s, e);
-            Utc::now()
-        })
 }
 
 fn parse_agent_type(s: &str) -> AgentType {

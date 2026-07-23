@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
 import type { Project, AgentDetection, Discussion, AgentType, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact } from '../types/generated';
@@ -85,10 +85,29 @@ export function ChatHeader({
   const [expandedConfigSection, setExpandedConfigSection] =
     useState<'profiles' | 'skills' | 'directives' | null>(null);
   const [showAgentSwitch, setShowAgentSwitch] = useState(false);
+  const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
+  const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Which inline badge popover is currently open, if any. Encoded as
   // "type:id" (e.g. "profile:default-architect", "skill:bootstrap-architect")
   // so we only need one useState for the whole header sub-row.
   const [openBadgeInfo, setOpenBadgeInfo] = useState<string | null>(null);
+
+  useEffect(() => () => {
+    if (discIdResetTimer.current) clearTimeout(discIdResetTimer.current);
+  }, []);
+
+  const copyDiscussionId = async () => {
+    try {
+      await navigator.clipboard.writeText(discussion.id);
+      setIsDiscIdCopied(true);
+      if (discIdResetTimer.current) clearTimeout(discIdResetTimer.current);
+      discIdResetTimer.current = setTimeout(() => setIsDiscIdCopied(false), 1500);
+      toast(t('disc.idCopied'), 'success');
+    } catch {
+      setIsDiscIdCopied(false);
+      toast(t('disc.idCopyFailed'), 'error');
+    }
+  };
 
   // Close the badge info popover on click-outside and on Escape. The
   // click-outside check walks up from the event target until it finds
@@ -225,18 +244,15 @@ export function ChatHeader({
           <button
             type="button"
             className="disc-id-pill"
-            onClick={async (e) => {
+            data-copied={isDiscIdCopied}
+            onClick={(e) => {
               e.stopPropagation();
-              try {
-                await navigator.clipboard.writeText(discussion.id);
-                toast(t('disc.idCopied'), 'success');
-              } catch {
-                toast(t('disc.idCopyFailed'), 'error');
-              }
+              void copyDiscussionId();
             }}
             title={t('disc.idPillTooltip', discussion.id)}
             aria-label={t('disc.idPillTooltip', discussion.id)}
           >
+            {isDiscIdCopied ? <Check size={8} /> : null}
             #{discussion.id.slice(0, 8)}
           </button>
           {!isValidationDisc(discussion.title) && !isBootstrapDisc(discussion.title) && !isBriefingDisc(discussion.title) && (
