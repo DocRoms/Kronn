@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use rusqlite::Connection;
 use crate::db::migrations;
 use crate::models::*;
@@ -9,6 +9,19 @@ fn test_db() -> Connection {
     conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
     migrations::run(&conn).unwrap();
     conn
+}
+
+#[test]
+fn parse_dt_accepts_rfc3339_and_sqlite_utc_without_drift() {
+    let expected = Utc.with_ymd_and_hms(2026, 7, 7, 19, 11, 11).unwrap();
+    assert_eq!(
+        super::parse_dt("2026-07-07T19:11:11Z".into()),
+        expected,
+    );
+    assert_eq!(
+        super::parse_dt("2026-07-07 19:11:11".into()),
+        expected,
+    );
 }
 
 // ─── ADR-001 O2 (stab-2) — read-connection guards ───────────────────────

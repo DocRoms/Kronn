@@ -97,6 +97,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         ("075_workflows_pinned", include_str!("sql/075_workflows_pinned.sql")),
         ("076_audit_runs_validation_link", include_str!("sql/076_audit_runs_validation_link.sql")),
         ("077_discussion_session_resume", include_str!("sql/077_discussion_session_resume.sql")),
+        ("078_normalize_sqlite_datetimes", include_str!("sql/078_normalize_sqlite_datetimes.sql")),
     ];
 
     // Check if there are pending migrations before backing up
@@ -219,6 +220,65 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         run_with_backup(&conn, None).expect("run_with_backup with None path should succeed");
         // No assertion on files — just ensure it doesn't panic
+    }
+
+    #[test]
+    fn sqlite_datetimes_are_normalized_once_to_rfc3339() {
+        let conn = Connection::open_in_memory().unwrap();
+        run(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('p-dt', 'Dates', '/tmp/dates', ?1, ?1)",
+            ["2026-07-07 19:11:11"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at)
+             VALUES ('d-dt', 'Dates', ?1, ?1)",
+            ["2026-07-07 19:11:11"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO messages (id, discussion_id, role, content, timestamp)
+             VALUES ('m-dt', 'd-dt', 'User', 'hello', ?1)",
+            ["2026-07-07 19:11:11"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO workflows
+             (id, name, trigger_json, steps_json, actions_json, safety_json,
+              enabled, created_at, updated_at)
+             VALUES ('w-dt', 'Dates', '{\"type\":\"Manual\"}', '[]', '[]', '{}',
+                     1, ?1, ?1)",
+            ["2026-07-07 19:11:11"],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO workflow_runs
+             (id, workflow_id, status, step_results_json, tokens_used,
+              started_at, finished_at)
+             VALUES ('r-dt', 'w-dt', 'Success', '[]', 0, ?1, ?1)",
+            ["2026-07-07 19:11:11"],
+        ).unwrap();
+
+        conn.execute(
+            "DELETE FROM _migrations WHERE name = '078_normalize_sqlite_datetimes'",
+            [],
+        ).unwrap();
+        run(&conn).unwrap();
+
+        for (table, column, id) in [
+            ("projects", "created_at", "p-dt"),
+            ("projects", "updated_at", "p-dt"),
+            ("discussions", "created_at", "d-dt"),
+            ("discussions", "updated_at", "d-dt"),
+            ("messages", "timestamp", "m-dt"),
+            ("workflows", "created_at", "w-dt"),
+            ("workflows", "updated_at", "w-dt"),
+            ("workflow_runs", "started_at", "r-dt"),
+            ("workflow_runs", "finished_at", "r-dt"),
+        ] {
+            let sql = format!("SELECT {column} FROM {table} WHERE id = ?1");
+            let value: String = conn.query_row(&sql, [id], |row| row.get(0)).unwrap();
+            assert_eq!(value, "2026-07-07T19:11:11Z", "{table}.{column}");
+        }
     }
 
     /// A migration that fails mid-way must be ATOMIC: neither its schema change

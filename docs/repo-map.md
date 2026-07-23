@@ -40,7 +40,7 @@ Kronn/
 │       │   ├── skills.rs       # Skills API: list, create, update, delete
 │       │   ├── profiles.rs     # Profiles API: list, create, update, delete, persona-name override
 │       │   ├── directives.rs   # Directives API: list, create, update, delete
-│       │   ├── docs.rs         # Kronn Docs proxy (post-0.5.0) — 5 endpoints POST /api/docs/{pdf,docx,xlsx,csv,pptx} + GET /api/docs/file/:disc/:filename. All POSTs go through proxy_to_sidecar() helper. Filename sanitization (alphanumerics + -_ space, UUID suffix, extension forced) + canonicalize check against path traversal. Output dir: ~/.kronn/generated/<discussion_id>/. Graceful "Document sidecar unavailable" error when the Python venv is missing.
+│       │   ├── docs.rs         # Kronn Docs proxy (post-0.5.0) — 5 endpoints POST /api/docs/{pdf,docx,xlsx,csv,pptx} + GET /api/docs/file/:disc/:filename. All POSTs go through proxy_to_sidecar() helper. Filename sanitization (alphanumerics + -_ space, UUID suffix, extension forced) + canonicalize check against path traversal. Output dir: ~/.kronn/generated/<discussion_id>/. Graceful update/reinstall error when no sidecar runtime is available.
 │       │   └── git_ops.rs      # Shared git helpers (838L) — used by projects + discussions
 │       ├── agents/             # Agent runner (CLI execution)
 │       │   ├── mod.rs          # Agent detection: PATH → KRONN_HOST_BIN (with .cmd/.exe extension matching) → WSL (via bash -lc). Version detection handles WSL paths. Runtime probe (npx fallback, 5min cache). 6 agents: Claude, Codex, Vibe, Gemini, Kiro, Copilot
@@ -96,7 +96,7 @@ Kronn/
 │       │   ├── host_mcp_discovery.rs # 0.6.0: read-only scan of ~/.claude.json, ~/.gemini/settings.json, ~/.codex/config.toml, ~/.copilot/mcp-config.json. Returns DiscoveredHostMcp with HostScope (ClaudeUser, ClaudeLocal{path}, Gemini, Codex, Copilot) + KronnOwnership (NotManaged | ManagedByMarker(uuid) | ManagedByHash(uuid)). Phase 1 of inbound/outbound feature. Never writes disk.
 │       │   ├── oauth2_cache.rs # OAuth2 client-credentials token cache + exchanger (0.5.0). In-memory HashMap<config_id, CachedToken> behind a tokio::sync::Mutex. resolve_token() checks cache → exchanges on miss/expiry → returns bearer. 30s safety margin before provider expiry. Error-transparent: token-exchange failures are bubbled up as human-readable strings for prompt injection.
 │       │   ├── native_files.rs # Native SKILL.md + agent file sync. Writes skills to .claude/skills/, .agents/skills/, .gemini/skills/. Profiles to .claude/agents/, .gemini/agents/, .codex/agents/. Additive sync for discussions, full cleanup at startup.
-│       │   ├── docs_sidecar.rs # Kronn Docs sidecar manager (0.5.1) — spawns backend/sidecars/docs/ Python process on a random loopback port, reads stdout until "KRONN_DOCS_READY <port>" marker, exposes handle() → base_url for proxy. Gracefully degrades when the venv is missing (returns None; API handlers surface a "Document sidecar unavailable" error).
+│       │   ├── docs_sidecar.rs # Kronn Docs sidecar manager (0.5.1) — prefers the desktop-bundled executable, falls back to the Docker/dev Python venv, reads "KRONN_DOCS_READY <port>", and exposes handle() → base_url for the proxy.
 │       │   ├── tailscale.rs   # Network & VPN auto-detection (Tailscale, VPN, LAN IPs). KRONN_HOST_IPS env for Docker. Used for multi-user invite codes.
 │       │   ├── ws_client.rs   # WebSocket client manager: outbound connections to contacts with exponential backoff. Auto-reconnects.
 │       │   ├── crypto.rs       # AES-256-GCM encryption for MCP secrets
@@ -136,7 +136,7 @@ Kronn/
 │               ├── mod.rs      # TrackerSource trait (poll, update_status, comment, create_pr)
 │               └── github.rs   # GitHub API v3 implementation (reqwest + rustls)
 │   └── sidecars/
-│       └── docs/                # Python document-generation sidecar (0.5.1) — FastAPI + uvicorn. Installed via `make docs-setup` into .venv; prints `KRONN_DOCS_READY <port>` to stdout on ready. Deps: WeasyPrint (PDF), python-docx + BeautifulSoup (DOCX), XlsxWriter (XLSX), stdlib csv (CSV), python-pptx (PPTX).
+│       └── docs/                # Python document-generation sidecar (0.5.1) — FastAPI + uvicorn. Frozen into desktop builds, baked into Docker, or installed via `make docs-setup` for source development. Prints `KRONN_DOCS_READY <port>` on ready.
 │
 ├── frontend/                   # React + TypeScript (Vite)
 │   ├── package.json            # engines: node>=24 (LTS)

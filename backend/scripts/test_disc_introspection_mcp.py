@@ -239,6 +239,70 @@ class CallDiscCreateAutoInheritTests(unittest.TestCase):
         self.assertNotIn("source_session_id", body)
 
 
+class CallDiscGetMessageTests(unittest.TestCase):
+    """Selector and bounded-window contract for the cheap message reader."""
+
+    def setUp(self):
+        self.mod = _load_module()
+        self.env_patch = mock.patch.dict(
+            os.environ,
+            {"KRONN_DISCUSSION_ID": "disc-abc"},
+            clear=False,
+        )
+        self.env_patch.start()
+        self.addCleanup(self.env_patch.stop)
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"idx": 4, "id": "12345678-full", "content": "hello"},
+        })
+        self.http_patch = mock.patch.object(self.mod, "_http", self.fake_http)
+        self.http_patch.start()
+        self.addCleanup(self.http_patch.stop)
+
+    def test_idx_remains_backward_compatible(self):
+        self.mod.call_disc_get_message({"idx": -1})
+        method, path = self.fake_http.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertEqual(
+            path,
+            "/api/discussions/disc-abc/message/-1?before=0&after=0",
+        )
+
+    def test_catalog_exposes_either_selector_and_bounded_window(self):
+        tool = next(item for item in self.mod.TOOLS if item["name"] == "disc_get_message")
+        schema = tool["inputSchema"]
+        self.assertIn("oneOf", schema)
+        self.assertEqual(schema["properties"]["before"]["maximum"], 10)
+        self.assertEqual(schema["properties"]["after"]["maximum"], 10)
+        self.assertIn("message_id", schema["properties"])
+
+    def test_short_reference_can_request_a_context_window(self):
+        self.mod.call_disc_get_message({
+            "message_id": "MSG-12345678",
+            "before": 2,
+            "after": 3,
+        })
+        method, path = self.fake_http.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertEqual(
+            path,
+            "/api/discussions/disc-abc/message/MSG-12345678?before=2&after=3",
+        )
+
+    def test_requires_exactly_one_selector(self):
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            self.mod.call_disc_get_message({})
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            self.mod.call_disc_get_message({"idx": 1, "message_id": "MSG-12345678"})
+
+    def test_rejects_oversized_or_non_integer_windows_before_http(self):
+        with self.assertRaisesRegex(RuntimeError, "before"):
+            self.mod.call_disc_get_message({"idx": 1, "before": 11})
+        with self.assertRaisesRegex(RuntimeError, "after"):
+            self.mod.call_disc_get_message({"idx": 1, "after": True})
+        self.fake_http.assert_not_called()
+
+
 class McpListEnrichedOutputTests(unittest.TestCase):
     """0.8.6 — the `mcp_list` tool surfaces enough metadata for the
     agent to PICK an API natively (description, docs link, per-endpoint
@@ -3327,10 +3391,18 @@ class StepSchemaAndBindingListTests(unittest.TestCase):
             self.assertIn(n, names)
             self.assertIn(n, self.mod.DISPATCH)
 
-    def test_orientation_mentions_step_schema_and_binding_lists(self):
+    def test_orientation_mentions_step_schema_and_agent_library_reads(self):
         resp = self.mod._handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
         instr = resp["result"]["instructions"]
-        for needle in ["workflow_step_schema", "skills_list", "profiles_list", "directives_list"]:
+        for needle in [
+            "workflow_step_schema",
+            "skills_list",
+            "profiles_list",
+            "directives_list",
+            "skill_get",
+            "profile_get",
+            "directive_get",
+        ]:
             self.assertIn(needle, instr)
 
     def test_step_schema_foreach_contract_documents_current_task_template_vars(self):
@@ -3461,6 +3533,40 @@ class AgentLibraryCrudTests(unittest.TestCase):
         method, path, _ = fake.call_args.args
         self.assertEqual((method, path), ("POST", "/api/profiles"))
 
+    # ── get (full body; list remains lean) ───────────────────────────
+    def test_skill_get_returns_full_markdown_body(self):
+        full = {
+            "id": "custom-review", "name": "Review", "content": "# Full body",
+            "license": "MIT", "allowed_tools": "Read, Grep",
+        }
+        fake = mock.MagicMock(return_value=self._env([full]))
+        with mock.patch.object(self.mod, "_http", fake):
+            out = self.mod.call_skill_get({"skill_id": "custom-review"})
+        self.assertEqual(out, full)
+        self.assertEqual(fake.call_args.args, ("GET", "/api/skills"))
+
+    def test_profile_and_directive_get_return_omitted_bodies(self):
+        cases = [
+            ("profile", self.mod.call_profile_get, "/api/profiles",
+             {"id": "p-1", "persona_prompt": "You are an architect"}),
+            ("directive", self.mod.call_directive_get, "/api/directives",
+             {"id": "d-1", "content": "Always cite sources"}),
+        ]
+        for kind, fn, path, full in cases:
+            with self.subTest(kind=kind):
+                fake = mock.MagicMock(return_value=self._env([full]))
+                with mock.patch.object(self.mod, "_http", fake):
+                    out = fn({"id": full["id"]})
+                self.assertEqual(out, full)
+                self.assertEqual(fake.call_args.args, ("GET", path))
+
+    def test_get_rejects_missing_or_unknown_id(self):
+        with self.assertRaisesRegex(RuntimeError, "skill_id"):
+            self.mod.call_skill_get({})
+        with mock.patch.object(self.mod, "_http", return_value=self._env([])):
+            with self.assertRaisesRegex(RuntimeError, "not found"):
+                self.mod.call_directive_get({"directive_id": "missing"})
+
     # ── update (load-merge-write) ─────────────────────────────────────
     def test_directive_update_merges_over_existing(self):
         existing = [{
@@ -3505,9 +3611,9 @@ class AgentLibraryCrudTests(unittest.TestCase):
     # ── registration ──────────────────────────────────────────────────
     def test_all_crud_tools_registered(self):
         names = [t["name"] for t in self.mod.TOOLS]
-        for n in ["skill_create", "skill_update", "skill_delete",
-                  "profile_create", "profile_update", "profile_delete",
-                  "directive_create", "directive_update", "directive_delete"]:
+        for n in ["skill_get", "skill_create", "skill_update", "skill_delete",
+                  "profile_get", "profile_create", "profile_update", "profile_delete",
+                  "directive_get", "directive_create", "directive_update", "directive_delete"]:
             self.assertIn(n, names, f"{n} missing from TOOLS")
             self.assertIn(n, self.mod.DISPATCH, f"{n} missing from DISPATCH")
 

@@ -3,7 +3,7 @@
 // regression of the UX fix added alongside the disc_prompts worktree notice.
 
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { buildApiMock } from '../../test/apiMock';
 
 vi.mock('../../lib/api', () => buildApiMock());
@@ -73,6 +73,22 @@ function renderHeader(pendingFilesCount: number, disc: Discussion = makeDiscussi
 }
 
 describe('ChatHeader — pending files badge', () => {
+  it('shows copied feedback on the discussion ID pill while copying the full ID', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const id = '12345678-90ab-cdef-1234-567890abcdef';
+    const { container } = renderHeader(0, makeDiscussion({ id }));
+    const pill = container.querySelector<HTMLButtonElement>('.disc-id-pill');
+
+    fireEvent.click(pill!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(id));
+    expect(pill?.getAttribute('data-copied')).toBe('true');
+    expect(pill?.querySelector('svg')).not.toBeNull();
+  });
+
   it('shows no badge when pendingFilesCount is 0', () => {
     renderHeader(0);
     expect(document.querySelector('.disc-icon-btn-badge')).toBeNull();

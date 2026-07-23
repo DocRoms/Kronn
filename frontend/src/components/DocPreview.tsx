@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react';
-import { FileText, FileDown, Loader2, ExternalLink } from 'lucide-react';
+import { FileText, FileDown, Loader2, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
 import { docs as docsApi } from '../lib/api';
+import { useT } from '../lib/I18nContext';
 
 interface DocPreviewProps {
   /** Full HTML document composed by the agent — used both for the live
@@ -25,7 +26,9 @@ interface DocPreviewProps {
  *  backend emits mid-stream; for now the fence in the markdown is the
  *  single signal. */
 export function DocPreview({ html, discussionId }: DocPreviewProps) {
+  const { t } = useT();
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const [expanded, setExpanded] = useState(false);
   // Per-format generation state. DOCX and PDF share the same HTML
   // input so the iframe preview applies to both; the user picks at
   // export time.
@@ -47,6 +50,18 @@ export function DocPreview({ html, discussionId }: DocPreviewProps) {
     if (!el) return;
     el.srcdoc = html;
   }, [html]);
+
+  // Escape mirrors other reversible overlays/popovers in Kronn. The preview
+  // remains inline (not a modal), but a predictable keyboard exit matters
+  // once it occupies the full conversation width.
+  useEffect(() => {
+    if (!expanded) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setExpanded(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [expanded]);
 
   // Factor out the request + state-transitions so PDF and DOCX share
   // the exact same plumbing. Any future HTML-based format drops in here
@@ -77,10 +92,22 @@ export function DocPreview({ html, discussionId }: DocPreviewProps) {
   };
 
   return (
-    <div className="doc-preview">
+    <div className="doc-preview" data-expanded={expanded}>
       <div className="doc-preview-header">
-        <FileText size={12} />
-        <span>Preview</span>
+        <span className="doc-preview-header-label">
+          <FileText size={12} />
+          <span>Preview</span>
+        </span>
+        <button
+          type="button"
+          className="doc-preview-expand-btn"
+          aria-label={t(expanded ? 'disc.docPreviewCollapse' : 'disc.docPreviewExpand')}
+          aria-expanded={expanded}
+          title={t(expanded ? 'disc.docPreviewCollapse' : 'disc.docPreviewExpand')}
+          onClick={() => setExpanded(value => !value)}
+        >
+          {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+        </button>
       </div>
       <iframe
         ref={iframeRef}

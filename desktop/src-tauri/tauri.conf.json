@@ -7,7 +7,7 @@
     "frontendDist": "../../frontend/dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "pnpm --dir ../frontend dev",
-    "beforeBuildCommand": "pnpm --dir ../frontend build"
+    "beforeBuildCommand": "node scripts/build-docs-sidecar.mjs && pnpm --dir ../frontend build"
   },
   "app": {
     "withGlobalTauri": false,
@@ -35,6 +35,9 @@
   "bundle": {
     "active": true,
     "targets": ["deb", "nsis", "dmg"],
+    "resources": {
+      "resources/docs-sidecar/": "sidecars/docs/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

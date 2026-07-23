@@ -49,6 +49,11 @@ export function splitMessageSeed(content: string): { visible: string; seed: stri
   return { visible, seed: m[1].trim() };
 }
 
+/** Same short-id label used by discussion and workflow header pills. */
+function messageShortLabel(id: string): string {
+  return `#${id.slice(0, 8)}`;
+}
+
 // 0.8.5 — collapsed disclosure for Kronn-internal seed payloads.
 // Mirrors `<details>` semantics with kronn-styled controls. Hidden
 // by default; opens on click. Pre-renders the seed inside a `<pre>`
@@ -149,6 +154,23 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
     onCopy, onTts, onEditStart, onEditCancel, onEditSubmit, onEditTextChange, onRetry, onExpandSummary, onNavigate, discussionId, projectId, chainableQPs, onLaunchQp, attachments, pendingAttachment, t } = props;
   const isUser = msg.role === 'User';
   const agentType = msg.agent_type ?? defaultAgent;
+  const [isMessageIdCopied, setIsMessageIdCopied] = useState(false);
+  const messageIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (messageIdResetTimer.current) clearTimeout(messageIdResetTimer.current);
+  }, []);
+
+  const copyMessageId = async () => {
+    try {
+      await navigator.clipboard.writeText(msg.id);
+      setIsMessageIdCopied(true);
+      if (messageIdResetTimer.current) clearTimeout(messageIdResetTimer.current);
+      messageIdResetTimer.current = setTimeout(() => setIsMessageIdCopied(false), 1500);
+    } catch {
+      setIsMessageIdCopied(false);
+    }
+  };
 
   // KRONN:CHAIN_QP:<id> — agent-proposed QP hand-off. Agent messages only:
   // the batch seed (User role) quotes the signal inside its instructions
@@ -264,107 +286,122 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
           : 'error'
         ) : undefined}
       >
-        {isUser && (
-          // Always render a clear HUMAN attribution on user messages — even with
-          // no pseudo (federated from a peer whose pseudo is unset → "anonyme").
-          // The "· humain" marker is what tells a reader this is a PERSON typing
-          // in Kronn, not an agent reply (F11: cross-instance, both used to read
-          // as a bare "Anonymous" with no human/agent distinction).
-          <div className="disc-msg-author">
-            {msg.author_avatar_email ? (
-              <img src={gravatarUrl(msg.author_avatar_email, 20)} alt="" className="disc-msg-author-avatar" />
-            ) : (
-              <span className="disc-msg-author-initials">
-                {(msg.author_pseudo || 'anonyme').slice(0, 2).toUpperCase()}
-              </span>
+        <div className="disc-msg-header-row">
+          <div className="disc-msg-header-main">
+            {isUser && (
+              // Always render a clear HUMAN attribution on user messages — even with
+              // no pseudo (federated from a peer whose pseudo is unset → "anonyme").
+              // The "· humain" marker is what tells a reader this is a PERSON typing
+              // in Kronn, not an agent reply (F11: cross-instance, both used to read
+              // as a bare "Anonymous" with no human/agent distinction).
+              <div className="disc-msg-author">
+                {msg.author_avatar_email ? (
+                  <img src={gravatarUrl(msg.author_avatar_email, 20)} alt="" className="disc-msg-author-avatar" />
+                ) : (
+                  <span className="disc-msg-author-initials">
+                    {(msg.author_pseudo || 'anonyme').slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+                <span className="disc-msg-author-name">{msg.author_pseudo || 'anonyme'}</span>
+                <span
+                  className="disc-msg-author-kind"
+                  style={{ fontSize: 'var(--kr-fs-xs)', fontWeight: 400, opacity: 0.55 }}
+                  title="Message humain — saisi dans Kronn"
+                >
+                  · humain
+                </span>
+              </div>
             )}
-            <span className="disc-msg-author-name">{msg.author_pseudo || 'anonyme'}</span>
-            <span
-              className="disc-msg-author-kind"
-              style={{ fontSize: 'var(--kr-fs-xs)', fontWeight: 400, opacity: 0.55 }}
-              title="Message humain — saisi dans Kronn"
-            >
-              · humain
-            </span>
-          </div>
-        )}
-        {msg.role === 'Agent' && (
-          <div className="disc-msg-agent-label" style={{ color: agentColor(agentType), justifyContent: 'space-between' }}>
-            <span className="flex-row gap-2">
-              {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
-               *  glance. model_tier is present on local agent messages; a
-               *  federated agent reply also carries its owner's pseudo
-               *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
-               *  reads as "Romu's ClaudeCode on the other instance". */}
-              <Cpu size={10} /> {agentType}
-              {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
-               *  switch models mid-thread, so this is per-message. Fall back to
-               *  the tier when the model wasn't recorded (legacy rows / a
-               *  provider-default run with no explicit flag). */}
-              {(msg.model || msg.model_tier) && (
-                <span
-                  style={{ opacity: 0.6, fontWeight: 400 }}
-                  title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
-                >
-                  · {msg.model ?? msg.model_tier}
-                </span>
-              )}
-              {msg.author_pseudo && (
-                <span
-                  className="disc-msg-agent-peer"
-                  style={{ opacity: 0.6, fontWeight: 400 }}
-                  title={`Réponse fédérée du pair ${msg.author_pseudo}`}
-                >
-                  · {msg.author_pseudo}
-                </span>
-              )}
-            </span>
-            {copyBtn(9, false)}
-          </div>
-        )}
-        {msg.role === 'System' && isKronnTool && (
-          <div className="disc-msg-kronn-tool" data-testid="kronn-tool-badge">
-            {/* Wrench icon mirrors the `🔧 N` pill in ChatHeader so the
-             *  user makes the visual connection: pill counts these
-             *  badges. The tool name + args render compactly; if the
-             *  resolver returned a payload (slash-marker path) we
-             *  render it as a collapsed snippet on hover. */}
-            <span className="disc-msg-kronn-tool-icon" aria-hidden="true">🔧</span>
-            <span className="disc-msg-kronn-tool-label">
-              {kronnToolMatch ? (
-                <>
-                  <code className="disc-msg-kronn-tool-name">{kronnToolMatch[1]}</code>
-                  {kronnToolMatch[2] && (
-                    <span className="disc-msg-kronn-tool-args">({kronnToolMatch[2]})</span>
+            {msg.role === 'Agent' && (
+              <div className="disc-msg-agent-label" style={{ color: agentColor(agentType), justifyContent: 'space-between' }}>
+                <span className="flex-row gap-2">
+                  {/* "<agent>[ · <model>][ · <owner>]" — answers WHO + WHAT at a
+                   *  glance. model_tier is present on local agent messages; a
+                   *  federated agent reply also carries its owner's pseudo
+                   *  (handle_incoming_chat_message) so "ClaudeCode · reasoning · Romu"
+                   *  reads as "Romu's ClaudeCode on the other instance". */}
+                  <Cpu size={10} /> {agentType}
+                  {/* Prefer the CONCRETE model ("qwen3:32b", "sonnet") — a disc can
+                   *  switch models mid-thread, so this is per-message. Fall back to
+                   *  the tier when the model wasn't recorded (legacy rows / a
+                   *  provider-default run with no explicit flag). */}
+                  {(msg.model || msg.model_tier) && (
+                    <span
+                      style={{ opacity: 0.6, fontWeight: 400 }}
+                      title={msg.model ? `Modèle : ${msg.model}` : `Palier : ${msg.model_tier}`}
+                    >
+                      · {msg.model ?? msg.model_tier}
+                    </span>
                   )}
-                </>
-              ) : (
-                <span>{msg.content}</span>
-              )}
-            </span>
-            {kronnToolMatch && kronnToolMatch[3] && (
-              <details className="disc-msg-kronn-tool-result">
-                <summary>{t('disc.kronnToolResult')}</summary>
-                <pre>{kronnToolMatch[3]}</pre>
-              </details>
+                  {msg.author_pseudo && (
+                    <span
+                      className="disc-msg-agent-peer"
+                      style={{ opacity: 0.6, fontWeight: 400 }}
+                      title={`Réponse fédérée du pair ${msg.author_pseudo}`}
+                    >
+                      · {msg.author_pseudo}
+                    </span>
+                  )}
+                </span>
+                {copyBtn(9, false)}
+              </div>
+            )}
+            {msg.role === 'System' && isKronnTool && (
+              <div className="disc-msg-kronn-tool" data-testid="kronn-tool-badge">
+                {/* Wrench icon mirrors the `🔧 N` pill in ChatHeader so the
+                 *  user makes the visual connection: pill counts these
+                 *  badges. The tool name + args render compactly; if the
+                 *  resolver returned a payload (slash-marker path) we
+                 *  render it as a collapsed snippet on hover. */}
+                <span className="disc-msg-kronn-tool-icon" aria-hidden="true">🔧</span>
+                <span className="disc-msg-kronn-tool-label">
+                  {kronnToolMatch ? (
+                    <>
+                      <code className="disc-msg-kronn-tool-name">{kronnToolMatch[1]}</code>
+                      {kronnToolMatch[2] && (
+                        <span className="disc-msg-kronn-tool-args">({kronnToolMatch[2]})</span>
+                      )}
+                    </>
+                  ) : (
+                    <span>{msg.content}</span>
+                  )}
+                </span>
+                {kronnToolMatch && kronnToolMatch[3] && (
+                  <details className="disc-msg-kronn-tool-result">
+                    <summary>{t('disc.kronnToolResult')}</summary>
+                    <pre>{kronnToolMatch[3]}</pre>
+                  </details>
+                )}
+              </div>
+            )}
+            {msg.role === 'System' && !isKronnTool && (
+              <div className="disc-msg-agent-label" style={{ color: msg.content.startsWith('summary cached') ? 'var(--kr-success)' : 'var(--kr-error)' }}>
+                {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
+                {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
+                {msg.content.startsWith('summary cached') && summaryCache && (
+                  <button
+                    className="disc-summary-toggle"
+                    aria-label={t('disc.viewSummary')}
+                    onClick={() => onExpandSummary(msg.id)}
+                  >
+                    {isExpandedSummary ? t('disc.hideSummary') : t('disc.viewSummary')}
+                  </button>
+                )}
+              </div>
             )}
           </div>
-        )}
-        {msg.role === 'System' && !isKronnTool && (
-          <div className="disc-msg-agent-label" style={{ color: msg.content.startsWith('summary cached') ? 'var(--kr-success)' : 'var(--kr-error)' }}>
-            {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
-            {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
-            {msg.content.startsWith('summary cached') && summaryCache && (
-              <button
-                className="disc-summary-toggle"
-                aria-label={t('disc.viewSummary')}
-                onClick={() => onExpandSummary(msg.id)}
-              >
-                {isExpandedSummary ? t('disc.hideSummary') : t('disc.viewSummary')}
-              </button>
-            )}
-          </div>
-        )}
+          <button
+            type="button"
+            className="disc-id-pill disc-message-id-pill"
+            data-copied={isMessageIdCopied}
+            onClick={copyMessageId}
+            title={t('disc.idPillTooltip', msg.id)}
+            aria-label={t('disc.idPillTooltip', msg.id)}
+          >
+            {isMessageIdCopied ? <Check size={8} /> : null}
+            {messageShortLabel(msg.id)}
+          </button>
+        </div>
         {msg.role === 'System' && msg.content.startsWith('summary cached') && isExpandedSummary && summaryCache && (
           <div className="disc-summary-expanded">
             {summaryCache}

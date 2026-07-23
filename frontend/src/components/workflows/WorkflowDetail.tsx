@@ -1164,6 +1164,23 @@ function compactStepMeta(step: WorkflowStep): { kind: string; Icon: typeof Plug;
 export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, onEdit, onDeleteRun, onDeleteAllRuns, triggering, agentAccess, onNavigateToBatch, onNavigateToWorkflow, onNavigateToRun, focusRunId, onExport, onGateDecided, onToggleEnabled, toast }: WorkflowDetailProps) {
   const { t } = useT();
   const [showRuns, setShowRuns] = useState(true);
+  const [isWorkflowIdCopied, setIsWorkflowIdCopied] = useState(false);
+  const workflowIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => {
+    if (workflowIdResetTimer.current) clearTimeout(workflowIdResetTimer.current);
+  }, []);
+  const copyWorkflowId = async () => {
+    try {
+      await navigator.clipboard.writeText(workflow.id);
+      setIsWorkflowIdCopied(true);
+      if (workflowIdResetTimer.current) clearTimeout(workflowIdResetTimer.current);
+      workflowIdResetTimer.current = setTimeout(() => setIsWorkflowIdCopied(false), 1500);
+      toast?.(t('disc.idCopied'), 'success');
+    } catch {
+      setIsWorkflowIdCopied(false);
+      toast?.(t('disc.idCopyFailed'), 'error');
+    }
+  };
   // Run-list control bar (#2): status filter + free-text search + fold past N.
   // Pure in-memory over `runs` already fetched — no backend round-trip.
   const [runFilter, setRunFilter] = useState<RunStatusFilter>('all');
@@ -1369,17 +1386,12 @@ export function WorkflowDetail({ workflow, runs, liveRun, onTrigger, onRefresh, 
         <button
           type="button"
           className="wf-id-pill"
-          onClick={async () => {
-            try {
-              await navigator.clipboard.writeText(workflow.id);
-              toast?.(t('disc.idCopied'), 'success');
-            } catch {
-              toast?.(t('disc.idCopyFailed'), 'error');
-            }
-          }}
+          data-copied={isWorkflowIdCopied}
+          onClick={() => void copyWorkflowId()}
           title={t('disc.idPillTooltip', workflow.id)}
           aria-label={t('disc.idPillTooltip', workflow.id)}
         >
+          {isWorkflowIdCopied ? <Check size={8} /> : null}
           #{workflow.id.slice(0, 8)}
         </button>
         <span className="flex-1" />

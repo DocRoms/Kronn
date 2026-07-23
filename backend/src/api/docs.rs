@@ -223,7 +223,7 @@ async fn proxy_to_sidecar(
         Some(h) => h,
         None => {
             return Json(ApiResponse::err(
-                "Document sidecar unavailable. Run `make docs-setup` to install it, then restart Kronn.".to_string(),
+                "Document export is unavailable in this Kronn installation. Update or reinstall Kronn, then restart the application.".to_string(),
             ));
         }
     };

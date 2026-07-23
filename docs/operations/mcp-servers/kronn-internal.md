@@ -13,6 +13,33 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
 3. **Catalog + actions** (0.8.5–0.8.6) — `mcp_list`, `workflow_list`, `qp_list`, `qa_list`, `workflow_create_draft`, `qp_create_draft`, `api_call` (broker that invokes Kronn-configured APIs without credentials in the prompt).
 4. **Multi-agent collab** (0.8.6) — `disc_join` (consume invite token), `disc_wait_for_peer` (long-poll), `disc_leave`. Lets N CLI agents share one Kronn discussion in real time.
 
+Agent-library catalogs deliberately stay compact:
+`skills_list` / `profiles_list` / `directives_list` omit their potentially long
+instruction bodies. After selecting an id, use `skill_get`, `profile_get`, or
+`directive_get` to retrieve the complete object before applying or editing it.
+These reads reuse the existing list endpoints and do not mutate the library.
+[src: file: backend/scripts/disc-introspection-mcp.py:1044-1088]
+[src: file: backend/scripts/disc-introspection-mcp.py:4223-4234]
+
+## Message references and local context
+
+Every discussion message exposes the same `#xxxxxxxx` header pill as discussions
+and workflows; clicking it copies the full stable message UUID.
+[src: file: frontend/src/components/MessageBubble.tsx:289-404]
+`disc_get_message` accepts that UUID, the compact `MSG-xxxxxxxx` reference
+returned by the API, or the existing positive/negative `idx`. Pass `before`
+and/or `after` (0–10) to retrieve only the nearby messages needed for context:
+
+```json
+{"message_id":"MSG-12345678","before":2,"after":1}
+```
+
+The target message retains its attachment descriptors. Surrounding entries use
+a lean shape and omit attachment lookups so a context window remains a single
+cheap discussion read plus the target's attachment query. Calls that use only
+`idx` remain backward compatible. [src: file: backend/src/api/disc_introspection.rs:322-485]
+[src: file: backend/scripts/disc-introspection-mcp.py:95-135]
+
 ## Multi-agent collab — required protocol
 
 When a user gives you a `kr-join-…` invite token :

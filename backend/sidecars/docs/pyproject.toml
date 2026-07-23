@@ -9,14 +9,22 @@ dependencies = [
   "uvicorn[standard]>=0.29,<0.40",
   # PDF: HTML + CSS + Paged Media → PDF.
   "weasyprint>=62,<65",
-  # DOCX: HTML tag mapping goes through a soup, so we need a parser
-  # (beautifulsoup4 with stdlib 'html.parser' = no native deps).
+  # DOCX: render the HTML with the PDF engine, then place each rendered page
+  # in Word so browser-only layouts keep their visual appearance.
   "python-docx>=1.1,<2",
-  "beautifulsoup4>=4.12,<5",
+  "pypdfium2>=5.12,<6",
+  "Pillow>=10,<13",
   # XLSX: pure-Python Excel writer (no libreoffice dep).
   "XlsxWriter>=3.2,<4",
   # PPTX: PowerPoint Open-XML generator.
   "python-pptx>=1.0,<2",
+]
+
+[project.optional-dependencies]
+# Release-only toolchain. PyInstaller 6.16 added Python 3.14 support; keeping
+# the upper bound below 7 avoids an unreviewed bundle-format jump.
+bundle = [
+  "pyinstaller>=6.16,<7",
 ]
 
 [build-system]
@@ -25,3 +33,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["kronn_docs"]
+
+[tool.setuptools.package-data]
+kronn_docs = ["fonts.conf"]

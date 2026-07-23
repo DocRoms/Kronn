@@ -40,6 +40,23 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger("kronn_docs")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
+
+def _configure_bundled_fontconfig() -> None:
+    """Point frozen releases at a portable fontconfig search-path file.
+
+    Homebrew/MSYS build machines have their own fontconfig configuration, but
+    an installed Kronn app must not depend on those build-host paths.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    bundle_root = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    config = bundle_root / "kronn_docs" / "fonts.conf"
+    if config.is_file():
+        os.environ["FONTCONFIG_FILE"] = str(config)
+
+
+_configure_bundled_fontconfig()
+
 app = FastAPI(title="kronn-docs", version="0.1.0")
 
 
@@ -70,6 +87,21 @@ class DocResponse(BaseModel):
     size_bytes: int
 
 
+def _pdf_page_stylesheet(html: str, page_size: Optional[str]) -> str:
+    """Remove implicit page margins without trampling author margins."""
+    page_rules = re.findall(r"@page[^{]*\{([^}]*)\}", html or "", flags=re.I | re.S)
+    author_sets_margin = any(
+        re.search(r"\bmargin(?:-(?:top|right|bottom|left))?\s*:", rule, flags=re.I)
+        for rule in page_rules
+    )
+    declarations = []
+    if page_size:
+        declarations.append(f"size: {page_size}")
+    if not author_sets_margin:
+        declarations.append("margin: 0")
+    return f"@page {{ {'; '.join(declarations)}; }}" if declarations else ""
+
+
 # ─── Endpoints ──────────────────────────────────────────────────────────────
 
 
@@ -97,8 +129,9 @@ def render_pdf(req: PdfRequest) -> DocResponse:
         )
 
     stylesheets = []
-    if req.page_size:
-        stylesheets.append(CSS(string=f"@page {{ size: {req.page_size}; }}"))
+    page_stylesheet = _pdf_page_stylesheet(req.html, req.page_size)
+    if page_stylesheet:
+        stylesheets.append(CSS(string=page_stylesheet))
 
     output = Path(req.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -120,11 +153,9 @@ def render_pdf(req: PdfRequest) -> DocResponse:
 
 # ─── DOCX — HTML → Word ────────────────────────────────────────────────────
 #
-# python-docx is the pragmatic tool for generating .docx from Python, but it
-# does NOT understand HTML natively. We use a minimal tag mapper that
-# converts the most common structures (h1-h4, p, ul/ol, li, table, strong,
-# em). Advanced CSS layouts are silently lost — agents know from the skill
-# doc to keep DOCX content semantic and let Word handle layout.
+# Word cannot represent browser layout primitives. The exporter renders the
+# HTML with WeasyPrint and places the resulting pages in a DOCX, preserving
+# the preview's appearance instead of producing a misleading approximation.
 
 
 class DocxRequest(BaseModel):
@@ -137,92 +168,25 @@ class DocxRequest(BaseModel):
 @app.post("/docx", response_model=DocResponse)
 def render_docx(req: DocxRequest) -> DocResponse:
     try:
-        from docx import Document  # type: ignore
-        from bs4 import BeautifulSoup  # type: ignore
+        from .html_to_docx import render_html_to_docx
     except ImportError as e:
         raise HTTPException(
             status_code=503,
             detail=(
-                f"python-docx / beautifulsoup4 not installed: {e}. "
-                "Re-run `make docs-setup` to refresh the venv."
+                f"DOCX renderer dependencies are unavailable: {e}. "
+                "Update or reinstall Kronn, then restart the application."
             ),
         )
 
     output = Path(req.output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    doc = Document()
-    # BeautifulSoup with 'html.parser' (stdlib, no lxml dep) — good enough
-    # for the semantic HTML agents produce; lxml would be stricter but
-    # adds another native build step to the setup.
-    soup = BeautifulSoup(req.html or "", "html.parser")
-    body = soup.body or soup
-
-    def render_node(node: Any) -> None:
-        name = getattr(node, "name", None)
-        if name is None:
-            # NavigableString at root level — treat as a paragraph.
-            text = str(node).strip()
-            if text:
-                doc.add_paragraph(text)
-            return
-        if name in ("h1", "h2", "h3", "h4"):
-            level = int(name[1])
-            doc.add_heading(node.get_text(strip=True), level=min(level, 4))
-        elif name == "p":
-            p = doc.add_paragraph()
-            _render_inline(node, p)
-        elif name in ("ul", "ol"):
-            style = "List Bullet" if name == "ul" else "List Number"
-            for li in node.find_all("li", recursive=False):
-                doc.add_paragraph(li.get_text(strip=True), style=style)
-        elif name == "table":
-            rows = node.find_all("tr", recursive=True)
-            if not rows:
-                return
-            cols = max(len(r.find_all(["th", "td"])) for r in rows)
-            table = doc.add_table(rows=len(rows), cols=cols)
-            for i, tr in enumerate(rows):
-                cells = tr.find_all(["th", "td"])
-                for j, cell in enumerate(cells):
-                    if j < cols:
-                        table.rows[i].cells[j].text = cell.get_text(strip=True)
-        elif name in ("hr",):
-            doc.add_paragraph("─" * 30)
-        elif name in ("div", "section", "article", "body"):
-            # Containers — recurse into children.
-            for child in node.children:
-                render_node(child)
-        else:
-            # Unknown / unmapped tag: take its text as a paragraph so we
-            # don't silently lose content.
-            text = node.get_text(strip=True)
-            if text:
-                doc.add_paragraph(text)
-
-    def _render_inline(node: Any, para: Any) -> None:
-        for child in node.children:
-            if getattr(child, "name", None) is None:
-                para.add_run(str(child))
-            elif child.name in ("strong", "b"):
-                para.add_run(child.get_text()).bold = True
-            elif child.name in ("em", "i"):
-                para.add_run(child.get_text()).italic = True
-            elif child.name == "br":
-                para.add_run("\n")
-            elif child.name == "a":
-                # Hyperlink styling in docx is gnarly — dump the text +
-                # URL in parens. Good enough for reports.
-                text = child.get_text() or ""
-                href = child.get("href") or ""
-                para.add_run(f"{text} ({href})" if href else text)
-            else:
-                para.add_run(child.get_text())
-
     try:
-        for node in body.children:
-            render_node(node)
-        doc.save(str(output))
+        render_html_to_docx(
+            req.html,
+            output,
+            page_stylesheet=_pdf_page_stylesheet(req.html, "A4"),
+        )
     except Exception as e:
         logger.exception("DOCX rendering failed")
         raise HTTPException(status_code=500, detail=f"DOCX rendering failed: {e}") from e

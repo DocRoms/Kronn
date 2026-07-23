@@ -17,14 +17,11 @@
  * Without per-agent coverage, MCP regressions are caught only on whichever
  * agent the canary spec uses (today: ClaudeCode). Real-world failures —
  * Gemini's `MCP issues detected. Run /mcp list for status.` prefix bug
- * (2026-05-10), the Codex sandbox block (TD-20260510), Kiro's empty saves
+ * (2026-05-10), Codex's former exec-mode sandbox block, Kiro's empty saves
  * after subscription exhaustion — would have surfaced earlier with this.
  *
  * # Skipped agents
  *
- *   • **Codex** — `exec` mode sandbox cancels MCP subprocess spawn before
- *     the bridge runs (TD-20260510-codex-mcp-sandbox-block). Removing
- *     the skip-rule will fail the test until upstream fixes it. Tracked.
  *   • **Vibe / Ollama** — no MCP path; they use the slash-marker
  *     fallback (`KRONN:DISC_*`). Different code path; covered separately.
  *
@@ -80,7 +77,7 @@ async function discoverInstalledAgents(request: APIRequestContext): Promise<stri
 // Agents that *do* speak MCP and *should* be able to call
 // `kronn-internal`. Mirrors `agentSupportsIntrospection()` on the
 // frontend — keep in sync.
-const INTROSPECTION_AGENTS = ['ClaudeCode', 'Kiro', 'GeminiCli', 'CopilotCli'] as const;
+const INTROSPECTION_AGENTS = ['ClaudeCode', 'Codex', 'Kiro', 'GeminiCli', 'CopilotCli'] as const;
 
 // Tests share one Playwright worker (cf. `playwright.config.ts`,
 // fullyParallel: false). We DO NOT use `mode: 'serial'` here because

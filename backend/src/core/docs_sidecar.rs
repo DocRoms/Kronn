@@ -1,26 +1,27 @@
 //! Kronn-docs sidecar manager.
 //!
-//! A small Python FastAPI server lives at `backend/sidecars/docs/`,
-//! launched by `make docs-setup` into `~/.kronn/venv/docs`. This module
-//! owns its lifecycle:
+//! A small Python FastAPI server lives at `backend/sidecars/docs/`.
+//! Desktop releases bundle it as a standalone executable; Docker bakes
+//! its virtualenv into the image; native development can install that
+//! virtualenv with `make docs-setup`. This module owns its lifecycle:
 //!
 //! * Discovers a free loopback port at startup and spawns the sidecar
 //!   with `KRONN_DOCS_PORT=<port>` in its env.
-//! * Waits up to 5 s for the sidecar to print `KRONN_DOCS_READY <port>`
+//! * Waits up to 15 s for the sidecar to print `KRONN_DOCS_READY <port>`
 //!   on stdout — the sidecar prints this once uvicorn has bound.
 //! * Exposes `SidecarHandle` with the base URL so API handlers can
 //!   reqwest directly against `127.0.0.1:<port>`.
 //! * Kills the child on drop so we don't leak Python processes across
 //!   backend restarts.
 //!
-//! Graceful degradation: if the venv is missing (user didn't run
-//! `make docs-setup`), we log a one-line hint and leave the handle
-//! empty; `/api/docs/*` routes then return a 503 with an actionable
-//! message pointing at the README. No crash, no Retry loop, no user
-//! confusion.
+//! Graceful degradation: if neither a bundled executable nor the
+//! development virtualenv exists, we log a one-line hint and leave the
+//! handle empty; `/api/docs/*` routes then return a 503. No crash and
+//! no retry loop.
 
+use std::ffi::OsString;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -31,6 +32,14 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use crate::core::cmd::async_cmd;
+
+const BUNDLED_SIDECAR_ENV: &str = "KRONN_DOCS_SIDECAR";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidecarProgram {
+    Bundled(PathBuf),
+    PythonModule(PathBuf),
+}
 
 /// Read-only snapshot of a live sidecar. Cloned into each request
 /// handler through `AppState.docs_sidecar`.
@@ -74,13 +83,18 @@ impl DocsSidecar {
             return;
         }
 
-        let venv_python = venv_python_path();
-        if !venv_python.exists() {
+        let program = resolve_sidecar_program(
+            std::env::var_os(BUNDLED_SIDECAR_ENV),
+            &source_bundle_path(),
+            &venv_python_path(),
+        );
+        let Some(program) = program else {
             tracing::info!(
-                "kronn-docs sidecar not installed — PDF/DOCX/XLSX generation will be disabled until `make docs-setup` is run. See backend/sidecars/docs/README.md"
+                "kronn-docs sidecar unavailable — desktop releases should bundle it; native developers can run `make docs-setup`. See backend/sidecars/docs/README.md"
             );
             return;
-        }
+        };
+        tracing::info!("starting resolved kronn-docs sidecar: {program:?}");
 
         // Ask the OS for a free TCP port. Bind + drop — the port is
         // then ours to hand to the child which will re-bind immediately.
@@ -95,18 +109,28 @@ impl DocsSidecar {
             }
         };
 
-        // Spawn `python -m kronn_docs.server` with the port in env.
+        // Desktop bundles execute directly. Docker/native development
+        // use `python -m kronn_docs.server` from the dedicated venv.
         // stdout goes through a pipe so we can read the READY marker;
         // stderr is inherited so real errors land in the main backend
         // log without us having to re-forward them.
-        let mut cmd = async_cmd(&venv_python);
-        cmd.arg("-m")
-            .arg("kronn_docs.server")
-            .env("KRONN_DOCS_PORT", port.to_string())
+        let mut cmd = match &program {
+            SidecarProgram::Bundled(path) => async_cmd(path),
+            SidecarProgram::PythonModule(path) => {
+                let mut cmd = async_cmd(path);
+                cmd.arg("-m").arg("kronn_docs.server");
+                cmd
+            }
+        };
+        cmd.env("KRONN_DOCS_PORT", port.to_string())
             .env("PYTHONUNBUFFERED", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true);
+        // `cargo run` injects Rust build directories here on macOS. Passing
+        // them to the frozen Python child masks its bundled Pango libraries.
+        #[cfg(target_os = "macos")]
+        cmd.env_remove("DYLD_FALLBACK_LIBRARY_PATH");
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
@@ -116,8 +140,9 @@ impl DocsSidecar {
             }
         };
 
-        // Wait for the READY marker on stdout — bounded by 5 s so a
-        // broken install doesn't block the backend boot forever.
+        // Frozen Python has a slower first launch, especially while Windows
+        // Defender scans a fresh install. This runs in a background task, so
+        // allowing 15 seconds does not delay the Kronn backend itself.
         let stdout = match child.stdout.take() {
             Some(s) => s,
             None => {
@@ -126,7 +151,7 @@ impl DocsSidecar {
             }
         };
 
-        let ready_check = timeout(Duration::from_secs(5), wait_for_ready(stdout, port)).await;
+        let ready_check = timeout(Duration::from_secs(15), wait_for_ready(stdout, port)).await;
         match ready_check {
             Ok(Ok(())) => {
                 let base_url = format!("http://127.0.0.1:{port}");
@@ -139,7 +164,7 @@ impl DocsSidecar {
                 let _ = child.kill().await;
             }
             Err(_) => {
-                tracing::warn!("kronn-docs sidecar did not print READY marker within 5 s — aborting");
+                tracing::warn!("kronn-docs sidecar did not print READY marker within 15 s — aborting");
                 let _ = child.kill().await;
             }
         }
@@ -157,7 +182,50 @@ fn pick_free_port() -> Option<u16> {
         .map(|a| a.port())
 }
 
-/// Path to the venv python interpreter created by `make docs-setup`.
+/// Pick the release-bundled sidecar first, then a development venv, then the
+/// repo-local desktop bundle. The final fallback makes `kronn start-dev` use
+/// the same exporter that a preceding desktop build already produced.
+fn resolve_sidecar_program(
+    bundled_override: Option<OsString>,
+    source_bundle: &Path,
+    venv_python: &Path,
+) -> Option<SidecarProgram> {
+    if let Some(path) = bundled_override.filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(SidecarProgram::Bundled(path));
+        }
+        tracing::warn!(
+            "{} points to a missing sidecar executable: {}",
+            BUNDLED_SIDECAR_ENV,
+            path.display()
+        );
+    }
+
+    if venv_python.is_file() {
+        return Some(SidecarProgram::PythonModule(venv_python.to_path_buf()));
+    }
+
+    source_bundle
+        .is_file()
+        .then(|| SidecarProgram::Bundled(source_bundle.to_path_buf()))
+}
+
+/// PyInstaller's one-directory output in a source checkout. Tauri relocates
+/// this tree and sets `KRONN_DOCS_SIDECAR` in installed apps; this absolute
+/// build-time path is only useful while running the backend from the checkout.
+fn source_bundle_path() -> PathBuf {
+    let executable = if cfg!(windows) {
+        "kronn-docs.exe"
+    } else {
+        "kronn-docs"
+    };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../desktop/src-tauri/resources/docs-sidecar/kronn-docs")
+        .join(executable)
+}
+
+/// Path to the venv Python interpreter created by `make docs-setup`.
 /// `~/.kronn/venv/docs/bin/python` on Unix, `Scripts\python.exe` on
 /// Windows.
 fn venv_python_path() -> PathBuf {
@@ -203,6 +271,11 @@ async fn wait_for_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
+
+    fn test_dir(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("kronn-docs-sidecar-{label}-{}", Uuid::new_v4()))
+    }
 
     #[test]
     fn venv_python_path_is_platform_specific() {
@@ -222,15 +295,67 @@ mod tests {
         assert!(p > 0);
     }
 
-    #[tokio::test]
-    async fn start_is_noop_when_venv_missing() {
-        // Default test state has no ~/.kronn/venv/docs — `start()` must
-        // log + return without crashing, and handle() must stay None.
-        let sc = DocsSidecar::new();
-        sc.start().await;
-        assert!(
-            sc.handle().await.is_none(),
-            "handle must remain None when the venv is absent"
+    #[test]
+    fn bundled_program_wins_over_development_venv() {
+        let root = test_dir("precedence");
+        let bundled = root.join(if cfg!(windows) {
+            "kronn-docs.exe"
+        } else {
+            "kronn-docs"
+        });
+        let venv = root.join("venv-python");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&bundled, b"bundle").unwrap();
+        std::fs::write(&venv, b"venv").unwrap();
+
+        let source = root.join("source-bundle");
+        let resolved =
+            resolve_sidecar_program(Some(bundled.clone().into_os_string()), &source, &venv);
+        assert_eq!(resolved, Some(SidecarProgram::Bundled(bundled)));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_bundle_falls_back_to_development_venv() {
+        let root = test_dir("fallback");
+        let venv = root.join("venv-python");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&venv, b"venv").unwrap();
+
+        let source = root.join("source-bundle");
+        let resolved = resolve_sidecar_program(
+            Some(root.join("missing").into_os_string()),
+            &source,
+            &venv,
         );
+        assert_eq!(resolved, Some(SidecarProgram::PythonModule(venv)));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_installed_program_returns_none() {
+        let root = test_dir("missing");
+        let resolved = resolve_sidecar_program(
+            None,
+            &root.join("source-bundle"),
+            &root.join("venv-python"),
+        );
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn repo_bundle_is_used_when_no_override_or_venv_exists() {
+        let root = test_dir("source-bundle");
+        let source = root.join("kronn-docs");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&source, b"bundle").unwrap();
+
+        let resolved =
+            resolve_sidecar_program(None, &source, &root.join("missing-venv-python"));
+        assert_eq!(resolved, Some(SidecarProgram::Bundled(source)));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

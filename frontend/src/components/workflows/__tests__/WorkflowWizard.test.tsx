@@ -296,6 +296,17 @@ describe('WorkflowWizard — step list handlers', () => {
     expect(screen.getByDisplayValue('beta')).toBeInTheDocument();
   });
 
+  it('warns on Agent + Exec without required isolation and offers the safe setting', () => {
+    toStepsPage([
+      mkStep(),
+      mkStep({ name: 'execute', step_type: { type: 'Exec' } }),
+    ]);
+
+    expect(screen.getByText('wiz.agentExecIsolationWarning')).toBeInTheDocument();
+    fireEvent.click(screen.getByText('wiz.requireIsolationAction'));
+    expect(screen.queryByText('wiz.agentExecIsolationWarning')).not.toBeInTheDocument();
+  });
+
   it('editing a step name propagates to the step', () => {
     toStepsPage([mkStep(), mkStep({ name: 'beta' })]);
     const stepName = screen.getByDisplayValue('main') as HTMLInputElement;

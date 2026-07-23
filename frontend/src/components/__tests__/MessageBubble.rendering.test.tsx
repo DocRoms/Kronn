@@ -20,7 +20,7 @@
  * props bag spread onto every render. No real person names.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within } from '@testing-library/react';
+import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
 
 // Mock the boot config call so I18nProvider doesn't try to fetch.
@@ -245,6 +245,27 @@ describe('MessageBubble — footer chips', () => {
     // Locale-formatted HH:MM — exact value depends on TZ, so just assert
     // it looks like a clock value rather than empty.
     expect(timeEl?.textContent).toMatch(/\d{1,2}:\d{2}/);
+  });
+
+  it('renders the standard short ID pill in the header and copies the full ID', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const id = '12345678-90ab-cdef-1234-567890abcdef';
+    const { container } = renderBubble(makeMessage({ role: 'System', id }));
+
+    const pill = container.querySelector<HTMLButtonElement>('.disc-message-id-pill');
+    expect(pill).not.toBeNull();
+    expect(pill?.textContent).toContain('#12345678');
+    expect(pill?.classList.contains('disc-id-pill')).toBe(true);
+    expect(pill?.closest('.disc-msg-header-row')).not.toBeNull();
+    expect(pill?.closest('.disc-msg-footer')).toBeNull();
+
+    fireEvent.click(pill!);
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(id));
+    expect(pill?.getAttribute('data-copied')).toBe('true');
   });
 
   it('renders the token count only when tokens_used > 0', () => {

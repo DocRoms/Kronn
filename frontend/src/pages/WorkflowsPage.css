@@ -613,6 +613,7 @@
 .wf-id-pill {
   display: inline-flex;
   align-items: center;
+  gap: 2px;
   padding: 2px 8px;
   border-radius: 999px;
   font-size: 11px;
@@ -633,6 +634,11 @@
 .wf-id-pill:focus-visible {
   outline: 2px solid var(--kr-accent);
   outline-offset: 1px;
+}
+.wf-id-pill[data-copied="true"] {
+  color: var(--kr-success);
+  border-color: rgba(var(--kr-success-rgb), 0.35);
+  background: rgba(var(--kr-success-rgb), 0.08);
 }
 
 /* ── Wizard card ───────────────────────────────────────── */
@@ -3225,6 +3231,39 @@
 .wf-worktree-hint svg {
   flex-shrink: 0;
   opacity: 0.8;
+}
+
+.wf-isolation-warning {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3) var(--kr-sp-4);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-warning-rgb), 0.07);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.2);
+  color: var(--kr-warning);
+  font-size: var(--kr-fs-xs);
+}
+
+.wf-isolation-warning svg {
+  flex-shrink: 0;
+}
+
+.wf-isolation-warning-action {
+  margin-left: auto;
+  padding: var(--kr-sp-1) var(--kr-sp-3);
+  border: 1px solid currentColor;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.wf-isolation-warning-action:hover {
+  background: rgba(var(--kr-warning-rgb), 0.1);
 }
 
 /* Worktree path row on the run detail card. Compact, monospace, with a

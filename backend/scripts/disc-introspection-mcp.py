@@ -94,10 +94,12 @@ TOOLS = [
     {
         "name": "disc_get_message",
         "description": (
-            "Return one message by 0-indexed position. Negative idx "
-            "counts from the end (-1 = last). Use this when you need "
-            "the verbatim content of a specific past message you can't "
-            "see in the current prompt window. Cheap."
+            "Return one message by either 0-indexed position (`idx`) or its "
+            "copyable `MSG-xxxxxxxx` / full UUID (`message_id`). Negative idx "
+            "counts from the end (-1 = last). Optional `before` / `after` "
+            "return a bounded surrounding window (maximum 10 each). Use this "
+            "when you need verbatim local context without loading or "
+            "summarising the whole discussion. Cheap."
         ),
         "inputSchema": {
             "type": "object",
@@ -105,9 +107,30 @@ TOOLS = [
                 "idx": {
                     "type": "integer",
                     "description": "0-based index, or negative for from-end (-1=last)."
+                },
+                "message_id": {
+                    "type": "string",
+                    "description": "Copyable MSG-xxxxxxxx reference, raw ID prefix, or full message UUID."
+                },
+                "before": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "default": 0,
+                    "description": "Number of preceding messages to return."
+                },
+                "after": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 10,
+                    "default": 0,
+                    "description": "Number of following messages to return."
                 }
             },
-            "required": ["idx"],
+            "oneOf": [
+                {"required": ["idx"], "not": {"required": ["message_id"]}},
+                {"required": ["message_id"], "not": {"required": ["idx"]}}
+            ],
         },
     },
     {
@@ -1017,6 +1040,51 @@ TOOLS = [
             "directives; list to PICK ids."
         ),
         "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "skill_get",
+        "description": (
+            "Fetch one skill's FULL definition by id, including its markdown "
+            "`content`, license and allowed-tools fields omitted by "
+            "`skills_list`. Read before editing or applying a skill."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "skill_id": {"type": "string", "description": "Skill id from `skills_list`."},
+            },
+            "required": ["skill_id"],
+        },
+    },
+    {
+        "name": "profile_get",
+        "description": (
+            "Fetch one profile's FULL definition by id, including the "
+            "`persona_prompt` omitted by `profiles_list`. Read before editing "
+            "or using a persona."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "profile_id": {"type": "string", "description": "Profile id from `profiles_list`."},
+            },
+            "required": ["profile_id"],
+        },
+    },
+    {
+        "name": "directive_get",
+        "description": (
+            "Fetch one directive's FULL definition by id, including its "
+            "`content` omitted by `directives_list`. Read before editing or "
+            "applying a directive."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "directive_id": {"type": "string", "description": "Directive id from `directives_list`."},
+            },
+            "required": ["directive_id"],
+        },
     },
     {
         "name": "skill_create",
@@ -2543,9 +2611,21 @@ def call_disc_meta(_args):
 
 def call_disc_get_message(args):
     idx = args.get("idx")
-    if idx is None:
-        raise RuntimeError("disc_get_message: missing required 'idx'")
-    return _unwrap(_http("GET", f"/api/discussions/{_disc_id()}/message/{idx}"))
+    message_id = args.get("message_id")
+    if (idx is None) == (message_id is None):
+        raise RuntimeError("disc_get_message: provide exactly one of 'idx' or 'message_id'")
+    before = args.get("before", 0)
+    after = args.get("after", 0)
+    for name, value in (("before", before), ("after", after)):
+        if not isinstance(value, int) or isinstance(value, bool) or not 0 <= value <= 10:
+            raise RuntimeError(f"disc_get_message: '{name}' must be an integer from 0 to 10")
+    selector = message_id if message_id is not None else idx
+    encoded_selector = urllib.parse.quote(str(selector), safe="")
+    query = urllib.parse.urlencode({"before": before, "after": after})
+    return _unwrap(_http(
+        "GET",
+        f"/api/discussions/{_disc_id()}/message/{encoded_selector}?{query}",
+    ))
 
 
 def call_disc_summarize(args):
@@ -4140,6 +4220,20 @@ _AGENT_LIB = {
 }
 
 
+def _lib_get(kind, args):
+    """Return one full Agent-library item while keeping list tools lean."""
+    iid = args.get(f"{kind}_id") or args.get("id")
+    if not iid:
+        raise RuntimeError(f"{kind}_get: missing required '{kind}_id'")
+    items = _unwrap(_http("GET", _AGENT_LIB[kind]["path"])) or []
+    existing = next((item for item in items if item.get("id") == iid), None)
+    if not existing:
+        raise RuntimeError(
+            f"{kind}_get: {iid!r} not found — call {kind}s_list to see what exists"
+        )
+    return existing
+
+
 def _lib_create(kind, args):
     spec = _AGENT_LIB[kind]
     for f in spec["required"]:
@@ -4196,6 +4290,11 @@ def call_skill_create(args):
     return _lib_create("skill", args)
 
 
+def call_skill_get(args):
+    """Return one FULL skill, including its markdown content body."""
+    return _lib_get("skill", args)
+
+
 def call_skill_update(args):
     """Patch a CUSTOM skill (load-merge-write over PUT /api/skills/<id>). Builtin
     skills are rejected by the backend. ⚠ The backend recreates the skill, so
@@ -4216,6 +4315,11 @@ def call_profile_create(args):
     return _lib_create("profile", args)
 
 
+def call_profile_get(args):
+    """Return one FULL profile, including its persona_prompt body."""
+    return _lib_get("profile", args)
+
+
 def call_profile_update(args):
     """Patch a custom profile (load-merge-write over PUT /api/profiles/<id>)."""
     return _lib_update("profile", args)
@@ -4232,6 +4336,11 @@ def call_directive_create(args):
     (list of directive ids it's mutually exclusive with). Bind via an Agent
     step's `directive_ids`. Returns the created directive (incl id)."""
     return _lib_create("directive", args)
+
+
+def call_directive_get(args):
+    """Return one FULL directive, including its content body."""
+    return _lib_get("directive", args)
 
 
 def call_directive_update(args):
@@ -5118,6 +5227,9 @@ DISPATCH = {
     "skills_list": call_skills_list,
     "profiles_list": call_profiles_list,
     "directives_list": call_directives_list,
+    "skill_get": call_skill_get,
+    "profile_get": call_profile_get,
+    "directive_get": call_directive_get,
     # 0.8.8 (2026-06-24) — author/edit/delete the Agent-step bindings, closing
     # the loop so an agent can retain · retrieve · evaluate · modify skills (+
     # profiles/directives), not just read them. Custom-only edits.
@@ -5215,7 +5327,7 @@ def _handle(req):
                     "owns ALL credentials server-side (never paste secrets). "
                     "Your tools, by area:\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
-                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid `skill_ids`/`profile_ids`/`directive_ids`; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
+                    "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"
                     "• Docs/conventions: `convention_get`. Continual learning: `learning_propose`.\n"

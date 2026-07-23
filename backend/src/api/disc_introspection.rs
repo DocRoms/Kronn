@@ -23,7 +23,7 @@
 //! above, so the actual data lives in this single Rust module.
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
 use serde::{Deserialize, Serialize};
@@ -72,6 +72,8 @@ pub struct DiscussionMeta {
 pub struct DiscussionMessageRead {
     pub idx: u32,
     pub id: String,
+    /// Stable compact reference accepted by `disc_get_message`.
+    pub message_ref: String,
     pub role: MessageRole,
     pub content: String,
     pub agent_type: Option<AgentType>,
@@ -82,6 +84,33 @@ pub struct DiscussionMessageRead {
     /// a discussed image. Empty for messages with no attachments.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<MessageAttachment>,
+    /// Optional compact context requested by the caller. Attachments stay on
+    /// the target message only so a small window does not fan out DB reads.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub before: Vec<DiscussionMessageContextItem>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<DiscussionMessageContextItem>,
+}
+
+/// Lean surrounding-message shape for a `disc_get_message` window.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DiscussionMessageContextItem {
+    pub idx: u32,
+    pub id: String,
+    pub message_ref: String,
+    pub role: MessageRole,
+    pub content: String,
+    pub agent_type: Option<AgentType>,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct MessageWindowQuery {
+    #[serde(default)]
+    pub before: u32,
+    #[serde(default)]
+    pub after: u32,
 }
 
 /// stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
@@ -290,15 +319,102 @@ pub async fn disc_meta(
     }))
 }
 
-/// `GET /api/discussions/{id}/message/{idx}`
+const MAX_MESSAGE_CONTEXT: u32 = 10;
+
+fn short_message_ref(id: &str) -> String {
+    format!("MSG-{}", id.chars().take(8).collect::<String>())
+}
+
+fn resolve_message_selector(
+    messages: &[DiscussionMessage],
+    selector: &str,
+) -> Result<usize, String> {
+    let total = messages.len();
+    if let Ok(n) = selector.parse::<i64>() {
+        if n >= 0 {
+            let idx = n as usize;
+            return (idx < total)
+                .then_some(idx)
+                .ok_or_else(|| format!("Index {} out of range (total {})", idx, total));
+        }
+        let from_end = n.unsigned_abs() as usize;
+        return (from_end <= total)
+            .then_some(total - from_end)
+            .ok_or_else(|| format!("Negative index {} out of range (total {})", n, total));
+    }
+
+    // Exact IDs win before interpreting `MSG-` as the human-reference prefix.
+    // This keeps legacy/non-UUID message IDs such as `msg-import-…` resolvable.
+    if let Some((idx, _)) = messages
+        .iter()
+        .enumerate()
+        .find(|(_, message)| message.id.eq_ignore_ascii_case(selector))
+    {
+        return Ok(idx);
+    }
+
+    let id_selector = if selector
+        .get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("MSG-"))
+    {
+        &selector[4..]
+    } else {
+        selector
+    };
+    if id_selector.is_empty() {
+        return Err("Invalid message selector — expected idx, MSG-xxxxxxxx, or full UUID".into());
+    }
+
+    if let Some((idx, _)) = messages
+        .iter()
+        .enumerate()
+        .find(|(_, message)| message.id.eq_ignore_ascii_case(id_selector))
+    {
+        return Ok(idx);
+    }
+    if id_selector.chars().count() < 8 {
+        return Err("Message ID prefixes must contain at least 8 characters".into());
+    }
+
+    let needle = id_selector.to_ascii_lowercase();
+    let matches: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, message)| {
+            message.id.to_ascii_lowercase().starts_with(&needle).then_some(idx)
+        })
+        .collect();
+    match matches.as_slice() {
+        [idx] => Ok(*idx),
+        [] => Err(format!("Message {} not found in this discussion", selector)),
+        _ => Err(format!(
+            "Message prefix {} is ambiguous in this discussion",
+            selector
+        )),
+    }
+}
+
+fn context_item(idx: usize, message: &DiscussionMessage) -> DiscussionMessageContextItem {
+    DiscussionMessageContextItem {
+        idx: idx as u32,
+        id: message.id.clone(),
+        message_ref: short_message_ref(&message.id),
+        role: message.role.clone(),
+        content: message.content.clone(),
+        agent_type: message.agent_type.clone(),
+        timestamp: message.timestamp,
+    }
+}
+
+/// `GET /api/discussions/{id}/message/{selector}`
 ///
-/// Negative-index semantics: `idx == u32::MAX` (i.e. -1 in two's
-/// complement) is treated as "last message". Anything past the end
-/// returns 404. We avoid signed integer parsing in the path so the
-/// router stays simple.
+/// `selector` accepts a positive/negative numeric index, a compact
+/// `MSG-xxxxxxxx` reference, an unprefixed ID prefix, or a full message UUID.
+/// Optional `before` / `after` query parameters return a bounded lean window.
 pub async fn disc_get_message(
     State(state): State<AppState>,
-    Path((id, idx_param)): Path<(String, String)>,
+    Path((id, selector)): Path<(String, String)>,
+    Query(window): Query<MessageWindowQuery>,
 ) -> Json<ApiResponse<DiscussionMessageRead>> {
     let did = id.clone();
     let disc = match state.db.with_conn(move |conn| {
@@ -318,29 +434,16 @@ pub async fn disc_get_message(
     if total == 0 {
         return Json(ApiResponse::err("Discussion has no messages"));
     }
-
-    // Parse the idx parameter, accepting negative numbers as "from end".
-    // `-1` = last, `-2` = second-to-last, etc.
-    let resolved_idx: usize = match idx_param.parse::<i64>() {
-        Ok(n) if n >= 0 => n as usize,
-        Ok(n) => {
-            // Negative: count from the end. `n == -1` → total - 1.
-            let from_end = (-n) as usize;
-            if from_end > total {
-                return Json(ApiResponse::err(format!(
-                    "Negative index {} out of range (total {})", n, total
-                )));
-            }
-            total - from_end
-        }
-        Err(_) => return Json(ApiResponse::err("Invalid idx — must be an integer")),
-    };
-
-    if resolved_idx >= total {
+    if window.before > MAX_MESSAGE_CONTEXT || window.after > MAX_MESSAGE_CONTEXT {
         return Json(ApiResponse::err(format!(
-            "Index {} out of range (total {})", resolved_idx, total
+            "Message context is limited to {} before and {} after",
+            MAX_MESSAGE_CONTEXT, MAX_MESSAGE_CONTEXT
         )));
     }
+    let resolved_idx = match resolve_message_selector(&disc.messages, &selector) {
+        Ok(idx) => idx,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
 
     let msg = &disc.messages[resolved_idx];
     let msg_id = msg.id.clone();
@@ -355,15 +458,30 @@ pub async fn disc_get_message(
             disk_path: f.disk_path,
         })
         .collect();
+    let before_start = resolved_idx.saturating_sub(window.before as usize);
+    let before = disc.messages[before_start..resolved_idx]
+        .iter()
+        .enumerate()
+        .map(|(offset, message)| context_item(before_start + offset, message))
+        .collect();
+    let after_end = (resolved_idx + 1 + window.after as usize).min(total);
+    let after = disc.messages[resolved_idx + 1..after_end]
+        .iter()
+        .enumerate()
+        .map(|(offset, message)| context_item(resolved_idx + 1 + offset, message))
+        .collect();
     Json(ApiResponse::ok(DiscussionMessageRead {
         idx: resolved_idx as u32,
         id: msg.id.clone(),
+        message_ref: short_message_ref(&msg.id),
         role: msg.role.clone(),
         content: msg.content.clone(),
         agent_type: msg.agent_type.clone(),
         timestamp: msg.timestamp,
         tokens_used: msg.tokens_used,
         attachments,
+        before,
+        after,
     }))
 }
 

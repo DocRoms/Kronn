@@ -6,15 +6,7 @@ use uuid::Uuid;
 use crate::models::*;
 
 // ─── Helper ─────────────────────────────────────────────────────────────────
-
-fn parse_dt(s: String) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(&s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to parse datetime '{}': {}, using now()", s, e);
-            Utc::now()
-        })
-}
+use super::parse_dt;
 
 fn parse_run_status(s: &str) -> RunStatus {
     match s {

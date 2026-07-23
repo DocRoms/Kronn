@@ -1,8 +1,9 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection};
 
 use crate::models::*;
+use super::parse_dt;
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
@@ -203,15 +204,4 @@ pub fn delete_project_discussions(conn: &Connection, project_id: &str) -> Result
         params![project_id],
     )?;
     Ok(())
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-fn parse_dt(s: String) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(&s)
-        .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to parse datetime '{}': {}, using now()", s, e);
-            Utc::now()
-        })
 }

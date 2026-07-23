@@ -345,17 +345,17 @@ pub fn build_agent_prompt(
     let introspection_notice = match disc.language.as_str() {
         "fr" => "Outils d'historique disponibles via le MCP `kronn-internal` : \
             `disc_meta()` (compte de messages, agent, tier — gratuit), \
-            `disc_get_message(idx)` (un message précis, idx négatif = depuis la fin — gratuit), \
+            `disc_get_message(idx | message_id, before?, after?)` (un message précis par index ou référence `MSG-…`, avec petit contexte optionnel — gratuit), \
             `disc_summarize(from?, to?)` (synthèse à la demande — coûte des tokens). \
             N'utilise CES OUTILS QUE si tu remarques un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\n",
         "es" => "Herramientas de historial vía MCP `kronn-internal`: \
             `disc_meta()` (cuenta de mensajes, agente, tier — gratuito), \
-            `disc_get_message(idx)` (un mensaje específico, idx negativo = desde el final — gratuito), \
+            `disc_get_message(idx | message_id, before?, after?)` (un mensaje por índice o referencia `MSG-…`, con contexto pequeño opcional — gratuito), \
             `disc_summarize(from?, to?)` (resumen bajo demanda — cuesta tokens). \
             Úsalos SOLO cuando notes un hueco de contexto que no puedas deducir de la ventana actual.\n\n",
         _ => "History tools available via the `kronn-internal` MCP: \
             `disc_meta()` (message count, agent, tier — free), \
-            `disc_get_message(idx)` (one specific message, negative idx = from end — free), \
+            `disc_get_message(idx | message_id, before?, after?)` (one message by index or `MSG-…` reference, with an optional small context window — free), \
             `disc_summarize(from?, to?)` (on-demand summary — costs tokens). \
             Use these ONLY when you notice a context gap you cannot infer from the current window. Never speculatively.\n\n",
     };
@@ -433,10 +433,7 @@ pub fn build_agent_prompt(
     //   - Vibe + Ollama: get the slash-marker fallback (post-stream
     //     parser in `slash_markers.rs` resolves them into System
     //     messages on the next turn).
-    //   - Codex (currently): gets nothing — the wiring lands but
-    //     Codex's exec-mode sandbox cancels the call. Avoiding the
-    //     notice prevents pollution; lift this when the upstream
-    //     blocker (TD-20260510-codex-mcp-sandbox-block) is fixed.
+    //   - Codex is an MCP speaker again since 0.8.6 / Codex 0.132.
     let agent_uses_slash_markers = matches!(
         agent_type,
         AgentType::Vibe | AgentType::Ollama,

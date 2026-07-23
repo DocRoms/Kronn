@@ -17,10 +17,10 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             label: Windows
-          - os: macos-latest
+          - os: macos-15
             target: aarch64-apple-darwin
             label: macOS-arm64
-          - os: macos-15
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             label: macOS-x64
           - os: ubuntu-22.04
@@ -56,8 +56,22 @@ jobs:
             libappindicator3-dev \
             librsvg2-dev \
             libssl-dev \
+            libpango1.0-dev \
+            libharfbuzz-dev \
+            libffi-dev \
             patchelf \
             file
+
+      - name: Install macOS document-rendering libraries
+        if: startsWith(matrix.os, 'macos')
+        run: brew install pango libffi
+
+      - name: Install Windows document-rendering libraries
+        if: matrix.os == 'windows-latest'
+        uses: msys2/setup-msys2@v2
+        with:
+          update: false
+          install: mingw-w64-x86_64-pango
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -78,6 +92,13 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+
+      - name: Setup Python for bundled document exporter
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/sidecars/docs/pyproject.toml
 
       - name: Enable corepack (provides pnpm pinned by package.json)
         # See `ci-test.yml`. Corepack reads `packageManager` from
@@ -128,6 +149,16 @@ jobs:
           _APPLE_ID: ${{ secrets.APPLE_ID }}
           _APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           _APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Smoke-test bundled PDF and DOCX exporter
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            SIDECAR="desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs.exe"
+          else
+            SIDECAR="desktop/src-tauri/resources/docs-sidecar/kronn-docs/kronn-docs"
+          fi
+          python backend/sidecars/docs/smoke_bundle.py "$SIDECAR"
 
       # Ad-hoc sign macOS .app when no Apple Developer certificate is configured.
       # This removes the "app is damaged" error for most users. Without a paid

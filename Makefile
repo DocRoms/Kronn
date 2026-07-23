@@ -357,10 +357,14 @@ docs-setup:
 ## Build the desktop app for the current platform
 desktop:
 	@echo "$(CYAN)▸ Building desktop app...$(RESET)"
-	@cd frontend && pnpm build
 	@cd desktop && pnpm build
 	@echo "$(GREEN)✓ Desktop app built$(RESET)"
 	@echo "  Output: desktop/src-tauri/target/release/bundle/"
+
+## Build only the standalone document exporter embedded in desktop installers.
+docs-bundle:
+	@echo "$(CYAN)▸ Building bundled kronn-docs exporter...$(RESET)"
+	@cd desktop && node scripts/build-docs-sidecar.mjs
 
 ## Run the desktop app in dev mode (hot reload)
 desktop-dev:
