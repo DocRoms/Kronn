@@ -364,6 +364,7 @@ export function SettingsPage({
                 matrix: { label: t('config.themeMatrix'), icon: <Terminal size={14} /> },
                 sakura: { label: t('config.themeSakura'), icon: <Heart size={14} /> },
                 gotham: { label: t('config.themeGotham'), icon: <span style={{ fontSize: 14, lineHeight: 1 }}>🦇</span> },
+                euronews: { label: t('config.themeEuronews'), icon: <Globe size={14} /> },
               };
               const secret = unlockedThemes
                 .filter(m => secretMeta[m])

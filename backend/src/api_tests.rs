@@ -1919,6 +1919,29 @@ mod tests {
             "batman must be in unlocked_profiles after unlock, got {:?}", cfg.unlocked_profiles);
     }
 
+    /// The kronnEuronews built-in code unlocks the single `euronews`
+    /// theme (no bundle) via the committed hash — no config.toml needed,
+    /// so it works on every self-hosted instance after update.
+    #[tokio::test]
+    async fn theme_unlock_euronews_built_in_unlocks_theme() {
+        let state = test_state();
+        // Intentionally leave secret_themes empty — this must match a
+        // BUILT_IN_UNLOCK_HASHES entry, not a local plaintext override.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/themes/unlock")
+            .header("Content-Type", "application/json")
+            .body(Body::from(serde_json::json!({"code": "kronnEuronews"}).to_string()))
+            .unwrap();
+        let (status, body) = send(state, false, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["success"], true, "kronnEuronews rejected: {body}");
+        let unlocks = body["data"]["unlocks"].as_array().expect("unlocks array");
+        assert_eq!(unlocks.len(), 1, "euronews is a single theme, not a bundle: {body}");
+        assert_eq!(unlocks[0]["kind"], "theme");
+        assert_eq!(unlocks[0]["name"], "euronews");
+    }
+
     /// Batman is hidden from GET /api/profiles until unlocked, and
     /// shows up afterwards. Verifies the secret-profile filter in
     /// both states from the caller perspective.
