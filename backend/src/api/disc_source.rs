@@ -608,7 +608,7 @@ pub async fn list_source_bindings(
 ) -> Json<ApiResponse<Vec<crate::db::disc_source::DiscSourceBinding>>> {
     let result = state
         .db
-        .with_conn(|conn| crate::db::disc_source::list_all_source_bindings(conn))
+        .with_conn(crate::db::disc_source::list_all_source_bindings)
         .await;
     match result {
         Ok(bindings) => Json(ApiResponse::ok(bindings)),
@@ -637,7 +637,7 @@ pub async fn disc_source_detail(
     let id_for_bindings = id.clone();
     let bindings = state
         .db
-        .with_conn(move |conn| crate::db::disc_source::list_all_source_bindings(conn))
+        .with_conn(crate::db::disc_source::list_all_source_bindings)
         .await
         .unwrap_or_default();
     let current = bindings.into_iter().find(|b| b.disc_id == id_for_bindings);

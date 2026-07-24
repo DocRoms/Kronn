@@ -1794,7 +1794,7 @@ async fn boot_recovery_simulation_emits_ws_event() {
     // This is the exact call main.rs makes.
     let ids = state
         .db
-        .with_conn(|conn| kronn::db::discussions::recover_partial_responses(conn))
+        .with_conn(kronn::db::discussions::recover_partial_responses)
         .await
         .unwrap();
     assert_eq!(ids.len(), 2);

@@ -80,7 +80,7 @@ pub async fn audit_latest(
 pub async fn audit_runs_cleanup(State(state): State<AppState>) -> Json<ApiResponse<u64>> {
     let result = state
         .db
-        .with_conn(|conn| crate::db::audit_runs::reconcile_all_running(conn))
+        .with_conn(crate::db::audit_runs::reconcile_all_running)
         .await;
     match result {
         Ok(n) => Json(ApiResponse::ok(n)),

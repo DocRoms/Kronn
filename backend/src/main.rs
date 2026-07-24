@@ -322,7 +322,7 @@ async fn main() -> anyhow::Result<()> {
     // responses on the same disc (the recovered one + the new run).
     let recovered = state
         .db
-        .with_conn(|conn| kronn::db::discussions::recover_partial_responses(conn))
+        .with_conn(kronn::db::discussions::recover_partial_responses)
         .await;
     match recovered {
         Ok(ids) if !ids.is_empty() => {
@@ -351,7 +351,7 @@ async fn main() -> anyhow::Result<()> {
     // correctly seen as answered and skipped.
     let awaiting = state
         .db
-        .with_conn(|conn| kronn::db::discussions::reconcile_awaiting_agents(conn))
+        .with_conn(kronn::db::discussions::reconcile_awaiting_agents)
         .await;
     match awaiting {
         Ok(ids) if !ids.is_empty() => {
@@ -399,7 +399,7 @@ async fn main() -> anyhow::Result<()> {
     // this keeps it self-maintaining across restarts.
     match state
         .db
-        .with_conn(|conn| kronn::db::discussion_sessions::reap_abandoned_sessions(conn))
+        .with_conn(kronn::db::discussion_sessions::reap_abandoned_sessions)
         .await
     {
         Ok(n) if n > 0 => {

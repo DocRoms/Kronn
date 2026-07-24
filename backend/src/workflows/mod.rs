@@ -148,9 +148,7 @@ impl WorkflowEngine {
         };
 
         let db = self.db().clone();
-        let workflows = db
-            .with_conn(|conn| crate::db::workflows::list_workflows(conn))
-            .await?;
+        let workflows = db.with_conn(crate::db::workflows::list_workflows).await?;
 
         for wf in workflows {
             if !wf.enabled {

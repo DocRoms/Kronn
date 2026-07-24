@@ -890,7 +890,7 @@ pub async fn disc_pr_template(
 async fn build_global_mcp_context(state: &AppState) -> Option<String> {
     let configs = state
         .db
-        .with_conn(|conn| crate::db::mcps::list_configs(conn))
+        .with_conn(crate::db::mcps::list_configs)
         .await
         .ok()?;
 
@@ -901,7 +901,7 @@ async fn build_global_mcp_context(state: &AppState) -> Option<String> {
 
     let servers = state
         .db
-        .with_conn(|conn| crate::db::mcps::list_servers(conn))
+        .with_conn(crate::db::mcps::list_servers)
         .await
         .unwrap_or_default();
     let server_map: std::collections::HashMap<String, String> = servers

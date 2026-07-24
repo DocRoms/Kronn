@@ -188,7 +188,7 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<(RepoSour
         let secret_clone = secret.clone();
         let configs = state
             .db
-            .with_conn(move |conn| crate::db::mcps::list_configs(conn))
+            .with_conn(crate::db::mcps::list_configs)
             .await
             .unwrap_or_default();
 
