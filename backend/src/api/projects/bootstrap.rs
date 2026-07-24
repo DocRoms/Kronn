@@ -38,7 +38,8 @@ pub async fn bootstrap(
     }
 
     // Sanitize name for directory (kebab-case)
-    let dir_name: String = project_name.to_lowercase()
+    let dir_name: String = project_name
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
@@ -60,11 +61,17 @@ pub async fn bootstrap(
             // Resolve the parent dir (which exists) then append the new dir name
             let parent_resolved = scanner::resolve_host_path(&parent);
             if !parent_resolved.exists() {
-                return Err(format!("Parent directory not found: {}", parent_resolved.display()));
+                return Err(format!(
+                    "Parent directory not found: {}",
+                    parent_resolved.display()
+                ));
             }
             let project_path = parent_resolved.join(&dirname);
             if project_path.exists() {
-                return Err(format!("Directory already exists: {}", project_path.display()));
+                return Err(format!(
+                    "Directory already exists: {}",
+                    project_path.display()
+                ));
             }
             std::fs::create_dir_all(&project_path)
                 .map_err(|e| format!("Failed to create directory: {}", e))?;
@@ -103,10 +110,7 @@ pub async fn bootstrap(
                 let _ = std::fs::create_dir_all(&conventions_dir);
                 let spec_path = conventions_dir.join("agents-md-format-v1.md");
                 if !spec_path.exists() {
-                    let _ = std::fs::write(
-                        &spec_path,
-                        crate::core::anti_halluc::SPEC_AGENTS_MD_V1,
-                    );
+                    let _ = std::fs::write(&spec_path, crate::core::anti_halluc::SPEC_AGENTS_MD_V1);
                 }
                 // 0.7.1 — agent-writable subfolders. Bootstrapped only
                 // when missing (idempotent), with a short README so a
@@ -136,7 +140,8 @@ pub async fn bootstrap(
                 let kiro_dst = project_path.join(".kiro/steering/instructions.md");
                 if kiro_src.exists() && !kiro_dst.exists() {
                     // Safety: kiro_dst is a multi-segment path (.kiro/steering/instructions.md), parent() cannot be None
-                    let _ = std::fs::create_dir_all(kiro_dst.parent().expect("kiro_dst has a parent"));
+                    let _ =
+                        std::fs::create_dir_all(kiro_dst.parent().expect("kiro_dst has a parent"));
                     let _ = std::fs::copy(&kiro_src, &kiro_dst);
                 }
             }
@@ -144,7 +149,9 @@ pub async fn bootstrap(
             runner::fix_file_ownership(&project_path);
             Ok(())
         }
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = setup_result {
         return Json(ApiResponse::err(e));
@@ -165,7 +172,7 @@ pub async fn bootstrap(
         },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
-            tech_debt_count: 0,
+        tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
         default_skill_ids: vec![],
@@ -179,14 +186,18 @@ pub async fn bootstrap(
 
     let p = project.clone();
     let mcp_ids = req.mcp_config_ids.clone();
-    if let Err(e) = state.db.with_conn(move |conn| {
-        crate::db::projects::insert_project(conn, &p)?;
-        // Link selected MCP configs to the new project
-        for mcp_id in &mcp_ids {
-            crate::db::mcps::link_config_project(conn, mcp_id, &p.id)?;
-        }
-        Ok(())
-    }).await {
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &p)?;
+            // Link selected MCP configs to the new project
+            for mcp_id in &mcp_ids {
+                crate::db::mcps::link_config_project(conn, mcp_id, &p.id)?;
+            }
+            Ok(())
+        })
+        .await
+    {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
     }
 
@@ -196,10 +207,14 @@ pub async fn bootstrap(
         if let Some(ref secret) = config.encryption_secret {
             let secret = secret.clone();
             let pid = project_id.clone();
-            if let Err(e) = state.db.with_conn(move |conn| {
-                crate::core::mcp_scanner::sync_affected_projects(conn, &[pid], &secret);
-                Ok::<_, anyhow::Error>(())
-            }).await {
+            if let Err(e) = state
+                .db
+                .with_conn(move |conn| {
+                    crate::core::mcp_scanner::sync_affected_projects(conn, &[pid], &secret);
+                    Ok::<_, anyhow::Error>(())
+                })
+                .await
+            {
                 tracing::error!("Failed to sync MCP config for new project: {e}");
             }
         }
@@ -231,7 +246,12 @@ pub async fn bootstrap(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
     };
 
     let discussion = Discussion {
@@ -243,7 +263,8 @@ pub async fn bootstrap(
         language: language.clone(),
         participants: vec![agent_type],
         messages: vec![initial_message.clone()],
-        message_count: 1, non_system_message_count: 1,
+        message_count: 1,
+        non_system_message_count: 1,
         skill_ids: req.skill_ids.clone(),
         profile_ids: vec![
             "architect".into(),
@@ -252,7 +273,7 @@ pub async fn bootstrap(
         ],
         directive_ids: vec![],
         archived: false,
-            pinned: false,
+        pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
         tier: if req.skill_ids.contains(&"bootstrap-architect".to_string()) {
@@ -278,12 +299,19 @@ pub async fn bootstrap(
 
     let disc = discussion.clone();
     let msg = initial_message;
-    if let Err(e) = state.db.with_conn(move |conn| {
-        crate::db::discussions::insert_discussion(conn, &disc)?;
-        crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
-        Ok(())
-    }).await {
-        return Json(ApiResponse::err(format!("Failed to create discussion: {}", e)));
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            Ok(())
+        })
+        .await
+    {
+        return Json(ApiResponse::err(format!(
+            "Failed to create discussion: {}",
+            e
+        )));
     }
 
     Json(ApiResponse::ok(BootstrapProjectResponse {
@@ -302,7 +330,7 @@ pub async fn bootstrap(
 fn build_bootstrap_plus_prompt(language: &str, project_name: &str, description: &str) -> String {
     match language {
         "en" => format!(
-r#"# Bootstrap for project "{project_name}"
+            r#"# Bootstrap for project "{project_name}"
 
 Respond in English.
 
@@ -311,9 +339,10 @@ Respond in English.
 
 ---
 
-Follow the **Bootstrap Architect** skill instructions exactly. The skill defines 4 gated stages (Repo & Project Setup → Architecture → Plan → Issues) and tells you which one to start with based on the configured MCPs. Read the skill first, then start at the right stage. Do NOT skip stages. Emit the stage signal at the end of each message and wait for my validation before continuing."#),
+Follow the **Bootstrap Architect** skill instructions exactly. The skill defines 4 gated stages (Repo & Project Setup → Architecture → Plan → Issues) and tells you which one to start with based on the configured MCPs. Read the skill first, then start at the right stage. Do NOT skip stages. Emit the stage signal at the end of each message and wait for my validation before continuing."#
+        ),
         "es" => format!(
-r#"# Bootstrap del proyecto "{project_name}"
+            r#"# Bootstrap del proyecto "{project_name}"
 
 Responde en español.
 
@@ -322,9 +351,10 @@ Responde en español.
 
 ---
 
-Sigue exactamente las instrucciones del skill **Bootstrap Architect**. El skill define 4 etapas con puertas (Repo y Project → Arquitectura → Plan → Issues) e indica cuál iniciar según los MCPs configurados. Lee el skill primero, luego comienza en la etapa correcta. NO saltes etapas. Emite la señal de la etapa al final de cada mensaje y espera mi validación antes de continuar."#),
+Sigue exactamente las instrucciones del skill **Bootstrap Architect**. El skill define 4 etapas con puertas (Repo y Project → Arquitectura → Plan → Issues) e indica cuál iniciar según los MCPs configurados. Lee el skill primero, luego comienza en la etapa correcta. NO saltes etapas. Emite la señal de la etapa al final de cada mensaje y espera mi validación antes de continuar."#
+        ),
         _ => format!(
-r#"# Bootstrap du projet "{project_name}"
+            r#"# Bootstrap du projet "{project_name}"
 
 Réponds en français.
 
@@ -333,14 +363,15 @@ Réponds en français.
 
 ---
 
-Suis les instructions du skill **Bootstrap Architect** à la lettre. Le skill définit 4 étapes avec validation (Repo & Project Setup → Architecture → Plan → Issues) et t'indique par laquelle commencer selon les MCPs configurés. Lis le skill d'abord, puis démarre à la bonne étape. Ne saute AUCUNE étape. Émets le signal de l'étape à la fin de chaque message et attends ma validation avant de continuer."#),
+Suis les instructions du skill **Bootstrap Architect** à la lettre. Le skill définit 4 étapes avec validation (Repo & Project Setup → Architecture → Plan → Issues) et t'indique par laquelle commencer selon les MCPs configurés. Lis le skill d'abord, puis démarre à la bonne étape. Ne saute AUCUNE étape. Émets le signal de l'étape à la fin de chaque message et attends ma validation avant de continuer."#
+        ),
     }
 }
 
 fn build_bootstrap_prompt(language: &str, project_name: &str, description: &str) -> String {
     match language {
         "en" => format!(
-r#"# Bootstrap for project "{project_name}"
+            r#"# Bootstrap for project "{project_name}"
 
 Respond in English.
 
@@ -382,7 +413,7 @@ Start by analyzing the description above, then guide me through the following st
 Start now with step 1. Ask me questions if the description lacks details."#
         ),
         "es" => format!(
-r#"# Bootstrap del proyecto "{project_name}"
+            r#"# Bootstrap del proyecto "{project_name}"
 
 Responde en español.
 
@@ -424,7 +455,7 @@ Comienza analizando la descripción anterior y luego guíame a través de los si
 Comienza ahora por el paso 1. Hazme preguntas si la descripción carece de detalles."#
         ),
         _ => format!(
-r#"# Bootstrap du projet "{project_name}"
+            r#"# Bootstrap du projet "{project_name}"
 
 Réponds en français.
 
@@ -491,8 +522,11 @@ mod prompt_tests {
     fn bootstrap_prompt_contains_completion_signal() {
         for lang in ["fr", "en", "es"] {
             let prompt = build_bootstrap_prompt(lang, "P", "d");
-            assert!(prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
-                "Bootstrap prompt ({}) must contain completion signal", lang);
+            assert!(
+                prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
+                "Bootstrap prompt ({}) must contain completion signal",
+                lang
+            );
         }
     }
 
@@ -501,31 +535,54 @@ mod prompt_tests {
         for lang in ["fr", "en", "es"] {
             let prompt = build_bootstrap_plus_prompt(lang, "MyApp", "A cool app");
             // Must contain the project info
-            assert!(prompt.contains("MyApp"), "Plus prompt ({}) must contain project name", lang);
-            assert!(prompt.contains("A cool app"), "Plus prompt ({}) must contain description", lang);
+            assert!(
+                prompt.contains("MyApp"),
+                "Plus prompt ({}) must contain project name",
+                lang
+            );
+            assert!(
+                prompt.contains("A cool app"),
+                "Plus prompt ({}) must contain description",
+                lang
+            );
             // Must reference the skill by name — that's how the LLM knows to
             // look at the injected system prompt for the gated workflow.
-            assert!(prompt.contains("Bootstrap Architect"),
-                "Plus prompt ({}) must reference the skill", lang);
+            assert!(
+                prompt.contains("Bootstrap Architect"),
+                "Plus prompt ({}) must reference the skill",
+                lang
+            );
             // v4: must NOT hardcode a starting stage. Earlier versions said
             // "Commence par l'Étape 1" / "Start with Stage 1" which made the
             // agent skip Stage 0 entirely (disc 8716ae79). The skill decides
             // which stage to start based on the configured MCPs.
             assert!(!prompt.contains("Commence par l'**Étape 1**"),
                 "Plus prompt ({}) must NOT hardcode 'Commence par l'Étape 1' — let the skill decide", lang);
-            assert!(!prompt.contains("Start with **Stage 1**"),
-                "Plus prompt ({}) must NOT hardcode 'Start with Stage 1'", lang);
-            assert!(!prompt.contains("Comienza con la **Etapa 1**"),
-                "Plus prompt ({}) must NOT hardcode 'Comienza con la Etapa 1'", lang);
+            assert!(
+                !prompt.contains("Start with **Stage 1**"),
+                "Plus prompt ({}) must NOT hardcode 'Start with Stage 1'",
+                lang
+            );
+            assert!(
+                !prompt.contains("Comienza con la **Etapa 1**"),
+                "Plus prompt ({}) must NOT hardcode 'Comienza con la Etapa 1'",
+                lang
+            );
             // Must NOT mention legacy signals that the skill no longer uses
-            assert!(!prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
-                "Plus prompt ({}) must NOT mention BOOTSTRAP_COMPLETE (handled by skill)", lang);
+            assert!(
+                !prompt.contains("KRONN:BOOTSTRAP_COMPLETE"),
+                "Plus prompt ({}) must NOT mention BOOTSTRAP_COMPLETE (handled by skill)",
+                lang
+            );
             // Must tell the agent to not skip stages — otherwise Stage 0
             // can be silently bypassed when the LLM infers the wrong start.
-            assert!(prompt.to_lowercase().contains("saute")
-                 || prompt.to_lowercase().contains("skip")
-                 || prompt.to_lowercase().contains("salt"),
-                "Plus prompt ({}) must instruct the agent to not skip stages", lang);
+            assert!(
+                prompt.to_lowercase().contains("saute")
+                    || prompt.to_lowercase().contains("skip")
+                    || prompt.to_lowercase().contains("salt"),
+                "Plus prompt ({}) must instruct the agent to not skip stages",
+                lang
+            );
         }
     }
 
@@ -537,7 +594,10 @@ mod prompt_tests {
         // a future multi-user / peer caller from registering a project that
         // anchors reads outside the intended scan roots.
         let bad = scanner::contains_parent_dir("/home/user/../etc/passwd");
-        assert!(bad, "scanner::contains_parent_dir must flag /home/user/../etc/passwd");
+        assert!(
+            bad,
+            "scanner::contains_parent_dir must flag /home/user/../etc/passwd"
+        );
         let good = scanner::contains_parent_dir("/home/user/repos/my-project");
         assert!(!good, "Clean absolute paths must not be flagged");
     }
@@ -554,6 +614,8 @@ mod prompt_tests {
         // A double-dot sequence within a filename component (e.g. "file..bak")
         // is not a parent-dir component — must NOT be rejected.
         assert!(!scanner::contains_parent_dir("/home/user/file..bak"));
-        assert!(!scanner::contains_parent_dir("/home/user/.config/app..conf"));
+        assert!(!scanner::contains_parent_dir(
+            "/home/user/.config/app..conf"
+        ));
     }
 }

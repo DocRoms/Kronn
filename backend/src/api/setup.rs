@@ -1,3 +1,7 @@
+use crate::agents;
+use crate::core::{config, scanner};
+use crate::models::*;
+use crate::AppState;
 use axum::{
     body::Body,
     extract::{Multipart, Path, State},
@@ -6,10 +10,6 @@ use axum::{
     Json,
 };
 use chrono::Utc;
-use crate::models::*;
-use crate::core::{config, scanner};
-use crate::agents;
-use crate::AppState;
 
 /// Resolve default scan paths (best candidate for the wizard).
 /// In Docker: KRONN_HOST_HOME.
@@ -42,17 +42,14 @@ fn default_scan_path() -> Option<String> {
     }
 
     // Fallback: native user home
-    directories::UserDirs::new()
-        .map(|d| d.home_dir().to_string_lossy().to_string())
+    directories::UserDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
 }
 
 /// GET /api/setup/status
 /// Returns current setup state with auto-detected repos.
 /// Fast path: if config exists and scan_paths are set, skip the expensive
 /// agent detection + filesystem scan — setup is already complete.
-pub async fn get_status(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<SetupStatus>> {
+pub async fn get_status(State(state): State<AppState>) -> Json<ApiResponse<SetupStatus>> {
     let is_first = config::is_first_run().await.unwrap_or(true);
 
     let config = state.config.read().await;
@@ -96,9 +93,9 @@ pub async fn get_status(
     let scan_depth = config.scan.scan_depth;
     drop(config);
 
-    let has_wsl_paths = scan_paths.iter().any(|p| {
-        p.starts_with(r"\\wsl.localhost\") || p.starts_with(r"\\wsl$\")
-    });
+    let has_wsl_paths = scan_paths
+        .iter()
+        .any(|p| p.starts_with(r"\\wsl.localhost\") || p.starts_with(r"\\wsl$\"));
     let scan_timeout = if has_wsl_paths { 15 } else { 5 };
 
     // Parallel: detect agents + scan repos simultaneously
@@ -112,7 +109,10 @@ pub async fn get_status(
 
     let repos_detected = repos_result
         .unwrap_or_else(|_| {
-            tracing::warn!("Repo scan timed out after {}s — returning empty list", scan_timeout);
+            tracing::warn!(
+                "Repo scan timed out after {}s — returning empty list",
+                scan_timeout
+            );
             Ok(vec![])
         })
         .unwrap_or_default();
@@ -137,18 +137,14 @@ pub async fn get_status(
 
 /// GET /api/config/scan-paths
 /// Returns the configured scan paths
-pub async fn get_scan_paths(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<String>>> {
+pub async fn get_scan_paths(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.scan.paths.clone()))
 }
 
 /// GET /api/config/scan-ignore
 /// Returns the configured scan ignore patterns
-pub async fn get_scan_ignore(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<String>>> {
+pub async fn get_scan_ignore(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.scan.ignore.clone()))
 }
@@ -184,9 +180,7 @@ pub async fn set_scan_paths(
 
 /// POST /api/setup/install-agent
 /// Install an agent
-pub async fn install_agent(
-    Json(agent_type): Json<AgentType>,
-) -> Json<ApiResponse<String>> {
+pub async fn install_agent(Json(agent_type): Json<AgentType>) -> Json<ApiResponse<String>> {
     match agents::install_agent(&agent_type).await {
         Ok(output) => Json(ApiResponse::ok(output)),
         Err(e) => Json(ApiResponse::err(format!("Install failed: {}", e))),
@@ -195,9 +189,7 @@ pub async fn install_agent(
 
 /// POST /api/setup/complete
 /// Mark setup as complete
-pub async fn complete(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<()>> {
+pub async fn complete(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     let config = state.config.read().await;
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
@@ -207,17 +199,20 @@ pub async fn complete(
 
 /// GET /api/config/tokens
 /// Returns all API keys (masked) grouped by provider
-pub async fn get_tokens(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<ApiKeysResponse>> {
+pub async fn get_tokens(State(state): State<AppState>) -> Json<ApiResponse<ApiKeysResponse>> {
     let config = state.config.read().await;
-    let keys = config.tokens.keys.iter().map(|k| ApiKeyDisplay {
-        id: k.id.clone(),
-        name: k.name.clone(),
-        provider: k.provider.clone(),
-        masked_value: mask_token(&k.value),
-        active: k.active,
-    }).collect();
+    let keys = config
+        .tokens
+        .keys
+        .iter()
+        .map(|k| ApiKeyDisplay {
+            id: k.id.clone(),
+            name: k.name.clone(),
+            provider: k.provider.clone(),
+            masked_value: mask_token(&k.value),
+            active: k.active,
+        })
+        .collect();
     Json(ApiResponse::ok(ApiKeysResponse {
         keys,
         disabled_overrides: config.tokens.disabled_overrides.clone(),
@@ -247,7 +242,11 @@ pub async fn save_api_key(
         }
     } else {
         // Create new
-        let is_first = !config.tokens.keys.iter().any(|k| k.provider == req.provider);
+        let is_first = !config
+            .tokens
+            .keys
+            .iter()
+            .any(|k| k.provider == req.provider);
         let new_key = ApiKey {
             id: uuid::Uuid::new_v4().to_string(),
             name: req.name,
@@ -284,7 +283,12 @@ pub async fn delete_api_key(
         let removed = config.tokens.keys.remove(i);
         // If the deleted key was active, activate the next key for this provider
         if removed.active {
-            if let Some(next) = config.tokens.keys.iter_mut().find(|k| k.provider == removed.provider) {
+            if let Some(next) = config
+                .tokens
+                .keys
+                .iter_mut()
+                .find(|k| k.provider == removed.provider)
+            {
                 next.active = true;
             }
         }
@@ -305,7 +309,10 @@ pub async fn activate_api_key(
 ) -> Json<ApiResponse<()>> {
     let mut config = state.config.write().await;
 
-    let provider = config.tokens.keys.iter()
+    let provider = config
+        .tokens
+        .keys
+        .iter()
         .find(|k| k.id == id)
         .map(|k| k.provider.clone());
 
@@ -344,14 +351,18 @@ pub async fn toggle_token_override(
 
     // Sync agent auth files: write key if enabled, remove if disabled
     if provider == "openai" {
-        sync_codex_auth(
-            if is_now_enabled { config.tokens.active_key_for("openai") } else { None },
-        );
+        sync_codex_auth(if is_now_enabled {
+            config.tokens.active_key_for("openai")
+        } else {
+            None
+        });
     }
     if provider == "google" {
-        crate::core::key_discovery::write_gemini_key(
-            if is_now_enabled { config.tokens.active_key_for("google") } else { None },
-        );
+        crate::core::key_discovery::write_gemini_key(if is_now_enabled {
+            config.tokens.active_key_for("google")
+        } else {
+            None
+        });
     }
 
     match config::save(&config).await {
@@ -361,9 +372,7 @@ pub async fn toggle_token_override(
 }
 
 /// GET /api/config/language
-pub async fn get_language(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<String>> {
+pub async fn get_language(State(state): State<AppState>) -> Json<ApiResponse<String>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.language.clone()))
 }
@@ -387,9 +396,7 @@ pub async fn save_language(
 /// mount to survive Tauri WebView2 localStorage wipes (app update, profile
 /// rotation on Windows) — localStorage remains the fast-path write so the
 /// UI doesn't flash on navigation.
-pub async fn get_ui_language(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<String>> {
+pub async fn get_ui_language(State(state): State<AppState>) -> Json<ApiResponse<String>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.ui_language.clone()))
 }
@@ -402,7 +409,10 @@ pub async fn save_ui_language(
     // Validate — refuse random strings to avoid poisoning the config. We
     // accept only the three locales the frontend actually ships.
     if !matches!(lang.as_str(), "fr" | "en" | "es") {
-        return Json(ApiResponse::err(format!("Invalid ui_language '{}'. Expected fr|en|es.", lang)));
+        return Json(ApiResponse::err(format!(
+            "Invalid ui_language '{}'. Expected fr|en|es.",
+            lang
+        )));
     }
     let mut config = state.config.write().await;
     config.ui_language = lang;
@@ -413,9 +423,7 @@ pub async fn save_ui_language(
 }
 
 /// GET /api/config/stt-model
-pub async fn get_stt_model(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Option<String>>> {
+pub async fn get_stt_model(State(state): State<AppState>) -> Json<ApiResponse<Option<String>>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.stt_model.clone()))
 }
@@ -426,7 +434,11 @@ pub async fn save_stt_model(
     Json(model_id): Json<String>,
 ) -> Json<ApiResponse<()>> {
     let mut config = state.config.write().await;
-    config.stt_model = if model_id.is_empty() { None } else { Some(model_id) };
+    config.stt_model = if model_id.is_empty() {
+        None
+    } else {
+        Some(model_id)
+    };
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
@@ -454,17 +466,15 @@ pub struct TtsVoiceRequest {
 /// that provides glossary, company conventions, tech stack overview, etc.
 /// Supplements project-level `ai/` context — this one applies even when
 /// the discussion has no project attached.
-pub async fn get_global_context(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<String>> {
+pub async fn get_global_context(State(state): State<AppState>) -> Json<ApiResponse<String>> {
     let config = state.config.read().await;
-    Json(ApiResponse::ok(config.server.global_context.clone().unwrap_or_default()))
+    Json(ApiResponse::ok(
+        config.server.global_context.clone().unwrap_or_default(),
+    ))
 }
 
 /// GET /api/config/global-context-mode
-pub async fn get_global_context_mode(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<String>> {
+pub async fn get_global_context_mode(State(state): State<AppState>) -> Json<ApiResponse<String>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.server.global_context_mode.clone()))
 }
@@ -475,7 +485,10 @@ pub async fn save_global_context_mode(
     Json(mode): Json<String>,
 ) -> Json<ApiResponse<()>> {
     if !matches!(mode.as_str(), "always" | "no_project" | "never") {
-        return Json(ApiResponse::err(format!("Invalid mode '{}'. Expected always|no_project|never.", mode)));
+        return Json(ApiResponse::err(format!(
+            "Invalid mode '{}'. Expected always|no_project|never.",
+            mode
+        )));
     }
     let mut config = state.config.write().await;
     config.server.global_context_mode = mode;
@@ -490,7 +503,9 @@ pub async fn get_anti_hallucination_mode(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<String>> {
     let config = state.config.read().await;
-    Json(ApiResponse::ok(config.server.anti_hallucination_mode.clone()))
+    Json(ApiResponse::ok(
+        config.server.anti_hallucination_mode.clone(),
+    ))
 }
 
 /// POST /api/config/anti-hallucination-mode
@@ -521,7 +536,9 @@ pub async fn save_anti_hallucination_mode(
 pub async fn get_continual_learning_enabled(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<bool>> {
-    Json(ApiResponse::ok(state.config.read().await.server.continual_learning_enabled))
+    Json(ApiResponse::ok(
+        state.config.read().await.server.continual_learning_enabled,
+    ))
 }
 
 /// POST /api/config/continual-learning-enabled — flip the master toggle.
@@ -586,7 +603,11 @@ pub async fn save_global_context(
     Json(content): Json<String>,
 ) -> Json<ApiResponse<()>> {
     let mut config = state.config.write().await;
-    config.server.global_context = if content.trim().is_empty() { None } else { Some(content) };
+    config.server.global_context = if content.trim().is_empty() {
+        None
+    } else {
+        Some(content)
+    };
     match config::save(&config).await {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("Failed to save: {}", e))),
@@ -614,9 +635,7 @@ pub async fn save_tts_voice(
 }
 
 /// GET /api/config/scan-depth
-pub async fn get_scan_depth(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<usize>> {
+pub async fn get_scan_depth(State(state): State<AppState>) -> Json<ApiResponse<usize>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.scan.scan_depth))
 }
@@ -636,9 +655,7 @@ pub async fn set_scan_depth(
 }
 
 /// GET /api/config/agent-access
-pub async fn get_agent_access(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<AgentsConfig>> {
+pub async fn get_agent_access(State(state): State<AppState>) -> Json<ApiResponse<AgentsConfig>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.agents.clone()))
 }
@@ -665,9 +682,7 @@ pub async fn set_agent_access(
 }
 
 /// GET /api/config/model-tiers
-pub async fn get_model_tiers(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<ModelTiersConfig>> {
+pub async fn get_model_tiers(State(state): State<AppState>) -> Json<ApiResponse<ModelTiersConfig>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.agents.model_tiers.clone()))
 }
@@ -713,7 +728,11 @@ pub async fn set_server_config(
 ) -> Json<ApiResponse<()>> {
     let mut config = state.config.write().await;
     if let Some(domain) = req.domain {
-        config.server.domain = if domain.is_empty() { None } else { Some(domain) };
+        config.server.domain = if domain.is_empty() {
+            None
+        } else {
+            Some(domain)
+        };
     }
     if let Some(max) = req.max_concurrent_agents {
         config.server.max_concurrent_agents = max.clamp(1, 20);
@@ -722,7 +741,11 @@ pub async fn set_server_config(
         config.server.agent_stall_timeout_min = clamp_stall_timeout_min(timeout);
     }
     if let Some(pseudo) = req.pseudo {
-        config.server.pseudo = if pseudo.is_empty() { None } else { Some(pseudo) };
+        config.server.pseudo = if pseudo.is_empty() {
+            None
+        } else {
+            Some(pseudo)
+        };
     }
     if let Some(email) = req.avatar_email {
         config.server.avatar_email = if email.is_empty() { None } else { Some(email) };
@@ -829,9 +852,7 @@ pub async fn set_network_exposure(
 }
 
 /// POST /api/config/auth-token/regenerate
-pub async fn regenerate_auth_token(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<String>> {
+pub async fn regenerate_auth_token(State(state): State<AppState>) -> Json<ApiResponse<String>> {
     let mut config = state.config.write().await;
     let new_token = uuid::Uuid::new_v4().to_string();
     config.server.auth_token = Some(new_token.clone());
@@ -843,9 +864,7 @@ pub async fn regenerate_auth_token(
 }
 
 /// GET /api/config/auth-token
-pub async fn get_auth_token(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Option<String>>> {
+pub async fn get_auth_token(State(state): State<AppState>) -> Json<ApiResponse<Option<String>>> {
     let config = state.config.read().await;
     Json(ApiResponse::ok(config.server.auth_token.clone()))
 }
@@ -867,11 +886,17 @@ fn sync_codex_auth(key: Option<&str>) {
                 Ok(_) | Err(_) if key.is_some() => {
                     // Corrupt/non-object file and we're about to write: don't
                     // merge garbage, but say what we're replacing.
-                    tracing::warn!("{} was not valid JSON — rewriting it", codex_auth_path.display());
+                    tracing::warn!(
+                        "{} was not valid JSON — rewriting it",
+                        codex_auth_path.display()
+                    );
                     serde_json::Map::new()
                 }
                 _ => {
-                    tracing::warn!("{} unreadable as JSON — leaving it untouched", codex_auth_path.display());
+                    tracing::warn!(
+                        "{} unreadable as JSON — leaving it untouched",
+                        codex_auth_path.display()
+                    );
                     return;
                 }
             },
@@ -882,12 +907,22 @@ fn sync_codex_auth(key: Option<&str>) {
         Some(k) => {
             let _ = std::fs::create_dir_all(&codex_dir);
             let mut merged = existing;
-            merged.insert("auth_mode".into(), serde_json::Value::String("apikey".into()));
+            merged.insert(
+                "auth_mode".into(),
+                serde_json::Value::String("apikey".into()),
+            );
             merged.insert("OPENAI_API_KEY".into(), serde_json::Value::String(k.into()));
             let content = serde_json::Value::Object(merged);
             // Safety: serializing a serde_json::Value cannot fail
-            match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).expect("JSON Value serialization cannot fail")) {
-                Ok(_) => tracing::info!("Synced OpenAI key into {} (other fields preserved)", codex_auth_path.display()),
+            match std::fs::write(
+                &codex_auth_path,
+                serde_json::to_string_pretty(&content)
+                    .expect("JSON Value serialization cannot fail"),
+            ) {
+                Ok(_) => tracing::info!(
+                    "Synced OpenAI key into {} (other fields preserved)",
+                    codex_auth_path.display()
+                ),
                 Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
             }
         }
@@ -895,7 +930,9 @@ fn sync_codex_auth(key: Option<&str>) {
             // Remove ONLY our fields; other credentials (OAuth tokens) stay.
             // Delete the file only when nothing else remains in it.
             let mut merged = existing;
-            if merged.remove("OPENAI_API_KEY").is_none() && merged.get("auth_mode").and_then(|v| v.as_str()) != Some("apikey") {
+            if merged.remove("OPENAI_API_KEY").is_none()
+                && merged.get("auth_mode").and_then(|v| v.as_str()) != Some("apikey")
+            {
                 return; // nothing of ours in there
             }
             if merged.get("auth_mode").and_then(|v| v.as_str()) == Some("apikey") {
@@ -903,15 +940,29 @@ fn sync_codex_auth(key: Option<&str>) {
             }
             if merged.is_empty() {
                 match std::fs::remove_file(&codex_auth_path) {
-                    Ok(_) => tracing::info!("Removed {} (Codex will use local auth)", codex_auth_path.display()),
+                    Ok(_) => tracing::info!(
+                        "Removed {} (Codex will use local auth)",
+                        codex_auth_path.display()
+                    ),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(e) => tracing::warn!("Failed to remove {}: {}", codex_auth_path.display(), e),
+                    Err(e) => {
+                        tracing::warn!("Failed to remove {}: {}", codex_auth_path.display(), e)
+                    }
                 }
             } else {
                 let content = serde_json::Value::Object(merged);
-                match std::fs::write(&codex_auth_path, serde_json::to_string_pretty(&content).expect("JSON Value serialization cannot fail")) {
-                    Ok(_) => tracing::info!("Removed Kronn's API-key fields from {} (other credentials preserved)", codex_auth_path.display()),
-                    Err(e) => tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e),
+                match std::fs::write(
+                    &codex_auth_path,
+                    serde_json::to_string_pretty(&content)
+                        .expect("JSON Value serialization cannot fail"),
+                ) {
+                    Ok(_) => tracing::info!(
+                        "Removed Kronn's API-key fields from {} (other credentials preserved)",
+                        codex_auth_path.display()
+                    ),
+                    Err(e) => {
+                        tracing::warn!("Failed to write {}: {}", codex_auth_path.display(), e)
+                    }
                 }
             }
         }
@@ -920,15 +971,17 @@ fn sync_codex_auth(key: Option<&str>) {
 
 /// POST /api/config/sync-agent-tokens
 /// Write API tokens into agent-specific auth files (e.g. ~/.codex/auth.json)
-pub async fn sync_agent_tokens(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<String>>> {
+pub async fn sync_agent_tokens(State(state): State<AppState>) -> Json<ApiResponse<Vec<String>>> {
     let config = state.config.read().await;
     let mut synced: Vec<String> = Vec::new();
 
     // ── Codex: ~/.codex/auth.json ──
     if let Some(openai_key) = config.tokens.active_key_for("openai") {
-        if !config.tokens.disabled_overrides.contains(&"openai".to_string()) {
+        if !config
+            .tokens
+            .disabled_overrides
+            .contains(&"openai".to_string())
+        {
             sync_codex_auth(Some(openai_key));
             synced.push("Codex".into());
         }
@@ -936,7 +989,11 @@ pub async fn sync_agent_tokens(
 
     // ── Gemini CLI: ~/.gemini/settings.json ──
     if let Some(google_key) = config.tokens.active_key_for("google") {
-        if !config.tokens.disabled_overrides.contains(&"google".to_string()) {
+        if !config
+            .tokens
+            .disabled_overrides
+            .contains(&"google".to_string())
+        {
             crate::core::key_discovery::write_gemini_key(Some(google_key));
             synced.push("Gemini CLI".into());
         }
@@ -1004,7 +1061,7 @@ fn mask_token(token: &str) -> String {
     if token.len() <= 8 {
         return "*".repeat(token.len());
     }
-    format!("{}...{}", &token[..4], &token[token.len()-4..])
+    format!("{}...{}", &token[..4], &token[token.len() - 4..])
 }
 
 /// Clamp the operator-supplied agent inactivity timeout (in minutes) to
@@ -1019,39 +1076,47 @@ pub(crate) fn clamp_stall_timeout_min(input: u64) -> u32 {
 }
 
 /// GET /api/config/db-info
-pub async fn db_info(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<DbInfo>> {
+pub async fn db_info(State(state): State<AppState>) -> Json<ApiResponse<DbInfo>> {
     let size_bytes = std::fs::metadata(state.db.path())
         .map(|m| m.len())
         .unwrap_or(0);
 
     // Count custom skills/directives/profiles (file-based, not in DB)
     let custom_skill_count = crate::core::skills::list_all_skills()
-        .iter().filter(|s| !s.is_builtin).count() as u32;
+        .iter()
+        .filter(|s| !s.is_builtin)
+        .count() as u32;
     let custom_profile_count = crate::core::profiles::list_all_profiles()
-        .iter().filter(|p| !p.is_builtin).count() as u32;
+        .iter()
+        .filter(|p| !p.is_builtin)
+        .count() as u32;
     let custom_directive_count = crate::core::directives::list_all_directives()
-        .iter().filter(|d| !d.is_builtin).count() as u32;
+        .iter()
+        .filter(|d| !d.is_builtin)
+        .count() as u32;
 
-    match state.db.with_conn(move |conn| {
-        let count = |table: &str| -> u32 {
-            conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
-                .unwrap_or(0)
-        };
-        Ok(DbInfo {
-            size_bytes,
-            project_count: count("projects"),
-            discussion_count: count("discussions"),
-            message_count: count("messages"),
-            mcp_count: count("mcp_configs"),
-            workflow_count: count("workflows"),
-            workflow_run_count: count("workflow_runs"),
-            custom_skill_count,
-            custom_profile_count,
-            custom_directive_count,
+    match state
+        .db
+        .with_conn(move |conn| {
+            let count = |table: &str| -> u32 {
+                conn.query_row(&format!("SELECT COUNT(*) FROM {}", table), [], |r| r.get(0))
+                    .unwrap_or(0)
+            };
+            Ok(DbInfo {
+                size_bytes,
+                project_count: count("projects"),
+                discussion_count: count("discussions"),
+                message_count: count("messages"),
+                mcp_count: count("mcp_configs"),
+                workflow_count: count("workflows"),
+                workflow_run_count: count("workflow_runs"),
+                custom_skill_count,
+                custom_profile_count,
+                custom_directive_count,
+            })
         })
-    }).await {
+        .await
+    {
         Ok(info) => Json(ApiResponse::ok(info)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -1082,9 +1147,7 @@ pub struct DbBackupResponse {
 ///
 /// Idempotent: re-running drops a new file with a fresh timestamp.
 /// Older backups stay — the operator decides retention.
-pub async fn db_backup(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<DbBackupResponse>> {
+pub async fn db_backup(State(state): State<AppState>) -> Json<ApiResponse<DbBackupResponse>> {
     let source_path = state.db.path().clone();
 
     // In-memory DB (test mode) → nothing meaningful to back up.
@@ -1098,12 +1161,17 @@ pub async fn db_backup(
     // env wrangling. Operator can move/copy the file afterwards.
     let backup_dir = match source_path.parent() {
         Some(p) => p.join("backups"),
-        None => return Json(ApiResponse::err(
-            "Cannot determine backup parent dir from DB path".to_string(),
-        )),
+        None => {
+            return Json(ApiResponse::err(
+                "Cannot determine backup parent dir from DB path".to_string(),
+            ))
+        }
     };
     if let Err(e) = std::fs::create_dir_all(&backup_dir) {
-        return Json(ApiResponse::err(format!("Failed to create backup dir: {}", e)));
+        return Json(ApiResponse::err(format!(
+            "Failed to create backup dir: {}",
+            e
+        )));
     }
 
     let now = chrono::Utc::now();
@@ -1116,28 +1184,34 @@ pub async fn db_backup(
     // doesn't need a quiet window, the API holds the mutex while it
     // copies pages.
     let backup_path_owned = backup_path.clone();
-    let result = state.db.with_conn(move |conn| {
-        let mut dst = rusqlite::Connection::open(&backup_path_owned)?;
-        let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
-        // One-shot copy via `step(-1)` (all pages in a single call). Pausing
-        // between page batches only helps when OTHER connections could write
-        // in the gaps — Kronn has a single shared connection, so a pause just
-        // holds the global mutex longer (~2.5s/MB) for no benefit.
-        // NOT `run_to_completion(-1, …)`: it asserts pages_per_step > 0 and
-        // panics (2026-07-09 boot-tick incident — poisoned the DB mutex).
-        match backup.step(-1)? {
-            rusqlite::backup::StepResult::Done => {}
-            other => anyhow::bail!("backup did not complete in one step: {other:?}"),
-        }
-        Ok(())
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let mut dst = rusqlite::Connection::open(&backup_path_owned)?;
+            let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
+            // One-shot copy via `step(-1)` (all pages in a single call). Pausing
+            // between page batches only helps when OTHER connections could write
+            // in the gaps — Kronn has a single shared connection, so a pause just
+            // holds the global mutex longer (~2.5s/MB) for no benefit.
+            // NOT `run_to_completion(-1, …)`: it asserts pages_per_step > 0 and
+            // panics (2026-07-09 boot-tick incident — poisoned the DB mutex).
+            match backup.step(-1)? {
+                rusqlite::backup::StepResult::Done => {}
+                other => anyhow::bail!("backup did not complete in one step: {other:?}"),
+            }
+            Ok(())
+        })
+        .await;
 
     match result {
         Ok(()) => {
-            let size_bytes = std::fs::metadata(&backup_path).map(|m| m.len()).unwrap_or(0);
+            let size_bytes = std::fs::metadata(&backup_path)
+                .map(|m| m.len())
+                .unwrap_or(0);
             tracing::info!(
                 "DB backup written: {} ({} bytes)",
-                backup_path.display(), size_bytes
+                backup_path.display(),
+                size_bytes
             );
             Json(ApiResponse::ok(DbBackupResponse {
                 backup_path: backup_path.to_string_lossy().to_string(),
@@ -1156,39 +1230,72 @@ pub async fn db_backup(
 /// Build the DbExport from current state
 async fn build_export(state: &AppState) -> Result<DbExport, String> {
     // ADR-001 O2 — the export walks EVERY table; read connection.
-    let projects = state.db.with_read_conn(crate::db::projects::list_projects).await
+    let projects = state
+        .db
+        .with_read_conn(crate::db::projects::list_projects)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
-    let discussions = state.db.with_read_conn(crate::db::discussions::list_discussions_with_messages).await
+    let discussions = state
+        .db
+        .with_read_conn(crate::db::discussions::list_discussions_with_messages)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
-    let (workflows, mcp_servers, mcp_configs) = state.db.with_read_conn(|conn| {
-        let wf = crate::db::workflows::list_workflows(conn)?;
-        let servers = crate::db::mcps::list_servers(conn)?;
-        let configs = crate::db::mcps::list_configs(conn)?;
-        Ok((wf, servers, configs))
-    }).await.map_err(|e| format!("DB error: {}", e))?;
-    let contacts = state.db.with_read_conn(crate::db::contacts::list_contacts).await
+    let (workflows, mcp_servers, mcp_configs) = state
+        .db
+        .with_read_conn(|conn| {
+            let wf = crate::db::workflows::list_workflows(conn)?;
+            let servers = crate::db::mcps::list_servers(conn)?;
+            let configs = crate::db::mcps::list_configs(conn)?;
+            Ok((wf, servers, configs))
+        })
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
-    let quick_prompts = state.db.with_read_conn(crate::db::quick_prompts::list_quick_prompts).await
+    let contacts = state
+        .db
+        .with_read_conn(crate::db::contacts::list_contacts)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
-    let quick_apis = state.db.with_read_conn(crate::db::quick_apis::list_quick_apis).await
+    let quick_prompts = state
+        .db
+        .with_read_conn(crate::db::quick_prompts::list_quick_prompts)
+        .await
+        .map_err(|e| format!("DB error: {}", e))?;
+    let quick_apis = state
+        .db
+        .with_read_conn(crate::db::quick_apis::list_quick_apis)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
     // All learnings, every status — pending candidates and promoted facts both
     // matter on a migrated box (None filters = no status / no project narrowing).
-    let learnings = state.db.with_read_conn(|conn| crate::db::learnings::list(conn, None, None)).await
+    let learnings = state
+        .db
+        .with_read_conn(|conn| crate::db::learnings::list(conn, None, None))
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
     // v5 (passe D) — QP version lineage + rejection counters, previously lost.
-    let quick_prompt_versions = state.db
-        .with_read_conn(crate::db::quick_prompts::list_all_quick_prompt_versions).await
+    let quick_prompt_versions = state
+        .db
+        .with_read_conn(crate::db::quick_prompts::list_all_quick_prompt_versions)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
-    let learning_rejections = state.db.with_read_conn(crate::db::learnings::list_rejections).await
+    let learning_rejections = state
+        .db
+        .with_read_conn(crate::db::learnings::list_rejections)
+        .await
         .map_err(|e| format!("DB error: {}", e))?;
 
     let custom_skills: Vec<_> = crate::core::skills::list_all_skills()
-        .into_iter().filter(|s| !s.is_builtin).collect();
+        .into_iter()
+        .filter(|s| !s.is_builtin)
+        .collect();
     let custom_directives: Vec<_> = crate::core::directives::list_all_directives()
-        .into_iter().filter(|d| !d.is_builtin).collect();
+        .into_iter()
+        .filter(|d| !d.is_builtin)
+        .collect();
     let custom_profiles: Vec<_> = crate::core::profiles::list_all_profiles()
-        .into_iter().filter(|p| !p.is_builtin).collect();
+        .into_iter()
+        .filter(|p| !p.is_builtin)
+        .collect();
 
     Ok(DbExport {
         version: crate::models::db::CURRENT_EXPORT_VERSION,
@@ -1225,9 +1332,7 @@ fn build_export_config(config: &AppConfig) -> AppConfig {
 }
 
 /// GET /api/config/export — returns a ZIP containing data.json + config.toml
-pub async fn export_data(
-    State(state): State<AppState>,
-) -> Response {
+pub async fn export_data(State(state): State<AppState>) -> Response {
     let db_export = match build_export(&state).await {
         Ok(e) => e,
         Err(msg) => return (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response(),
@@ -1235,14 +1340,26 @@ pub async fn export_data(
 
     let data_json = match serde_json::to_string_pretty(&db_export) {
         Ok(j) => j,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("JSON error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("JSON error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     let config = state.config.read().await;
     let export_cfg = build_export_config(&config);
     let config_toml = match toml::to_string_pretty(&export_cfg) {
         Ok(t) => t,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("TOML error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("TOML error: {}", e),
+            )
+                .into_response()
+        }
     };
     drop(config);
 
@@ -1264,7 +1381,10 @@ pub async fn export_data(
     Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "application/zip")
-        .header(header::CONTENT_DISPOSITION, "attachment; filename=\"kronn-export.zip\"")
+        .header(
+            header::CONTENT_DISPOSITION,
+            "attachment; filename=\"kronn-export.zip\"",
+        )
         .body(Body::from(bytes))
         .unwrap()
 }
@@ -1283,21 +1403,25 @@ fn build_export_zip(
         let options = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
 
-        zip.start_file("data.json", options).map_err(|e| format!("ZIP error: {}", e))?;
+        zip.start_file("data.json", options)
+            .map_err(|e| format!("ZIP error: {}", e))?;
         std::io::Write::write_all(&mut zip, data_json.as_bytes())
             .map_err(|e| format!("ZIP write error: {}", e))?;
 
-        zip.start_file("config.toml", options).map_err(|e| format!("ZIP error: {}", e))?;
+        zip.start_file("config.toml", options)
+            .map_err(|e| format!("ZIP error: {}", e))?;
         std::io::Write::write_all(&mut zip, config_toml.as_bytes())
             .map_err(|e| format!("ZIP write error: {}", e))?;
 
         if let Some(code) = recovery_code {
-            zip.start_file("recovery.key", options).map_err(|e| format!("ZIP error: {}", e))?;
+            zip.start_file("recovery.key", options)
+                .map_err(|e| format!("ZIP error: {}", e))?;
             std::io::Write::write_all(&mut zip, code.as_bytes())
                 .map_err(|e| format!("ZIP write error: {}", e))?;
         }
 
-        zip.finish().map_err(|e| format!("ZIP finish error: {}", e))?;
+        zip.finish()
+            .map_err(|e| format!("ZIP finish error: {}", e))?;
     }
     Ok(buf.into_inner())
 }
@@ -1310,7 +1434,8 @@ fn build_export_zip(
 fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
     let mut warnings = Vec::new();
     let Ok(blob) = crate::core::recovery::from_code(code) else {
-        warnings.push("The backup carries a recovery blob but it is malformed — ignored.".to_string());
+        warnings
+            .push("The backup carries a recovery blob but it is malformed — ignored.".to_string());
         return warnings;
     };
     match crate::core::recovery::load_blob(dir) {
@@ -1325,7 +1450,8 @@ fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
                     "The backup's recovery blob was installed (this machine's previous one was \
                      kept as recovery.key.backup). If imported plugin secrets are unreadable, \
                      use Plugins → 'Restore from recovery passphrase' with the passphrase set \
-                     on the SOURCE machine.".to_string(),
+                     on the SOURCE machine."
+                        .to_string(),
                 );
             }
         }
@@ -1334,7 +1460,8 @@ fn persist_imported_recovery(dir: &std::path::Path, code: &str) -> Vec<String> {
                 warnings.push(
                     "The backup's recovery blob was installed. If imported plugin secrets are \
                      unreadable, use Plugins → 'Restore from recovery passphrase' with the \
-                     passphrase set on the SOURCE machine.".to_string(),
+                     passphrase set on the SOURCE machine."
+                        .to_string(),
                 );
             }
         }
@@ -1361,18 +1488,30 @@ fn import_clear_statements(data: &DbExport) -> Vec<&'static str> {
         stmts.push("DELETE FROM workflow_runs");
         stmts.push("DELETE FROM workflows");
     }
-    if !data.contacts.is_empty() { stmts.push("DELETE FROM contacts"); }
-    if !data.quick_prompts.is_empty() { stmts.push("DELETE FROM quick_prompts"); }
+    if !data.contacts.is_empty() {
+        stmts.push("DELETE FROM contacts");
+    }
+    if !data.quick_prompts.is_empty() {
+        stmts.push("DELETE FROM quick_prompts");
+    }
     // Versions clear ONLY when the archive carries some (v5+): a v4 export
     // must not wipe local lineage it knows nothing about. Referential
     // integrity vs the replaced parents is handled by the post-import prune.
     if !data.quick_prompt_versions.is_empty() {
         stmts.push("DELETE FROM quick_prompt_versions");
     }
-    if !data.quick_apis.is_empty() { stmts.push("DELETE FROM quick_apis"); }
-    if !data.learnings.is_empty() { stmts.push("DELETE FROM learnings"); }
-    if !data.learning_rejections.is_empty() { stmts.push("DELETE FROM learning_rejections"); }
-    if !data.projects.is_empty() { stmts.push("DELETE FROM projects"); }
+    if !data.quick_apis.is_empty() {
+        stmts.push("DELETE FROM quick_apis");
+    }
+    if !data.learnings.is_empty() {
+        stmts.push("DELETE FROM learnings");
+    }
+    if !data.learning_rejections.is_empty() {
+        stmts.push("DELETE FROM learning_rejections");
+    }
+    if !data.projects.is_empty() {
+        stmts.push("DELETE FROM projects");
+    }
     stmts
 }
 
@@ -1388,7 +1527,8 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
         warnings.push(format!(
             "This backup is an older format (v{} < v{}). Tables it doesn't carry are left \
              untouched instead of wiped — your current data for any newer feature is preserved.",
-            data.version, crate::models::db::CURRENT_EXPORT_VERSION
+            data.version,
+            crate::models::db::CURRENT_EXPORT_VERSION
         ));
     }
 
@@ -1397,17 +1537,25 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     let stmts = import_clear_statements(data);
     if !stmts.is_empty() {
         let batch = format!("{};", stmts.join("; "));
-        state.db.with_conn(move |conn| {
-            conn.execute_batch(&batch)?;
-            Ok(())
-        }).await.map_err(|e| format!("Failed to clear DB: {}", e))?;
+        state
+            .db
+            .with_conn(move |conn| {
+                conn.execute_batch(&batch)?;
+                Ok(())
+            })
+            .await
+            .map_err(|e| format!("Failed to clear DB: {}", e))?;
     }
 
     // Import projects (check path validity)
     for project in &data.projects {
         let p = project.clone();
         let path = project.path.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &p)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &p))
+            .await
+        {
             tracing::warn!("Import project error: {}", e);
         }
         if !std::path::Path::new(&path).exists() {
@@ -1418,14 +1566,22 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import discussions with their messages
     for disc in &data.discussions {
         let d = disc.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &d)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::insert_discussion(conn, &d))
+            .await
+        {
             tracing::warn!("Import discussion error: {}", e);
         }
         let did = disc.id.clone();
         for msg in &disc.messages {
             let m = msg.clone();
             let id = did.clone();
-            if let Err(e) = state.db.with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m)).await {
+            if let Err(e) = state
+                .db
+                .with_conn(move |conn| crate::db::discussions::insert_message(conn, &id, &m))
+                .await
+            {
                 tracing::error!("Failed to import discussion message: {e}");
             }
         }
@@ -1434,13 +1590,21 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import MCP servers & configs
     for server in &data.mcp_servers {
         let s = server.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::mcps::upsert_server(conn, &s))
+            .await
+        {
             tracing::error!("Failed to import MCP server: {e}");
         }
     }
     for config_entry in &data.mcp_configs {
         let c = config_entry.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::mcps::insert_config(conn, &c)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::mcps::insert_config(conn, &c))
+            .await
+        {
             tracing::error!("Failed to import MCP config: {e}");
         }
     }
@@ -1448,7 +1612,11 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import workflows
     for wf in &data.workflows {
         let w = wf.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w))
+            .await
+        {
             tracing::error!("Failed to import workflow: {e}");
         }
     }
@@ -1456,19 +1624,28 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import custom skills/directives/profiles (file-based)
     for skill in &data.custom_skills {
         let _ = crate::core::skills::save_custom_skill(
-            &skill.name, &skill.description, &skill.icon, &skill.category, &skill.content,
-            skill.license.as_deref(), skill.allowed_tools.as_deref(),
+            &skill.name,
+            &skill.description,
+            &skill.icon,
+            &skill.category,
+            &skill.content,
+            skill.license.as_deref(),
+            skill.allowed_tools.as_deref(),
         );
     }
     for directive in &data.custom_directives {
         let _ = crate::core::directives::save_custom_directive(
-            &directive.name, &directive.description, &directive.icon, &directive.category,
-            &directive.content, &directive.conflicts,
+            &directive.name,
+            &directive.description,
+            &directive.icon,
+            &directive.category,
+            &directive.content,
+            &directive.conflicts,
         );
     }
     for profile in &data.custom_profiles {
-        let _ = crate::core::profiles::save_custom_profile(
-            &crate::core::profiles::CustomProfileData {
+        let _ =
+            crate::core::profiles::save_custom_profile(&crate::core::profiles::CustomProfileData {
                 name: &profile.name,
                 persona_name: &profile.persona_name,
                 role: &profile.role,
@@ -1477,14 +1654,17 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
                 category: &profile.category,
                 persona_prompt: &profile.persona_prompt,
                 default_engine: profile.default_engine.as_deref(),
-            }
-        );
+            });
     }
 
     // Import contacts
     for contact in &data.contacts {
         let c = contact.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::contacts::insert_contact(conn, &c))
+            .await
+        {
             tracing::warn!("Import contact error: {}", e);
         }
     }
@@ -1492,7 +1672,11 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import quick prompts
     for qp in &data.quick_prompts {
         let q = qp.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt(conn, &q))
+            .await
+        {
             tracing::warn!("Import quick prompt error: {}", e);
         }
     }
@@ -1500,7 +1684,13 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import QP version history (v5) — verbatim rows, after their parents.
     for v in &data.quick_prompt_versions {
         let v = v.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::quick_prompts::insert_quick_prompt_version_row(conn, &v)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::quick_prompts::insert_quick_prompt_version_row(conn, &v)
+            })
+            .await
+        {
             tracing::warn!("Import quick prompt version error: {}", e);
         }
     }
@@ -1508,7 +1698,11 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Import quick APIs
     for qa in &data.quick_apis {
         let a = qa.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &a)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &a))
+            .await
+        {
             tracing::warn!("Import quick API error: {}", e);
         }
     }
@@ -1518,7 +1712,11 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // failure here is a corrupt export, logged not fatal.
     for learning in &data.learnings {
         let l = learning.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::learnings::insert(conn, &l)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::learnings::insert(conn, &l))
+            .await
+        {
             tracing::warn!("Import learning error: {}", e);
         }
     }
@@ -1526,13 +1724,18 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // Referential prune — local version rows whose parent QP no longer
     // exists after the import (v4 archive: parents replaced, lineage kept
     // for same-id QPs, orphans dropped).
-    match state.db.with_conn(|conn| {
-        conn.execute(
-            "DELETE FROM quick_prompt_versions
+    match state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM quick_prompt_versions
              WHERE quick_prompt_id NOT IN (SELECT id FROM quick_prompts)",
-            [],
-        ).map_err(Into::into)
-    }).await {
+                [],
+            )
+            .map_err(Into::into)
+        })
+        .await
+    {
         Ok(n) if n > 0 => warnings.push(format!(
             "{n} quick-prompt version row(s) dropped — their prompts are not part of this import"
         )),
@@ -1544,16 +1747,26 @@ async fn do_import_db(state: &AppState, data: &DbExport) -> Result<ImportResult,
     // threshold armed across a migration.
     for rej in &data.learning_rejections {
         let r = rej.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::learnings::insert_rejection_row(conn, &r)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::learnings::insert_rejection_row(conn, &r))
+            .await
+        {
             tracing::warn!("Import learning rejection error: {}", e);
         }
     }
 
     if !invalid_paths.is_empty() {
-        warnings.push(format!("{} project(s) have invalid paths — remap them in the Projects page", invalid_paths.len()));
+        warnings.push(format!(
+            "{} project(s) have invalid paths — remap them in the Projects page",
+            invalid_paths.len()
+        ));
     }
 
-    Ok(ImportResult { warnings, invalid_paths })
+    Ok(ImportResult {
+        warnings,
+        invalid_paths,
+    })
 }
 
 /// Merge imported config into current config (language, pseudo, bio, scan_paths — keep existing keys)
@@ -1596,7 +1809,10 @@ async fn merge_import_config(state: &AppState, imported: &AppConfig) -> Vec<Stri
 
     // Check for MCP secrets warning: if imported config has any MCP-related env vars,
     // the encryption_secret is different so they need reconfiguration
-    warnings.push("MCP secrets are encrypted with a different key — reconfigure them in the Plugins page".to_string());
+    warnings.push(
+        "MCP secrets are encrypted with a different key — reconfigure them in the Plugins page"
+            .to_string(),
+    );
 
     if let Err(e) = config::save(&config).await {
         tracing::error!("Failed to save merged config: {}", e);
@@ -1616,11 +1832,7 @@ const ZIP_CAP_RECOVERY_KEY: u64 = 64 * 1024;
 
 /// Read a ZIP entry into a String, refusing past `cap` decompressed bytes.
 /// `take(cap + 1)` makes the overflow detectable without allocating it.
-fn read_zip_entry_capped(
-    f: impl std::io::Read,
-    name: &str,
-    cap: u64,
-) -> Result<String, String> {
+fn read_zip_entry_capped(f: impl std::io::Read, name: &str, cap: u64) -> Result<String, String> {
     let mut contents = String::new();
     std::io::Read::read_to_string(&mut f.take(cap + 1), &mut contents)
         .map_err(|e| format!("Failed to read {name}: {e}"))?;
@@ -1636,16 +1848,15 @@ fn read_zip_entry_capped(
 /// file (synchronous, no await).
 fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option<String>), String> {
     let cursor = std::io::Cursor::new(file_bytes);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| format!("Invalid ZIP: {}", e))?;
+    let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("Invalid ZIP: {}", e))?;
 
     // Read data.json (required)
     let data: DbExport = {
-        let mut f = archive.by_name("data.json")
+        let mut f = archive
+            .by_name("data.json")
             .map_err(|e| format!("data.json not found in ZIP: {}", e))?;
         let contents = read_zip_entry_capped(&mut f, "data.json", ZIP_CAP_DATA_JSON)?;
-        serde_json::from_str(&contents)
-            .map_err(|e| format!("Invalid data.json: {}", e))?
+        serde_json::from_str(&contents).map_err(|e| format!("Invalid data.json: {}", e))?
     };
 
     // Read config.toml (optional) — but an OVERSIZED one is a hard error,
@@ -1663,7 +1874,9 @@ fn extract_zip(file_bytes: &[u8]) -> Result<(DbExport, Option<AppConfig>, Option
     let recovery_code = if let Ok(mut f) = archive.by_name("recovery.key") {
         let contents = read_zip_entry_capped(&mut f, "recovery.key", ZIP_CAP_RECOVERY_KEY)?;
         let trimmed = contents.trim().to_string();
-        crate::core::recovery::from_code(&trimmed).ok().map(|_| trimmed)
+        crate::core::recovery::from_code(&trimmed)
+            .ok()
+            .map(|_| trimmed)
     } else {
         None
     };
@@ -1678,19 +1891,20 @@ pub async fn import_data(
 ) -> Json<ApiResponse<ImportResult>> {
     // Read the uploaded file
     let file_bytes = match multipart.next_field().await {
-        Ok(Some(field)) => {
-            match field.bytes().await {
-                Ok(b) => b,
-                Err(e) => return Json(ApiResponse::err(format!("Failed to read upload: {}", e))),
-            }
-        }
+        Ok(Some(field)) => match field.bytes().await {
+            Ok(b) => b,
+            Err(e) => return Json(ApiResponse::err(format!("Failed to read upload: {}", e))),
+        },
         Ok(None) => return Json(ApiResponse::err("No file uploaded".to_string())),
         Err(e) => return Json(ApiResponse::err(format!("Multipart error: {}", e))),
     };
 
     // Detect format: ZIP (starts with PK\x03\x04) or JSON legacy
-    let is_zip = file_bytes.len() >= 4 && file_bytes[0] == b'P' && file_bytes[1] == b'K'
-        && file_bytes[2] == 0x03 && file_bytes[3] == 0x04;
+    let is_zip = file_bytes.len() >= 4
+        && file_bytes[0] == b'P'
+        && file_bytes[1] == b'K'
+        && file_bytes[2] == 0x03
+        && file_bytes[3] == 0x04;
 
     if is_zip {
         // Extract ZIP (sync — no await needed, avoids Send issues with zip reader)
@@ -1715,7 +1929,9 @@ pub async fn import_data(
         // unlock the imported secrets (never destroys local recovery material).
         if let Some(code) = recovery_code {
             if let Ok(dir) = config::config_dir() {
-                result.warnings.extend(persist_imported_recovery(&dir, &code));
+                result
+                    .warnings
+                    .extend(persist_imported_recovery(&dir, &code));
             }
         }
 
@@ -1738,9 +1954,7 @@ pub async fn import_data(
 
 /// POST /api/setup/reset
 /// Delete config file to trigger first-run wizard again
-pub async fn reset(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<()>> {
+pub async fn reset(State(state): State<AppState>) -> Json<ApiResponse<()>> {
     // Delete config file
     if let Ok(path) = config::config_path() {
         let _ = tokio::fs::remove_file(&path).await;
@@ -1837,7 +2051,9 @@ pub async fn restore_recovery(
         &req.passphrase,
         req.recovery_code.as_deref(),
         &dir,
-    ).await {
+    )
+    .await
+    {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
@@ -1879,8 +2095,8 @@ pub async fn open_url(Json(req): Json<OpenUrlRequest>) -> Json<ApiResponse<()>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serial_test::serial;
     use crate::core::config;
+    use serial_test::serial;
 
     // ─── extract_zip decompressed caps (passe D: zip bomb) ────────────────
 
@@ -1921,7 +2137,10 @@ mod tests {
         let (export, cfg, key) = extract_zip(&bytes).expect("valid archive imports");
         assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION);
         assert!(cfg.is_none());
-        assert!(key.is_none(), "non-parsing recovery code is dropped, not an error");
+        assert!(
+            key.is_none(),
+            "non-parsing recovery code is dropped, not an error"
+        );
     }
 
     // ─── export v5 round-trip (passe D: QP versions + rejection counters) ────
@@ -1930,46 +2149,67 @@ mod tests {
     async fn export_v5_round_trips_qp_versions_and_rejection_counters() {
         let mk_state = || async {
             let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
-            let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(crate::core::config::default_config()));
+            let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(
+                crate::core::config::default_config(),
+            ));
             crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS)
         };
         let source = mk_state().await;
 
         // Seed: one QP + one snapshot version + one armed rejection counter.
-        source.db.with_conn(|conn| {
-            let qp: crate::models::QuickPrompt = serde_json::from_value(serde_json::json!({
-                "id": "qp-1", "name": "QP", "icon": "x", "prompt_template": "T {{v}}",
-                "variables": [], "agent": "ClaudeCode", "project_id": null,
-                "skill_ids": [], "profile_ids": [], "directive_ids": [],
-                "tier": "default", "description": "",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-                "updated_at": chrono::Utc::now().to_rfc3339(),
-            })).unwrap();
-            // insert_quick_prompt auto-snapshots version 1; a second snapshot
-            // gives the lineage a real history to round-trip.
-            crate::db::quick_prompts::insert_quick_prompt(conn, &qp)?;
-            crate::db::quick_prompts::snapshot_quick_prompt_version(conn, &qp)?;
-            crate::db::learnings::record_rejection(conn, "hash-1", "too vague")?;
-            crate::db::learnings::record_rejection(conn, "hash-1", "too vague")?;
-            Ok(())
-        }).await.unwrap();
+        source
+            .db
+            .with_conn(|conn| {
+                let qp: crate::models::QuickPrompt = serde_json::from_value(serde_json::json!({
+                    "id": "qp-1", "name": "QP", "icon": "x", "prompt_template": "T {{v}}",
+                    "variables": [], "agent": "ClaudeCode", "project_id": null,
+                    "skill_ids": [], "profile_ids": [], "directive_ids": [],
+                    "tier": "default", "description": "",
+                    "created_at": chrono::Utc::now().to_rfc3339(),
+                    "updated_at": chrono::Utc::now().to_rfc3339(),
+                }))
+                .unwrap();
+                // insert_quick_prompt auto-snapshots version 1; a second snapshot
+                // gives the lineage a real history to round-trip.
+                crate::db::quick_prompts::insert_quick_prompt(conn, &qp)?;
+                crate::db::quick_prompts::snapshot_quick_prompt_version(conn, &qp)?;
+                crate::db::learnings::record_rejection(conn, "hash-1", "too vague")?;
+                crate::db::learnings::record_rejection(conn, "hash-1", "too vague")?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         let export = build_export(&source).await.expect("export");
         assert_eq!(export.version, 5);
-        assert_eq!(export.quick_prompt_versions.len(), 2, "version lineage exported");
+        assert_eq!(
+            export.quick_prompt_versions.len(),
+            2,
+            "version lineage exported"
+        );
         assert_eq!(export.learning_rejections.len(), 1);
-        assert_eq!(export.learning_rejections[0].count, 2, "cumulative count exported");
+        assert_eq!(
+            export.learning_rejections[0].count, 2,
+            "cumulative count exported"
+        );
 
         // Import into a FRESH instance — both tables restored verbatim.
         let target = mk_state().await;
         do_import_db(&target, &export).await.expect("import");
-        let (versions, rej_count) = target.db.with_conn(|conn| {
-            let v = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-1")?;
-            let c = crate::db::learnings::rejection_count(conn, "hash-1")?;
-            Ok((v, c))
-        }).await.unwrap();
+        let (versions, rej_count) = target
+            .db
+            .with_conn(|conn| {
+                let v = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-1")?;
+                let c = crate::db::learnings::rejection_count(conn, "hash-1")?;
+                Ok((v, c))
+            })
+            .await
+            .unwrap();
         assert_eq!(versions.len(), 2, "version history survives the migration");
-        assert_eq!(versions[0].version_index, 2, "newest first, indices preserved verbatim");
+        assert_eq!(
+            versions[0].version_index, 2,
+            "newest first, indices preserved verbatim"
+        );
         assert_eq!(rej_count, 2, "anti-repetition threshold stays armed");
     }
 
@@ -1980,7 +2220,9 @@ mod tests {
         // re-imports (same id), while versions of QPs absent from the archive
         // are pruned with their parents.
         let db = std::sync::Arc::new(crate::db::Database::open_in_memory().unwrap());
-        let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(crate::core::config::default_config()));
+        let cfg = std::sync::Arc::new(tokio::sync::RwLock::new(
+            crate::core::config::default_config(),
+        ));
         let state = crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
 
         let mk_qp = |id: &str| -> crate::models::QuickPrompt {
@@ -1991,18 +2233,23 @@ mod tests {
                 "tier": "default", "description": "",
                 "created_at": chrono::Utc::now().to_rfc3339(),
                 "updated_at": chrono::Utc::now().to_rfc3339(),
-            })).unwrap()
+            }))
+            .unwrap()
         };
 
         // Local state: two versioned QPs.
         let (kept, dropped) = (mk_qp("qp-kept"), mk_qp("qp-dropped"));
         {
             let (kept, dropped) = (kept.clone(), dropped.clone());
-            state.db.with_conn(move |conn| {
-                crate::db::quick_prompts::insert_quick_prompt(conn, &kept)?;
-                crate::db::quick_prompts::insert_quick_prompt(conn, &dropped)?;
-                Ok(())
-            }).await.unwrap();
+            state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::quick_prompts::insert_quick_prompt(conn, &kept)?;
+                    crate::db::quick_prompts::insert_quick_prompt(conn, &dropped)?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
         }
 
         // v4 archive: carries qp-kept only, no version lineage at all.
@@ -2011,13 +2258,23 @@ mod tests {
         v4.quick_prompts = vec![kept];
         do_import_db(&state, &v4).await.expect("v4 import");
 
-        let (kept_versions, dropped_versions) = state.db.with_conn(|conn| {
-            let k = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-kept")?;
-            let d = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-dropped")?;
-            Ok((k, d))
-        }).await.unwrap();
-        assert!(!kept_versions.is_empty(), "v4 import must NOT wipe local lineage of a re-imported QP");
-        assert!(dropped_versions.is_empty(), "orphaned lineage (parent gone) is pruned");
+        let (kept_versions, dropped_versions) = state
+            .db
+            .with_conn(|conn| {
+                let k = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-kept")?;
+                let d = crate::db::quick_prompts::list_quick_prompt_versions(conn, "qp-dropped")?;
+                Ok((k, d))
+            })
+            .await
+            .unwrap();
+        assert!(
+            !kept_versions.is_empty(),
+            "v4 import must NOT wipe local lineage of a re-imported QP"
+        );
+        assert!(
+            dropped_versions.is_empty(),
+            "orphaned lineage (parent gone) is pruned"
+        );
     }
 
     // ─── import_clear_statements (I10: selective clear, no downgrade wipe) ────
@@ -2026,19 +2283,33 @@ mod tests {
         crate::models::db::DbExport {
             version: crate::models::db::CURRENT_EXPORT_VERSION,
             exported_at: chrono::Utc::now(),
-            projects: vec![], discussions: vec![], workflows: vec![],
-            mcp_servers: vec![], mcp_configs: vec![], custom_skills: vec![],
-            custom_directives: vec![], custom_profiles: vec![], contacts: vec![],
-            quick_prompts: vec![], quick_apis: vec![], learnings: vec![],
-            quick_prompt_versions: vec![], learning_rejections: vec![],
+            projects: vec![],
+            discussions: vec![],
+            workflows: vec![],
+            mcp_servers: vec![],
+            mcp_configs: vec![],
+            custom_skills: vec![],
+            custom_directives: vec![],
+            custom_profiles: vec![],
+            contacts: vec![],
+            quick_prompts: vec![],
+            quick_apis: vec![],
+            learnings: vec![],
+            quick_prompt_versions: vec![],
+            learning_rejections: vec![],
         }
     }
 
     fn a_contact() -> crate::models::Contact {
         crate::models::Contact {
-            id: "c1".into(), pseudo: "p".into(), avatar_email: None,
-            kronn_url: "u".into(), invite_code: "x".into(), status: "accepted".into(),
-            created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+            id: "c1".into(),
+            pseudo: "p".into(),
+            avatar_email: None,
+            kronn_url: "u".into(),
+            invite_code: "x".into(),
+            status: "accepted".into(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
         }
     }
 
@@ -2066,9 +2337,15 @@ mod tests {
     fn selective_clear_orders_children_before_parents() {
         let mut exp = empty_export();
         exp.mcp_servers.push(crate::models::McpServer {
-            id: "s".into(), name: "n".into(), description: String::new(),
-            transport: crate::models::McpTransport::Stdio { command: "echo".into(), args: vec![] },
-            source: crate::models::McpSource::Registry, api_spec: None,
+            id: "s".into(),
+            name: "n".into(),
+            description: String::new(),
+            transport: crate::models::McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
+            source: crate::models::McpSource::Registry,
+            api_spec: None,
         });
         let stmts = import_clear_statements(&exp);
         // FK-safe order: link table + configs cleared before the parent servers.
@@ -2281,24 +2558,47 @@ mod tests {
         let state = test_state();
 
         let qa = sample_quick_api("qa-1");
-        state.db.with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &qa)).await.unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::quick_apis::insert_quick_api(conn, &qa))
+            .await
+            .unwrap();
         let l = sample_learning("l-1");
-        state.db.with_conn(move |conn| crate::db::learnings::insert(conn, &l)).await.unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::learnings::insert(conn, &l))
+            .await
+            .unwrap();
 
         let export = build_export(&state).await.expect("build_export");
-        assert_eq!(export.version, crate::models::db::CURRENT_EXPORT_VERSION, "payload bumped to the current export version");
+        assert_eq!(
+            export.version,
+            crate::models::db::CURRENT_EXPORT_VERSION,
+            "payload bumped to the current export version"
+        );
         assert_eq!(export.quick_apis.len(), 1, "quick_apis must be exported");
         assert_eq!(export.learnings.len(), 1, "learnings must be exported");
 
         // Re-importing the same export clears then re-inserts — neither entity
         // may duplicate nor disappear.
         do_import_db(&state, &export).await.expect("do_import_db");
-        let qas = state.db.with_conn(crate::db::quick_apis::list_quick_apis).await.unwrap();
-        let ls = state.db.with_conn(|conn| crate::db::learnings::list(conn, None, None)).await.unwrap();
+        let qas = state
+            .db
+            .with_conn(crate::db::quick_apis::list_quick_apis)
+            .await
+            .unwrap();
+        let ls = state
+            .db
+            .with_conn(|conn| crate::db::learnings::list(conn, None, None))
+            .await
+            .unwrap();
         assert_eq!(qas.len(), 1, "quick_api survives import (no dup, no drop)");
         assert_eq!(qas[0].name, "Daily Top Articles");
         assert_eq!(ls.len(), 1, "learning survives import");
-        assert_eq!(ls[0].claim, "Gateway must be restarted after a frontend rebuild");
+        assert_eq!(
+            ls[0].claim,
+            "Gateway must be restarted after a frontend rebuild"
+        );
     }
 
     /// `global_context` travels in the exported config.toml but was dropped on
@@ -2330,7 +2630,10 @@ mod tests {
         );
 
         let cfg = state.config.read().await;
-        assert_eq!(cfg.server.global_context.as_deref(), Some("Always answer in French."));
+        assert_eq!(
+            cfg.server.global_context.as_deref(),
+            Some("Always answer in French.")
+        );
         assert_eq!(cfg.server.global_context_mode, "no_project");
     }
 
@@ -2401,10 +2704,17 @@ mod tests {
         let bytes = build_export_zip(&data_json, "", Some(&code)).unwrap();
 
         let (_, _, extracted) = extract_zip(&bytes).unwrap();
-        assert_eq!(extracted.as_deref(), Some(code.as_str()), "recovery code must roundtrip");
+        assert_eq!(
+            extracted.as_deref(),
+            Some(code.as_str()),
+            "recovery code must roundtrip"
+        );
         // …and the roundtripped code still unwraps the key with the passphrase.
         let parsed = crate::core::recovery::from_code(extracted.as_deref().unwrap()).unwrap();
-        assert_eq!(crate::core::recovery::unwrap_key(&parsed, "passphrase-123").unwrap(), key);
+        assert_eq!(
+            crate::core::recovery::unwrap_key(&parsed, "passphrase-123").unwrap(),
+            key
+        );
     }
 
     #[test]
@@ -2420,7 +2730,10 @@ mod tests {
         let data_json = serde_json::to_string(&empty_export()).unwrap();
         let bytes = build_export_zip(&data_json, "", Some("not-a-valid-recovery-code")).unwrap();
         let (_, _, extracted) = extract_zip(&bytes).unwrap();
-        assert!(extracted.is_none(), "garbage recovery.key must be dropped, not error");
+        assert!(
+            extracted.is_none(),
+            "garbage recovery.key must be dropped, not error"
+        );
     }
 
     /// Import must NEVER destroy local recovery material: a differing local blob
@@ -2430,31 +2743,56 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         // Local machine has its own blob (protects the LOCAL key).
-        let local = crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "local-pass").unwrap();
+        let local =
+            crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "local-pass")
+                .unwrap();
         crate::core::recovery::save_blob(tmp.path(), &local).unwrap();
 
         // Imported backup carries a different blob (the SOURCE machine's).
-        let imported = crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "source-pass").unwrap();
-        let warnings = persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
+        let imported =
+            crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "source-pass")
+                .unwrap();
+        let warnings =
+            persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
 
-        assert!(!warnings.is_empty(), "replacing a local blob must be surfaced");
+        assert!(
+            !warnings.is_empty(),
+            "replacing a local blob must be surfaced"
+        );
         // The imported blob is now the active one…
-        assert_eq!(crate::core::recovery::load_blob(tmp.path()).unwrap(), imported);
+        assert_eq!(
+            crate::core::recovery::load_blob(tmp.path()).unwrap(),
+            imported
+        );
         // …and the local one survives as a backup.
         let backup = std::fs::read_to_string(tmp.path().join("recovery.key.backup")).unwrap();
-        assert_eq!(crate::core::recovery::from_code(backup.trim()).unwrap(), local);
+        assert_eq!(
+            crate::core::recovery::from_code(backup.trim()).unwrap(),
+            local
+        );
     }
 
     #[test]
     fn persist_imported_recovery_installs_when_no_local_blob() {
         let tmp = tempfile::tempdir().unwrap();
 
-        let imported = crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pp").unwrap();
-        let warnings = persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
+        let imported =
+            crate::core::recovery::wrap_key(&crate::core::crypto::generate_secret(), "pp").unwrap();
+        let warnings =
+            persist_imported_recovery(tmp.path(), &crate::core::recovery::to_code(&imported));
 
-        assert!(!warnings.is_empty(), "the user must be told how to use the installed blob");
-        assert_eq!(crate::core::recovery::load_blob(tmp.path()).unwrap(), imported);
-        assert!(!tmp.path().join("recovery.key.backup").exists(), "no backup when nothing replaced");
+        assert!(
+            !warnings.is_empty(),
+            "the user must be told how to use the installed blob"
+        );
+        assert_eq!(
+            crate::core::recovery::load_blob(tmp.path()).unwrap(),
+            imported
+        );
+        assert!(
+            !tmp.path().join("recovery.key.backup").exists(),
+            "no backup when nothing replaced"
+        );
     }
 
     // ─── 0.8.6 phase 4 — default_model_tier ───────────────────────────
@@ -2467,7 +2805,10 @@ mod tests {
         // `Economy` by accident, every existing install would silently
         // start using a different tier on next disc create. Critical.
         let cfg = config::default_config();
-        assert_eq!(cfg.server.default_model_tier, crate::models::ModelTier::Default);
+        assert_eq!(
+            cfg.server.default_model_tier,
+            crate::models::ModelTier::Default
+        );
     }
 
     #[test]
@@ -2485,7 +2826,10 @@ mod tests {
             serialised,
         );
         let parsed: crate::models::AppConfig = toml::from_str(&serialised).unwrap();
-        assert_eq!(parsed.server.default_model_tier, crate::models::ModelTier::Reasoning);
+        assert_eq!(
+            parsed.server.default_model_tier,
+            crate::models::ModelTier::Reasoning
+        );
     }
 
     // ── 0.8.7 — anti_hallucination_mode ─────────────────────
@@ -2522,7 +2866,11 @@ mod tests {
         let spec = crate::core::anti_halluc::SPEC_AGENTS_MD_V1;
         assert!(spec.contains("Kronn `AGENTS.md` convention"));
         assert!(spec.contains("kronn:doc-version"));
-        assert!(spec.len() > 1_000, "spec unexpectedly small: {} bytes", spec.len());
+        assert!(
+            spec.len() > 1_000,
+            "spec unexpectedly small: {} bytes",
+            spec.len()
+        );
     }
 
     #[test]
@@ -2598,7 +2946,10 @@ debug_mode = false
             serialised,
         );
         let parsed: crate::models::AppConfig = toml::from_str(&serialised).unwrap();
-        assert_eq!(parsed.server.default_summary_strategy, crate::models::SummaryStrategy::Auto);
+        assert_eq!(
+            parsed.server.default_summary_strategy,
+            crate::models::SummaryStrategy::Auto
+        );
     }
 
     #[test]
@@ -2616,8 +2967,7 @@ agent_stall_timeout_min = 5
 global_context_mode = "always"
 debug_mode = false
 "#;
-        let parsed: crate::models::ServerConfig =
-            toml::from_str(legacy_server_toml).unwrap();
+        let parsed: crate::models::ServerConfig = toml::from_str(legacy_server_toml).unwrap();
         assert_eq!(
             parsed.default_summary_strategy,
             crate::models::SummaryStrategy::Off,
@@ -2643,8 +2993,7 @@ agent_stall_timeout_min = 5
 global_context_mode = "always"
 debug_mode = false
 "#;
-        let parsed: crate::models::ServerConfig =
-            toml::from_str(legacy_server_toml).unwrap();
+        let parsed: crate::models::ServerConfig = toml::from_str(legacy_server_toml).unwrap();
         assert_eq!(
             parsed.default_model_tier,
             crate::models::ModelTier::Default,
@@ -2675,7 +3024,10 @@ debug_mode = false
     fn mask_token_exactly_9_chars_is_long_branch() {
         // 9 = > 8, takes the long branch.
         let result = mask_token("123456789");
-        assert!(result.contains("..."), "9-char token must enter long branch");
+        assert!(
+            result.contains("..."),
+            "9-char token must enter long branch"
+        );
         assert_eq!(result.len(), 11, "long-branch output is 4 + 3 + 4 = 11");
     }
 
@@ -2683,8 +3035,14 @@ debug_mode = false
     fn mask_token_does_not_leak_middle_chars() {
         let secret = "sk-ant-VERY_SECRET_MIDDLE-tail";
         let masked = mask_token(secret);
-        assert!(!masked.contains("SECRET"), "middle bytes must NOT appear in mask");
-        assert!(!masked.contains("MIDDLE"), "middle bytes must NOT appear in mask");
+        assert!(
+            !masked.contains("SECRET"),
+            "middle bytes must NOT appear in mask"
+        );
+        assert!(
+            !masked.contains("MIDDLE"),
+            "middle bytes must NOT appear in mask"
+        );
         assert!(masked.contains("tail"), "last 4 must be visible");
     }
 }

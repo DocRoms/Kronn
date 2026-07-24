@@ -27,14 +27,26 @@ pub async fn list(
         let per_page = pq.per_page.min(200);
         let offset = (page - 1) * per_page;
         // ADR-001 O2 — dashboard/sidebar polling read, off the write path.
-        return match state.db.with_read_conn(move |conn| {
-            crate::db::discussions::list_discussions_paginated(conn, Some(per_page), Some(offset))
-        }).await {
+        return match state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::discussions::list_discussions_paginated(
+                    conn,
+                    Some(per_page),
+                    Some(offset),
+                )
+            })
+            .await
+        {
             Ok(discussions) => Json(ApiResponse::ok(discussions)),
             Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
         };
     }
-    match state.db.with_read_conn(crate::db::discussions::list_discussions).await {
+    match state
+        .db
+        .with_read_conn(crate::db::discussions::list_discussions)
+        .await
+    {
         Ok(discussions) => Json(ApiResponse::ok(discussions)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -45,7 +57,11 @@ pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Discussion>> {
-    match state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &id))
+        .await
+    {
         Ok(Some(d)) => Json(ApiResponse::ok(d)),
         Ok(None) => Json(ApiResponse::err("Discussion not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -59,30 +75,48 @@ pub async fn create(
 ) -> Json<ApiResponse<Discussion>> {
     // Input validation
     if req.title.len() > MAX_TITLE_LEN {
-        return Json(ApiResponse::err(format!("Title too long ({} chars, max {})", req.title.len(), MAX_TITLE_LEN)));
+        return Json(ApiResponse::err(format!(
+            "Title too long ({} chars, max {})",
+            req.title.len(),
+            MAX_TITLE_LEN
+        )));
     }
     if req.initial_prompt.len() > MAX_CONTENT_LEN {
-        return Json(ApiResponse::err(format!("Prompt too long ({} bytes, max {})", req.initial_prompt.len(), MAX_CONTENT_LEN)));
+        return Json(ApiResponse::err(format!(
+            "Prompt too long ({} bytes, max {})",
+            req.initial_prompt.len(),
+            MAX_CONTENT_LEN
+        )));
     }
 
     // Reject conflicting directives (eco: avoids injecting contradictory instructions that waste tokens)
     if !req.directive_ids.is_empty() {
         let conflicts = crate::core::directives::validate_no_conflicts(&req.directive_ids);
         if !conflicts.is_empty() {
-            let pairs: Vec<String> = conflicts.iter().map(|(a, b)| format!("{} <> {}", a, b)).collect();
-            return Json(ApiResponse::err(format!("Conflicting directives: {}", pairs.join(", "))));
+            let pairs: Vec<String> = conflicts
+                .iter()
+                .map(|(a, b)| format!("{} <> {}", a, b))
+                .collect();
+            return Json(ApiResponse::err(format!(
+                "Conflicting directives: {}",
+                pairs.join(", ")
+            )));
         }
     }
 
     // Validate project exists (if specified)
     if let Some(ref pid) = req.project_id {
         let pid = pid.clone();
-        let project_exists = state.db.with_conn({
-            move |conn| {
-                let p = crate::db::projects::get_project(conn, &pid)?;
-                Ok(p.is_some())
-            }
-        }).await.unwrap_or(false);
+        let project_exists = state
+            .db
+            .with_conn({
+                move |conn| {
+                    let p = crate::db::projects::get_project(conn, &pid)?;
+                    Ok(p.is_some())
+                }
+            })
+            .await
+            .unwrap_or(false);
 
         if !project_exists {
             return Json(ApiResponse::err("Project not found"));
@@ -121,8 +155,12 @@ pub async fn create(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, cost_usd: None, author_pseudo, author_avatar_email,
-        source_msg_id: None, duration_ms: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo,
+        author_avatar_email,
+        source_msg_id: None,
+        duration_ms: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -137,7 +175,8 @@ pub async fn create(
         language,
         participants: vec![req.agent.clone()],
         messages: vec![initial_message.clone()],
-        message_count: 1, non_system_message_count: 1,
+        message_count: 1,
+        non_system_message_count: 1,
         skill_ids: req.skill_ids,
         profile_ids: req.profile_ids,
         directive_ids: req.directive_ids,
@@ -145,7 +184,7 @@ pub async fn create(
         model: None,
         pin_first_message: false,
         archived: false,
-            pinned: false,
+        pinned: false,
         workspace_mode: workspace_mode.clone(),
         workspace_path: None,
         worktree_branch: None,
@@ -171,38 +210,45 @@ pub async fn create(
     // source of truth avoids races against concurrent QP updates).
     let originating_qp_id = req.originating_qp_id.clone();
     let want_no_agent = req.no_agent;
-    match state.db.with_conn(move |conn| {
-        // 0.8.10 — a QP-launched discussion inherits the QP's explicit model
-        // (agent_settings.model), so a standalone launch runs on the same
-        // model the QP is pinned to. Set it before insert; None → tier resolve.
-        if let Some(ref qp_id) = originating_qp_id {
-            if let Ok(Some(qp)) = crate::db::quick_prompts::get_quick_prompt(conn, qp_id) {
-                if let Some(m) = qp.agent_settings.and_then(|s| s.model) {
-                    disc.model = Some(m);
+    match state
+        .db
+        .with_conn(move |conn| {
+            // 0.8.10 — a QP-launched discussion inherits the QP's explicit model
+            // (agent_settings.model), so a standalone launch runs on the same
+            // model the QP is pinned to. Set it before insert; None → tier resolve.
+            if let Some(ref qp_id) = originating_qp_id {
+                if let Ok(Some(qp)) = crate::db::quick_prompts::get_quick_prompt(conn, qp_id) {
+                    if let Some(m) = qp.agent_settings.and_then(|s| s.model) {
+                        disc.model = Some(m);
+                    }
                 }
             }
-        }
-        crate::db::discussions::insert_discussion(conn, &disc)?;
-        crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
-        if let Some(ref qp_id) = originating_qp_id {
-            if let Ok(Some(v)) = crate::db::quick_prompts::current_version_index(conn, qp_id) {
-                crate::db::discussions::set_originating_qp(conn, &disc.id, qp_id, v)?;
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            if let Some(ref qp_id) = originating_qp_id {
+                if let Ok(Some(v)) = crate::db::quick_prompts::current_version_index(conn, qp_id) {
+                    crate::db::discussions::set_originating_qp(conn, &disc.id, qp_id, v)?;
+                }
             }
-        }
-        // F9 — mark the disc human-only so the runner never spawns.
-        if want_no_agent {
-            crate::db::discussions::set_disc_no_agent(conn, &disc.id, true)?;
-        }
-        Ok(())
-    }).await {
+            // F9 — mark the disc human-only so the runner never spawns.
+            if want_no_agent {
+                crate::db::discussions::set_disc_no_agent(conn, &disc.id, true)?;
+            }
+            Ok(())
+        })
+        .await
+    {
         Ok(()) => {
             // If workspace_mode is "Isolated", create a worktree
             if workspace_mode == "Isolated" {
                 if let Some(ref pid) = discussion.project_id {
                     let pid = pid.clone();
-                    let project = state.db.with_conn(move |conn| {
-                        crate::db::projects::get_project(conn, &pid)
-                    }).await.ok().flatten();
+                    let project = state
+                        .db
+                        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+                        .await
+                        .ok()
+                        .flatten();
 
                     if let Some(project) = project {
                         let resolved = crate::core::scanner::resolve_host_path(&project.path);
@@ -213,28 +259,45 @@ pub async fn create(
                         let branch = base_branch.as_deref().unwrap_or("main");
 
                         match crate::core::worktree::create_discussion_worktree(
-                            repo_path, project_slug, discussion_slug, branch,
+                            repo_path,
+                            project_slug,
+                            discussion_slug,
+                            branch,
                         ) {
                             Ok(info) => {
                                 let disc_id = discussion.id.clone();
                                 let wp = info.path.clone();
                                 let wb = info.branch.clone();
-                                if let Err(e) = state.db.with_conn(move |conn| {
-                                    crate::db::discussions::update_discussion_workspace(conn, &disc_id, &wp, &wb)
-                                }).await {
+                                if let Err(e) = state
+                                    .db
+                                    .with_conn(move |conn| {
+                                        crate::db::discussions::update_discussion_workspace(
+                                            conn, &disc_id, &wp, &wb,
+                                        )
+                                    })
+                                    .await
+                                {
                                     tracing::error!("Failed to update discussion workspace: {e}");
                                 }
 
                                 // Return the updated discussion
                                 let disc_id = discussion.id.clone();
-                                if let Ok(Some(updated)) = state.db.with_conn(move |conn| {
-                                    crate::db::discussions::get_discussion(conn, &disc_id)
-                                }).await {
+                                if let Ok(Some(updated)) = state
+                                    .db
+                                    .with_conn(move |conn| {
+                                        crate::db::discussions::get_discussion(conn, &disc_id)
+                                    })
+                                    .await
+                                {
                                     return Json(ApiResponse::ok(updated));
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("Failed to create worktree for discussion {}: {}", discussion.id, e);
+                                tracing::error!(
+                                    "Failed to create worktree for discussion {}: {}",
+                                    discussion.id,
+                                    e
+                                );
                                 // Discussion is still created in Direct mode — don't fail the whole request
                             }
                         }
@@ -243,7 +306,7 @@ pub async fn create(
             }
 
             Json(ApiResponse::ok(discussion))
-        },
+        }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -270,8 +333,14 @@ pub async fn update(
         if !ids.is_empty() {
             let conflicts = crate::core::directives::validate_no_conflicts(ids);
             if !conflicts.is_empty() {
-                let pairs: Vec<String> = conflicts.iter().map(|(a, b)| format!("{} <> {}", a, b)).collect();
-                return Json(ApiResponse::err(format!("Conflicting directives: {}", pairs.join(", "))));
+                let pairs: Vec<String> = conflicts
+                    .iter()
+                    .map(|(a, b)| format!("{} <> {}", a, b))
+                    .collect();
+                return Json(ApiResponse::err(format!(
+                    "Conflicting directives: {}",
+                    pairs.join(", ")
+                )));
             }
         }
     }
@@ -279,9 +348,13 @@ pub async fn update(
     // Agent switch: fetch old agent name for the system message
     let old_agent_name = if new_agent.is_some() {
         let did = id.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::discussions::get_discussion(conn, &did)
-        }).await.ok().flatten().map(|d| format!("{:?}", d.agent))
+        state
+            .db
+            .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+            .await
+            .ok()
+            .flatten()
+            .map(|d| format!("{:?}", d.agent))
     } else {
         None
     };
@@ -359,32 +432,49 @@ pub async fn delete(
     if let Ok(mut map) = state.cancel_registry.lock() {
         if let Some(token) = map.remove(&id) {
             token.cancel();
-            tracing::info!("delete discussion {}: cancelled live agent before delete", id);
+            tracing::info!(
+                "delete discussion {}: cancelled live agent before delete",
+                id
+            );
         }
     } else {
-        tracing::warn!("delete discussion {}: cancel registry poisoned — deleting without cancel", id);
+        tracing::warn!(
+            "delete discussion {}: cancel registry poisoned — deleting without cancel",
+            id
+        );
     }
 
     // Fetch discussion to check for worktree before deleting
-    let disc = state.db.with_conn({
-        let did = id.clone();
-        move |conn| crate::db::discussions::get_discussion(conn, &did)
-    }).await.ok().flatten();
+    let disc = state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| crate::db::discussions::get_discussion(conn, &did)
+        })
+        .await
+        .ok()
+        .flatten();
 
     // Clean up worktree if present
     if let Some(ref d) = disc {
         if let Some(ref wp) = d.workspace_path {
             if let Some(ref pid) = d.project_id {
                 let pid = pid.clone();
-                let project_path = state.db.with_conn(move |conn| {
-                    let p = crate::db::projects::get_project(conn, &pid)?;
-                    Ok(p.map(|p| p.path).unwrap_or_default())
-                }).await.unwrap_or_default();
+                let project_path = state
+                    .db
+                    .with_conn(move |conn| {
+                        let p = crate::db::projects::get_project(conn, &pid)?;
+                        Ok(p.map(|p| p.path).unwrap_or_default())
+                    })
+                    .await
+                    .unwrap_or_default();
 
                 if !project_path.is_empty() {
                     let resolved = crate::core::scanner::resolve_host_path(&project_path);
                     let repo_path = std::path::Path::new(&resolved);
-                    if let Err(e) = crate::core::worktree::remove_discussion_worktree(repo_path, wp, true) {
+                    if let Err(e) =
+                        crate::core::worktree::remove_discussion_worktree(repo_path, wp, true)
+                    {
                         tracing::warn!("Failed to remove worktree for discussion {}: {}", id, e);
                     }
                 }
@@ -392,7 +482,11 @@ pub async fn delete(
         }
     }
 
-    match state.db.with_conn(move |conn| crate::db::discussions::delete_discussion(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::delete_discussion(conn, &id))
+        .await
+    {
         Ok(true) => Json(ApiResponse::ok(())),
         Ok(false) => Json(ApiResponse::err("Discussion not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -409,20 +503,28 @@ pub async fn share(
     let contact_ids = req.contact_ids.clone();
 
     // Get or create shared_id
-    let result = state.db.with_conn(move |conn| {
-        let disc = crate::db::discussions::get_discussion(conn, &disc_id)?
-            .ok_or_else(|| anyhow::anyhow!("Discussion not found"))?;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let disc = crate::db::discussions::get_discussion(conn, &disc_id)?
+                .ok_or_else(|| anyhow::anyhow!("Discussion not found"))?;
 
-        let shared_id = disc.shared_id.unwrap_or_else(|| Uuid::new_v4().to_string());
-        let mut all_shared = disc.shared_with;
-        for cid in &contact_ids {
-            if !all_shared.contains(cid) {
-                all_shared.push(cid.clone());
+            let shared_id = disc.shared_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+            let mut all_shared = disc.shared_with;
+            for cid in &contact_ids {
+                if !all_shared.contains(cid) {
+                    all_shared.push(cid.clone());
+                }
             }
-        }
-        crate::db::discussions::update_discussion_sharing(conn, &disc.id, &shared_id, &all_shared)?;
-        Ok((shared_id, disc.title))
-    }).await;
+            crate::db::discussions::update_discussion_sharing(
+                conn,
+                &disc.id,
+                &shared_id,
+                &all_shared,
+            )?;
+            Ok((shared_id, disc.title))
+        })
+        .await;
 
     match result {
         Ok((shared_id, title)) => {
@@ -454,10 +556,20 @@ pub async fn delete_last_agent_messages(
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
     let id_clone = id.clone();
-    match state.db.with_conn(move |conn| crate::db::discussions::delete_last_agent_messages(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::delete_last_agent_messages(conn, &id))
+        .await
+    {
         Ok(_) => {
             // Invalidate summary cache since messages were deleted
-            if let Err(e) = state.db.with_conn(move |conn| crate::db::discussions::invalidate_summary_cache(conn, &id_clone)).await {
+            if let Err(e) = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::discussions::invalidate_summary_cache(conn, &id_clone)
+                })
+                .await
+            {
                 tracing::error!("Failed to invalidate summary cache after delete: {e}");
             }
             Json(ApiResponse::ok(()))
@@ -473,7 +585,11 @@ pub async fn edit_last_user_message(
     Json(req): Json<SendMessageRequest>,
 ) -> Json<ApiResponse<()>> {
     let content = req.content;
-    match state.db.with_conn(move |conn| crate::db::discussions::edit_last_user_message(conn, &id, &content)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::edit_last_user_message(conn, &id, &content))
+        .await
+    {
         Ok(_) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -507,11 +623,18 @@ mod tests {
         // disc-keyed token first, or the agent writes into a deleted row.
         let state = state_with_disc("d-live").await;
         let token = tokio_util::sync::CancellationToken::new();
-        state.cancel_registry.lock().unwrap().insert("d-live".into(), token.clone());
+        state
+            .cancel_registry
+            .lock()
+            .unwrap()
+            .insert("d-live".into(), token.clone());
 
         let resp = delete(State(state.clone()), Path("d-live".to_string())).await;
         assert!(resp.0.success, "delete must succeed: {:?}", resp.0.error);
-        assert!(token.is_cancelled(), "the disc's agent token must be cancelled");
+        assert!(
+            token.is_cancelled(),
+            "the disc's agent token must be cancelled"
+        );
         assert!(
             state.cancel_registry.lock().unwrap().is_empty(),
             "the cancelled token must be removed from the registry",

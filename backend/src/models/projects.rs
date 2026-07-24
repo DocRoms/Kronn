@@ -116,12 +116,12 @@ pub struct AiConfigStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum AiConfigType {
-    ClaudeMd,       // CLAUDE.md
-    ClauseDir,      // .claude/
-    AiDir,          // .ai/
-    CursorRules,    // .cursorrules
-    ContinueDev,    // .continue/
-    McpJson,        // .mcp.json
+    ClaudeMd,    // CLAUDE.md
+    ClauseDir,   // .claude/
+    AiDir,       // .ai/
+    CursorRules, // .cursorrules
+    ContinueDev, // .continue/
+    McpJson,     // .mcp.json
     Custom,
 }
 
@@ -345,9 +345,9 @@ pub struct AuditRecommendation {
 pub fn compute_health_score(critical: u32, high: u32, medium: u32, low: u32) -> u8 {
     let raw = 100.0
         - (critical as f64 * 12.0)
-        - (high     as f64 *  4.0)
-        - (medium   as f64 *  1.5)
-        - (low      as f64 *  0.3);
+        - (high as f64 * 4.0)
+        - (medium as f64 * 1.5)
+        - (low as f64 * 0.3);
     raw.clamp(0.0, 100.0) as u8
 }
 
@@ -361,12 +361,23 @@ mod audit_kind_label_tests {
         // the round-trip must be lossless for every variant. A drift here
         // would resume the wrong pipeline.
         for k in [
-            AuditKind::Full, AuditKind::Drift, AuditKind::Security,
-            AuditKind::Docker, AuditKind::Performance, AuditKind::Accessibility,
-            AuditKind::Rgaa, AuditKind::Database, AuditKind::ApiDesign,
-            AuditKind::CodeQuality, AuditKind::Custom,
+            AuditKind::Full,
+            AuditKind::Drift,
+            AuditKind::Security,
+            AuditKind::Docker,
+            AuditKind::Performance,
+            AuditKind::Accessibility,
+            AuditKind::Rgaa,
+            AuditKind::Database,
+            AuditKind::ApiDesign,
+            AuditKind::CodeQuality,
+            AuditKind::Custom,
         ] {
-            assert_eq!(AuditKind::from_label(k.as_label()), Some(k), "{k:?} round-trip");
+            assert_eq!(
+                AuditKind::from_label(k.as_label()),
+                Some(k),
+                "{k:?} round-trip"
+            );
         }
     }
 
@@ -374,7 +385,11 @@ mod audit_kind_label_tests {
     fn from_label_rejects_unknown_labels() {
         assert_eq!(AuditKind::from_label("Nonsense"), None);
         assert_eq!(AuditKind::from_label(""), None);
-        assert_eq!(AuditKind::from_label("full"), None, "case-sensitive on purpose");
+        assert_eq!(
+            AuditKind::from_label("full"),
+            None,
+            "case-sensitive on purpose"
+        );
     }
 }
 
@@ -459,17 +474,17 @@ impl AuditKind {
     /// progress / SSE event names so the UI can filter by audit type.
     pub fn as_label(&self) -> &'static str {
         match self {
-            AuditKind::Full          => "Full",
-            AuditKind::Drift         => "Drift",
-            AuditKind::Security      => "Security",
-            AuditKind::Docker        => "Docker",
-            AuditKind::Performance   => "Performance",
+            AuditKind::Full => "Full",
+            AuditKind::Drift => "Drift",
+            AuditKind::Security => "Security",
+            AuditKind::Docker => "Docker",
+            AuditKind::Performance => "Performance",
             AuditKind::Accessibility => "Accessibility",
-            AuditKind::Rgaa          => "Rgaa",
-            AuditKind::Database      => "Database",
-            AuditKind::ApiDesign     => "ApiDesign",
-            AuditKind::CodeQuality   => "CodeQuality",
-            AuditKind::Custom        => "Custom",
+            AuditKind::Rgaa => "Rgaa",
+            AuditKind::Database => "Database",
+            AuditKind::ApiDesign => "ApiDesign",
+            AuditKind::CodeQuality => "CodeQuality",
+            AuditKind::Custom => "Custom",
         }
     }
 
@@ -479,18 +494,18 @@ impl AuditKind {
     /// the wrong pipeline on a resume).
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
-            "Full"          => Some(AuditKind::Full),
-            "Drift"         => Some(AuditKind::Drift),
-            "Security"      => Some(AuditKind::Security),
-            "Docker"        => Some(AuditKind::Docker),
-            "Performance"   => Some(AuditKind::Performance),
+            "Full" => Some(AuditKind::Full),
+            "Drift" => Some(AuditKind::Drift),
+            "Security" => Some(AuditKind::Security),
+            "Docker" => Some(AuditKind::Docker),
+            "Performance" => Some(AuditKind::Performance),
             "Accessibility" => Some(AuditKind::Accessibility),
-            "Rgaa"          => Some(AuditKind::Rgaa),
-            "Database"      => Some(AuditKind::Database),
-            "ApiDesign"     => Some(AuditKind::ApiDesign),
-            "CodeQuality"   => Some(AuditKind::CodeQuality),
-            "Custom"        => Some(AuditKind::Custom),
-            _               => None,
+            "Rgaa" => Some(AuditKind::Rgaa),
+            "Database" => Some(AuditKind::Database),
+            "ApiDesign" => Some(AuditKind::ApiDesign),
+            "CodeQuality" => Some(AuditKind::CodeQuality),
+            "Custom" => Some(AuditKind::Custom),
+            _ => None,
         }
     }
 
@@ -505,17 +520,17 @@ impl AuditKind {
     /// for backend-emitted strings (disc title, log lines).
     pub fn display_name(&self) -> &'static str {
         match self {
-            AuditKind::Full          => "Audit global",
-            AuditKind::Drift         => "Drift",
-            AuditKind::Security      => "Sécurité",
-            AuditKind::Docker        => "Docker",
-            AuditKind::Performance   => "Performance",
+            AuditKind::Full => "Audit global",
+            AuditKind::Drift => "Drift",
+            AuditKind::Security => "Sécurité",
+            AuditKind::Docker => "Docker",
+            AuditKind::Performance => "Performance",
             AuditKind::Accessibility => "Accessibilité",
-            AuditKind::Rgaa          => "RGAA 4.1",
-            AuditKind::Database      => "Base de données",
-            AuditKind::ApiDesign     => "Design d'API",
-            AuditKind::CodeQuality   => "Qualité de code",
-            AuditKind::Custom        => "Custom",
+            AuditKind::Rgaa => "RGAA 4.1",
+            AuditKind::Database => "Base de données",
+            AuditKind::ApiDesign => "Design d'API",
+            AuditKind::CodeQuality => "Qualité de code",
+            AuditKind::Custom => "Custom",
         }
     }
 
@@ -637,23 +652,23 @@ pub struct RemoteRepo {
     pub language: Option<String>,
     pub stargazers_count: u32,
     pub updated_at: String,
-    pub source: String,  // "github" or "gitlab"
+    pub source: String, // "github" or "gitlab"
     pub already_cloned: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct RepoSource {
-    pub id: String,           // MCP config id, or "env:github" / "env:gitlab"
-    pub label: String,        // MCP config label, or "GitHub (env)" / "GitLab (env)"
-    pub provider: String,     // "github" or "gitlab"
+    pub id: String,       // MCP config id, or "env:github" / "env:gitlab"
+    pub label: String,    // MCP config label, or "GitHub (env)" / "GitLab (env)"
+    pub provider: String, // "github" or "gitlab"
 }
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct DiscoverReposRequest {
     #[serde(default)]
-    pub source_ids: Vec<String>,  // empty = use all available sources
+    pub source_ids: Vec<String>, // empty = use all available sources
 }
 
 /// 0.8.7 — per-source failure surfaced to the user (GitLab silently

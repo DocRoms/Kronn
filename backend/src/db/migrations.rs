@@ -1,6 +1,6 @@
-use std::path::Path;
 use anyhow::Result;
 use rusqlite::Connection;
+use std::path::Path;
 
 /// Run all migrations in order. Each migration is idempotent.
 /// If `db_path` points to an existing file and there are pending migrations,
@@ -16,99 +16,299 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
             id INTEGER PRIMARY KEY,
             name TEXT NOT NULL,
             applied_at TEXT NOT NULL DEFAULT (datetime('now'))
-        );"
+        );",
     )?;
 
     let migrations: &[(&str, &str)] = &[
         ("001_initial", include_str!("sql/001_initial.sql")),
         ("002_mcp_redesign", include_str!("sql/002_mcp_redesign.sql")),
         ("003_workflows", include_str!("sql/003_workflows.sql")),
-        ("004_token_tracking", include_str!("sql/004_token_tracking.sql")),
-        ("005_discussion_archive", include_str!("sql/005_discussion_archive.sql")),
-        ("006_discussion_skills", include_str!("sql/006_discussion_skills.sql")),
-        ("007_project_skills", include_str!("sql/007_project_skills.sql")),
-        ("008_discussions_index", include_str!("sql/008_discussions_index.sql")),
+        (
+            "004_token_tracking",
+            include_str!("sql/004_token_tracking.sql"),
+        ),
+        (
+            "005_discussion_archive",
+            include_str!("sql/005_discussion_archive.sql"),
+        ),
+        (
+            "006_discussion_skills",
+            include_str!("sql/006_discussion_skills.sql"),
+        ),
+        (
+            "007_project_skills",
+            include_str!("sql/007_project_skills.sql"),
+        ),
+        (
+            "008_discussions_index",
+            include_str!("sql/008_discussions_index.sql"),
+        ),
         ("009_profiles", include_str!("sql/009_profiles.sql")),
         ("010_directives", include_str!("sql/010_directives.sql")),
-        ("011_multi_profiles", include_str!("sql/011_multi_profiles.sql")),
+        (
+            "011_multi_profiles",
+            include_str!("sql/011_multi_profiles.sql"),
+        ),
         ("012_mcp_general", include_str!("sql/012_mcp_general.sql")),
-        ("013_discussion_worktrees", include_str!("sql/013_discussion_worktrees.sql")),
-        ("014_summary_cache", include_str!("sql/014_summary_cache.sql")),
+        (
+            "013_discussion_worktrees",
+            include_str!("sql/013_discussion_worktrees.sql"),
+        ),
+        (
+            "014_summary_cache",
+            include_str!("sql/014_summary_cache.sql"),
+        ),
         ("015_model_tier", include_str!("sql/015_model_tier.sql")),
-        ("016_message_model_tier", include_str!("sql/016_message_model_tier.sql")),
-        ("017_message_count", include_str!("sql/017_message_count.sql")),
-        ("018_briefing_notes", include_str!("sql/018_briefing_notes.sql")),
-        ("019_pin_first_message", include_str!("sql/019_pin_first_message.sql")),
-        ("020_fix_worktree_paths", include_str!("sql/020_fix_worktree_paths.sql")),
-        ("021_message_identity", include_str!("sql/021_message_identity.sql")),
+        (
+            "016_message_model_tier",
+            include_str!("sql/016_message_model_tier.sql"),
+        ),
+        (
+            "017_message_count",
+            include_str!("sql/017_message_count.sql"),
+        ),
+        (
+            "018_briefing_notes",
+            include_str!("sql/018_briefing_notes.sql"),
+        ),
+        (
+            "019_pin_first_message",
+            include_str!("sql/019_pin_first_message.sql"),
+        ),
+        (
+            "020_fix_worktree_paths",
+            include_str!("sql/020_fix_worktree_paths.sql"),
+        ),
+        (
+            "021_message_identity",
+            include_str!("sql/021_message_identity.sql"),
+        ),
         ("022_contacts", include_str!("sql/022_contacts.sql")),
-        ("023_shared_discussions", include_str!("sql/023_shared_discussions.sql")),
+        (
+            "023_shared_discussions",
+            include_str!("sql/023_shared_discussions.sql"),
+        ),
         ("024_message_cost", include_str!("sql/024_message_cost.sql")),
-        ("025_context_files", include_str!("sql/025_context_files.sql")),
+        (
+            "025_context_files",
+            include_str!("sql/025_context_files.sql"),
+        ),
         // 026: idempotent column addition (handled below, not via SQL file)
-        ("027_quick_prompts", include_str!("sql/026_quick_prompts.sql")),
-        ("028_quick_prompt_descriptions", include_str!("sql/027_quick_prompt_descriptions.sql")),
-        ("029_batch_workflow_runs", include_str!("sql/028_batch_workflow_runs.sql")),
-        ("030_workflow_run_parent", include_str!("sql/030_workflow_run_parent.sql")),
-        ("031_partial_response", include_str!("sql/031_partial_response.sql")),
-        ("032_partial_response_started_at", include_str!("sql/032_partial_response_started_at.sql")),
-        ("033_discussion_pinned", include_str!("sql/033_discussion_pinned.sql")),
-        ("034_test_mode_fields", include_str!("sql/034_test_mode_fields.sql")),
-        ("035_mcp_server_api_spec", include_str!("sql/035_mcp_server_api_spec.sql")),
-        ("036_mcp_host_sync", include_str!("sql/036_mcp_host_sync.sql")),
-        ("037_mcp_host_sync_backfill", include_str!("sql/037_mcp_host_sync_backfill.sql")),
-        ("038_mcp_host_sync_collapse", include_str!("sql/038_mcp_host_sync_collapse.sql")),
-        ("039_workflow_guards", include_str!("sql/039_workflow_guards.sql")),
-        ("040_workflow_artifacts", include_str!("sql/040_workflow_artifacts.sql")),
-        ("041_workflow_on_failure", include_str!("sql/041_workflow_on_failure.sql")),
-        ("042_workflow_run_state", include_str!("sql/042_workflow_run_state.sql")),
-        ("043_workflow_exec_allowlist", include_str!("sql/043_workflow_exec_allowlist.sql")),
-        ("044_workflow_variables", include_str!("sql/044_workflow_variables.sql")),
+        (
+            "027_quick_prompts",
+            include_str!("sql/026_quick_prompts.sql"),
+        ),
+        (
+            "028_quick_prompt_descriptions",
+            include_str!("sql/027_quick_prompt_descriptions.sql"),
+        ),
+        (
+            "029_batch_workflow_runs",
+            include_str!("sql/028_batch_workflow_runs.sql"),
+        ),
+        (
+            "030_workflow_run_parent",
+            include_str!("sql/030_workflow_run_parent.sql"),
+        ),
+        (
+            "031_partial_response",
+            include_str!("sql/031_partial_response.sql"),
+        ),
+        (
+            "032_partial_response_started_at",
+            include_str!("sql/032_partial_response_started_at.sql"),
+        ),
+        (
+            "033_discussion_pinned",
+            include_str!("sql/033_discussion_pinned.sql"),
+        ),
+        (
+            "034_test_mode_fields",
+            include_str!("sql/034_test_mode_fields.sql"),
+        ),
+        (
+            "035_mcp_server_api_spec",
+            include_str!("sql/035_mcp_server_api_spec.sql"),
+        ),
+        (
+            "036_mcp_host_sync",
+            include_str!("sql/036_mcp_host_sync.sql"),
+        ),
+        (
+            "037_mcp_host_sync_backfill",
+            include_str!("sql/037_mcp_host_sync_backfill.sql"),
+        ),
+        (
+            "038_mcp_host_sync_collapse",
+            include_str!("sql/038_mcp_host_sync_collapse.sql"),
+        ),
+        (
+            "039_workflow_guards",
+            include_str!("sql/039_workflow_guards.sql"),
+        ),
+        (
+            "040_workflow_artifacts",
+            include_str!("sql/040_workflow_artifacts.sql"),
+        ),
+        (
+            "041_workflow_on_failure",
+            include_str!("sql/041_workflow_on_failure.sql"),
+        ),
+        (
+            "042_workflow_run_state",
+            include_str!("sql/042_workflow_run_state.sql"),
+        ),
+        (
+            "043_workflow_exec_allowlist",
+            include_str!("sql/043_workflow_exec_allowlist.sql"),
+        ),
+        (
+            "044_workflow_variables",
+            include_str!("sql/044_workflow_variables.sql"),
+        ),
         ("045_quick_apis", include_str!("sql/045_quick_apis.sql")),
-        ("046_workflow_run_produced_branches", include_str!("sql/046_workflow_run_produced_branches.sql")),
-        ("047_discussion_summary_strategy", include_str!("sql/047_discussion_summary_strategy.sql")),
-        ("048_disc_summary_ranges", include_str!("sql/048_disc_summary_ranges.sql")),
-        ("049_introspection_call_count", include_str!("sql/049_introspection_call_count.sql")),
+        (
+            "046_workflow_run_produced_branches",
+            include_str!("sql/046_workflow_run_produced_branches.sql"),
+        ),
+        (
+            "047_discussion_summary_strategy",
+            include_str!("sql/047_discussion_summary_strategy.sql"),
+        ),
+        (
+            "048_disc_summary_ranges",
+            include_str!("sql/048_disc_summary_ranges.sql"),
+        ),
+        (
+            "049_introspection_call_count",
+            include_str!("sql/049_introspection_call_count.sql"),
+        ),
         ("050_audit_runs", include_str!("sql/050_audit_runs.sql")),
-        ("051_agent_decisions", include_str!("sql/051_agent_decisions.sql")),
-        ("052_project_linked_repos", include_str!("sql/052_project_linked_repos.sql")),
-        ("053_audit_runs_last_completed_step", include_str!("sql/053_audit_runs_last_completed_step.sql")),
-        ("054_cross_agent_memory", include_str!("sql/054_cross_agent_memory.sql")),
-        ("055_audit_run_steps", include_str!("sql/055_audit_run_steps.sql")),
-        ("056_qp_qa_profile_directive_binding", include_str!("sql/056_qp_qa_profile_directive_binding.sql")),
-        ("057_message_duration", include_str!("sql/057_message_duration.sql")),
-        ("058_qp_versions_and_lineage", include_str!("sql/058_qp_versions_and_lineage.sql")),
-        ("059_qp_versions_backfill", include_str!("sql/059_qp_versions_backfill.sql")),
-        ("060_discussion_sessions", include_str!("sql/060_discussion_sessions.sql")),
-        ("061_api_call_logs", include_str!("sql/061_api_call_logs.sql")),
-        ("062_message_lint_report", include_str!("sql/062_message_lint_report.sql")),
-        ("063_continual_learning", include_str!("sql/063_continual_learning.sql")),
-        ("064_discussion_session_last_seen", include_str!("sql/064_discussion_session_last_seen.sql")),
-        ("065_reap_abandoned_sessions", include_str!("sql/065_reap_abandoned_sessions.sql")),
-        ("066_context_files_message_id", include_str!("sql/066_context_files_message_id.sql")),
-        ("067_context_files_backfill_legacy", include_str!("sql/067_context_files_backfill_legacy.sql")),
-        ("068_shared_id_unique", include_str!("sql/068_shared_id_unique.sql")),
-        ("069_disc_no_agent", include_str!("sql/069_disc_no_agent.sql")),
-        ("070_agent_model_override", include_str!("sql/070_agent_model_override.sql")),
-        ("071_message_model", include_str!("sql/071_message_model.sql")),
-        ("072_message_received_at", include_str!("sql/072_message_received_at.sql")),
-        ("073_session_activity", include_str!("sql/073_session_activity.sql")),
-        ("074_disc_awaiting_agent", include_str!("sql/074_disc_awaiting_agent.sql")),
-        ("075_workflows_pinned", include_str!("sql/075_workflows_pinned.sql")),
-        ("076_audit_runs_validation_link", include_str!("sql/076_audit_runs_validation_link.sql")),
-        ("077_discussion_session_resume", include_str!("sql/077_discussion_session_resume.sql")),
-        ("078_normalize_sqlite_datetimes", include_str!("sql/078_normalize_sqlite_datetimes.sql")),
+        (
+            "051_agent_decisions",
+            include_str!("sql/051_agent_decisions.sql"),
+        ),
+        (
+            "052_project_linked_repos",
+            include_str!("sql/052_project_linked_repos.sql"),
+        ),
+        (
+            "053_audit_runs_last_completed_step",
+            include_str!("sql/053_audit_runs_last_completed_step.sql"),
+        ),
+        (
+            "054_cross_agent_memory",
+            include_str!("sql/054_cross_agent_memory.sql"),
+        ),
+        (
+            "055_audit_run_steps",
+            include_str!("sql/055_audit_run_steps.sql"),
+        ),
+        (
+            "056_qp_qa_profile_directive_binding",
+            include_str!("sql/056_qp_qa_profile_directive_binding.sql"),
+        ),
+        (
+            "057_message_duration",
+            include_str!("sql/057_message_duration.sql"),
+        ),
+        (
+            "058_qp_versions_and_lineage",
+            include_str!("sql/058_qp_versions_and_lineage.sql"),
+        ),
+        (
+            "059_qp_versions_backfill",
+            include_str!("sql/059_qp_versions_backfill.sql"),
+        ),
+        (
+            "060_discussion_sessions",
+            include_str!("sql/060_discussion_sessions.sql"),
+        ),
+        (
+            "061_api_call_logs",
+            include_str!("sql/061_api_call_logs.sql"),
+        ),
+        (
+            "062_message_lint_report",
+            include_str!("sql/062_message_lint_report.sql"),
+        ),
+        (
+            "063_continual_learning",
+            include_str!("sql/063_continual_learning.sql"),
+        ),
+        (
+            "064_discussion_session_last_seen",
+            include_str!("sql/064_discussion_session_last_seen.sql"),
+        ),
+        (
+            "065_reap_abandoned_sessions",
+            include_str!("sql/065_reap_abandoned_sessions.sql"),
+        ),
+        (
+            "066_context_files_message_id",
+            include_str!("sql/066_context_files_message_id.sql"),
+        ),
+        (
+            "067_context_files_backfill_legacy",
+            include_str!("sql/067_context_files_backfill_legacy.sql"),
+        ),
+        (
+            "068_shared_id_unique",
+            include_str!("sql/068_shared_id_unique.sql"),
+        ),
+        (
+            "069_disc_no_agent",
+            include_str!("sql/069_disc_no_agent.sql"),
+        ),
+        (
+            "070_agent_model_override",
+            include_str!("sql/070_agent_model_override.sql"),
+        ),
+        (
+            "071_message_model",
+            include_str!("sql/071_message_model.sql"),
+        ),
+        (
+            "072_message_received_at",
+            include_str!("sql/072_message_received_at.sql"),
+        ),
+        (
+            "073_session_activity",
+            include_str!("sql/073_session_activity.sql"),
+        ),
+        (
+            "074_disc_awaiting_agent",
+            include_str!("sql/074_disc_awaiting_agent.sql"),
+        ),
+        (
+            "075_workflows_pinned",
+            include_str!("sql/075_workflows_pinned.sql"),
+        ),
+        (
+            "076_audit_runs_validation_link",
+            include_str!("sql/076_audit_runs_validation_link.sql"),
+        ),
+        (
+            "077_discussion_session_resume",
+            include_str!("sql/077_discussion_session_resume.sql"),
+        ),
+        (
+            "078_normalize_sqlite_datetimes",
+            include_str!("sql/078_normalize_sqlite_datetimes.sql"),
+        ),
     ];
 
     // Check if there are pending migrations before backing up
     if let Some(path) = db_path {
         if path.exists() {
             let has_pending = migrations.iter().any(|(name, _)| {
-                let applied: bool = conn.query_row(
-                    "SELECT COUNT(*) > 0 FROM _migrations WHERE name = ?1",
-                    [name],
-                    |row| row.get(0),
-                ).unwrap_or(false);
+                let applied: bool = conn
+                    .query_row(
+                        "SELECT COUNT(*) > 0 FROM _migrations WHERE name = ?1",
+                        [name],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
                 !applied
             });
             if has_pending {
@@ -117,7 +317,10 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
                 // writes live only in `<db>-wal` and the backup is stale/torn
                 // (it would omit everything since the last checkpoint).
                 if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);") {
-                    tracing::warn!("WAL checkpoint before backup failed (backup may be stale): {}", e);
+                    tracing::warn!(
+                        "WAL checkpoint before backup failed (backup may be stale): {}",
+                        e
+                    );
                 }
                 let backup_path = path.with_extension("db.backup");
                 if let Err(e) = std::fs::copy(path, &backup_path) {
@@ -157,7 +360,8 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
             // works on `&Connection`; on any error the tx drops → rollback, so
             // the DB is left exactly as before this migration (restore from
             // `<db>.db.backup` if the failure is a corrupt file, not just SQL).
-            let tx = conn.unchecked_transaction()
+            let tx = conn
+                .unchecked_transaction()
                 .map_err(|e| anyhow::anyhow!("begin tx for migration {name}: {e}"))?;
             tx.execute_batch(sql)
                 .map_err(|e| anyhow::anyhow!("migration {name} failed and was rolled back: {e}"))?;
@@ -187,8 +391,10 @@ mod tests {
         // Create and populate the database, then close the connection
         {
             let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT);").unwrap();
-            conn.execute("INSERT INTO t(val) VALUES (?1)", ["hello"]).unwrap();
+            conn.execute_batch("CREATE TABLE t(id INTEGER PRIMARY KEY, val TEXT);")
+                .unwrap();
+            conn.execute("INSERT INTO t(val) VALUES (?1)", ["hello"])
+                .unwrap();
         }
 
         // Open a new connection and run migrations (which will create a backup)
@@ -197,20 +403,29 @@ mod tests {
 
         // Verify the backup file was created
         let backup_path = db_path.with_extension("db.backup");
-        assert!(backup_path.exists(), "Backup file should exist at {:?}", backup_path);
+        assert!(
+            backup_path.exists(),
+            "Backup file should exist at {:?}",
+            backup_path
+        );
 
         // Verify the original file still exists
-        assert!(db_path.exists(), "Original database file should still exist");
+        assert!(
+            db_path.exists(),
+            "Original database file should still exist"
+        );
 
         // Verify the backup contains valid data by opening it as a SQLite DB
         let backup_conn = Connection::open(&backup_path).unwrap();
-        let val: String = backup_conn.query_row(
-            "SELECT val FROM t WHERE id = 1", [], |row| row.get(0),
-        ).unwrap();
+        let val: String = backup_conn
+            .query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(val, "hello", "Backup database should contain original data");
 
         // Verify the original database still has our data (migrations don't destroy it)
-        let val: String = conn.query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0)).unwrap();
+        let val: String = conn
+            .query_row("SELECT val FROM t WHERE id = 1", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(val, "hello");
     }
 
@@ -231,17 +446,20 @@ mod tests {
             "INSERT INTO projects (id, name, path, created_at, updated_at)
              VALUES ('p-dt', 'Dates', '/tmp/dates', ?1, ?1)",
             ["2026-07-07 19:11:11"],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO discussions (id, title, created_at, updated_at)
              VALUES ('d-dt', 'Dates', ?1, ?1)",
             ["2026-07-07 19:11:11"],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO messages (id, discussion_id, role, content, timestamp)
              VALUES ('m-dt', 'd-dt', 'User', 'hello', ?1)",
             ["2026-07-07 19:11:11"],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO workflows
              (id, name, trigger_json, steps_json, actions_json, safety_json,
@@ -249,19 +467,22 @@ mod tests {
              VALUES ('w-dt', 'Dates', '{\"type\":\"Manual\"}', '[]', '[]', '{}',
                      1, ?1, ?1)",
             ["2026-07-07 19:11:11"],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO workflow_runs
              (id, workflow_id, status, step_results_json, tokens_used,
               started_at, finished_at)
              VALUES ('r-dt', 'w-dt', 'Success', '[]', 0, ?1, ?1)",
             ["2026-07-07 19:11:11"],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             "DELETE FROM _migrations WHERE name = '078_normalize_sqlite_datetimes'",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         run(&conn).unwrap();
 
         for (table, column, id) in [
@@ -290,7 +511,8 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE _migrations (id INTEGER PRIMARY KEY, name TEXT NOT NULL, \
              applied_at TEXT NOT NULL DEFAULT (datetime('now')));",
-        ).unwrap();
+        )
+        .unwrap();
 
         // A batch that creates a table THEN runs invalid SQL — the CREATE must be
         // rolled back with the failure, and no _migrations row written.
@@ -300,11 +522,17 @@ mod tests {
         assert!(res.is_err(), "the invalid batch must error");
         drop(tx); // rollback
 
-        let table_exists: bool = conn.query_row(
-            "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='half_applied'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert!(!table_exists, "the CREATE must have been rolled back, not left half-applied");
+        let table_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='half_applied'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            !table_exists,
+            "the CREATE must have been rolled back, not left half-applied"
+        );
     }
 
     #[test]
@@ -323,7 +551,10 @@ mod tests {
         run_with_backup(&conn, Some(&db_path)).expect("migrations should succeed");
 
         let cfg_backup = dir.path().join("config.toml.backup");
-        assert!(cfg_backup.exists(), "config.toml must be snapshotted before migrations");
+        assert!(
+            cfg_backup.exists(),
+            "config.toml must be snapshotted before migrations"
+        );
         assert_eq!(
             std::fs::read_to_string(&cfg_backup).unwrap(),
             "auth_token = \"tok-123\"\n",

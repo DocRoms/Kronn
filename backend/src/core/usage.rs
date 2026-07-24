@@ -196,7 +196,10 @@ pub fn parse_report(period_kind: &str, json: &[u8]) -> Result<UsageReport, Strin
     // changes, so a ccusage bump doesn't silently zero the report.
     let rows_val = v
         .get(period_kind)
-        .or_else(|| v.as_object().and_then(|o| o.values().find(|x| x.is_array())))
+        .or_else(|| {
+            v.as_object()
+                .and_then(|o| o.values().find(|x| x.is_array()))
+        })
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Array(vec![]));
 
@@ -355,7 +358,10 @@ mod tests {
         assert!((report.rows[0].total_cost - 5.26).abs() < 1e-9);
         // modelBreakdowns parsed for agent rollup on the frontend.
         assert_eq!(report.rows[0].model_breakdowns.len(), 1);
-        assert_eq!(report.rows[0].model_breakdowns[0].model_name, "claude-opus-4-6");
+        assert_eq!(
+            report.rows[0].model_breakdowns[0].model_name,
+            "claude-opus-4-6"
+        );
         // ccusage ships no per-model `totalTokens`; we sum the 4 components.
         assert_eq!(
             report.rows[0].model_breakdowns[0].total_tokens,
@@ -365,7 +371,10 @@ mod tests {
         assert!((report.totals.total_cost - 6.68).abs() < 1e-9);
         // `claude` comes from row 0's metadata.agents (the `all` row),
         // `codex` from row 1's top-level agent. Sorted.
-        assert_eq!(report.agents_detected, vec!["claude".to_string(), "codex".to_string()]);
+        assert_eq!(
+            report.agents_detected,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
     }
 
     #[test]
@@ -381,7 +390,10 @@ mod tests {
           "totals": {"totalCost": 7.0, "totalTokens": 150}
         }"#;
         let report = parse_report("daily", json).unwrap();
-        assert_eq!(report.agents_detected, vec!["claude".to_string(), "codex".to_string()]);
+        assert_eq!(
+            report.agents_detected,
+            vec!["claude".to_string(), "codex".to_string()]
+        );
     }
 
     #[test]

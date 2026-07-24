@@ -3,7 +3,7 @@
 //! Extracts readable text from uploaded files (text, xlsx, docx, pptx, pdf)
 //! and builds the `=== CONTEXT FILES ===` prompt section.
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 
 /// Max extracted text size (500KB) — applies to OFFICE docs whose binary is
 /// converted to text inline. Plain files go to disk (no inline cap), see
@@ -34,15 +34,64 @@ const IMAGE_EXTENSIONS: &[&str] = &[
 
 /// Text file extensions (stored as-is)
 const TEXT_EXTENSIONS: &[&str] = &[
-    "txt", "md", "json", "csv", "yaml", "yml", "toml",
-    "sql", "xml", "html", "htm", "css", "js", "ts",
-    "jsx", "tsx", "py", "rs", "go", "java", "c", "cpp",
-    "h", "hpp", "rb", "sh", "bash", "zsh", "fish",
-    "log", "env", "ini", "cfg", "conf", "properties",
-    "swift", "kt", "kts", "scala", "clj", "ex", "exs",
-    "vue", "svelte", "astro", "php", "r", "jl", "lua",
-    "tf", "hcl", "dockerfile", "makefile", "cmake",
-    "gitignore", "editorconfig", "prettierrc", "eslintrc",
+    "txt",
+    "md",
+    "json",
+    "csv",
+    "yaml",
+    "yml",
+    "toml",
+    "sql",
+    "xml",
+    "html",
+    "htm",
+    "css",
+    "js",
+    "ts",
+    "jsx",
+    "tsx",
+    "py",
+    "rs",
+    "go",
+    "java",
+    "c",
+    "cpp",
+    "h",
+    "hpp",
+    "rb",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "log",
+    "env",
+    "ini",
+    "cfg",
+    "conf",
+    "properties",
+    "swift",
+    "kt",
+    "kts",
+    "scala",
+    "clj",
+    "ex",
+    "exs",
+    "vue",
+    "svelte",
+    "astro",
+    "php",
+    "r",
+    "jl",
+    "lua",
+    "tf",
+    "hcl",
+    "dockerfile",
+    "makefile",
+    "cmake",
+    "gitignore",
+    "editorconfig",
+    "prettierrc",
+    "eslintrc",
 ];
 
 /// Result of processing an uploaded file.
@@ -68,7 +117,13 @@ pub fn is_image(filename: &str) -> bool {
 
 /// Save image bytes to a target directory (project work_dir or temp).
 /// Returns the absolute path of the saved file.
-pub fn save_image_to_dir(dir: &std::path::Path, id: &str, filename: &str, _ext: &str, data: &[u8]) -> Result<String> {
+pub fn save_image_to_dir(
+    dir: &std::path::Path,
+    id: &str,
+    filename: &str,
+    _ext: &str,
+    data: &[u8],
+) -> Result<String> {
     // Save in .kronn/context-files/ within the target directory
     let ctx_dir = dir.join(".kronn").join("context-files");
     std::fs::create_dir_all(&ctx_dir)?;
@@ -86,7 +141,12 @@ pub fn save_image_to_dir(dir: &std::path::Path, id: &str, filename: &str, _ext: 
 /// Save arbitrary attachment bytes to the discussion's on-disk context-file
 /// dir (same location/scheme as images — `.kronn/context-files/`). The agent
 /// reads the file by the returned path. Generic over file type.
-pub fn save_file_to_dir(dir: &std::path::Path, id: &str, filename: &str, data: &[u8]) -> Result<String> {
+pub fn save_file_to_dir(
+    dir: &std::path::Path,
+    id: &str,
+    filename: &str,
+    data: &[u8],
+) -> Result<String> {
     save_image_to_dir(dir, id, filename, "", data)
 }
 
@@ -127,9 +187,15 @@ pub fn extract_content(filename: &str, data: &[u8]) -> Result<ExtractedContent> 
 
     if IMAGE_EXTENSIONS.contains(&ext.as_str()) {
         if data.len() > 10 * 1024 * 1024 {
-            bail!("Image exceeds 10MB limit ({} MB)", data.len() / (1024 * 1024));
+            bail!(
+                "Image exceeds 10MB limit ({} MB)",
+                data.len() / (1024 * 1024)
+            );
         }
-        return Ok(ExtractedContent::Image { data: data.to_vec(), ext });
+        return Ok(ExtractedContent::Image {
+            data: data.to_vec(),
+            ext,
+        });
     }
 
     if data.is_empty() {
@@ -158,19 +224,21 @@ pub fn extract_content(filename: &str, data: &[u8]) -> Result<ExtractedContent> 
     // the full file with its tools — no whole-file token cost, no 500KB cap.
     let preview_len = data.len().min(PREVIEW_BYTES);
     let preview = String::from_utf8_lossy(&data[..preview_len]).to_string();
-    Ok(ExtractedContent::DiskFile { data: data.to_vec(), preview })
+    Ok(ExtractedContent::DiskFile {
+        data: data.to_vec(),
+        preview,
+    })
 }
 
 /// Extract text content from a file's raw bytes.
 /// Returns the extracted text or an error for unsupported/binary files.
 pub fn extract_text(filename: &str, data: &[u8]) -> Result<String> {
-    let ext = filename.rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+    let ext = filename.rsplit('.').next().unwrap_or("").to_lowercase();
 
     // Also match extensionless files by known names
-    let basename = filename.rsplit('/').next()
+    let basename = filename
+        .rsplit('/')
+        .next()
         .and_then(|n| n.rsplit('\\').next())
         .unwrap_or(filename)
         .to_lowercase();
@@ -193,7 +261,10 @@ pub fn extract_text(filename: &str, data: &[u8]) -> Result<String> {
     };
 
     if text.len() > MAX_EXTRACTED_SIZE {
-        bail!("Extracted text exceeds 500KB limit ({} KB)", text.len() / 1024);
+        bail!(
+            "Extracted text exceeds 500KB limit ({} KB)",
+            text.len() / 1024
+        );
     }
 
     if text.trim().is_empty() {
@@ -205,12 +276,12 @@ pub fn extract_text(filename: &str, data: &[u8]) -> Result<String> {
 
 /// Extract text from xlsx/xls using calamine
 fn extract_xlsx(data: &[u8]) -> Result<String> {
-    use calamine::{Reader, Xlsx, Data};
+    use calamine::{Data, Reader, Xlsx};
     use std::io::Cursor;
 
     let cursor = Cursor::new(data);
-    let mut workbook: Xlsx<_> = Xlsx::new(cursor)
-        .map_err(|e| anyhow::anyhow!("Failed to open spreadsheet: {e}"))?;
+    let mut workbook: Xlsx<_> =
+        Xlsx::new(cursor).map_err(|e| anyhow::anyhow!("Failed to open spreadsheet: {e}"))?;
 
     let mut output = String::new();
     let sheet_names: Vec<String> = workbook.sheet_names().to_vec();
@@ -221,8 +292,9 @@ fn extract_xlsx(data: &[u8]) -> Result<String> {
                 output.push_str(&format!("--- Sheet: {} ---\n", name));
             }
             for row in range.rows() {
-                let cells: Vec<String> = row.iter().map(|cell| {
-                    match cell {
+                let cells: Vec<String> = row
+                    .iter()
+                    .map(|cell| match cell {
                         Data::Empty => String::new(),
                         Data::String(s) => s.clone(),
                         Data::Float(f) => format!("{f}"),
@@ -232,8 +304,8 @@ fn extract_xlsx(data: &[u8]) -> Result<String> {
                         Data::DateTime(dt) => format!("{dt}"),
                         Data::DateTimeIso(s) => s.clone(),
                         Data::DurationIso(s) => s.clone(),
-                    }
-                }).collect();
+                    })
+                    .collect();
                 output.push_str(&cells.join(","));
                 output.push('\n');
             }
@@ -249,8 +321,8 @@ fn extract_docx(data: &[u8]) -> Result<String> {
     use std::io::Cursor;
 
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| anyhow::anyhow!("Failed to open docx: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| anyhow::anyhow!("Failed to open docx: {e}"))?;
 
     let mut xml = String::new();
     if let Ok(mut file) = archive.by_name("word/document.xml") {
@@ -270,7 +342,9 @@ fn extract_docx(data: &[u8]) -> Result<String> {
         if ch == '<' {
             let mut tag = String::new();
             for tc in chars.by_ref() {
-                if tc == '>' { break; }
+                if tc == '>' {
+                    break;
+                }
                 tag.push(tc);
             }
             if tag.starts_with("w:t") && !tag.starts_with("w:tbl") {
@@ -294,8 +368,8 @@ fn extract_pptx(data: &[u8]) -> Result<String> {
     use std::io::{Cursor, Read};
 
     let cursor = Cursor::new(data);
-    let mut archive = zip::ZipArchive::new(cursor)
-        .map_err(|e| anyhow::anyhow!("Failed to open pptx: {e}"))?;
+    let mut archive =
+        zip::ZipArchive::new(cursor).map_err(|e| anyhow::anyhow!("Failed to open pptx: {e}"))?;
 
     let mut output = String::new();
     let mut slide_names: Vec<String> = Vec::new();
@@ -324,7 +398,9 @@ fn extract_pptx(data: &[u8]) -> Result<String> {
                 if ch == '<' {
                     let mut tag = String::new();
                     for tc in chars.by_ref() {
-                        if tc == '>' { break; }
+                        if tc == '>' {
+                            break;
+                        }
                         tag.push(tc);
                     }
                     if tag.starts_with("a:t") && !tag.contains('/') {
@@ -379,7 +455,9 @@ pub struct ContextEntry {
 /// Build the `=== CONTEXT FILES ===` prompt section.
 /// Text files: inline content. Images: reference path for agent to read.
 pub fn build_context_prompt(files: &[ContextEntry]) -> String {
-    if files.is_empty() { return String::new(); }
+    if files.is_empty() {
+        return String::new();
+    }
 
     let mut parts = Vec::new();
     for entry in files {
@@ -487,7 +565,11 @@ mod tests {
 
     #[test]
     fn build_context_prompt_single() {
-        let files = vec![ContextEntry { filename: "test.sql".into(), text: "SELECT 1".into(), disk_path: None }];
+        let files = vec![ContextEntry {
+            filename: "test.sql".into(),
+            text: "SELECT 1".into(),
+            disk_path: None,
+        }];
         let prompt = build_context_prompt(&files);
         assert!(prompt.contains("--- test.sql ---"));
         assert!(prompt.contains("SELECT 1"));
@@ -496,8 +578,16 @@ mod tests {
     #[test]
     fn build_context_prompt_multiple() {
         let files = vec![
-            ContextEntry { filename: "a.txt".into(), text: "AAA".into(), disk_path: None },
-            ContextEntry { filename: "b.txt".into(), text: "BBB".into(), disk_path: None },
+            ContextEntry {
+                filename: "a.txt".into(),
+                text: "AAA".into(),
+                disk_path: None,
+            },
+            ContextEntry {
+                filename: "b.txt".into(),
+                text: "BBB".into(),
+                disk_path: None,
+            },
         ];
         let prompt = build_context_prompt(&files);
         assert!(prompt.contains("--- a.txt ---"));
@@ -509,8 +599,16 @@ mod tests {
     #[test]
     fn build_context_prompt_with_image() {
         let files = vec![
-            ContextEntry { filename: "data.csv".into(), text: "a,b\n1,2".into(), disk_path: None },
-            ContextEntry { filename: "screenshot.png".into(), text: "[Image: screenshot.png]".into(), disk_path: Some("/tmp/abc.png".into()) },
+            ContextEntry {
+                filename: "data.csv".into(),
+                text: "a,b\n1,2".into(),
+                disk_path: None,
+            },
+            ContextEntry {
+                filename: "screenshot.png".into(),
+                text: "[Image: screenshot.png]".into(),
+                disk_path: Some("/tmp/abc.png".into()),
+            },
         ];
         let prompt = build_context_prompt(&files);
         assert!(prompt.contains("data.csv"));
@@ -532,7 +630,10 @@ mod tests {
         assert!(prompt.contains("file on disk"), "got: {prompt}");
         assert!(prompt.contains("/work/.kronn/context-files/ab_trace.har"));
         assert!(prompt.contains("Preview"));
-        assert!(!prompt.contains("image"), "a .har must not be described as an image");
+        assert!(
+            !prompt.contains("image"),
+            "a .har must not be described as an image"
+        );
     }
 
     #[test]
@@ -555,7 +656,11 @@ mod tests {
         match extract_content("huge.log", &big).unwrap() {
             ExtractedContent::DiskFile { data, preview } => {
                 assert_eq!(data.len(), big.len());
-                assert_eq!(preview.len(), PREVIEW_BYTES, "preview bounded to PREVIEW_BYTES");
+                assert_eq!(
+                    preview.len(),
+                    PREVIEW_BYTES,
+                    "preview bounded to PREVIEW_BYTES"
+                );
             }
             _ => panic!("large text must route to DiskFile"),
         }
@@ -626,7 +731,10 @@ mod tests {
 
     #[test]
     fn mime_detection() {
-        assert_eq!(mime_from_extension("data.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+        assert_eq!(
+            mime_from_extension("data.xlsx"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
         assert_eq!(mime_from_extension("doc.pdf"), "application/pdf");
         assert_eq!(mime_from_extension("readme.md"), "text/plain");
     }
@@ -644,7 +752,10 @@ mod tests {
         let big = vec![b'a'; MAX_EXTRACTED_SIZE + 16];
         let result = extract_text("huge.txt", &big);
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("500KB"), "expected 500KB limit error, got {err}");
+        assert!(
+            err.contains("500KB"),
+            "expected 500KB limit error, got {err}"
+        );
     }
 
     #[test]
@@ -687,13 +798,19 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let id = "abc12345-rest-of-uuid-here";
         let payload = b"\x89PNG fake";
-        let path =
-            save_image_to_dir(tmp.path(), id, "screen shot.png", "png", payload).unwrap();
-        assert!(std::path::Path::new(&path).exists(), "file should exist at {path}");
+        let path = save_image_to_dir(tmp.path(), id, "screen shot.png", "png", payload).unwrap();
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "file should exist at {path}"
+        );
         let written = std::fs::read(&path).unwrap();
         assert_eq!(written, payload);
         // Replacing spaces and the id prefix should appear in the basename.
-        let basename = std::path::Path::new(&path).file_name().unwrap().to_string_lossy().to_string();
+        let basename = std::path::Path::new(&path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(basename.starts_with("abc12345_"));
         assert!(basename.contains("screen_shot.png"));
     }
@@ -867,19 +984,25 @@ mod tests {
 
     #[test]
     fn extract_pptx_garbage_bytes_errors() {
-        let err = extract_text("bad.pptx", b"not a zip").unwrap_err().to_string();
+        let err = extract_text("bad.pptx", b"not a zip")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Failed to open pptx"), "got {err}");
     }
 
     #[test]
     fn extract_pdf_garbage_bytes_errors() {
-        let err = extract_text("bad.pdf", b"definitely not a pdf").unwrap_err().to_string();
+        let err = extract_text("bad.pdf", b"definitely not a pdf")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("PDF extraction failed"), "got {err}");
     }
 
     #[test]
     fn extract_xlsx_garbage_bytes_errors() {
-        let err = extract_text("bad.xlsx", b"not a real xlsx").unwrap_err().to_string();
+        let err = extract_text("bad.xlsx", b"not a real xlsx")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Failed to open spreadsheet"), "got {err}");
     }
 }

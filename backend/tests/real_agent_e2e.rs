@@ -142,7 +142,9 @@ fn real_agent_produces_valid_triage_manifest_for_big_ticket() {
     // - `decided.length + mocked.length + blocked.length >= 5`
     //   (a big ticket should produce real freedoms to trace)
     // - every entry has a non-empty `id` and `what`
-    eprintln!("[stub] Tier 4 real-agent triage — implementation pending wire-up to the agent runner.");
+    eprintln!(
+        "[stub] Tier 4 real-agent triage — implementation pending wire-up to the agent runner."
+    );
 }
 
 #[test]
@@ -161,19 +163,29 @@ fn opt_in_panic_message_is_actionable() {
     // SAFETY: env::remove_var can be unsafe in multi-threaded test
     // environments. Tests in this file are #[ignore]'d so they only
     // run when explicitly requested — never in parallel CI.
-    unsafe { env::remove_var("KRONN_E2E_REAL_AGENT"); }
+    unsafe {
+        env::remove_var("KRONN_E2E_REAL_AGENT");
+    }
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         require_opt_in();
     }));
     if let Some(prev_val) = prev {
-        unsafe { env::set_var("KRONN_E2E_REAL_AGENT", prev_val); }
+        unsafe {
+            env::set_var("KRONN_E2E_REAL_AGENT", prev_val);
+        }
     }
     let err = r.expect_err("require_opt_in() must panic when env is missing");
-    let msg = err.downcast_ref::<String>().cloned()
+    let msg = err
+        .downcast_ref::<String>()
+        .cloned()
         .or_else(|| err.downcast_ref::<&str>().map(|s| s.to_string()))
         .unwrap_or_default();
-    assert!(msg.contains("KRONN_E2E_REAL_AGENT"),
-        "panic must name the env var: {msg}");
-    assert!(msg.contains("tokens") || msg.contains("cost"),
-        "panic must warn about token cost: {msg}");
+    assert!(
+        msg.contains("KRONN_E2E_REAL_AGENT"),
+        "panic must name the env var: {msg}"
+    );
+    assert!(
+        msg.contains("tokens") || msg.contains("cost"),
+        "panic must warn about token cost: {msg}"
+    );
 }

@@ -2,8 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 
-use crate::models::{*, ModelTier};
 use super::parse_dt;
+use crate::models::{ModelTier, *};
 
 // ─── Discussions ────────────────────────────────────────────────────────────
 
@@ -149,13 +149,21 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
             // Worst case of a persistent failure is one warn line per boot —
             // observable, unlike a silently dropped owed-run marker.
             if let Err(e) = insert_message(conn, &disc_id, &msg) {
-                tracing::warn!("reconcile_awaiting_agents: failed to append notice for {}: {}", disc_id, e);
+                tracing::warn!(
+                    "reconcile_awaiting_agents: failed to append notice for {}: {}",
+                    disc_id,
+                    e
+                );
                 continue;
             }
             marked.push(disc_id.clone());
         }
         if let Err(e) = set_awaiting_agent(conn, &disc_id, false) {
-            tracing::warn!("reconcile_awaiting_agents: failed to clear flag for {}: {}", disc_id, e);
+            tracing::warn!(
+                "reconcile_awaiting_agents: failed to clear flag for {}: {}",
+                disc_id,
+                e
+            );
         }
     }
     Ok(marked)
@@ -165,7 +173,7 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
     let triples: Vec<(String, String, Option<String>)> = {
         let mut stmt = conn.prepare(
             "SELECT id, partial_response, partial_response_started_at \
-             FROM discussions WHERE partial_response IS NOT NULL"
+             FROM discussions WHERE partial_response IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -210,12 +218,18 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             model_tier: None,
             cost_usd: None,
             author_pseudo: None,
-            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
         };
         match insert_message(conn, &disc_id, &msg) {
             Ok(_) => {
                 if let Err(e) = set_partial_response(conn, &disc_id, None) {
-                    tracing::warn!("Cleared partial after recovery but failed to wipe column for {}: {}", disc_id, e);
+                    tracing::warn!(
+                        "Cleared partial after recovery but failed to wipe column for {}: {}",
+                        disc_id,
+                        e
+                    );
                 }
                 recovered.push(disc_id);
             }
@@ -243,7 +257,8 @@ pub fn has_pending_partial(conn: &Connection, disc_id: &str) -> Result<bool> {
 
 /// Column list shared by every `SELECT ... FROM discussions d` that maps rows
 /// via [`map_discussion_row`]. Keep the order in sync with the indices read there.
-const DISC_SELECT_COLS: &str = "d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
+const DISC_SELECT_COLS: &str =
+    "d.id, d.project_id, d.title, d.agent, d.language, d.participants_json,
                 d.created_at, d.updated_at, d.archived, d.skill_ids_json,
                 d.message_count,
                 d.profile_ids_json, d.directive_ids_json,
@@ -290,18 +305,28 @@ fn map_discussion_row(row: &rusqlite::Row) -> rusqlite::Result<Discussion> {
         workspace_mode: row.get::<_, String>(13).unwrap_or_else(|_| "Direct".into()),
         workspace_path: row.get::<_, Option<String>>(14).unwrap_or(None),
         worktree_branch: row.get::<_, Option<String>>(15).unwrap_or(None),
-        tier: parse_model_tier(&row.get::<_, String>(18).unwrap_or_else(|_| "default".into())),
+        tier: parse_model_tier(
+            &row.get::<_, String>(18)
+                .unwrap_or_else(|_| "default".into()),
+        ),
         model: row.get::<_, Option<String>>(32).unwrap_or(None),
         pin_first_message: row.get::<_, i32>(19).unwrap_or(0) != 0,
         summary_cache: row.get::<_, Option<String>>(16).unwrap_or(None),
         summary_up_to_msg_idx: row.get::<_, Option<u32>>(17).unwrap_or(None),
         shared_id: row.get::<_, Option<String>>(20).unwrap_or(None),
-        shared_with: serde_json::from_str(&row.get::<_, String>(21).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
+        shared_with: serde_json::from_str(
+            &row.get::<_, String>(21).unwrap_or_else(|_| "[]".into()),
+        )
+        .unwrap_or_default(),
         workflow_run_id: row.get::<_, Option<String>>(22).unwrap_or(None),
         awaiting_agent: row.get::<_, i32>(34).unwrap_or(0) != 0,
         test_mode_restore_branch: row.get::<_, Option<String>>(24).unwrap_or(None),
         test_mode_stash_ref: row.get::<_, Option<String>>(25).unwrap_or(None),
-        summary_strategy: parse_summary_strategy(row.get::<_, String>(26).unwrap_or_else(|_| "Auto".into()).as_str()),
+        summary_strategy: parse_summary_strategy(
+            row.get::<_, String>(26)
+                .unwrap_or_else(|_| "Auto".into())
+                .as_str(),
+        ),
         introspection_call_count: row.get::<_, u32>(27).unwrap_or(0),
         created_at: parse_dt(row.get::<_, String>(6)?),
         updated_at: parse_dt(row.get::<_, String>(7)?),
@@ -328,7 +353,11 @@ pub fn list_discussions_by_run(conn: &Connection, run_id: &str) -> Result<Vec<Di
     Ok(discussions)
 }
 
-pub fn list_discussions_paginated(conn: &Connection, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<Discussion>> {
+pub fn list_discussions_paginated(
+    conn: &Connection,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<Discussion>> {
     let sql = format!(
         "SELECT {} FROM discussions d ORDER BY d.updated_at DESC{}",
         DISC_SELECT_COLS,
@@ -387,47 +416,61 @@ pub fn get_discussion(conn: &Connection, id: &str) -> Result<Option<Discussion>>
          FROM discussions WHERE id = ?1"
     )?;
 
-    let disc = stmt.query_row(params![id], |row| {
-        let agent_str: String = row.get(3)?;
-        let participants_str: String = row.get(5)?;
-        let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
-        let profile_ids_str: String = row.get::<_, String>(10).unwrap_or_else(|_| "[]".into());
-        let directive_ids_str: String = row.get::<_, String>(11).unwrap_or_else(|_| "[]".into());
+    let disc = stmt
+        .query_row(params![id], |row| {
+            let agent_str: String = row.get(3)?;
+            let participants_str: String = row.get(5)?;
+            let skill_ids_str: String = row.get::<_, String>(9).unwrap_or_else(|_| "[]".into());
+            let profile_ids_str: String = row.get::<_, String>(10).unwrap_or_else(|_| "[]".into());
+            let directive_ids_str: String =
+                row.get::<_, String>(11).unwrap_or_else(|_| "[]".into());
 
-        Ok(Discussion {
-            id: row.get(0)?,
-            project_id: row.get(1)?,
-            title: row.get(2)?,
-            agent: parse_agent_type(&agent_str),
-            language: row.get(4)?,
-            participants: serde_json::from_str(&participants_str).unwrap_or_default(),
-            messages: vec![],
-            message_count: 0, non_system_message_count: 0,
-            skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
-            profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
-            directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
-            archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
-            pinned: row.get::<_, i32>(22).unwrap_or(0) != 0,
-            workspace_mode: row.get::<_, String>(12).unwrap_or_else(|_| "Direct".into()),
-            workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
-            worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
-            tier: parse_model_tier(&row.get::<_, String>(17).unwrap_or_else(|_| "default".into())),
-            model: row.get::<_, Option<String>>(31).unwrap_or(None),
-            pin_first_message: row.get::<_, i32>(18).unwrap_or(0) != 0,
-            summary_cache: row.get::<_, Option<String>>(15).unwrap_or(None),
-            summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
-            shared_id: row.get::<_, Option<String>>(19).unwrap_or(None),
-            shared_with: serde_json::from_str(&row.get::<_, String>(20).unwrap_or_else(|_| "[]".into())).unwrap_or_default(),
-            workflow_run_id: row.get::<_, Option<String>>(21).unwrap_or(None),
-            awaiting_agent: row.get::<_, i32>(32).unwrap_or(0) != 0,
-            test_mode_restore_branch: row.get::<_, Option<String>>(23).unwrap_or(None),
-            test_mode_stash_ref: row.get::<_, Option<String>>(24).unwrap_or(None),
-            summary_strategy: parse_summary_strategy(row.get::<_, String>(25).unwrap_or_else(|_| "Auto".into()).as_str()),
-            introspection_call_count: row.get::<_, u32>(26).unwrap_or(0),
-            created_at: parse_dt(row.get::<_, String>(6)?),
-            updated_at: parse_dt(row.get::<_, String>(7)?),
+            Ok(Discussion {
+                id: row.get(0)?,
+                project_id: row.get(1)?,
+                title: row.get(2)?,
+                agent: parse_agent_type(&agent_str),
+                language: row.get(4)?,
+                participants: serde_json::from_str(&participants_str).unwrap_or_default(),
+                messages: vec![],
+                message_count: 0,
+                non_system_message_count: 0,
+                skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+                profile_ids: serde_json::from_str(&profile_ids_str).unwrap_or_default(),
+                directive_ids: serde_json::from_str(&directive_ids_str).unwrap_or_default(),
+                archived: row.get::<_, i32>(8).unwrap_or(0) != 0,
+                pinned: row.get::<_, i32>(22).unwrap_or(0) != 0,
+                workspace_mode: row.get::<_, String>(12).unwrap_or_else(|_| "Direct".into()),
+                workspace_path: row.get::<_, Option<String>>(13).unwrap_or(None),
+                worktree_branch: row.get::<_, Option<String>>(14).unwrap_or(None),
+                tier: parse_model_tier(
+                    &row.get::<_, String>(17)
+                        .unwrap_or_else(|_| "default".into()),
+                ),
+                model: row.get::<_, Option<String>>(31).unwrap_or(None),
+                pin_first_message: row.get::<_, i32>(18).unwrap_or(0) != 0,
+                summary_cache: row.get::<_, Option<String>>(15).unwrap_or(None),
+                summary_up_to_msg_idx: row.get::<_, Option<u32>>(16).unwrap_or(None),
+                shared_id: row.get::<_, Option<String>>(19).unwrap_or(None),
+                shared_with: serde_json::from_str(
+                    &row.get::<_, String>(20).unwrap_or_else(|_| "[]".into()),
+                )
+                .unwrap_or_default(),
+                workflow_run_id: row.get::<_, Option<String>>(21).unwrap_or(None),
+                awaiting_agent: row.get::<_, i32>(32).unwrap_or(0) != 0,
+                test_mode_restore_branch: row.get::<_, Option<String>>(23).unwrap_or(None),
+                test_mode_stash_ref: row.get::<_, Option<String>>(24).unwrap_or(None),
+                summary_strategy: parse_summary_strategy(
+                    row.get::<_, String>(25)
+                        .unwrap_or_else(|_| "Auto".into())
+                        .as_str(),
+                ),
+                introspection_call_count: row.get::<_, u32>(26).unwrap_or(0),
+                created_at: parse_dt(row.get::<_, String>(6)?),
+                updated_at: parse_dt(row.get::<_, String>(7)?),
+            })
         })
-    }).ok();
+        .ok();
 
     if let Some(mut d) = disc {
         d.messages = list_messages(conn, &d.id)?;
@@ -574,16 +617,53 @@ pub fn delete_discussion(conn: &Connection, id: &str) -> Result<bool> {
     Ok(affected > 0)
 }
 
-pub fn update_discussion(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, pinned: Option<bool>, project_id: Option<Option<&str>>) -> Result<bool> {
-    update_discussion_fields(conn, id, title, archived, pinned, None, None, None, project_id)
+pub fn update_discussion(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    archived: Option<bool>,
+    pinned: Option<bool>,
+    project_id: Option<Option<&str>>,
+) -> Result<bool> {
+    update_discussion_fields(
+        conn, id, title, archived, pinned, None, None, None, project_id,
+    )
 }
 
-pub fn update_discussion_skill_ids(conn: &Connection, id: &str, skill_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, Some(skill_ids), None, None, None)
+pub fn update_discussion_skill_ids(
+    conn: &Connection,
+    id: &str,
+    skill_ids: &[String],
+) -> Result<bool> {
+    update_discussion_fields(
+        conn,
+        id,
+        None,
+        None,
+        None,
+        Some(skill_ids),
+        None,
+        None,
+        None,
+    )
 }
 
-pub fn update_discussion_profile_ids(conn: &Connection, id: &str, profile_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, None, Some(profile_ids), None, None)
+pub fn update_discussion_profile_ids(
+    conn: &Connection,
+    id: &str,
+    profile_ids: &[String],
+) -> Result<bool> {
+    update_discussion_fields(
+        conn,
+        id,
+        None,
+        None,
+        None,
+        None,
+        Some(profile_ids),
+        None,
+        None,
+    )
 }
 
 pub fn update_discussion_tier(conn: &Connection, id: &str, tier: &ModelTier) -> Result<bool> {
@@ -602,20 +682,47 @@ pub fn update_discussion_agent(conn: &Connection, id: &str, agent: &AgentType) -
     Ok(affected > 0)
 }
 
-pub fn update_discussion_directive_ids(conn: &Connection, id: &str, directive_ids: &[String]) -> Result<bool> {
-    update_discussion_fields(conn, id, None, None, None, None, None, Some(directive_ids), None)
+pub fn update_discussion_directive_ids(
+    conn: &Connection,
+    id: &str,
+    directive_ids: &[String],
+) -> Result<bool> {
+    update_discussion_fields(
+        conn,
+        id,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Some(directive_ids),
+        None,
+    )
 }
 
-pub fn update_discussion_summary_strategy(conn: &Connection, id: &str, strategy: crate::models::SummaryStrategy) -> Result<bool> {
+pub fn update_discussion_summary_strategy(
+    conn: &Connection,
+    id: &str,
+    strategy: crate::models::SummaryStrategy,
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE discussions SET summary_strategy = ?1, updated_at = ?2 WHERE id = ?3",
-        params![format_summary_strategy(strategy), Utc::now().to_rfc3339(), id],
+        params![
+            format_summary_strategy(strategy),
+            Utc::now().to_rfc3339(),
+            id
+        ],
     )?;
     Ok(affected > 0)
 }
 
 /// Update workspace_path and worktree_branch for a discussion (used after worktree creation).
-pub fn update_discussion_workspace(conn: &Connection, id: &str, workspace_path: &str, worktree_branch: &str) -> Result<bool> {
+pub fn update_discussion_workspace(
+    conn: &Connection,
+    id: &str,
+    workspace_path: &str,
+    worktree_branch: &str,
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE discussions SET workspace_path = ?1, worktree_branch = ?2, updated_at = ?3 WHERE id = ?4",
         params![workspace_path, worktree_branch, Utc::now().to_rfc3339(), id],
@@ -643,7 +750,17 @@ pub fn update_discussion_test_mode(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, archived: Option<bool>, pinned: Option<bool>, skill_ids: Option<&[String]>, profile_ids: Option<&[String]>, directive_ids: Option<&[String]>, project_id: Option<Option<&str>>) -> Result<bool> {
+fn update_discussion_fields(
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    archived: Option<bool>,
+    pinned: Option<bool>,
+    skill_ids: Option<&[String]>,
+    profile_ids: Option<&[String]>,
+    directive_ids: Option<&[String]>,
+    project_id: Option<Option<&str>>,
+) -> Result<bool> {
     let mut sets = Vec::new();
     let mut values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
@@ -665,15 +782,21 @@ fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, ar
     }
     if let Some(s) = skill_ids {
         sets.push("skill_ids_json = ?");
-        values.push(Box::new(serde_json::to_string(s).unwrap_or_else(|_| "[]".into())));
+        values.push(Box::new(
+            serde_json::to_string(s).unwrap_or_else(|_| "[]".into()),
+        ));
     }
     if let Some(p) = profile_ids {
         sets.push("profile_ids_json = ?");
-        values.push(Box::new(serde_json::to_string(p).unwrap_or_else(|_| "[]".into())));
+        values.push(Box::new(
+            serde_json::to_string(p).unwrap_or_else(|_| "[]".into()),
+        ));
     }
     if let Some(d) = directive_ids {
         sets.push("directive_ids_json = ?");
-        values.push(Box::new(serde_json::to_string(d).unwrap_or_else(|_| "[]".into())));
+        values.push(Box::new(
+            serde_json::to_string(d).unwrap_or_else(|_| "[]".into()),
+        ));
     }
 
     if sets.is_empty() {
@@ -685,10 +808,7 @@ fn update_discussion_fields(conn: &Connection, id: &str, title: Option<&str>, ar
 
     values.push(Box::new(id.to_string()));
 
-    let sql = format!(
-        "UPDATE discussions SET {} WHERE id = ?",
-        sets.join(", ")
-    );
+    let sql = format!("UPDATE discussions SET {} WHERE id = ?", sets.join(", "));
 
     let params: Vec<&dyn rusqlite::types::ToSql> = values.iter().map(|v| v.as_ref()).collect();
     let affected = conn.execute(&sql, params.as_slice())?;
@@ -703,10 +823,18 @@ pub fn update_discussion_timestamp(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn update_discussion_participants(conn: &Connection, id: &str, participants: &[AgentType]) -> Result<()> {
+pub fn update_discussion_participants(
+    conn: &Connection,
+    id: &str,
+    participants: &[AgentType],
+) -> Result<()> {
     conn.execute(
         "UPDATE discussions SET participants_json = ?1, updated_at = ?2 WHERE id = ?3",
-        params![serde_json::to_string(participants)?, Utc::now().to_rfc3339(), id],
+        params![
+            serde_json::to_string(participants)?,
+            Utc::now().to_rfc3339(),
+            id
+        ],
     )?;
     Ok(())
 }
@@ -714,35 +842,47 @@ pub fn update_discussion_participants(conn: &Connection, id: &str, participants:
 // ─── Messages ───────────────────────────────────────────────────────────────
 
 /// Load all messages grouped by discussion_id in a single query (avoids N+1).
-fn list_all_messages(conn: &Connection) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
+fn list_all_messages(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
         "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
-    let mut map: std::collections::HashMap<String, Vec<DiscussionMessage>> = std::collections::HashMap::new();
+    let mut map: std::collections::HashMap<String, Vec<DiscussionMessage>> =
+        std::collections::HashMap::new();
     let rows = stmt.query_map([], |row| {
         let disc_id: String = row.get(0)?;
         let role_str: String = row.get(2)?;
         let agent_type_str: Option<String> = row.get(4)?;
 
-        Ok((disc_id, DiscussionMessage {
-            id: row.get(1)?,
-            role: parse_role(&role_str),
-            content: row.get(3)?,
-            agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
-            timestamp: parse_dt(row.get::<_, String>(5)?),
-            tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
-            auth_mode: row.get(7)?,
-            model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
-            cost_usd: row.get::<_, Option<f64>>(9).unwrap_or(None),
-            author_pseudo: None,
-            author_avatar_email: None, source_msg_id: None,
-            duration_ms: row.get::<_, Option<i64>>(10).unwrap_or(None).map(|d| d as u64),
-            lint_report: row.get::<_, Option<String>>(11).unwrap_or(None)
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            model: row.get::<_, Option<String>>(12).unwrap_or(None),
-        }))
+        Ok((
+            disc_id,
+            DiscussionMessage {
+                id: row.get(1)?,
+                role: parse_role(&role_str),
+                content: row.get(3)?,
+                agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
+                timestamp: parse_dt(row.get::<_, String>(5)?),
+                tokens_used: row.get::<_, i64>(6).unwrap_or(0) as u64,
+                auth_mode: row.get(7)?,
+                model_tier: row.get::<_, Option<String>>(8).unwrap_or(None),
+                cost_usd: row.get::<_, Option<f64>>(9).unwrap_or(None),
+                author_pseudo: None,
+                author_avatar_email: None,
+                source_msg_id: None,
+                duration_ms: row
+                    .get::<_, Option<i64>>(10)
+                    .unwrap_or(None)
+                    .map(|d| d as u64),
+                lint_report: row
+                    .get::<_, Option<String>>(11)
+                    .unwrap_or(None)
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                model: row.get::<_, Option<String>>(12).unwrap_or(None),
+            },
+        ))
     })?;
 
     for row in rows.filter_map(|r| r.ok()) {
@@ -759,29 +899,37 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
          ORDER BY sort_order, timestamp"
     )?;
 
-    let messages = stmt.query_map(params![discussion_id], |row| {
-        let role_str: String = row.get(1)?;
-        let agent_type_str: Option<String> = row.get(3)?;
+    let messages = stmt
+        .query_map(params![discussion_id], |row| {
+            let role_str: String = row.get(1)?;
+            let agent_type_str: Option<String> = row.get(3)?;
 
-        Ok(DiscussionMessage {
-            id: row.get(0)?,
-            role: parse_role(&role_str),
-            content: row.get(2)?,
-            agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
-            timestamp: parse_dt(row.get::<_, String>(4)?),
-            tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
-            auth_mode: row.get(6)?,
-            model_tier: row.get::<_, Option<String>>(7).unwrap_or(None),
-            cost_usd: row.get::<_, Option<f64>>(8).unwrap_or(None),
-            author_pseudo: row.get::<_, Option<String>>(9).unwrap_or(None),
-            author_avatar_email: row.get::<_, Option<String>>(10).unwrap_or(None),
-            source_msg_id: row.get::<_, Option<String>>(11).unwrap_or(None),
-            duration_ms: row.get::<_, Option<i64>>(12).unwrap_or(None).map(|d| d as u64),
-            lint_report: row.get::<_, Option<String>>(13).unwrap_or(None)
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            model: row.get::<_, Option<String>>(14).unwrap_or(None),
-        })
-    })?.filter_map(|r| r.ok()).collect();
+            Ok(DiscussionMessage {
+                id: row.get(0)?,
+                role: parse_role(&role_str),
+                content: row.get(2)?,
+                agent_type: agent_type_str.map(|s| parse_agent_type(&s)),
+                timestamp: parse_dt(row.get::<_, String>(4)?),
+                tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
+                auth_mode: row.get(6)?,
+                model_tier: row.get::<_, Option<String>>(7).unwrap_or(None),
+                cost_usd: row.get::<_, Option<f64>>(8).unwrap_or(None),
+                author_pseudo: row.get::<_, Option<String>>(9).unwrap_or(None),
+                author_avatar_email: row.get::<_, Option<String>>(10).unwrap_or(None),
+                source_msg_id: row.get::<_, Option<String>>(11).unwrap_or(None),
+                duration_ms: row
+                    .get::<_, Option<i64>>(12)
+                    .unwrap_or(None)
+                    .map(|d| d as u64),
+                lint_report: row
+                    .get::<_, Option<String>>(13)
+                    .unwrap_or(None)
+                    .and_then(|s| serde_json::from_str(&s).ok()),
+                model: row.get::<_, Option<String>>(14).unwrap_or(None),
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     Ok(messages)
 }
@@ -806,7 +954,10 @@ pub fn list_shared_sync_points(conn: &Connection) -> Result<Vec<(String, i64)>> 
     })?;
     let mut out = Vec::new();
     for r in rows.filter_map(|r| r.ok()) {
-        let since = r.1.map(parse_dt).map(|dt| dt.timestamp_millis()).unwrap_or(0);
+        let since =
+            r.1.map(parse_dt)
+                .map(|dt| dt.timestamp_millis())
+                .unwrap_or(0);
         out.push((r.0, since));
     }
     Ok(out)
@@ -866,7 +1017,11 @@ pub fn last_user_message_at(
 /// long-poll (`disc_wait_for_peer`) need their REAL position, not an estimate
 /// (stab-1: estimated positions drifted under concurrent posters and made
 /// agents silently skip messages).
-pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMessage) -> Result<i64> {
+pub fn insert_message(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+) -> Result<i64> {
     // Get the next sort_order for this discussion
     let next_order: i64 = conn.query_row(
         "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages WHERE discussion_id = ?1",
@@ -921,7 +1076,12 @@ pub fn insert_message(conn: &Connection, discussion_id: &str, msg: &DiscussionMe
 /// avg tokens / duration / cost. Safe to call multiple times on the
 /// same discussion — last write wins (used by the compare-agents
 /// flow where every child gets the same lineage).
-pub fn set_originating_qp(conn: &Connection, disc_id: &str, qp_id: &str, version_index: u32) -> Result<()> {
+pub fn set_originating_qp(
+    conn: &Connection,
+    disc_id: &str,
+    qp_id: &str,
+    version_index: u32,
+) -> Result<()> {
     conn.execute(
         "UPDATE discussions SET originating_qp_id = ?2, originating_qp_version = ?3 WHERE id = ?1",
         params![disc_id, qp_id, version_index as i64],
@@ -931,16 +1091,23 @@ pub fn set_originating_qp(conn: &Connection, disc_id: &str, qp_id: &str, version
 
 /// Find a discussion by its shared_id (cross-Kronn replicated ID).
 pub fn find_discussion_by_shared_id(conn: &Connection, shared_id: &str) -> Result<Option<String>> {
-    let id = conn.query_row(
-        "SELECT id FROM discussions WHERE shared_id = ?1",
-        params![shared_id],
-        |row| row.get::<_, String>(0),
-    ).ok();
+    let id = conn
+        .query_row(
+            "SELECT id FROM discussions WHERE shared_id = ?1",
+            params![shared_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
     Ok(id)
 }
 
 /// Update shared_id and shared_with for a discussion.
-pub fn update_discussion_sharing(conn: &Connection, discussion_id: &str, shared_id: &str, shared_with: &[String]) -> Result<bool> {
+pub fn update_discussion_sharing(
+    conn: &Connection,
+    discussion_id: &str,
+    shared_id: &str,
+    shared_with: &[String],
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE discussions SET shared_id = ?1, shared_with_json = ?2, updated_at = ?3 WHERE id = ?4",
         params![shared_id, serde_json::to_string(shared_with)?, Utc::now().to_rfc3339(), discussion_id],
@@ -970,7 +1137,11 @@ pub fn delete_last_agent_messages(conn: &Connection, discussion_id: &str) -> Res
     Ok(affected as u64)
 }
 
-pub fn edit_last_user_message(conn: &Connection, discussion_id: &str, content: &str) -> Result<bool> {
+pub fn edit_last_user_message(
+    conn: &Connection,
+    discussion_id: &str,
+    content: &str,
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE messages SET content = ?1, timestamp = ?2
          WHERE discussion_id = ?3 AND role = 'User'
@@ -985,7 +1156,12 @@ pub fn edit_last_user_message(conn: &Connection, discussion_id: &str, content: &
 }
 
 /// Save a conversation summary cache for a discussion.
-pub fn update_summary_cache(conn: &Connection, discussion_id: &str, summary: &str, up_to_msg_idx: u32) -> Result<()> {
+pub fn update_summary_cache(
+    conn: &Connection,
+    discussion_id: &str,
+    summary: &str,
+    up_to_msg_idx: u32,
+) -> Result<()> {
     conn.execute(
         "UPDATE discussions SET summary_cache = ?1, summary_up_to_msg_idx = ?2 WHERE id = ?3",
         params![summary, up_to_msg_idx, discussion_id],
@@ -1027,12 +1203,14 @@ pub fn get_ranged_summary(
     from_idx: u32,
     to_idx: u32,
 ) -> Result<Option<(String, u64)>> {
-    let row: Option<(String, i64)> = conn.query_row(
-        "SELECT summary, tokens_used FROM disc_summary_ranges
+    let row: Option<(String, i64)> = conn
+        .query_row(
+            "SELECT summary, tokens_used FROM disc_summary_ranges
          WHERE discussion_id = ?1 AND from_idx = ?2 AND to_idx = ?3",
-        params![discussion_id, from_idx, to_idx],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).optional()?;
+            params![discussion_id, from_idx, to_idx],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
     Ok(row.map(|(s, t)| (s, t as u64)))
 }
 
@@ -1065,7 +1243,12 @@ pub fn upsert_ranged_summary(
     Ok(())
 }
 
-pub fn update_message_tokens(conn: &Connection, message_id: &str, tokens_used: u64, auth_mode: Option<&str>) -> Result<()> {
+pub fn update_message_tokens(
+    conn: &Connection,
+    message_id: &str,
+    tokens_used: u64,
+    auth_mode: Option<&str>,
+) -> Result<()> {
     conn.execute(
         "UPDATE messages SET tokens_used = ?1, auth_mode = ?2 WHERE id = ?3",
         params![tokens_used as i64, auth_mode, message_id],
@@ -1186,7 +1369,10 @@ pub fn context_file_exists(conn: &Connection, file_id: &str) -> rusqlite::Result
 
 /// Fetch a single context file by id (incl. `disk_path`). Used by the F8
 /// `fetch-file` endpoint to stream a federated attachment's bytes to a peer.
-pub fn get_context_file(conn: &Connection, file_id: &str) -> rusqlite::Result<Option<crate::models::ContextFile>> {
+pub fn get_context_file(
+    conn: &Connection,
+    file_id: &str,
+) -> rusqlite::Result<Option<crate::models::ContextFile>> {
     conn.query_row(
         "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
          FROM context_files WHERE id = ?1",
@@ -1218,13 +1404,18 @@ pub fn insert_federated_context_file(
     Ok(())
 }
 
-pub fn list_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
+pub fn list_context_files(
+    conn: &Connection,
+    discussion_id: &str,
+) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
     let mut stmt = conn.prepare(
         "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
          FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
     )?;
-    let rows = stmt.query_map(rusqlite::params![discussion_id], map_context_file_row)?
-        .filter_map(|r| r.ok()).collect();
+    let rows = stmt
+        .query_map(rusqlite::params![discussion_id], map_context_file_row)?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(rows)
 }
 
@@ -1240,9 +1431,13 @@ fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::
         extracted_size: row.get::<_, i64>(5).unwrap_or(0) as u64,
         disk_path: row.get(6)?,
         message_id: row.get(7)?,
-        created_at: row.get::<_, String>(8)
-            .map(|s| chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
-                .unwrap_or_default().and_utc())
+        created_at: row
+            .get::<_, String>(8)
+            .map(|s| {
+                chrono::NaiveDateTime::parse_from_str(&s, "%Y-%m-%d %H:%M:%S")
+                    .unwrap_or_default()
+                    .and_utc()
+            })
             .unwrap_or_else(|_| Utc::now()),
     })
 }
@@ -1250,13 +1445,18 @@ fn map_context_file_row(row: &rusqlite::Row) -> rusqlite::Result<crate::models::
 /// Files pinned to a single message (0.8.8). Used by the per-message bubble
 /// render and the `disc_get_message` MCP tool so an agent navigating to an old
 /// message knows what was attached to it.
-pub fn list_context_files_for_message(conn: &Connection, message_id: &str) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
+pub fn list_context_files_for_message(
+    conn: &Connection,
+    message_id: &str,
+) -> rusqlite::Result<Vec<crate::models::ContextFile>> {
     let mut stmt = conn.prepare(
         "SELECT id, discussion_id, filename, mime_type, original_size, extracted_size, disk_path, message_id, created_at
          FROM context_files WHERE message_id = ?1 ORDER BY created_at"
     )?;
-    let rows = stmt.query_map(rusqlite::params![message_id], map_context_file_row)?
-        .filter_map(|r| r.ok()).collect();
+    let rows = stmt
+        .query_map(rusqlite::params![message_id], map_context_file_row)?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(rows)
 }
 
@@ -1284,7 +1484,11 @@ pub fn count_context_files(conn: &Connection, discussion_id: &str) -> rusqlite::
     )
 }
 
-pub fn delete_context_file(conn: &Connection, discussion_id: &str, file_id: &str) -> rusqlite::Result<bool> {
+pub fn delete_context_file(
+    conn: &Connection,
+    discussion_id: &str,
+    file_id: &str,
+) -> rusqlite::Result<bool> {
     let affected = conn.execute(
         "DELETE FROM context_files WHERE id = ?1 AND discussion_id = ?2",
         rusqlite::params![file_id, discussion_id],
@@ -1293,17 +1497,23 @@ pub fn delete_context_file(conn: &Connection, discussion_id: &str, file_id: &str
 }
 
 /// Get all context files for prompt injection (text + image references).
-pub fn get_context_files_for_prompt(conn: &Connection, discussion_id: &str) -> rusqlite::Result<Vec<crate::core::context_files::ContextEntry>> {
+pub fn get_context_files_for_prompt(
+    conn: &Connection,
+    discussion_id: &str,
+) -> rusqlite::Result<Vec<crate::core::context_files::ContextEntry>> {
     let mut stmt = conn.prepare(
         "SELECT filename, extracted_text, disk_path FROM context_files WHERE discussion_id = ?1 ORDER BY created_at"
     )?;
-    let rows = stmt.query_map(rusqlite::params![discussion_id], |row| {
-        Ok(crate::core::context_files::ContextEntry {
-            filename: row.get(0)?,
-            text: row.get(1)?,
-            disk_path: row.get(2)?,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+    let rows = stmt
+        .query_map(rusqlite::params![discussion_id], |row| {
+            Ok(crate::core::context_files::ContextEntry {
+                filename: row.get(0)?,
+                text: row.get(1)?,
+                disk_path: row.get(2)?,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
     Ok(rows)
 }
 

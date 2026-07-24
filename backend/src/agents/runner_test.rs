@@ -8,8 +8,14 @@ mod tests {
 
     #[test]
     fn parse_stream_empty_line() {
-        assert!(matches!(parse_claude_stream_line(""), StreamJsonEvent::Skip));
-        assert!(matches!(parse_claude_stream_line("  "), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(""),
+            StreamJsonEvent::Skip
+        ));
+        assert!(matches!(
+            parse_claude_stream_line("  "),
+            StreamJsonEvent::Skip
+        ));
     }
 
     #[test]
@@ -50,9 +56,15 @@ mod tests {
     #[test]
     fn strip_thinking_leaks_preserves_legitimate_content() {
         // The word "thinking" in plain text — MUST NOT be stripped.
-        assert_eq!(strip_thinking_leaks("Thinking about it."), "Thinking about it.");
+        assert_eq!(
+            strip_thinking_leaks("Thinking about it."),
+            "Thinking about it."
+        );
         // Unrelated HTML-like content — MUST NOT be stripped.
-        assert_eq!(strip_thinking_leaks("Use <em>this</em> tag."), "Use <em>this</em> tag.");
+        assert_eq!(
+            strip_thinking_leaks("Use <em>this</em> tag."),
+            "Use <em>this</em> tag."
+        );
         // A genuine code sample referencing the tag as string — rare, but we
         // err on the side of the stream-pollution fix here: if someone really
         // needs to paste `</thinking>` into a message, they can escape it.
@@ -63,7 +75,10 @@ mod tests {
     fn strip_thinking_leaks_catches_qwen3_short_think_tag() {
         // Regression: the regex only matched `<thinking>`, never qwen3's
         // shorter `<think>` / `</think>`. Now both are stripped.
-        assert_eq!(strip_thinking_leaks("<think>reasoning</think>391"), "reasoning391");
+        assert_eq!(
+            strip_thinking_leaks("<think>reasoning</think>391"),
+            "reasoning391"
+        );
         assert_eq!(strip_thinking_leaks("</think>"), "");
         assert_eq!(strip_thinking_leaks("<THINK>x</THINK>"), "x");
         // The longer form still works.
@@ -81,8 +96,14 @@ mod tests {
         assert_eq!(opts["temperature"], 0);
         assert_eq!(opts["top_k"], 1);
         assert_eq!(opts["seed"], 42);
-        assert!(opts["num_ctx"].as_u64().unwrap() <= 8192, "num_ctx must be capped at 8192");
-        assert!(opts["num_ctx"].as_u64().unwrap() >= 2048, "num_ctx must respect the floor");
+        assert!(
+            opts["num_ctx"].as_u64().unwrap() <= 8192,
+            "num_ctx must be capped at 8192"
+        );
+        assert!(
+            opts["num_ctx"].as_u64().unwrap() >= 2048,
+            "num_ctx must respect the floor"
+        );
     }
 
     #[test]
@@ -95,8 +116,10 @@ mod tests {
         // Non-qwen3 (e.g. llama3.3) → no /no_think message at all.
         let l = build_ollama_chat_body("llama3.3:70b", "", "hi", None, 8192);
         let lmsgs = l["messages"].as_array().unwrap();
-        assert!(!lmsgs.iter().any(|m| m["content"] == "/no_think"),
-            "no_think must be qwen3-only");
+        assert!(
+            !lmsgs.iter().any(|m| m["content"] == "/no_think"),
+            "no_think must be qwen3-only"
+        );
     }
 
     #[test]
@@ -116,7 +139,11 @@ mod tests {
     fn ollama_num_ctx_is_clamped_both_ends() {
         assert_eq!(ollama_num_ctx("", "", 8192), 2048, "tiny prompt → floor");
         let huge = "x".repeat(100_000);
-        assert_eq!(ollama_num_ctx(&huge, &huge, 8192), 8192, "huge prompt → cap");
+        assert_eq!(
+            ollama_num_ctx(&huge, &huge, 8192),
+            8192,
+            "huge prompt → cap"
+        );
     }
 
     #[tokio::test]
@@ -126,20 +153,38 @@ mod tests {
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
         let (mut done, mut err) = (false, false);
         // A streamed content chunk...
-        forward_ollama_line(r#"{"message":{"content":"391"},"done":false}"#, &tx, &stderr, &mut done, &mut err, 0).await;
+        forward_ollama_line(
+            r#"{"message":{"content":"391"},"done":false}"#,
+            &tx,
+            &stderr,
+            &mut done,
+            &mut err,
+            0,
+        )
+        .await;
         assert!(!done && !err);
         // ...then the terminal `done` object (identical shape to a non-stream
         // single-object response), carrying the token counts.
         forward_ollama_line(
             r#"{"message":{"content":""},"done":true,"prompt_eval_count":12,"eval_count":3}"#,
-            &tx, &stderr, &mut done, &mut err, 0,
-        ).await;
+            &tx,
+            &stderr,
+            &mut done,
+            &mut err,
+            0,
+        )
+        .await;
         assert!(done && !err, "terminal chunk sets got_done, no error");
         drop(tx);
         let mut got = String::new();
-        while let Some(s) = rx.recv().await { got.push_str(&s); }
+        while let Some(s) = rx.recv().await {
+            got.push_str(&s);
+        }
         assert_eq!(got, "391");
-        assert_eq!(stderr.lock().unwrap().as_slice(), &["ollama_tokens:12:3".to_string()]);
+        assert_eq!(
+            stderr.lock().unwrap().as_slice(),
+            &["ollama_tokens:12:3".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -148,12 +193,15 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(8);
         let stderr = Arc::new(Mutex::new(Vec::<String>::new()));
         let (mut done, mut err) = (false, false);
-        forward_ollama_line("   ", &tx, &stderr, &mut done, &mut err, 0).await;      // blank tail buffer
+        forward_ollama_line("   ", &tx, &stderr, &mut done, &mut err, 0).await; // blank tail buffer
         forward_ollama_line("{not json", &tx, &stderr, &mut done, &mut err, 0).await; // partial/garbage
         drop(tx);
         assert!(rx.recv().await.is_none(), "no content forwarded");
         assert!(stderr.lock().unwrap().is_empty(), "no token line captured");
-        assert!(!done && !err, "garbage neither completes nor fails the stream");
+        assert!(
+            !done && !err,
+            "garbage neither completes nor fails the stream"
+        );
     }
 
     #[tokio::test]
@@ -167,20 +215,37 @@ mod tests {
         // pre-flight estimate).
         forward_ollama_line(
             r#"{"message":{"content":""},"done":true,"prompt_eval_count":8180,"eval_count":3}"#,
-            &tx, &stderr, &mut done, &mut err, 8192,
-        ).await;
+            &tx,
+            &stderr,
+            &mut done,
+            &mut err,
+            8192,
+        )
+        .await;
         assert!(done && !err, "truncation warns, it does not fail the step");
         let lines = stderr.lock().unwrap().clone();
-        assert!(lines.iter().any(|l| l.contains("Ollama truncation")), "{lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("Ollama truncation")),
+            "{lines:?}"
+        );
 
         // Comfortable margin → no truncation marker.
         let stderr2 = Arc::new(Mutex::new(Vec::<String>::new()));
         let (mut done2, mut err2) = (false, false);
         forward_ollama_line(
             r#"{"message":{"content":""},"done":true,"prompt_eval_count":4000,"eval_count":3}"#,
-            &tx, &stderr2, &mut done2, &mut err2, 8192,
-        ).await;
-        assert!(!stderr2.lock().unwrap().iter().any(|l| l.contains("truncation")));
+            &tx,
+            &stderr2,
+            &mut done2,
+            &mut err2,
+            8192,
+        )
+        .await;
+        assert!(!stderr2
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|l| l.contains("truncation")));
     }
 
     #[tokio::test]
@@ -193,15 +258,24 @@ mod tests {
         // be silently ignored → step "succeeded" with empty output.
         forward_ollama_line(
             r#"{"error":"model runner has unexpectedly stopped"}"#,
-            &tx, &stderr, &mut done, &mut err, 0,
-        ).await;
+            &tx,
+            &stderr,
+            &mut done,
+            &mut err,
+            0,
+        )
+        .await;
         drop(tx);
         assert!(err, "in-band error object must mark the stream failed");
         assert!(!done);
         assert!(rx.recv().await.is_none());
         let lines = stderr.lock().unwrap();
-        assert!(lines.iter().any(|l| l.contains("model runner has unexpectedly stopped")),
-            "error reason must reach the stderr tail shown on step failure: {lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("model runner has unexpectedly stopped")),
+            "error reason must reach the stderr tail shown on step failure: {lines:?}"
+        );
     }
 
     #[test]
@@ -210,7 +284,10 @@ mod tests {
         // NOT reach `full_response` as an empty chunk (which would still
         // count toward the downstream loop detector).
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"</thinking>"}}}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
     }
 
     #[test]
@@ -227,7 +304,11 @@ mod tests {
     fn parse_stream_usage_from_message_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":100,"output_tokens":50}}}"#;
         match parse_claude_stream_line(line) {
-            StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
+            StreamJsonEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => {
                 assert_eq!(input_tokens, 100);
                 assert_eq!(output_tokens, 50);
                 assert!(cost_usd.is_none());
@@ -240,7 +321,11 @@ mod tests {
     fn parse_stream_result_with_usage() {
         let line = r#"{"type":"result","subtype":"success","cost_usd":0.01,"usage":{"input_tokens":200,"output_tokens":100}}"#;
         match parse_claude_stream_line(line) {
-            StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
+            StreamJsonEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cost_usd,
+            } => {
                 assert_eq!(input_tokens, 200);
                 assert_eq!(output_tokens, 100);
                 assert!((cost_usd.unwrap() - 0.01).abs() < f64::EPSILON);
@@ -252,13 +337,19 @@ mod tests {
     #[test]
     fn parse_stream_result_without_usage() {
         let line = r#"{"type":"result","subtype":"success"}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
     }
 
     #[test]
     fn parse_stream_assistant_skipped() {
         let line = r#"{"type":"assistant","message":"full text so far"}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
     }
 
     #[test]
@@ -273,19 +364,28 @@ mod tests {
     #[test]
     fn parse_stream_unknown_type() {
         let line = r#"{"type":"init","session_id":"abc"}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
     }
 
     #[test]
     fn parse_stream_event_without_delta() {
         let line = r#"{"type":"stream_event","event":{"type":"message_start"}}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
     }
 
     #[test]
     fn parse_stream_zero_usage_skipped() {
         let line = r#"{"type":"stream_event","event":{"type":"message_delta","usage":{"input_tokens":0,"output_tokens":0}}}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::Skip));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::Skip
+        ));
     }
 
     // ─── parse_token_usage ────────────────────────────────────────────────────
@@ -327,7 +427,8 @@ mod tests {
         // binaries, network blocks), Gemini CLI 0.32 prepends a noisy
         // header to its reply that confuses the user (they assume Gemini
         // failed when it didn't). parse_token_usage must strip it.
-        let raw = "MCP issues detected. Run /mcp list for status.\nVoici la réponse réelle de Gemini.";
+        let raw =
+            "MCP issues detected. Run /mcp list for status.\nVoici la réponse réelle de Gemini.";
         let (cleaned, tokens) = parse_token_usage(&AgentType::GeminiCli, raw, &[]);
         assert_eq!(tokens, 0);
         assert_eq!(cleaned, "Voici la réponse réelle de Gemini.");
@@ -406,52 +507,61 @@ Suite de la réponse.";
 
     #[test]
     fn claude_code_full_access_adds_skip_permissions() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "test prompt", true, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "test prompt", true, "", None);
+        assert!(
+            args.contains(&"--dangerously-skip-permissions".to_string()),
+            "Claude Code with full_access should include --dangerously-skip-permissions"
         );
-        assert!(args.contains(&"--dangerously-skip-permissions".to_string()),
-            "Claude Code with full_access should include --dangerously-skip-permissions");
     }
 
     #[test]
     fn claude_code_no_full_access_omits_skip_permissions() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "test prompt", false, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "test prompt", false, "", None);
+        assert!(
+            !args.contains(&"--dangerously-skip-permissions".to_string()),
+            "Claude Code without full_access should NOT include --dangerously-skip-permissions"
         );
-        assert!(!args.contains(&"--dangerously-skip-permissions".to_string()),
-            "Claude Code without full_access should NOT include --dangerously-skip-permissions");
     }
 
     #[test]
     fn codex_full_access_uses_explicit_sandbox_only() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "test prompt", true, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "test prompt", true, "", None);
+        assert!(
+            !args.contains(&"--full-auto".to_string()),
+            "Codex should not include --full-auto (it overrides explicit sandbox)"
         );
-        assert!(!args.contains(&"--full-auto".to_string()),
-            "Codex should not include --full-auto (it overrides explicit sandbox)");
     }
 
     #[test]
     fn codex_no_full_access_omits_full_auto() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "test prompt", false, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "test prompt", false, "", None);
+        assert!(
+            !args.contains(&"--full-auto".to_string()),
+            "Codex without full_access should NOT include --full-auto"
         );
-        assert!(!args.contains(&"--full-auto".to_string()),
-            "Codex without full_access should NOT include --full-auto");
     }
 
     #[test]
     fn gemini_full_access_adds_yolo() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::GeminiCli, "test prompt", true, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::GeminiCli, "test prompt", true, "", None);
+        assert!(
+            args.contains(&"--yolo".to_string()),
+            "Gemini CLI with full_access should include --yolo"
         );
-        assert!(args.contains(&"--yolo".to_string()),
-            "Gemini CLI with full_access should include --yolo");
         // --yolo must come BEFORE -p (Gemini requires -p <prompt> as last args)
         let yolo_idx = args.iter().position(|a| a == "--yolo").unwrap();
         let p_idx = args.iter().position(|a| a == "-p").unwrap();
-        assert!(yolo_idx < p_idx,
-            "--yolo ({}) must come before -p ({}) to avoid arg parsing issues", yolo_idx, p_idx);
+        assert!(
+            yolo_idx < p_idx,
+            "--yolo ({}) must come before -p ({}) to avoid arg parsing issues",
+            yolo_idx,
+            p_idx
+        );
     }
 
     // ─── agent_command: MCP/skills context injection ───────────────────────────
@@ -459,7 +569,11 @@ Suite de la réponse.";
     #[test]
     fn claude_code_injects_context_via_append_system_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "prompt", false, "MCP context here", None,
+            &AgentType::ClaudeCode,
+            "prompt",
+            false,
+            "MCP context here",
+            None,
         );
         let idx = args.iter().position(|a| a == "--append-system-prompt");
         assert!(idx.is_some(), "Should have --append-system-prompt flag");
@@ -469,20 +583,31 @@ Suite de la réponse.";
     #[test]
     fn codex_prepends_context_to_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "user prompt", false, "MCP context", None,
+            &AgentType::Codex,
+            "user prompt",
+            false,
+            "MCP context",
+            None,
         );
         let last = args.last().unwrap();
-        assert!(last.starts_with("MCP context"), "Context should be prepended to prompt");
-        assert!(last.contains("user prompt"), "Original prompt should be in the combined prompt");
+        assert!(
+            last.starts_with("MCP context"),
+            "Context should be prepended to prompt"
+        );
+        assert!(
+            last.contains("user prompt"),
+            "Original prompt should be in the combined prompt"
+        );
     }
 
     #[test]
     fn agent_command_no_context_when_empty() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "prompt", false, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "prompt", false, "", None);
+        assert!(
+            !args.contains(&"--append-system-prompt".to_string()),
+            "Should not add --append-system-prompt when context is empty"
         );
-        assert!(!args.contains(&"--append-system-prompt".to_string()),
-            "Should not add --append-system-prompt when context is empty");
     }
 
     // ─── Kiro output cleaning ──────────────────────────────────────────────────
@@ -514,7 +639,10 @@ Suite de la réponse.";
 
     #[test]
     fn kiro_filters_mcp_tool_calls() {
-        assert!(clean_kiro_line("Running tool jira_get_issue with params (from mcp server: atlassian)").is_none());
+        assert!(clean_kiro_line(
+            "Running tool jira_get_issue with params (from mcp server: atlassian)"
+        )
+        .is_none());
         assert!(clean_kiro_line("Appel de l'outil get_repos (from mcp server: github)").is_none());
     }
 
@@ -544,27 +672,54 @@ Suite de la réponse.";
     #[test]
     fn kiro_filters_shell_commands_and_symbol_lookups() {
         // Real examples from Kiro output — "I will run..." contains "(using tool: shell)"
-        assert!(clean_kiro_line("I will run the following command: find /some/path -name '*.yaml' (using tool: shell)").is_none());
-        assert!(clean_kiro_line("Getting symbols from: /some/file.php [top_level=true] (using tool: code)").is_none());
+        assert!(clean_kiro_line(
+            "I will run the following command: find /some/path -name '*.yaml' (using tool: shell)"
+        )
+        .is_none());
+        assert!(clean_kiro_line(
+            "Getting symbols from: /some/file.php [top_level=true] (using tool: code)"
+        )
+        .is_none());
         // French variant
-        assert!(clean_kiro_line("Je vais exécuter la commande suivante: ls -la (using tool: shell)").is_none());
+        assert!(clean_kiro_line(
+            "Je vais exécuter la commande suivante: ls -la (using tool: shell)"
+        )
+        .is_none());
     }
 
     #[test]
     fn kiro_keeps_real_content() {
         // Actual response text should NOT be filtered
-        assert_eq!(clean_kiro_line("Voici l'analyse du problème :"), Some("Voici l'analyse du problème :".into()));
-        assert_eq!(clean_kiro_line("## Architecture des redirections"), Some("## Architecture des redirections".into()));
-        assert_eq!(clean_kiro_line("Layer 1 — YAML"), Some("Layer 1 — YAML".into()));
-        assert_eq!(clean_kiro_line("The fix needed: preserve query params"), Some("The fix needed: preserve query params".into()));
+        assert_eq!(
+            clean_kiro_line("Voici l'analyse du problème :"),
+            Some("Voici l'analyse du problème :".into())
+        );
+        assert_eq!(
+            clean_kiro_line("## Architecture des redirections"),
+            Some("## Architecture des redirections".into())
+        );
+        assert_eq!(
+            clean_kiro_line("Layer 1 — YAML"),
+            Some("Layer 1 — YAML".into())
+        );
+        assert_eq!(
+            clean_kiro_line("The fix needed: preserve query params"),
+            Some("The fix needed: preserve query params".into())
+        );
     }
 
     #[test]
     fn kiro_strips_ansi_and_prefix() {
         // ANSI codes should be stripped
-        assert_eq!(clean_kiro_line("\x1b[32mSome text\x1b[0m"), Some("Some text".into()));
+        assert_eq!(
+            clean_kiro_line("\x1b[32mSome text\x1b[0m"),
+            Some("Some text".into())
+        );
         // "> " prefix should be stripped
-        assert_eq!(clean_kiro_line("> Response text"), Some("Response text".into()));
+        assert_eq!(
+            clean_kiro_line("> Response text"),
+            Some("Response text".into())
+        );
     }
 
     // ─── agent_command: complete args structure per agent ────────────────────────
@@ -575,80 +730,116 @@ Suite de la réponse.";
 
     #[test]
     fn claude_code_command_structure() {
-        let (binary, npx, args, env_key, _, output_mode) = super::super::agent_command(
-            &AgentType::ClaudeCode, "do something", false, "", None,
-        );
+        let (binary, npx, args, env_key, _, output_mode) =
+            super::super::agent_command(&AgentType::ClaudeCode, "do something", false, "", None);
         assert_eq!(binary, "claude");
         assert_eq!(npx, Some("@anthropic-ai/claude-code"));
         assert_eq!(env_key, "ANTHROPIC_API_KEY");
         assert!(matches!(output_mode, OutputMode::StreamJson));
-        assert!(args.contains(&"--print".to_string()), "Missing --print flag");
-        assert!(args.contains(&"--output-format".to_string()), "Missing --output-format flag");
-        assert!(args.contains(&"stream-json".to_string()), "Missing stream-json value");
-        assert!(args.contains(&"--verbose".to_string()), "Missing --verbose flag");
-        assert!(args.contains(&"--include-partial-messages".to_string()), "Missing --include-partial-messages");
+        assert!(
+            args.contains(&"--print".to_string()),
+            "Missing --print flag"
+        );
+        assert!(
+            args.contains(&"--output-format".to_string()),
+            "Missing --output-format flag"
+        );
+        assert!(
+            args.contains(&"stream-json".to_string()),
+            "Missing stream-json value"
+        );
+        assert!(
+            args.contains(&"--verbose".to_string()),
+            "Missing --verbose flag"
+        );
+        assert!(
+            args.contains(&"--include-partial-messages".to_string()),
+            "Missing --include-partial-messages"
+        );
         // Prompt should be last arg
         assert_eq!(args.last().unwrap(), "do something");
     }
 
     #[test]
     fn codex_command_structure() {
-        let (binary, npx, args, env_key, _, output_mode) = super::super::agent_command(
-            &AgentType::Codex, "fix the bug", false, "", None,
-        );
+        let (binary, npx, args, env_key, _, output_mode) =
+            super::super::agent_command(&AgentType::Codex, "fix the bug", false, "", None);
         assert_eq!(binary, "codex");
         assert_eq!(npx, Some("@openai/codex"));
         assert_eq!(env_key, "OPENAI_API_KEY");
         assert!(matches!(output_mode, OutputMode::Text));
         assert_eq!(args[0], "exec", "First arg must be 'exec' subcommand");
-        assert!(args.contains(&"--skip-git-repo-check".to_string()), "Missing --skip-git-repo-check");
+        assert!(
+            args.contains(&"--skip-git-repo-check".to_string()),
+            "Missing --skip-git-repo-check"
+        );
         assert_eq!(args.last().unwrap(), "fix the bug");
     }
 
     #[test]
     fn vibe_command_structure() {
-        let (binary, npx, args, env_key, _, output_mode) = super::super::agent_command(
-            &AgentType::Vibe, "analyse this", false, "", None,
+        let (binary, npx, args, env_key, _, output_mode) =
+            super::super::agent_command(&AgentType::Vibe, "analyse this", false, "", None);
+        assert_eq!(
+            binary, "python3",
+            "Vibe must use python3 with vibe-runner.py"
         );
-        assert_eq!(binary, "python3", "Vibe must use python3 with vibe-runner.py");
         assert_eq!(npx, None, "Vibe has no npx fallback");
         assert_eq!(env_key, "MISTRAL_API_KEY");
         assert!(matches!(output_mode, OutputMode::Text));
         // First arg should be the runner script path
-        assert!(args[0].ends_with("vibe-runner.py"), "First arg must be vibe-runner.py, got: {}", args[0]);
+        assert!(
+            args[0].ends_with("vibe-runner.py"),
+            "First arg must be vibe-runner.py, got: {}",
+            args[0]
+        );
         // Prompt should be the last arg
         assert_eq!(args.last().unwrap(), "analyse this");
     }
 
     #[test]
     fn gemini_command_structure() {
-        let (binary, npx, args, env_key, _, output_mode) = super::super::agent_command(
-            &AgentType::GeminiCli, "explain this", false, "", None,
-        );
+        let (binary, npx, args, env_key, _, output_mode) =
+            super::super::agent_command(&AgentType::GeminiCli, "explain this", false, "", None);
         assert_eq!(binary, "gemini");
         assert_eq!(npx, Some("@google/gemini-cli"));
         assert_eq!(env_key, "GEMINI_API_KEY");
         assert!(matches!(output_mode, OutputMode::Text));
         // -p must be just before the prompt (last two args), not first
-        let p_idx = args.iter().position(|a| a == "-p").expect("-p flag must exist");
-        assert_eq!(p_idx, args.len() - 2, "-p must be second-to-last arg (before prompt)");
+        let p_idx = args
+            .iter()
+            .position(|a| a == "-p")
+            .expect("-p flag must exist");
+        assert_eq!(
+            p_idx,
+            args.len() - 2,
+            "-p must be second-to-last arg (before prompt)"
+        );
         assert_eq!(args.last().unwrap(), "explain this");
     }
 
     #[test]
     fn kiro_command_structure() {
-        let (binary, npx, args, env_key, _, output_mode) = super::super::agent_command(
-            &AgentType::Kiro, "review code", false, "", None,
-        );
+        let (binary, npx, args, env_key, _, output_mode) =
+            super::super::agent_command(&AgentType::Kiro, "review code", false, "", None);
         assert_eq!(binary, "kiro-cli");
         assert_eq!(npx, None, "Kiro has no npx fallback");
         assert_eq!(env_key, "AWS_BUILDER_ID");
         assert!(matches!(output_mode, OutputMode::Text));
         assert_eq!(args[0], "chat", "First arg must be 'chat' subcommand");
-        assert!(args.contains(&"--no-interactive".to_string()), "Missing --no-interactive (required for headless)");
-        assert!(args.contains(&"--trust-all-tools".to_string()), "Missing --trust-all-tools (required with --no-interactive)");
+        assert!(
+            args.contains(&"--no-interactive".to_string()),
+            "Missing --no-interactive (required for headless)"
+        );
+        assert!(
+            args.contains(&"--trust-all-tools".to_string()),
+            "Missing --trust-all-tools (required with --no-interactive)"
+        );
         assert!(args.contains(&"--wrap".to_string()), "Missing --wrap flag");
-        assert!(args.contains(&"never".to_string()), "Missing 'never' wrap value");
+        assert!(
+            args.contains(&"never".to_string()),
+            "Missing 'never' wrap value"
+        );
         assert_eq!(args.last().unwrap(), "review code");
     }
 
@@ -656,47 +847,71 @@ Suite de la réponse.";
 
     #[test]
     fn claude_code_model_flag_injected() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "prompt", false, "", Some("haiku"),
-        );
-        let idx = args.iter().position(|a| a == "--model").expect("Missing --model flag");
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "prompt", false, "", Some("haiku"));
+        let idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("Missing --model flag");
         assert_eq!(args[idx + 1], "haiku");
     }
 
     #[test]
     fn codex_model_flag_injected() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "prompt", false, "", Some("gpt-5-codex-mini"),
+            &AgentType::Codex,
+            "prompt",
+            false,
+            "",
+            Some("gpt-5-codex-mini"),
         );
-        let idx = args.iter().position(|a| a == "--model").expect("Missing --model flag");
+        let idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("Missing --model flag");
         assert_eq!(args[idx + 1], "gpt-5-codex-mini");
     }
 
     #[test]
     fn gemini_model_flag_injected() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::GeminiCli, "prompt", false, "", Some("gemini-2.5-flash"),
+            &AgentType::GeminiCli,
+            "prompt",
+            false,
+            "",
+            Some("gemini-2.5-flash"),
         );
-        let idx = args.iter().position(|a| a == "--model").expect("Missing --model flag");
+        let idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("Missing --model flag");
         assert_eq!(args[idx + 1], "gemini-2.5-flash");
     }
 
     #[test]
     fn vibe_model_flag_injected() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Vibe, "prompt", false, "", Some("devstral-small-latest"),
+            &AgentType::Vibe,
+            "prompt",
+            false,
+            "",
+            Some("devstral-small-latest"),
         );
-        let idx = args.iter().position(|a| a == "--model").expect("Vibe should support --model via runner");
+        let idx = args
+            .iter()
+            .position(|a| a == "--model")
+            .expect("Vibe should support --model via runner");
         assert_eq!(args[idx + 1], "devstral-small-latest");
     }
 
     #[test]
     fn kiro_no_model_flag_support() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Kiro, "prompt", false, "", Some("some-model"),
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Kiro, "prompt", false, "", Some("some-model"));
+        assert!(
+            !args.contains(&"--model".to_string()),
+            "Kiro should not have --model flag (not supported)"
         );
-        assert!(!args.contains(&"--model".to_string()),
-            "Kiro should not have --model flag (not supported)");
     }
 
     // ─── Vibe runner path resolution ────────────────────────────────────────────
@@ -704,16 +919,27 @@ Suite de la réponse.";
     #[test]
     fn vibe_runner_path_resolves_to_existing_file() {
         let path = super::super::vibe_runner_path();
-        assert!(path.ends_with("vibe-runner.py"), "Path should end with vibe-runner.py, got: {}", path);
-        assert!(std::path::Path::new(&path).exists(), "vibe-runner.py must exist at: {}", path);
+        assert!(
+            path.ends_with("vibe-runner.py"),
+            "Path should end with vibe-runner.py, got: {}",
+            path
+        );
+        assert!(
+            std::path::Path::new(&path).exists(),
+            "vibe-runner.py must exist at: {}",
+            path
+        );
     }
 
     // ─── get_api_key: Mistral provider support ──────────────────────────────────
 
     fn empty_tokens() -> crate::models::TokensConfig {
         crate::models::TokensConfig {
-            anthropic: None, openai: None, google: None,
-            keys: vec![], disabled_overrides: vec![],
+            anthropic: None,
+            openai: None,
+            google: None,
+            keys: vec![],
+            disabled_overrides: vec![],
         }
     }
 
@@ -721,7 +947,13 @@ Suite de la réponse.";
     fn get_api_key_all_providers_no_panic() {
         let tokens = empty_tokens();
         // None of these should panic, all should return None with empty config
-        for env_key in ["ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "MISTRAL_API_KEY", "UNKNOWN_KEY"] {
+        for env_key in [
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "GEMINI_API_KEY",
+            "MISTRAL_API_KEY",
+            "UNKNOWN_KEY",
+        ] {
             let _ = super::super::get_api_key(env_key, &tokens);
         }
     }
@@ -738,9 +970,9 @@ Suite de la réponse.";
 
         let cases = [
             ("ANTHROPIC_API_KEY", "anthropic", "sk-ant-test-123"),
-            ("OPENAI_API_KEY",    "openai",    "sk-openai-test-456"),
-            ("GEMINI_API_KEY",    "google",    "AIza-gemini-test-789"),
-            ("MISTRAL_API_KEY",   "mistral",   "mist-test-abc"),
+            ("OPENAI_API_KEY", "openai", "sk-openai-test-456"),
+            ("GEMINI_API_KEY", "google", "AIza-gemini-test-789"),
+            ("MISTRAL_API_KEY", "mistral", "mist-test-abc"),
         ];
 
         for (env_key, provider, value) in cases {
@@ -753,8 +985,13 @@ Suite de la réponse.";
                 active: true,
             });
             let key = super::super::get_api_key(env_key, &tokens);
-            assert_eq!(key, Some(value.to_string()),
-                "get_api_key({}) should return the active {} key", env_key, provider);
+            assert_eq!(
+                key,
+                Some(value.to_string()),
+                "get_api_key({}) should return the active {} key",
+                env_key,
+                provider
+            );
         }
     }
 
@@ -763,14 +1000,19 @@ Suite de la réponse.";
         use crate::models::ApiKey;
         let mut tokens = empty_tokens();
         tokens.keys.push(ApiKey {
-            id: "k1".into(), name: "old".into(),
-            provider: "anthropic".into(), value: "sk-inactive".into(),
+            id: "k1".into(),
+            name: "old".into(),
+            provider: "anthropic".into(),
+            value: "sk-inactive".into(),
             active: false,
         });
         // No active key → should fall back to env var (which is unset in tests)
         let key = super::super::get_api_key("ANTHROPIC_API_KEY", &tokens);
-        assert_ne!(key, Some("sk-inactive".to_string()),
-            "Inactive key should NOT be returned");
+        assert_ne!(
+            key,
+            Some("sk-inactive".to_string()),
+            "Inactive key should NOT be returned"
+        );
     }
 
     #[test]
@@ -778,15 +1020,20 @@ Suite de la réponse.";
         use crate::models::ApiKey;
         let mut tokens = empty_tokens();
         tokens.keys.push(ApiKey {
-            id: "k1".into(), name: "test".into(),
-            provider: "openai".into(), value: "sk-from-config".into(),
+            id: "k1".into(),
+            name: "test".into(),
+            provider: "openai".into(),
+            value: "sk-from-config".into(),
             active: true,
         });
         tokens.disabled_overrides.push("openai".into());
         // Override disabled → should NOT use config key, falls back to env
         let key = super::super::get_api_key("OPENAI_API_KEY", &tokens);
-        assert_ne!(key, Some("sk-from-config".to_string()),
-            "Disabled override should skip config key");
+        assert_ne!(
+            key,
+            Some("sk-from-config".to_string()),
+            "Disabled override should skip config key"
+        );
     }
 
     #[test]
@@ -794,18 +1041,25 @@ Suite de la réponse.";
         use crate::models::ApiKey;
         let mut tokens = empty_tokens();
         tokens.keys.push(ApiKey {
-            id: "k1".into(), name: "personal".into(),
-            provider: "google".into(), value: "AIza-personal".into(),
+            id: "k1".into(),
+            name: "personal".into(),
+            provider: "google".into(),
+            value: "AIza-personal".into(),
             active: false,
         });
         tokens.keys.push(ApiKey {
-            id: "k2".into(), name: "work".into(),
-            provider: "google".into(), value: "AIza-work".into(),
+            id: "k2".into(),
+            name: "work".into(),
+            provider: "google".into(),
+            value: "AIza-work".into(),
             active: true,
         });
         let key = super::super::get_api_key("GEMINI_API_KEY", &tokens);
-        assert_eq!(key, Some("AIza-work".to_string()),
-            "Should pick the active key among multiple for same provider");
+        assert_eq!(
+            key,
+            Some("AIza-work".to_string()),
+            "Should pick the active key among multiple for same provider"
+        );
     }
 
     // ─── agent_command: context injection per agent ─────────────────────────────
@@ -813,33 +1067,63 @@ Suite de la réponse.";
     #[test]
     fn vibe_prepends_mcp_context_to_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Vibe, "user prompt", false, "MCP context here", None,
+            &AgentType::Vibe,
+            "user prompt",
+            false,
+            "MCP context here",
+            None,
         );
         // vibe-runner.py uses the real Vibe SDK which supports tools,
         // so MCP context is prepended to the prompt (same as Codex/Gemini/Kiro)
         let prompt = args.last().unwrap();
-        assert!(prompt.contains("MCP context here"), "MCP context should be prepended");
-        assert!(prompt.contains("user prompt"), "User prompt should be present");
+        assert!(
+            prompt.contains("MCP context here"),
+            "MCP context should be prepended"
+        );
+        assert!(
+            prompt.contains("user prompt"),
+            "User prompt should be present"
+        );
     }
 
     #[test]
     fn gemini_prepends_context_to_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::GeminiCli, "user prompt", false, "MCP context", None,
+            &AgentType::GeminiCli,
+            "user prompt",
+            false,
+            "MCP context",
+            None,
         );
         let prompt = args.last().unwrap();
-        assert!(prompt.starts_with("MCP context"), "Context should be prepended");
-        assert!(prompt.contains("user prompt"), "Original prompt should be present");
+        assert!(
+            prompt.starts_with("MCP context"),
+            "Context should be prepended"
+        );
+        assert!(
+            prompt.contains("user prompt"),
+            "Original prompt should be present"
+        );
     }
 
     #[test]
     fn kiro_prepends_context_to_prompt() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Kiro, "user prompt", false, "MCP context", None,
+            &AgentType::Kiro,
+            "user prompt",
+            false,
+            "MCP context",
+            None,
         );
         let prompt = args.last().unwrap();
-        assert!(prompt.starts_with("MCP context"), "Context should be prepended");
-        assert!(prompt.contains("user prompt"), "Original prompt should be present");
+        assert!(
+            prompt.starts_with("MCP context"),
+            "Context should be prepended"
+        );
+        assert!(
+            prompt.contains("user prompt"),
+            "Original prompt should be present"
+        );
     }
 
     // ─── resolve_model_flag: tier mapping per agent ─────────────────────────────
@@ -847,9 +1131,18 @@ Suite de la réponse.";
     #[test]
     fn resolve_model_flag_claude_code_tiers() {
         use crate::models::ModelTier;
-        assert_eq!(resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, None), Some("haiku".into()));
-        assert_eq!(resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Default, None), Some("sonnet".into()));
-        assert_eq!(resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, None), Some("opus".into()));
+        assert_eq!(
+            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Economy, None),
+            Some("haiku".into())
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Default, None),
+            Some("sonnet".into())
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, None),
+            Some("opus".into())
+        );
     }
 
     #[test]
@@ -857,7 +1150,7 @@ Suite de la réponse.";
         // Run-9 finding — the [agents.model_tiers] overrides MUST win over
         // the built-in fallbacks (a Reasoning step configured on `fable`
         // was silently running on the built-in `opus`).
-        use crate::models::setup::{ModelTiersConfig, ModelTierConfig};
+        use crate::models::setup::{ModelTierConfig, ModelTiersConfig};
         use crate::models::ModelTier;
         let cfg = ModelTiersConfig {
             claude_code: ModelTierConfig {
@@ -880,33 +1173,57 @@ Suite de la réponse.";
     #[test]
     fn resolve_model_flag_codex_tiers() {
         use crate::models::ModelTier;
-        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None), Some("gpt-5.6-luna".into()));
-        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Default, None), None);
-        assert_eq!(resolve_model_flag(&AgentType::Codex, ModelTier::Reasoning, None), Some("gpt-5.6-sol".into()));
+        assert_eq!(
+            resolve_model_flag(&AgentType::Codex, ModelTier::Economy, None),
+            Some("gpt-5.6-luna".into())
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::Codex, ModelTier::Default, None),
+            None
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::Codex, ModelTier::Reasoning, None),
+            Some("gpt-5.6-sol".into())
+        );
     }
 
     #[test]
     fn resolve_model_flag_gemini_tiers() {
         use crate::models::ModelTier;
-        assert_eq!(resolve_model_flag(&AgentType::GeminiCli, ModelTier::Economy, None), Some("gemini-2.5-flash".into()));
-        assert_eq!(resolve_model_flag(&AgentType::GeminiCli, ModelTier::Default, None), None);
-        assert_eq!(resolve_model_flag(&AgentType::GeminiCli, ModelTier::Reasoning, None), Some("gemini-3.1-pro-preview".into()));
+        assert_eq!(
+            resolve_model_flag(&AgentType::GeminiCli, ModelTier::Economy, None),
+            Some("gemini-2.5-flash".into())
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::GeminiCli, ModelTier::Default, None),
+            None
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::GeminiCli, ModelTier::Reasoning, None),
+            Some("gemini-3.1-pro-preview".into())
+        );
     }
 
     #[test]
     fn resolve_model_flag_kiro_vibe_always_none() {
         use crate::models::ModelTier;
         for tier in [ModelTier::Economy, ModelTier::Default, ModelTier::Reasoning] {
-            assert_eq!(resolve_model_flag(&AgentType::Kiro, tier, None), None,
-                "Kiro should return None for all tiers (no --model support)");
-            assert_eq!(resolve_model_flag(&AgentType::Vibe, tier, None), None,
-                "Vibe should return None for all tiers (no --model support)");
+            assert_eq!(
+                resolve_model_flag(&AgentType::Kiro, tier, None),
+                None,
+                "Kiro should return None for all tiers (no --model support)"
+            );
+            assert_eq!(
+                resolve_model_flag(&AgentType::Vibe, tier, None),
+                None,
+                "Vibe should return None for all tiers (no --model support)"
+            );
         }
     }
 
     #[test]
     fn resolve_model_flag_user_override_takes_precedence() {
-        use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
+        use crate::models::{ModelTier, ModelTierConfig, ModelTiersConfig};
         let overrides = ModelTiersConfig {
             claude_code: ModelTierConfig {
                 economy: Some("custom-haiku-3".into()),
@@ -922,7 +1239,11 @@ Suite de la réponse.";
         );
         // Reasoning has no override → falls back to built-in
         assert_eq!(
-            resolve_model_flag(&AgentType::ClaudeCode, ModelTier::Reasoning, Some(&overrides)),
+            resolve_model_flag(
+                &AgentType::ClaudeCode,
+                ModelTier::Reasoning,
+                Some(&overrides)
+            ),
             Some("opus".into()),
         );
     }
@@ -933,7 +1254,7 @@ Suite de la réponse.";
         // before falling through to the built-in match. Primary use case
         // = Ollama user picks `gemma3:27b` from the OllamaCard, that
         // value overrides the built-in qwen3:30b-a3b fallback.
-        use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
+        use crate::models::{ModelTier, ModelTierConfig, ModelTiersConfig};
         let overrides = ModelTiersConfig {
             ollama: ModelTierConfig {
                 economy: None,
@@ -964,7 +1285,7 @@ Suite de la réponse.";
         // a portability fallback the user never asked for. Regression guard for
         // the reported bug "I set qwen3:32b as default but reasoning-tier discs
         // silently used qwen3:30b-a3b".
-        use crate::models::{ModelTier, ModelTiersConfig, ModelTierConfig};
+        use crate::models::{ModelTier, ModelTierConfig, ModelTiersConfig};
         let overrides = ModelTiersConfig {
             ollama: ModelTierConfig {
                 economy: None,
@@ -1014,9 +1335,18 @@ Suite de la réponse.";
         // bare `qwen3` (not a pullable tag) → opaque Ollama 404 at run time.
         // Portability-first: Default is a small, universal model (qwen3:8b);
         // Reasoning is the only heavy opt-in fallback.
-        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None), Some("qwen3:8b".into()));
-        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None), Some("qwen3:8b".into()));
-        assert_eq!(resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None), Some("qwen3:30b-a3b".into()));
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Economy, None),
+            Some("qwen3:8b".into())
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Default, None),
+            Some("qwen3:8b".into())
+        );
+        assert_eq!(
+            resolve_model_flag(&AgentType::Ollama, ModelTier::Reasoning, None),
+            Some("qwen3:30b-a3b".into())
+        );
     }
 
     #[test]
@@ -1026,11 +1356,23 @@ Suite de la réponse.";
         assert_eq!(parse_keep_alive(None), None);
         assert_eq!(parse_keep_alive(Some("  ".into())), None);
         // Bare integer → a JSON number (seconds).
-        assert_eq!(parse_keep_alive(Some("1800".into())), Some(serde_json::json!(1800)));
-        assert_eq!(parse_keep_alive(Some("-1".into())), Some(serde_json::json!(-1)));
+        assert_eq!(
+            parse_keep_alive(Some("1800".into())),
+            Some(serde_json::json!(1800))
+        );
+        assert_eq!(
+            parse_keep_alive(Some("-1".into())),
+            Some(serde_json::json!(-1))
+        );
         // Duration string → kept as a string.
-        assert_eq!(parse_keep_alive(Some("30m".into())), Some(serde_json::json!("30m")));
-        assert_eq!(parse_keep_alive(Some(" 1h ".into())), Some(serde_json::json!("1h")));
+        assert_eq!(
+            parse_keep_alive(Some("30m".into())),
+            Some(serde_json::json!("30m"))
+        );
+        assert_eq!(
+            parse_keep_alive(Some(" 1h ".into())),
+            Some(serde_json::json!("1h"))
+        );
     }
 
     #[test]
@@ -1051,10 +1393,26 @@ Suite de la réponse.";
         // Env override wins over everything (even a bigger model limit).
         assert_eq!(resolve_ctx_cap(Some("24576".into()), Some(131072)), 24576);
         // No env: the model's trained context, clamped to the RAM-safe ceiling.
-        assert_eq!(resolve_ctx_cap(None, Some(40960)), 32768, "qwen3 40K → ceiling 32K");
-        assert_eq!(resolve_ctx_cap(None, Some(131072)), 32768, "llama3.3 131K → ceiling");
-        assert_eq!(resolve_ctx_cap(None, Some(16384)), 16384, "model below ceiling → as-is");
-        assert_eq!(resolve_ctx_cap(None, Some(1024)), 2048, "tiny model limit → floor");
+        assert_eq!(
+            resolve_ctx_cap(None, Some(40960)),
+            32768,
+            "qwen3 40K → ceiling 32K"
+        );
+        assert_eq!(
+            resolve_ctx_cap(None, Some(131072)),
+            32768,
+            "llama3.3 131K → ceiling"
+        );
+        assert_eq!(
+            resolve_ctx_cap(None, Some(16384)),
+            16384,
+            "model below ceiling → as-is"
+        );
+        assert_eq!(
+            resolve_ctx_cap(None, Some(1024)),
+            2048,
+            "tiny model limit → floor"
+        );
         // Ollama unreachable → legacy portable default.
         assert_eq!(resolve_ctx_cap(None, None), 8192);
         // Bad env falls through to the model-derived path.
@@ -1071,7 +1429,10 @@ Suite de la réponse.";
         assert_eq!(parse_context_length(&llama), Some(131072));
         // No model_info / no matching key → None.
         assert_eq!(parse_context_length(&serde_json::json!({})), None);
-        assert_eq!(parse_context_length(&serde_json::json!({"model_info": {"x": 1}})), None);
+        assert_eq!(
+            parse_context_length(&serde_json::json!({"model_info": {"x": 1}})),
+            None
+        );
     }
 
     // ─── effective_model_flag: explicit model override beats tier ─────────────
@@ -1081,7 +1442,12 @@ Suite de la réponse.";
         // Explicit model beats the tier fallback — including the Economy tier
         // that would otherwise resolve to the qwen3:8b built-in.
         assert_eq!(
-            effective_model_flag(Some("qwen3:30b-a3b"), &AgentType::Ollama, ModelTier::Economy, None),
+            effective_model_flag(
+                Some("qwen3:30b-a3b"),
+                &AgentType::Ollama,
+                ModelTier::Economy,
+                None
+            ),
             Some("qwen3:30b-a3b".into()),
         );
     }
@@ -1108,21 +1474,38 @@ Suite de la réponse.";
         // start_agent_with_config inserts --mcp-config before the prompt (last arg).
         // This test ensures prompt remains the last arg so that insertion works.
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "my prompt", true, "context", Some("sonnet"),
+            &AgentType::ClaudeCode,
+            "my prompt",
+            true,
+            "context",
+            Some("sonnet"),
         );
-        assert_eq!(args.last().unwrap(), "my prompt",
-            "Prompt must be the last arg for --mcp-config injection to work");
+        assert_eq!(
+            args.last().unwrap(),
+            "my prompt",
+            "Prompt must be the last arg for --mcp-config injection to work"
+        );
     }
 
     #[test]
     fn claude_code_prompt_is_last_even_with_context() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "do stuff", false, "MCP servers info", None,
+            &AgentType::ClaudeCode,
+            "do stuff",
+            false,
+            "MCP servers info",
+            None,
         );
         assert_eq!(args.last().unwrap(), "do stuff");
         // --append-system-prompt should be before the prompt
-        let sys_idx = args.iter().position(|a| a == "--append-system-prompt").unwrap();
-        assert!(sys_idx < args.len() - 1, "--append-system-prompt must come before prompt");
+        let sys_idx = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap();
+        assert!(
+            sys_idx < args.len() - 1,
+            "--append-system-prompt must come before prompt"
+        );
     }
 
     // ─── --mcp-config insertion order ─────────────────────────────────────────
@@ -1132,7 +1515,11 @@ Suite de la réponse.";
         // Simulates what start_agent_with_config does: insert --mcp-config
         // before --append-system-prompt and its value.
         let (_, _, mut args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "the prompt", false, "MCP context", None,
+            &AgentType::ClaudeCode,
+            "the prompt",
+            false,
+            "MCP context",
+            None,
         );
 
         // Simulate the --mcp-config insertion logic from start_agent_with_config
@@ -1147,14 +1534,23 @@ Suite de la réponse.";
         args.push("--mcp-config".into());
         args.push("/path/to/.mcp.json".into());
         if let Some((flag, val)) = sys_prompt_val {
-            if let Some(f) = flag { args.push(f); }
-            if let Some(v) = val { args.push(v); }
+            if let Some(f) = flag {
+                args.push(f);
+            }
+            if let Some(v) = val {
+                args.push(v);
+            }
         }
-        if let Some(p) = prompt_arg { args.push(p); }
+        if let Some(p) = prompt_arg {
+            args.push(p);
+        }
 
         // Verify order: --mcp-config must come BEFORE --append-system-prompt
         let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
-        let sys_idx = args.iter().position(|a| a == "--append-system-prompt").unwrap();
+        let sys_idx = args
+            .iter()
+            .position(|a| a == "--append-system-prompt")
+            .unwrap();
         assert!(mcp_idx < sys_idx,
             "--mcp-config ({}) must come before --append-system-prompt ({}) to avoid arg parsing issues. Args: {:?}",
             mcp_idx, sys_idx, args);
@@ -1166,9 +1562,8 @@ Suite de la réponse.";
     #[test]
     fn mcp_config_works_without_append_system_prompt() {
         // When there's no MCP context, --append-system-prompt is absent
-        let (_, _, mut args, _, _, _) = super::super::agent_command(
-            &AgentType::ClaudeCode, "the prompt", false, "", None,
-        );
+        let (_, _, mut args, _, _, _) =
+            super::super::agent_command(&AgentType::ClaudeCode, "the prompt", false, "", None);
 
         // Simulate --mcp-config insertion
         let prompt_arg = args.pop();
@@ -1182,10 +1577,16 @@ Suite de la réponse.";
         args.push("--mcp-config".into());
         args.push("/path/to/.mcp.json".into());
         if let Some((flag, val)) = sys_prompt_val {
-            if let Some(f) = flag { args.push(f); }
-            if let Some(v) = val { args.push(v); }
+            if let Some(f) = flag {
+                args.push(f);
+            }
+            if let Some(v) = val {
+                args.push(v);
+            }
         }
-        if let Some(p) = prompt_arg { args.push(p); }
+        if let Some(p) = prompt_arg {
+            args.push(p);
+        }
 
         assert!(args.contains(&"--mcp-config".to_string()));
         assert_eq!(args.last().unwrap(), "the prompt");
@@ -1217,11 +1618,12 @@ Suite de la réponse.";
         // + worktree are the isolation boundary; always danger-full-access.
         std::env::set_var("KRONN_HOST_HOME", "/home/testuser");
         std::env::set_var("KRONN_HOST_OS", "Linux");
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "prompt", false, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
+        assert!(
+            args.contains(&"--sandbox=danger-full-access".to_string()),
+            "Docker (any OS) must use danger-full-access — bwrap can't init in the container"
         );
-        assert!(args.contains(&"--sandbox=danger-full-access".to_string()),
-            "Docker (any OS) must use danger-full-access — bwrap can't init in the container");
         assert!(!args.contains(&"--sandbox=workspace-write".to_string()));
         std::env::remove_var("KRONN_HOST_HOME");
         std::env::remove_var("KRONN_HOST_OS");
@@ -1232,11 +1634,12 @@ Suite de la réponse.";
     fn codex_macos_docker_forces_full_access_sandbox() {
         std::env::set_var("KRONN_HOST_HOME", "/Users/testuser");
         std::env::set_var("KRONN_HOST_OS", "macOS");
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "prompt", false, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "prompt", false, "", None);
+        assert!(
+            args.contains(&"--sandbox=danger-full-access".to_string()),
+            "macOS Docker should force danger-full-access sandbox regardless of full_access flag"
         );
-        assert!(args.contains(&"--sandbox=danger-full-access".to_string()),
-            "macOS Docker should force danger-full-access sandbox regardless of full_access flag");
         std::env::remove_var("KRONN_HOST_HOME");
         std::env::remove_var("KRONN_HOST_OS");
     }
@@ -1246,11 +1649,12 @@ Suite de la réponse.";
     fn codex_full_access_uses_danger_sandbox() {
         std::env::set_var("KRONN_HOST_HOME", "/home/testuser");
         std::env::set_var("KRONN_HOST_OS", "Linux");
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::Codex, "prompt", true, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::Codex, "prompt", true, "", None);
+        assert!(
+            args.contains(&"--sandbox=danger-full-access".to_string()),
+            "full_access=true should use danger-full-access sandbox"
         );
-        assert!(args.contains(&"--sandbox=danger-full-access".to_string()),
-            "full_access=true should use danger-full-access sandbox");
         std::env::remove_var("KRONN_HOST_HOME");
         std::env::remove_var("KRONN_HOST_OS");
     }
@@ -1271,7 +1675,11 @@ Suite de la réponse.";
         let line = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"file_path\":\"/src"}}}"#;
         match parse_claude_stream_line(line) {
             StreamJsonEvent::ToolInputDelta(partial) => {
-                assert!(partial.contains("file_path"), "Should contain partial JSON, got: {}", partial);
+                assert!(
+                    partial.contains("file_path"),
+                    "Should contain partial JSON, got: {}",
+                    partial
+                );
             }
             other => panic!("Expected ToolInputDelta, got {:?}", other),
         }
@@ -1280,36 +1688,47 @@ Suite de la réponse.";
     #[test]
     fn parse_stream_tool_end() {
         let line = r#"{"type":"stream_event","event":{"type":"content_block_stop","index":1}}"#;
-        assert!(matches!(parse_claude_stream_line(line), StreamJsonEvent::ToolEnd));
+        assert!(matches!(
+            parse_claude_stream_line(line),
+            StreamJsonEvent::ToolEnd
+        ));
     }
 
     // ─── CopilotCli agent_command ─────────────────────────────────────────────
 
     #[test]
     fn copilot_agent_command_basic() {
-        let (bin, npx, args, env_key, _, _) = super::super::agent_command(
-            &AgentType::CopilotCli, "hello", false, "", None,
-        );
+        let (bin, npx, args, env_key, _, _) =
+            super::super::agent_command(&AgentType::CopilotCli, "hello", false, "", None);
         assert_eq!(bin, "copilot");
         assert_eq!(npx, Some("@github/copilot"));
         assert_eq!(env_key, "GH_TOKEN");
         assert!(args.contains(&"-p".to_string()), "Should have -p flag");
         assert!(args.contains(&"hello".to_string()), "Should contain prompt");
-        assert!(!args.contains(&"--allow-all-tools".to_string()), "Should not have full_access flag");
+        assert!(
+            !args.contains(&"--allow-all-tools".to_string()),
+            "Should not have full_access flag"
+        );
     }
 
     #[test]
     fn copilot_agent_command_full_access() {
-        let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::CopilotCli, "hello", true, "", None,
+        let (_, _, args, _, _, _) =
+            super::super::agent_command(&AgentType::CopilotCli, "hello", true, "", None);
+        assert!(
+            args.contains(&"--allow-all-tools".to_string()),
+            "Full access should add --allow-all-tools"
         );
-        assert!(args.contains(&"--allow-all-tools".to_string()), "Full access should add --allow-all-tools");
     }
 
     #[test]
     fn copilot_agent_command_with_model() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::CopilotCli, "hello", false, "", Some("gpt-4o-mini"),
+            &AgentType::CopilotCli,
+            "hello",
+            false,
+            "",
+            Some("gpt-4o-mini"),
         );
         assert!(args.contains(&"--model".to_string()));
         assert!(args.contains(&"gpt-4o-mini".to_string()));
@@ -1318,23 +1737,36 @@ Suite de la réponse.";
     #[test]
     fn copilot_agent_command_with_mcp_context() {
         let (_, _, args, _, _, _) = super::super::agent_command(
-            &AgentType::CopilotCli, "hello", false, "MCP context here", None,
+            &AgentType::CopilotCli,
+            "hello",
+            false,
+            "MCP context here",
+            None,
         );
         // MCP context should be prepended to prompt (no --append-system-prompt for Copilot)
         let prompt = args.last().unwrap();
-        assert!(prompt.contains("MCP context here"), "Prompt should contain MCP context");
-        assert!(prompt.contains("hello"), "Prompt should contain user prompt");
+        assert!(
+            prompt.contains("MCP context here"),
+            "Prompt should contain MCP context"
+        );
+        assert!(
+            prompt.contains("hello"),
+            "Prompt should contain user prompt"
+        );
     }
 
     // ─── Cross-platform: model tier resolution ─────────────────────────────
 
     #[test]
     fn copilot_model_tiers() {
-        let economy = super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Economy, None);
+        let economy =
+            super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Economy, None);
         assert_eq!(economy, Some("gpt-4o-mini".into()));
-        let default = super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Default, None);
+        let default =
+            super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Default, None);
         assert_eq!(default, None); // Use Copilot's default
-        let reasoning = super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Reasoning, None);
+        let reasoning =
+            super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Reasoning, None);
         assert_eq!(reasoning, Some("o4-mini".into()));
     }
 

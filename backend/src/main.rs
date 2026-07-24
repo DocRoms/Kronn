@@ -1,7 +1,13 @@
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use kronn::{build_router, core::{config, mcp_scanner}, db::Database, workflows::WorkflowEngine, AppState, DEFAULT_MAX_CONCURRENT_AGENTS};
+use kronn::{
+    build_router,
+    core::{config, mcp_scanner},
+    db::Database,
+    workflows::WorkflowEngine,
+    AppState, DEFAULT_MAX_CONCURRENT_AGENTS,
+};
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
@@ -43,7 +49,8 @@ async fn main() -> anyhow::Result<()> {
     } else {
         "kronn=info,tower_http=info"
     };
-    let filter_src = std::env::var("RUST_LOG").ok()
+    let filter_src = std::env::var("RUST_LOG")
+        .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| default_filter.to_string());
     use tracing_subscriber::prelude::*;
@@ -209,7 +216,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Open database
     let database = Arc::new(Database::open().expect("Failed to open database"));
-    tracing::info!("Database opened at {}/kronn.db", config::config_dir().unwrap().display());
+    tracing::info!(
+        "Database opened at {}/kronn.db",
+        config::config_dir().unwrap().display()
+    );
 
     // Resolve/repair the encryption key now that the DB is open — `config::load`
     // deliberately never mints one. This adopts the legacy config.toml key,
@@ -257,13 +267,18 @@ async fn main() -> anyhow::Result<()> {
     // UPDATE here marked them `Failed` AFTER that reconcile (so it always
     // matched 0 rows) and would have mislabeled + bypassed the boot
     // notification if it ever fired. Kept as an assertion-style probe only.
-    match state.db.with_conn(|conn| {
-        conn.query_row(
-            "SELECT COUNT(*) FROM workflow_runs WHERE status IN ('Running', 'Pending')",
-            [],
-            |row| row.get::<_, i64>(0),
-        ).map_err(Into::into)
-    }).await {
+    match state
+        .db
+        .with_conn(|conn| {
+            conn.query_row(
+                "SELECT COUNT(*) FROM workflow_runs WHERE status IN ('Running', 'Pending')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(Into::into)
+        })
+        .await
+    {
         Ok(0) => tracing::info!("Orphan scan: nothing to clean up (boot reconcile already ran)"),
         Ok(n) => tracing::warn!(
             target: "kronn::invariant",
@@ -279,12 +294,18 @@ async fn main() -> anyhow::Result<()> {
     // before a registry enrichment (e.g. GitHub gained `api_spec` after
     // its initial config was saved) don't have to click "Refresh registry"
     // by hand for the workflow wizard to see the new capability.
-    let synced = state.db.with_conn(|conn| {
-        let registry = kronn::core::registry::builtin_registry();
-        kronn::db::mcps::sync_registry_servers_to_db(conn, &registry)
-    }).await;
+    let synced = state
+        .db
+        .with_conn(|conn| {
+            let registry = kronn::core::registry::builtin_registry();
+            kronn::db::mcps::sync_registry_servers_to_db(conn, &registry)
+        })
+        .await;
     match synced {
-        Ok(n) if n > 0 => tracing::info!("Registry sync: refreshed {} existing MCP server row(s) from builtin registry", n),
+        Ok(n) if n > 0 => tracing::info!(
+            "Registry sync: refreshed {} existing MCP server row(s) from builtin registry",
+            n
+        ),
         Ok(_) => tracing::info!("Registry sync: nothing to refresh (no registered plugins yet)"),
         Err(e) => tracing::warn!("Registry sync failed: {}", e),
     }
@@ -299,9 +320,10 @@ async fn main() -> anyhow::Result<()> {
     // immediately — without this, a user who reopens the app before the
     // recovery finishes and retypes their prompt ends up with two agent
     // responses on the same disc (the recovered one + the new run).
-    let recovered = state.db.with_conn(|conn| {
-        kronn::db::discussions::recover_partial_responses(conn)
-    }).await;
+    let recovered = state
+        .db
+        .with_conn(kronn::db::discussions::recover_partial_responses)
+        .await;
     match recovered {
         Ok(ids) if !ids.is_empty() => {
             tracing::warn!(
@@ -309,11 +331,11 @@ async fn main() -> anyhow::Result<()> {
                  from a previous process, saved as Agent messages with footer",
                 ids.len()
             );
-            let _ = state.ws_broadcast.send(
-                kronn::models::WsMessage::PartialResponseRecovered {
+            let _ = state
+                .ws_broadcast
+                .send(kronn::models::WsMessage::PartialResponseRecovered {
                     discussion_ids: ids,
-                }
-            );
+                });
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("Partial-response recovery failed: {}", e),
@@ -327,9 +349,10 @@ async fn main() -> anyhow::Result<()> {
     // interruption may be deliberate (the user shut the machine). Runs after
     // recovery so a disc whose partial was just turned into an Agent message is
     // correctly seen as answered and skipped.
-    let awaiting = state.db.with_conn(|conn| {
-        kronn::db::discussions::reconcile_awaiting_agents(conn)
-    }).await;
+    let awaiting = state
+        .db
+        .with_conn(kronn::db::discussions::reconcile_awaiting_agents)
+        .await;
     match awaiting {
         Ok(ids) if !ids.is_empty() => {
             tracing::warn!(
@@ -337,11 +360,11 @@ async fn main() -> anyhow::Result<()> {
                  started before the restart — marked interrupted (not re-spawned)",
                 ids.len()
             );
-            let _ = state.ws_broadcast.send(
-                kronn::models::WsMessage::AgentRunsInterrupted {
+            let _ = state
+                .ws_broadcast
+                .send(kronn::models::WsMessage::AgentRunsInterrupted {
                     discussion_ids: ids,
-                }
-            );
+                });
         }
         Ok(_) => {}
         Err(e) => tracing::warn!("Awaiting-agent reconcile failed: {}", e),
@@ -352,9 +375,17 @@ async fn main() -> anyhow::Result<()> {
     // preserved by the query. Default 0 = keep all history (no surprise loss).
     let retention_days = state.config.read().await.server.run_retention_days;
     if retention_days > 0 {
-        match state.db.with_conn(move |conn| kronn::db::workflows::purge_runs_older_than(conn, retention_days)).await {
+        match state
+            .db
+            .with_conn(move |conn| {
+                kronn::db::workflows::purge_runs_older_than(conn, retention_days)
+            })
+            .await
+        {
             Ok(0) => {}
-            Ok(n) => tracing::info!("Run retention: purged {n} workflow run(s) older than {retention_days} days", ),
+            Ok(n) => tracing::info!(
+                "Run retention: purged {n} workflow run(s) older than {retention_days} days",
+            ),
             Err(e) => tracing::warn!("Run retention purge failed: {}", e),
         }
     }
@@ -366,10 +397,14 @@ async fn main() -> anyhow::Result<()> {
     // 'active' honest, retire sessions idle > 24h (agents that exited
     // without `disc_leave`) at every boot. Migration 065 does the same once;
     // this keeps it self-maintaining across restarts.
-    match state.db.with_conn(|conn| {
-        kronn::db::discussion_sessions::reap_abandoned_sessions(conn)
-    }).await {
-        Ok(n) if n > 0 => tracing::info!("Reaped {n} abandoned discussion session(s) (idle > 24h, no disc_leave)"),
+    match state
+        .db
+        .with_conn(kronn::db::discussion_sessions::reap_abandoned_sessions)
+        .await
+    {
+        Ok(n) if n > 0 => {
+            tracing::info!("Reaped {n} abandoned discussion session(s) (idle > 24h, no disc_leave)")
+        }
         Ok(_) => {}
         Err(e) => tracing::warn!("Abandoned-session reap failed: {}", e),
     }
@@ -412,10 +447,13 @@ async fn main() -> anyhow::Result<()> {
         let cfg = state.config.read().await;
         if let Some(secret) = cfg.encryption_secret.clone() {
             drop(cfg); // Release read lock before blocking
-            if let Err(e) = db.with_conn(move |conn| {
-                mcp_scanner::sync_all_projects(conn, &secret);
-                Ok(())
-            }).await {
+            if let Err(e) = db
+                .with_conn(move |conn| {
+                    mcp_scanner::sync_all_projects(conn, &secret);
+                    Ok(())
+                })
+                .await
+            {
                 tracing::warn!("MCP startup sync failed: {}", e);
             } else {
                 tracing::info!("MCP configs synced to disk for all projects");
@@ -429,16 +467,22 @@ async fn main() -> anyhow::Result<()> {
     // (retroactive fix — also migrates old .kronn-tmp/ and .kronn-worktrees/ patterns)
     {
         let db = state.db.clone();
-        if let Err(e) = db.with_conn(|conn| {
-            let projects = kronn::db::projects::list_projects(conn)?;
-            for p in &projects {
-                let resolved = kronn::core::scanner::resolve_host_path(&p.path);
-                if resolved.join(".kronn").exists() || resolved.join(".kronn-tmp").exists() || resolved.join(".kronn-worktrees").exists() {
-                    mcp_scanner::ensure_gitignore_public(&p.path, ".kronn/");
+        if let Err(e) = db
+            .with_conn(|conn| {
+                let projects = kronn::db::projects::list_projects(conn)?;
+                for p in &projects {
+                    let resolved = kronn::core::scanner::resolve_host_path(&p.path);
+                    if resolved.join(".kronn").exists()
+                        || resolved.join(".kronn-tmp").exists()
+                        || resolved.join(".kronn-worktrees").exists()
+                    {
+                        mcp_scanner::ensure_gitignore_public(&p.path, ".kronn/");
+                    }
                 }
-            }
-            Ok(())
-        }).await {
+                Ok(())
+            })
+            .await
+        {
             tracing::warn!("Gitignore startup fix failed: {}", e);
         }
     }
@@ -505,14 +549,16 @@ async fn main() -> anyhow::Result<()> {
     // 0.9.0 — Continual Learning staleness sweep (hourly). Spawn mirrored in
     // desktop/src-tauri/src/main.rs — the feature is in the lib, the spawn is
     // per-binary.
-    let learning_sweep =
-        std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(state.db.clone()));
+    let learning_sweep = std::sync::Arc::new(kronn::core::learning_sweep::LearningSweep::new(
+        state.db.clone(),
+    ));
     tokio::spawn(async move { learning_sweep.start().await });
 
     // 0.8.11 (B6) — periodic DB backup (default every 24h, keep 7). Targets
     // KRONN_BACKUP_DIR (a host-mounted dir outside the data volume) when set;
     // KRONN_BACKUP_INTERVAL_HOURS=0 disables it entirely.
-    if let Some(backup_scheduler) = kronn::core::backup::BackupScheduler::from_env(state.db.clone()) {
+    if let Some(backup_scheduler) = kronn::core::backup::BackupScheduler::from_env(state.db.clone())
+    {
         tokio::spawn(async move { backup_scheduler.start().await });
     }
 
@@ -532,7 +578,9 @@ async fn main() -> anyhow::Result<()> {
     // point at the UI. Without the override — Docker (the gateway serves the UI
     // on this port) or a bare backend — it shows the backend address as before.
     let backend_url = format!("http://{}:{}", host, port);
-    let dev_ui = std::env::var("KRONN_DEV_UI_URL").ok().filter(|s| !s.is_empty());
+    let dev_ui = std::env::var("KRONN_DEV_UI_URL")
+        .ok()
+        .filter(|s| !s.is_empty());
     let entry = banner_entry_url(&backend_url, dev_ui.as_deref());
 
     println!();
@@ -556,9 +604,12 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     // Graceful shutdown: wait for SIGTERM/SIGINT, then let in-flight requests finish
-    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
 
     tracing::info!("Kronn — Shutdown complete.");
     Ok(())
@@ -656,14 +707,26 @@ mod tests {
     fn osc8_plain_when_not_a_tty() {
         // Redirected/piped output (logs, CI) must stay free of escape bytes —
         // cross-platform, no OS gating.
-        assert_eq!(osc8("http://localhost:5173", false), "http://localhost:5173");
+        assert_eq!(
+            osc8("http://localhost:5173", false),
+            "http://localhost:5173"
+        );
     }
 
     #[test]
     fn osc8_wraps_url_in_hyperlink_on_a_tty() {
         let s = osc8("http://localhost:5173", true);
-        assert!(s.starts_with("\x1b]8;;http://localhost:5173\x1b\\"), "opens the OSC 8 link: {s:?}");
-        assert!(s.ends_with("\x1b]8;;\x1b\\"), "closes the OSC 8 link: {s:?}");
-        assert!(s.contains("http://localhost:5173"), "keeps the visible URL label");
+        assert!(
+            s.starts_with("\x1b]8;;http://localhost:5173\x1b\\"),
+            "opens the OSC 8 link: {s:?}"
+        );
+        assert!(
+            s.ends_with("\x1b]8;;\x1b\\"),
+            "closes the OSC 8 link: {s:?}"
+        );
+        assert!(
+            s.contains("http://localhost:5173"),
+            "keeps the visible URL label"
+        );
     }
 }

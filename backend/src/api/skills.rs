@@ -20,13 +20,19 @@ pub async fn create(
     _state: State<AppState>,
     Json(req): Json<CreateSkillRequest>,
 ) -> Json<ApiResponse<Skill>> {
-    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content, req.license.as_deref(), req.allowed_tools.as_deref()) {
-        Ok(id) => {
-            match skills::get_skill(&id) {
-                Some(skill) => Json(ApiResponse::ok(skill)),
-                None => Json(ApiResponse::err("Skill created but could not be loaded")),
-            }
-        }
+    match skills::save_custom_skill(
+        &req.name,
+        &req.description,
+        &req.icon,
+        &req.category,
+        &req.content,
+        req.license.as_deref(),
+        req.allowed_tools.as_deref(),
+    ) {
+        Ok(id) => match skills::get_skill(&id) {
+            Some(skill) => Json(ApiResponse::ok(skill)),
+            None => Json(ApiResponse::err("Skill created but could not be loaded")),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -43,22 +49,25 @@ pub async fn update(
 
     let _ = skills::delete_custom_skill(&id);
 
-    match skills::save_custom_skill(&req.name, &req.description, &req.icon, &req.category, &req.content, req.license.as_deref(), req.allowed_tools.as_deref()) {
-        Ok(new_id) => {
-            match skills::get_skill(&new_id) {
-                Some(skill) => Json(ApiResponse::ok(skill)),
-                None => Json(ApiResponse::err("Skill updated but could not be loaded")),
-            }
-        }
+    match skills::save_custom_skill(
+        &req.name,
+        &req.description,
+        &req.icon,
+        &req.category,
+        &req.content,
+        req.license.as_deref(),
+        req.allowed_tools.as_deref(),
+    ) {
+        Ok(new_id) => match skills::get_skill(&new_id) {
+            Some(skill) => Json(ApiResponse::ok(skill)),
+            None => Json(ApiResponse::err("Skill updated but could not be loaded")),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
 
 /// DELETE /api/skills/:id — delete a custom skill
-pub async fn delete(
-    Path(id): Path<String>,
-    _state: State<AppState>,
-) -> Json<ApiResponse<bool>> {
+pub async fn delete(Path(id): Path<String>, _state: State<AppState>) -> Json<ApiResponse<bool>> {
     match skills::delete_custom_skill(&id) {
         Ok(deleted) => Json(ApiResponse::ok(deleted)),
         Err(e) => Json(ApiResponse::err(e)),
@@ -69,9 +78,7 @@ pub async fn delete(
 /// IDs for which auto-activation (keyword-based) is OFF. The frontend
 /// fetches this once on mount and filters its local
 /// `detectTriggeredSkills()` output against it.
-pub async fn list_disabled_auto(
-    state: State<AppState>,
-) -> Json<ApiResponse<Vec<String>>> {
+pub async fn list_disabled_auto(state: State<AppState>) -> Json<ApiResponse<Vec<String>>> {
     let ids = state.config.read().await.disabled_auto_skills.clone();
     Json(ApiResponse::ok(ids))
 }

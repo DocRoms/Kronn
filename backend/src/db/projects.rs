@@ -2,8 +2,8 @@ use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 
-use crate::models::*;
 use super::parse_dt;
+use crate::models::*;
 
 // ─── Projects ───────────────────────────────────────────────────────────────
 
@@ -12,40 +12,46 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
                 briefing_notes, linked_repos_json
-         FROM projects ORDER BY name"
+         FROM projects ORDER BY name",
     )?;
 
-    let projects: Vec<Project> = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let token_override_str: Option<String> = row.get(4)?;
-        let ai_config_str: String = row.get(5)?;
-        let skill_ids_str: String = row.get(8)?;
-        let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
+    let projects: Vec<Project> = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let token_override_str: Option<String> = row.get(4)?;
+            let ai_config_str: String = row.get(5)?;
+            let skill_ids_str: String = row.get(8)?;
+            let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
 
-        Ok((id.clone(), Project {
-            id,
-            name: row.get(1)?,
-            path: row.get(2)?,
-            repo_url: row.get(3)?,
-            token_override: token_override_str
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            ai_config: serde_json::from_str(&ai_config_str)
-                .unwrap_or(AiConfigStatus { detected: false, configs: vec![] }),
-            audit_status: AiAuditStatus::default(), // enriched by API layer
-            ai_todo_count: 0,  // enriched by API layer
-            tech_debt_count: 0,
-            needs_docs_migration: false,  // enriched by API layer
-            path_exists: true,
-            default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
-            default_profile_id: row.get(9)?,
-            briefing_notes: row.get(10)?,
-            linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
-            created_at: parse_dt(row.get::<_, String>(6)?),
-            updated_at: parse_dt(row.get::<_, String>(7)?),
-        }))
-    })?.filter_map(|r| r.ok())
-    .map(|(_id, project)| project)
-    .collect();
+            Ok((
+                id.clone(),
+                Project {
+                    id,
+                    name: row.get(1)?,
+                    path: row.get(2)?,
+                    repo_url: row.get(3)?,
+                    token_override: token_override_str.and_then(|s| serde_json::from_str(&s).ok()),
+                    ai_config: serde_json::from_str(&ai_config_str).unwrap_or(AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    }),
+                    audit_status: AiAuditStatus::default(), // enriched by API layer
+                    ai_todo_count: 0,                       // enriched by API layer
+                    tech_debt_count: 0,
+                    needs_docs_migration: false, // enriched by API layer
+                    path_exists: true,
+                    default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+                    default_profile_id: row.get(9)?,
+                    briefing_notes: row.get(10)?,
+                    linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
+                    created_at: parse_dt(row.get::<_, String>(6)?),
+                    updated_at: parse_dt(row.get::<_, String>(7)?),
+                },
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|(_id, project)| project)
+        .collect();
 
     Ok(projects)
 }
@@ -55,37 +61,40 @@ pub fn get_project(conn: &Connection, id: &str) -> Result<Option<Project>> {
         "SELECT id, name, path, repo_url, token_override_json, ai_config_json,
                 created_at, updated_at, default_skill_ids_json, default_profile_id,
                 briefing_notes, linked_repos_json
-         FROM projects WHERE id = ?1"
+         FROM projects WHERE id = ?1",
     )?;
 
-    let project = stmt.query_row(params![id], |row| {
-        let token_override_str: Option<String> = row.get(4)?;
-        let ai_config_str: String = row.get(5)?;
-        let skill_ids_str: String = row.get(8)?;
-        let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
+    let project = stmt
+        .query_row(params![id], |row| {
+            let token_override_str: Option<String> = row.get(4)?;
+            let ai_config_str: String = row.get(5)?;
+            let skill_ids_str: String = row.get(8)?;
+            let linked_repos_str: String = row.get(11).unwrap_or_else(|_| "[]".into());
 
-        Ok(Project {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            path: row.get(2)?,
-            repo_url: row.get(3)?,
-            token_override: token_override_str
-                .and_then(|s| serde_json::from_str(&s).ok()),
-            ai_config: serde_json::from_str(&ai_config_str)
-                .unwrap_or(AiConfigStatus { detected: false, configs: vec![] }),
-            audit_status: AiAuditStatus::default(),
-            ai_todo_count: 0,
-            tech_debt_count: 0,
-            needs_docs_migration: false,
-            path_exists: true,
-            default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
-            default_profile_id: row.get(9)?,
-            briefing_notes: row.get(10)?,
-            linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
-            created_at: parse_dt(row.get::<_, String>(6)?),
-            updated_at: parse_dt(row.get::<_, String>(7)?),
+            Ok(Project {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                path: row.get(2)?,
+                repo_url: row.get(3)?,
+                token_override: token_override_str.and_then(|s| serde_json::from_str(&s).ok()),
+                ai_config: serde_json::from_str(&ai_config_str).unwrap_or(AiConfigStatus {
+                    detected: false,
+                    configs: vec![],
+                }),
+                audit_status: AiAuditStatus::default(),
+                ai_todo_count: 0,
+                tech_debt_count: 0,
+                needs_docs_migration: false,
+                path_exists: true,
+                default_skill_ids: serde_json::from_str(&skill_ids_str).unwrap_or_default(),
+                default_profile_id: row.get(9)?,
+                briefing_notes: row.get(10)?,
+                linked_repos: serde_json::from_str(&linked_repos_str).unwrap_or_default(),
+                created_at: parse_dt(row.get::<_, String>(6)?),
+                updated_at: parse_dt(row.get::<_, String>(7)?),
+            })
         })
-    }).ok();
+        .ok();
 
     Ok(project)
 }
@@ -124,7 +133,11 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     Ok(())
 }
 
-pub fn update_project_briefing_notes(conn: &Connection, id: &str, notes: Option<&str>) -> Result<bool> {
+pub fn update_project_briefing_notes(
+    conn: &Connection,
+    id: &str,
+    notes: Option<&str>,
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE projects SET briefing_notes = ?1, updated_at = ?2 WHERE id = ?3",
         params![notes, Utc::now().to_rfc3339(), id],
@@ -133,7 +146,11 @@ pub fn update_project_briefing_notes(conn: &Connection, id: &str, notes: Option<
 }
 
 /// 0.8.3 — Replace the linked_repos list for a project.
-pub fn update_project_linked_repos(conn: &Connection, id: &str, linked_repos: &[LinkedRepo]) -> Result<bool> {
+pub fn update_project_linked_repos(
+    conn: &Connection,
+    id: &str,
+    linked_repos: &[LinkedRepo],
+) -> Result<bool> {
     let json = serde_json::to_string(linked_repos)?;
     let affected = conn.execute(
         "UPDATE projects SET linked_repos_json = ?1, updated_at = ?2 WHERE id = ?3",
@@ -143,11 +160,14 @@ pub fn update_project_linked_repos(conn: &Connection, id: &str, linked_repos: &[
 }
 
 pub fn get_project_briefing_notes(conn: &Connection, id: &str) -> Result<Option<String>> {
-    let notes = conn.query_row(
-        "SELECT briefing_notes FROM projects WHERE id = ?1",
-        params![id],
-        |row| row.get(0),
-    ).ok().flatten();
+    let notes = conn
+        .query_row(
+            "SELECT briefing_notes FROM projects WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
     Ok(notes)
 }
 
@@ -165,19 +185,34 @@ pub fn update_project_timestamps(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn update_project_ai_config(conn: &Connection, id: &str, ai_config: &AiConfigStatus) -> Result<()> {
+pub fn update_project_ai_config(
+    conn: &Connection,
+    id: &str,
+    ai_config: &AiConfigStatus,
+) -> Result<()> {
     conn.execute(
         "UPDATE projects SET ai_config_json = ?1, updated_at = ?2 WHERE id = ?3",
-        params![serde_json::to_string(ai_config)?, Utc::now().to_rfc3339(), id],
+        params![
+            serde_json::to_string(ai_config)?,
+            Utc::now().to_rfc3339(),
+            id
+        ],
     )?;
     Ok(())
 }
 
-
-pub fn update_project_default_skills(conn: &Connection, id: &str, skill_ids: &[String]) -> Result<bool> {
+pub fn update_project_default_skills(
+    conn: &Connection,
+    id: &str,
+    skill_ids: &[String],
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE projects SET default_skill_ids_json = ?1, updated_at = ?2 WHERE id = ?3",
-        params![serde_json::to_string(skill_ids)?, Utc::now().to_rfc3339(), id],
+        params![
+            serde_json::to_string(skill_ids)?,
+            Utc::now().to_rfc3339(),
+            id
+        ],
     )?;
     Ok(affected > 0)
 }
@@ -190,7 +225,11 @@ pub fn update_project_path(conn: &Connection, id: &str, new_path: &str) -> Resul
     Ok(affected > 0)
 }
 
-pub fn update_project_default_profile(conn: &Connection, id: &str, profile_id: Option<&str>) -> Result<bool> {
+pub fn update_project_default_profile(
+    conn: &Connection,
+    id: &str,
+    profile_id: Option<&str>,
+) -> Result<bool> {
     let affected = conn.execute(
         "UPDATE projects SET default_profile_id = ?1, updated_at = ?2 WHERE id = ?3",
         params![profile_id, Utc::now().to_rfc3339(), id],

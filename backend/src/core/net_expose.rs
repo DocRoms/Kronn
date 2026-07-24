@@ -133,9 +133,18 @@ mod tests {
     #[test]
     fn lan_exposed_is_docker_aware() {
         // Docker: internal bind is always 0.0.0.0 — only KRONN_BIND (host publish) counts.
-        assert!(!lan_exposed(true, Some("127.0.0.1"), "0.0.0.0"), "docker loopback publish = safe");
-        assert!(!lan_exposed(true, None, "0.0.0.0"), "docker no KRONN_BIND = default safe");
-        assert!(lan_exposed(true, Some("0.0.0.0"), "0.0.0.0"), "docker opted into LAN publish");
+        assert!(
+            !lan_exposed(true, Some("127.0.0.1"), "0.0.0.0"),
+            "docker loopback publish = safe"
+        );
+        assert!(
+            !lan_exposed(true, None, "0.0.0.0"),
+            "docker no KRONN_BIND = default safe"
+        );
+        assert!(
+            lan_exposed(true, Some("0.0.0.0"), "0.0.0.0"),
+            "docker opted into LAN publish"
+        );
         // Native: the resolved bind host is authoritative.
         assert!(!lan_exposed(false, None, "127.0.0.1"));
         assert!(lan_exposed(false, None, "0.0.0.0"));

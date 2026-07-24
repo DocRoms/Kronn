@@ -9,16 +9,20 @@ use chrono::Utc;
 use crate::models::*;
 use crate::AppState;
 
+use super::steps::{execute_step, StepOutcome};
 use super::template::TemplateContext;
 use super::workspace::Workspace;
-use super::steps::{execute_step, StepOutcome};
 
 /// Events emitted during a workflow run for real-time SSE streaming.
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "event", content = "data")]
 pub enum RunEvent {
     /// A step is about to start executing.
-    StepStart { step_name: String, step_index: usize, total_steps: usize },
+    StepStart {
+        step_name: String,
+        step_index: usize,
+        total_steps: usize,
+    },
     /// Partial output from the agent (streamed in real-time).
     StepProgress { text: String },
     /// A step has finished executing.
@@ -29,7 +33,11 @@ pub enum RunEvent {
     /// the red "Échec" one. `actual` is the value at trigger time
     /// (e.g. seconds elapsed for Timeout, calls counted for MaxLlmCalls,
     /// revisit count for LoopDetection).
-    GuardTriggered { kind: GuardKind, threshold: u64, actual: u64 },
+    GuardTriggered {
+        kind: GuardKind,
+        threshold: u64,
+        actual: u64,
+    },
     /// The entire run has finished.
     RunDone { status: RunStatus },
     /// An error occurred.
@@ -64,7 +72,8 @@ impl SharedBudget {
         self.llm_calls.load(std::sync::atomic::Ordering::Relaxed)
     }
     pub fn add_llm_calls(&self, n: u32) {
-        self.llm_calls.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        self.llm_calls
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
     }
     /// The tree-wide cap (the root run's `max_llm_calls`, inherited by every
     /// descendant — a child's own `max_llm_calls` is ignored when nested).
@@ -168,6 +177,52 @@ pub async fn execute_run(
     // `None` for a top-level run or an isolated child.
     inherited_workspace: Option<String>,
 ) -> Result<()> {
+    execute_run_with_notify_policy(
+        state,
+        workflow,
+        run,
+        tokens_config,
+        agents_config,
+        events_tx,
+        shared_budget,
+        inherited_workspace,
+        NotifySecurityPolicy::Production,
+    )
+    .await
+}
+
+/// The production binary has only the enforcing variant. The loopback variant
+/// is compiled exclusively into Rust tests, so no environment variable, API
+/// payload or runtime configuration can weaken Notify's SSRF boundary.
+#[derive(Clone, Copy)]
+enum NotifySecurityPolicy {
+    Production,
+    #[cfg(test)]
+    AllowLoopbackForTests,
+}
+
+impl NotifySecurityPolicy {
+    fn enforce_public_ip(self) -> bool {
+        match self {
+            Self::Production => true,
+            #[cfg(test)]
+            Self::AllowLoopbackForTests => false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_run_with_notify_policy(
+    state: AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+    tokens_config: &TokensConfig,
+    agents_config: &AgentsConfig,
+    events_tx: Option<EventSender>,
+    shared_budget: Option<SharedBudget>,
+    inherited_workspace: Option<String>,
+    notify_security_policy: NotifySecurityPolicy,
+) -> Result<()> {
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
     // Helper to send events (best-effort, ignore send errors)
@@ -189,16 +244,19 @@ pub async fn execute_run(
     let workflow_id_for_ws = workflow.id.clone();
     let run_id_for_ws = run.id.clone();
     let total_steps_for_ws = workflow.steps.len() as u32;
-    let broadcast_run_state = |status: &crate::models::RunStatus, step_index: i32, current_step: Option<String>| {
-        let _ = state.ws_broadcast.send(crate::models::WsMessage::WorkflowRunUpdated {
-            run_id: run_id_for_ws.clone(),
-            workflow_id: workflow_id_for_ws.clone(),
-            status: format!("{:?}", status),
-            step_index,
-            total_steps: total_steps_for_ws,
-            current_step,
-        });
-    };
+    let broadcast_run_state =
+        |status: &crate::models::RunStatus, step_index: i32, current_step: Option<String>| {
+            let _ = state
+                .ws_broadcast
+                .send(crate::models::WsMessage::WorkflowRunUpdated {
+                    run_id: run_id_for_ws.clone(),
+                    workflow_id: workflow_id_for_ws.clone(),
+                    status: format!("{:?}", status),
+                    step_index,
+                    total_steps: total_steps_for_ws,
+                    current_step,
+                });
+        };
 
     let db = state.db.clone();
 
@@ -217,9 +275,14 @@ pub async fn execute_run(
     run.status = RunStatus::Running;
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let db2 = db.clone();
-    let claimed = db2.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+    let claimed = db2
+        .with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+        .await?;
     if !claimed {
-        tracing::info!("Run {} was cancelled (or deleted) before execution started — aborting", run.id);
+        tracing::info!(
+            "Run {} was cancelled (or deleted) before execution started — aborting",
+            run.id
+        );
         run.status = RunStatus::Cancelled;
         return Ok(());
     }
@@ -240,10 +303,9 @@ pub async fn execute_run(
     } else {
         String::new()
     };
-    let agent_extra_context = crate::api::projects::compute_companion_context(
-        &state,
-        workflow.project_id.as_deref(),
-    ).await;
+    let agent_extra_context =
+        crate::api::projects::compute_companion_context(&state, workflow.project_id.as_deref())
+            .await;
 
     // 0.7.0 Phase 4 — detect resume: a non-empty step_results means
     // this is a continuation from a Gate pause (or a future restart-
@@ -263,17 +325,31 @@ pub async fn execute_run(
         let repo_path = crate::core::scanner::resolve_host_path(&project_path);
         if repo_path.exists() {
             let hooks = workflow.workspace_config.as_ref().map(|c| c.hooks.clone());
-            if let Some(inh) = inherited_workspace.as_ref().map(std::path::PathBuf::from).filter(|p| p.exists()) {
+            if let Some(inh) = inherited_workspace
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .filter(|p| p.exists())
+            {
                 // Phase 2 — sub-workflow child shares the parent's worktree.
                 // Attach to the parent's branch so commits land there; the
                 // child never creates/destroys this tree (parent owns it).
                 run.workspace_path = Some(inh.to_string_lossy().to_string());
-                Some(Workspace::attach(inh, repo_path, &workflow.name, &run.id, hooks))
+                Some(Workspace::attach(
+                    inh,
+                    repo_path,
+                    &workflow.name,
+                    &run.id,
+                    hooks,
+                ))
             } else if is_resume {
                 match run.workspace_path.as_ref().map(std::path::PathBuf::from) {
-                    Some(path) if path.exists() => {
-                        Some(Workspace::attach(path, repo_path, &workflow.name, &run.id, hooks))
-                    }
+                    Some(path) if path.exists() => Some(Workspace::attach(
+                        path,
+                        repo_path,
+                        &workflow.name,
+                        &run.id,
+                        hooks,
+                    )),
                     _ => None, // resume without worktree (or worktree gone) — run in main tree
                 }
             } else {
@@ -290,7 +366,8 @@ pub async fn execute_run(
                         // run instead of falling back (mirror the preflight
                         // failure pattern). Read-only workflows keep the legacy
                         // warn-and-continue behaviour.
-                        let requires_isolation = workflow.workspace_config
+                        let requires_isolation = workflow
+                            .workspace_config
                             .as_ref()
                             .map(|c| c.require_isolation)
                             .unwrap_or(false);
@@ -322,7 +399,10 @@ pub async fn execute_run(
                             });
                             let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                             let db_w = db.clone();
-                            db_w.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+                            db_w.with_conn(move |conn| {
+                                crate::db::workflows::update_run_progress(conn, snap)
+                            })
+                            .await?;
                             emit(RunEvent::RunError { error: msg }).await;
                             return Ok(());
                         }
@@ -372,7 +452,8 @@ pub async fn execute_run(
                 run.finished_at = Some(Utc::now());
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_g = db.clone();
-                db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+                db_g.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
                 emit(RunEvent::RunError { error: msg }).await;
                 return Ok(());
             }
@@ -382,7 +463,8 @@ pub async fn execute_run(
     };
 
     // Determine working directory
-    let work_dir = workspace.as_ref()
+    let work_dir = workspace
+        .as_ref()
         .map(|ws| ws.path.to_string_lossy().to_string())
         .unwrap_or_else(|| {
             let resolved = crate::core::scanner::resolve_host_path(&project_path);
@@ -413,13 +495,11 @@ pub async fn execute_run(
     // .ssh/credentials. Cheap (only reads small files), happens once per
     // run, results reused across every Agent step audit. Empty when the
     // run has no project (Notify-only / ApiCall-only workflows).
-    let sensitive_substrings = std::sync::Arc::new(
-        if work_dir.is_empty() {
-            crate::core::docs_write_filter::SensitiveSubstrings::new()
-        } else {
-            crate::core::docs_write_filter::scan_sensitive_files(std::path::Path::new(&work_dir))
-        }
-    );
+    let sensitive_substrings = std::sync::Arc::new(if work_dir.is_empty() {
+        crate::core::docs_write_filter::SensitiveSubstrings::new()
+    } else {
+        crate::core::docs_write_filter::scan_sensitive_files(std::path::Path::new(&work_dir))
+    });
 
     // Build template context from trigger context
     let mut ctx = TemplateContext::new();
@@ -462,19 +542,28 @@ pub async fn execute_run(
     // already partway through and the user may have intentionally
     // uninstalled an agent that's only used in skipped branches.
     if !is_resume {
-        let agent_steps: Vec<&str> = workflow.steps.iter()
+        let agent_steps: Vec<&str> = workflow
+            .steps
+            .iter()
             .filter(|s| matches!(s.step_type, StepType::Agent))
             .map(|s| s.name.as_str())
             .collect();
         if !agent_steps.is_empty() {
             let detections = crate::agents::detect_all_cached(false).await;
-            let usable: Vec<crate::models::AgentType> = detections.iter()
+            let usable: Vec<crate::models::AgentType> = detections
+                .iter()
                 .filter(|d| (d.installed || d.runtime_available) && d.enabled)
                 .map(|d| d.agent_type.clone())
                 .collect();
             let mut missing: Vec<(String, String)> = Vec::new();
-            for step in workflow.steps.iter().filter(|s| matches!(s.step_type, StepType::Agent)) {
-                let ok = usable.iter().any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
+            for step in workflow
+                .steps
+                .iter()
+                .filter(|s| matches!(s.step_type, StepType::Agent))
+            {
+                let ok = usable
+                    .iter()
+                    .any(|u| std::mem::discriminant(u) == std::mem::discriminant(&step.agent));
                 if !ok {
                     missing.push((step.name.clone(), format!("{:?}", step.agent)));
                 }
@@ -492,7 +581,7 @@ pub async fn execute_run(
                     tokens_used: 0,
                     duration_ms: 0,
                     started_at: None,
-            condition_result: None,
+                    condition_result: None,
                     envelope_detected: None,
                     step_kind: Some("Preflight".into()),
                     step_api_plugin_slug: None,
@@ -504,7 +593,8 @@ pub async fn execute_run(
                 });
                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                 let db_p = db.clone();
-                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+                db_p.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+                    .await?;
                 emit(RunEvent::RunError { error: msg }).await;
                 return Ok(());
             }
@@ -529,8 +619,7 @@ pub async fn execute_run(
     // Phase 1b-ii — shared LLM-calls budget. A child inherits the parent
     // tree's (same counter + cap); a top-level run gets a fresh one capped at
     // its own resolved limit. The whole tree is then governed by ONE quota.
-    let budget = shared_budget
-        .unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls));
+    let budget = shared_budget.unwrap_or_else(|| SharedBudget::root(resolved_guards.max_llm_calls));
     let mut step_revisits: std::collections::HashMap<String, usize> =
         std::collections::HashMap::new();
     // 0.7.0 Phase 6 — per-Goto-edge counter. Keyed by `(source, target)`
@@ -547,7 +636,11 @@ pub async fn execute_run(
         // Note: a step already in flight won't stop here — agent steps have
         // their own disc-level token checked inside `make_agent_stream`.
         if cancel_token.is_cancelled() {
-            tracing::info!("Workflow run {} cancelled by user before step {}", run.id, step_idx);
+            tracing::info!(
+                "Workflow run {} cancelled by user before step {}",
+                run.id,
+                step_idx
+            );
             cancelled_by_user = true;
             run.step_results.push(StepResult {
                 step_name: "__cancelled_by_user__".to_string(),
@@ -556,7 +649,7 @@ pub async fn execute_run(
                 tokens_used: 0,
                 duration_ms: 0,
                 started_at: None,
-            condition_result: None,
+                condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -571,7 +664,10 @@ pub async fn execute_run(
         }
         iteration_count += 1;
         if iteration_count > max_total_iterations {
-            tracing::error!("Workflow run exceeded {} iterations — aborting to prevent infinite loop", max_total_iterations);
+            tracing::error!(
+                "Workflow run exceeded {} iterations — aborting to prevent infinite loop",
+                max_total_iterations
+            );
             all_success = false;
             run.step_results.push(StepResult {
                 step_name: "__safeguard_abort__".to_string(),
@@ -610,15 +706,19 @@ pub async fn execute_run(
                 kind: GuardKind::Timeout,
                 threshold: resolved_guards.timeout_seconds,
                 actual: elapsed_secs,
-            }).await;
+            })
+            .await;
             run.step_results.push(StepResult {
                 step_name: "__guard_timeout__".to_string(),
                 status: RunStatus::StoppedByGuard,
-                output: format!("Stopped by Timeout guard: {}s elapsed (limit {}s)", elapsed_secs, resolved_guards.timeout_seconds),
+                output: format!(
+                    "Stopped by Timeout guard: {}s elapsed (limit {}s)",
+                    elapsed_secs, resolved_guards.timeout_seconds
+                ),
                 tokens_used: 0,
                 duration_ms: 0,
                 started_at: None,
-            condition_result: None,
+                condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -646,15 +746,20 @@ pub async fn execute_run(
                 kind: GuardKind::MaxLlmCalls,
                 threshold: budget.max_llm_calls() as u64,
                 actual: budget.llm_calls() as u64,
-            }).await;
+            })
+            .await;
             run.step_results.push(StepResult {
                 step_name: "__guard_max_llm_calls__".to_string(),
                 status: RunStatus::StoppedByGuard,
-                output: format!("Stopped by MaxLlmCalls guard: {} LLM calls (limit {})", budget.llm_calls(), budget.max_llm_calls()),
+                output: format!(
+                    "Stopped by MaxLlmCalls guard: {} LLM calls (limit {})",
+                    budget.llm_calls(),
+                    budget.max_llm_calls()
+                ),
                 tokens_used: 0,
                 duration_ms: 0,
                 started_at: None,
-            condition_result: None,
+                condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -693,18 +798,24 @@ pub async fn execute_run(
                 threshold = resolved_guards.loop_detection_max_revisits, actual = visit_count,
                 "Workflow run stopped by LoopDetection guard");
             emit(RunEvent::GuardTriggered {
-                kind: GuardKind::LoopDetection { step_name: step_name.clone() },
+                kind: GuardKind::LoopDetection {
+                    step_name: step_name.clone(),
+                },
                 threshold: resolved_guards.loop_detection_max_revisits as u64,
                 actual: visit_count as u64,
-            }).await;
+            })
+            .await;
             run.step_results.push(StepResult {
                 step_name: "__guard_loop_detection__".to_string(),
                 status: RunStatus::StoppedByGuard,
-                output: format!("Stopped by LoopDetection guard: step '{}' visited {} times (limit {})", step_name, visit_count, resolved_guards.loop_detection_max_revisits),
+                output: format!(
+                    "Stopped by LoopDetection guard: step '{}' visited {} times (limit {})",
+                    step_name, visit_count, resolved_guards.loop_detection_max_revisits
+                ),
                 tokens_used: 0,
                 duration_ms: 0,
                 started_at: None,
-            condition_result: None,
+                condition_result: None,
                 envelope_detected: None,
                 step_kind: None,
                 step_agent: None,
@@ -719,13 +830,19 @@ pub async fn execute_run(
         }
 
         let step = &workflow.steps[step_idx];
-        tracing::info!("Executing step {}/{}: '{}'", step_idx + 1, total_steps, step.name);
+        tracing::info!(
+            "Executing step {}/{}: '{}'",
+            step_idx + 1,
+            total_steps,
+            step.name
+        );
 
         emit(RunEvent::StepStart {
             step_name: step.name.clone(),
             step_index: step_idx,
             total_steps,
-        }).await;
+        })
+        .await;
         // 0.8.2 — cross-tab live update
         broadcast_run_state(&run.status, step_idx as i32, Some(step.name.clone()));
 
@@ -769,13 +886,20 @@ pub async fn execute_run(
                         &run.id,
                         state.clone(),
                         &ctx,
-                    ).await
+                    )
+                    .await
                 }
                 StepType::Notify => {
                     // Direct HTTP webhook — zero agent tokens. Used as a workflow
                     // finalizer or mechanical data step (post to Slack, create
-                    // ticket, etc.). Shipped 0.3.5.
-                    super::notify_step::execute_notify_step(step, &ctx).await
+                    // ticket, etc.). The alternate policy variant is cfg(test)
+                    // only; production always enforces the public-IP guard.
+                    super::notify_step::execute_notify_step_with_policy(
+                        step,
+                        &ctx,
+                        notify_security_policy.enforce_public_ip(),
+                    )
+                    .await
                 }
                 StepType::ApiCall => {
                     // Désagentification: direct HTTP call from the engine.
@@ -793,8 +917,11 @@ pub async fn execute_run(
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
-                    ).await
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
+                            run.id.clone(),
+                        ),
+                    )
+                    .await
                 }
                 StepType::Agent => {
                     // 0.7+ — hydrate optional QuickPrompt reference. Le helper
@@ -817,7 +944,7 @@ pub async fn execute_run(
                                 tokens_used: 0,
                                 duration_ms: step_start.elapsed().as_millis() as u64,
                                 started_at: None,
-            condition_result: None,
+                                condition_result: None,
                                 envelope_detected: None,
                                 step_kind: None,
                                 step_agent: None,
@@ -830,90 +957,95 @@ pub async fn execute_run(
                             condition_action: None,
                         }
                     } else {
-                    // Gate feedback, runtime injection (global, approach B):
-                    // a human Gate "request changes" persisted its comment to
-                    // run.state["last_human_feedback"] before the truncate
-                    // (see decide_run). Prepend it to THIS step's prompt (the
-                    // re-run target) and consume it once — so every preset AND
-                    // every hand-built workflow surfaces the feedback with NO
-                    // `{{state.last_human_feedback}}` placeholder needed.
-                    inject_and_consume_gate_feedback(&mut hydrated.prompt_template, &mut run.state);
-                    let step = &hydrated;
-                    let full_access = agents_config.full_access_for(&step.agent);
-                    // Live-progress wiring — without this the user gets a
-                    // "step is running" pulse with no visible content until
-                    // the step finishes (typical Agent step = 30-120s of
-                    // silence). Spawn a forwarder that pumps each chunk from
-                    // the agent's stdout into the SSE channel as a
-                    // `StepProgress` event. Bounded buffer (256) keeps a
-                    // slow client from back-pressuring the agent's stdout.
-                    let (progress_tx, mut progress_rx) =
-                        tokio::sync::mpsc::channel::<String>(256);
-                    let forwarder_tx = events_tx.clone();
-                    let forwarder = tokio::spawn(async move {
-                        while let Some(text) = progress_rx.recv().await {
-                            if let Some(ref tx) = forwarder_tx {
-                                let _ = tx.send(RunEvent::StepProgress { text }).await;
+                        // Gate feedback, runtime injection (global, approach B):
+                        // a human Gate "request changes" persisted its comment to
+                        // run.state["last_human_feedback"] before the truncate
+                        // (see decide_run). Prepend it to THIS step's prompt (the
+                        // re-run target) and consume it once — so every preset AND
+                        // every hand-built workflow surfaces the feedback with NO
+                        // `{{state.last_human_feedback}}` placeholder needed.
+                        inject_and_consume_gate_feedback(
+                            &mut hydrated.prompt_template,
+                            &mut run.state,
+                        );
+                        let step = &hydrated;
+                        let full_access = agents_config.full_access_for(&step.agent);
+                        // Live-progress wiring — without this the user gets a
+                        // "step is running" pulse with no visible content until
+                        // the step finishes (typical Agent step = 30-120s of
+                        // silence). Spawn a forwarder that pumps each chunk from
+                        // the agent's stdout into the SSE channel as a
+                        // `StepProgress` event. Bounded buffer (256) keeps a
+                        // slow client from back-pressuring the agent's stdout.
+                        let (progress_tx, mut progress_rx) =
+                            tokio::sync::mpsc::channel::<String>(256);
+                        let forwarder_tx = events_tx.clone();
+                        let forwarder = tokio::spawn(async move {
+                            while let Some(text) = progress_rx.recv().await {
+                                if let Some(ref tx) = forwarder_tx {
+                                    let _ = tx.send(RunEvent::StepProgress { text }).await;
+                                }
+                            }
+                        });
+                        // 0.8.2 — Stamp the wall-clock step start so the
+                        // frontend's live-elapsed counter reads an authoritative
+                        // value instead of estimating via `runStart + sum of
+                        // prior durations`. The estimate diverges from reality
+                        // after Goto loops (re-runs of the same step), agent
+                        // retries, and any scheduling gap between steps —
+                        // and the WorkflowDetail live-mini-dashboard then
+                        // disagrees with RunDetail's `LiveStepStatus`.
+                        let step_started_at = Utc::now();
+                        let outcome = execute_step(
+                            step,
+                            &project_path,
+                            &work_dir,
+                            tokens_config,
+                            full_access,
+                            &ctx,
+                            &agent_extra_context,
+                            Some(progress_tx),
+                            Some(&agents_config.model_tiers),
+                        )
+                        .await;
+                        let mut outcome = outcome;
+                        if outcome.result.started_at.is_none() {
+                            outcome.result.started_at = Some(step_started_at);
+                        }
+                        // execute_step took ownership of progress_tx and dropped
+                        // it on return → the forwarder's recv() now yields None
+                        // and the loop exits naturally. AWAIT it (don't abort —
+                        // abort would kill the task before it could drain the
+                        // tail of the channel buffer, losing the last few chunks
+                        // of the step's output to the SSE stream).
+                        let _ = forwarder.await;
+                        // 0.7.1 — anti-secret audit on docs/ writes the agent
+                        // produced during this step. Soft-reject : we revert
+                        // via `git checkout` and log; the step itself stays
+                        // Success unless the agent's code write itself failed.
+                        // Only fires when there's a real worktree (skips
+                        // ApiCall-only / Notify-only workflows where work_dir
+                        // is empty or unmounted).
+                        if !work_dir.is_empty() {
+                            let rejections = crate::core::docs_write_filter::audit_docs_writes(
+                                std::path::Path::new(&work_dir),
+                                sensitive_substrings.as_ref(),
+                            )
+                            .await;
+                            if !rejections.is_empty() {
+                                for (path, reason) in &rejections {
+                                    tracing::warn!(
+                                        target: "kronn::docs_write_filter",
+                                        "Step '{}': reverted docs write {} — {}",
+                                        step.name, path, reason.explain()
+                                    );
+                                }
+                                // Surface count in run state for UI visibility.
+                                let count_key = format!("docs_write_rejections.{}", step.name);
+                                run.state.insert(count_key, rejections.len().to_string());
                             }
                         }
-                    });
-                    // 0.8.2 — Stamp the wall-clock step start so the
-                    // frontend's live-elapsed counter reads an authoritative
-                    // value instead of estimating via `runStart + sum of
-                    // prior durations`. The estimate diverges from reality
-                    // after Goto loops (re-runs of the same step), agent
-                    // retries, and any scheduling gap between steps —
-                    // and the WorkflowDetail live-mini-dashboard then
-                    // disagrees with RunDetail's `LiveStepStatus`.
-                    let step_started_at = Utc::now();
-                    let outcome = execute_step(
-                        step,
-                        &project_path,
-                        &work_dir,
-                        tokens_config,
-                        full_access,
-                        &ctx,
-                        &agent_extra_context,
-                        Some(progress_tx),
-                        Some(&agents_config.model_tiers),
-                    ).await;
-                    let mut outcome = outcome;
-                    if outcome.result.started_at.is_none() {
-                        outcome.result.started_at = Some(step_started_at);
-                    }
-                    // execute_step took ownership of progress_tx and dropped
-                    // it on return → the forwarder's recv() now yields None
-                    // and the loop exits naturally. AWAIT it (don't abort —
-                    // abort would kill the task before it could drain the
-                    // tail of the channel buffer, losing the last few chunks
-                    // of the step's output to the SSE stream).
-                    let _ = forwarder.await;
-                    // 0.7.1 — anti-secret audit on docs/ writes the agent
-                    // produced during this step. Soft-reject : we revert
-                    // via `git checkout` and log; the step itself stays
-                    // Success unless the agent's code write itself failed.
-                    // Only fires when there's a real worktree (skips
-                    // ApiCall-only / Notify-only workflows where work_dir
-                    // is empty or unmounted).
-                    if !work_dir.is_empty() {
-                        let rejections = crate::core::docs_write_filter::audit_docs_writes(
-                            std::path::Path::new(&work_dir),
-                            sensitive_substrings.as_ref(),
-                        ).await;
-                        if !rejections.is_empty() {
-                            for (path, reason) in &rejections {
-                                tracing::warn!(
-                                    target: "kronn::docs_write_filter",
-                                    "Step '{}': reverted docs write {} — {}",
-                                    step.name, path, reason.explain()
-                                );
-                            }
-                            // Surface count in run state for UI visibility.
-                            let count_key = format!("docs_write_rejections.{}", step.name);
-                            run.state.insert(count_key, rejections.len().to_string());
-                        }
-                    }
-                    outcome
+                        outcome
                     }
                 }
                 StepType::Gate => {
@@ -942,10 +1074,14 @@ pub async fn execute_run(
                                 "gate_checkpoint_before skipped — workflow uses Isolated worktree mode",
                             );
                         } else if let Some(pid) = workflow.project_id.as_ref() {
-                            let project_path_opt = match state.db.with_conn({
-                                let pid2 = pid.clone();
-                                move |conn| crate::db::projects::get_project(conn, &pid2)
-                            }).await {
+                            let project_path_opt = match state
+                                .db
+                                .with_conn({
+                                    let pid2 = pid.clone();
+                                    move |conn| crate::db::projects::get_project(conn, &pid2)
+                                })
+                                .await
+                            {
                                 Ok(p) => p,
                                 Err(e) => {
                                     tracing::warn!(
@@ -1014,7 +1150,8 @@ pub async fn execute_run(
                         &workflow.exec_allowlist,
                         &work_dir,
                         &ctx,
-                    ).await
+                    )
+                    .await
                 }
                 StepType::BatchApiCall => {
                     // 0.6.0 — mechanical fan-out of an API call over a list of
@@ -1026,8 +1163,11 @@ pub async fn execute_run(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
-                    ).await
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
+                            run.id.clone(),
+                        ),
+                    )
+                    .await
                 }
                 StepType::JsonData => {
                     // 0.7+ — déterministe data source. Émet le payload
@@ -1048,7 +1188,8 @@ pub async fn execute_run(
                         agents_config,
                         sub_budget.clone(),
                         sub_parent_workspace.clone(),
-                    ).await
+                    )
+                    .await
                 }
             }
         };
@@ -1088,7 +1229,12 @@ pub async fn execute_run(
         // the template ctx from it — set_step_meta reads step_agent/step_model,
         // so the order is load-bearing (Codex review: seeding before the
         // snapshot exposed None to the next step).
-        record_step_completion(step, &mut outcome.result, &mut ctx, Some(&agents_config.model_tiers));
+        record_step_completion(
+            step,
+            &mut outcome.result,
+            &mut ctx,
+            Some(&agents_config.model_tiers),
+        );
 
         // 0.7.0 Phase 3 — persist declared artifacts to disk so they
         // survive past the run (committable when in a worktree,
@@ -1167,7 +1313,10 @@ pub async fn execute_run(
         let paused_here = outcome.result.status == RunStatus::WaitingApproval;
 
         // Emit step done event
-        emit(RunEvent::StepDone { step_result: outcome.result.clone() }).await;
+        emit(RunEvent::StepDone {
+            step_result: outcome.result.clone(),
+        })
+        .await;
         // 0.8.2 — cross-tab live update. status reflects the new state
         // (WaitingApproval if the step was a Gate, else still Running).
         // The current_step is cleared since this step is now finished.
@@ -1192,8 +1341,11 @@ pub async fn execute_run(
                 &step.output_format,
             )
         {
-            if let Some(env) = crate::workflows::template::extract_step_envelope(&outcome.result.output) {
-                if let Ok(mut manifest) = serde_json::from_str::<serde_json::Value>(&env.data_json) {
+            if let Some(env) =
+                crate::workflows::template::extract_step_envelope(&outcome.result.output)
+            {
+                if let Ok(mut manifest) = serde_json::from_str::<serde_json::Value>(&env.data_json)
+                {
                     // 2026-06-12 — incremental re-triage: a round ≥ 2 may emit
                     // only the items the plan review flagged, plus
                     // `unchanged: ["<id>", …]`. Hydrate those ids from the
@@ -1208,7 +1360,8 @@ pub async fn execute_run(
                         .map(|a| !a.is_empty())
                         .unwrap_or(false);
                     if has_unchanged && !work_dir.is_empty() {
-                        let prev_path = std::path::Path::new(&work_dir).join(".kronn/manifest.json");
+                        let prev_path =
+                            std::path::Path::new(&work_dir).join(".kronn/manifest.json");
                         let prev = std::fs::read_to_string(&prev_path)
                             .ok()
                             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok());
@@ -1230,14 +1383,15 @@ pub async fn execute_run(
                             ),
                         }
                     }
-                    let ticket_ref = run
-                        .trigger_context
-                        .as_ref()
-                        .and_then(|tc| {
-                            tc.get("issue")
-                                .and_then(|i| i.get("key").or_else(|| i.get("number")))
-                                .and_then(|v| v.as_str().map(String::from).or_else(|| v.as_i64().map(|n| n.to_string())))
-                        });
+                    let ticket_ref = run.trigger_context.as_ref().and_then(|tc| {
+                        tc.get("issue")
+                            .and_then(|i| i.get("key").or_else(|| i.get("number")))
+                            .and_then(|v| {
+                                v.as_str()
+                                    .map(String::from)
+                                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+                            })
+                    });
                     let project_id = workflow.project_id.clone();
                     let decisions = crate::workflows::triage::manifest_to_decisions(
                         &manifest,
@@ -1277,12 +1431,24 @@ pub async fn execute_run(
                     // have written (engine wins). Best-effort: failures log,
                     // never abort the run.
                     if !work_dir.is_empty() {
-                        for (rel, content) in crate::workflows::triage::derive_machine_files(&manifest) {
+                        for (rel, content) in
+                            crate::workflows::triage::derive_machine_files(&manifest)
+                        {
                             let path = std::path::Path::new(&work_dir).join(&rel);
-                            if let Some(parent) = path.parent() { let _ = std::fs::create_dir_all(parent); }
+                            if let Some(parent) = path.parent() {
+                                let _ = std::fs::create_dir_all(parent);
+                            }
                             match std::fs::write(&path, &content) {
-                                Ok(()) => tracing::info!("Triage machine file derived: {} ({} bytes)", rel, content.len()),
-                                Err(e) => tracing::warn!("Failed to write derived triage file {}: {}", rel, e),
+                                Ok(()) => tracing::info!(
+                                    "Triage machine file derived: {} ({} bytes)",
+                                    rel,
+                                    content.len()
+                                ),
+                                Err(e) => tracing::warn!(
+                                    "Failed to write derived triage file {}: {}",
+                                    rel,
+                                    e
+                                ),
                             }
                         }
                     }
@@ -1300,7 +1466,8 @@ pub async fn execute_run(
         // Persist progress
         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
         let db4 = db.clone();
-        db4.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+        db4.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+            .await?;
 
         // Mid-step cancellation winner — `cancelled_by_user` was flipped
         // by the `tokio::select!` cancel branch above. We persist the
@@ -1325,7 +1492,10 @@ pub async fn execute_run(
             // it. Agent steps don't reach here because they never set Failed
             // status when emitting a SIGNAL: Failed for them = a real crash.
             match outcome.condition_action {
-                Some(ConditionAction::Goto { ref step_name, max_iterations }) => {
+                Some(ConditionAction::Goto {
+                    ref step_name,
+                    max_iterations,
+                }) => {
                     if let Some(target) = workflow.steps.iter().position(|s| s.name == *step_name) {
                         let edge = (step.name.clone(), step_name.clone());
                         let count = goto_fires.entry(edge.clone()).or_insert(0);
@@ -1397,7 +1567,8 @@ pub async fn execute_run(
                         tokio::spawn(async move {
                             let client = match reqwest::Client::builder()
                                 .timeout(std::time::Duration::from_secs(10))
-                                .build() {
+                                .build()
+                            {
                                 Ok(c) => c,
                                 Err(e) => {
                                     tracing::warn!(
@@ -1447,7 +1618,8 @@ pub async fn execute_run(
                         tokio::time::sleep(std::time::Duration::from_secs(delay_secs as u64)).await;
                         let client = match reqwest::Client::builder()
                             .timeout(std::time::Duration::from_secs(15))
-                            .build() {
+                            .build()
+                        {
                             Ok(c) => c,
                             Err(e) => {
                                 tracing::warn!(
@@ -1497,7 +1669,11 @@ pub async fn execute_run(
         // Delay after step (if configured)
         if let Some(delay_secs) = step.delay_after_secs {
             if delay_secs > 0 {
-                tracing::info!("Step '{}' — waiting {}s before next step", step.name, delay_secs);
+                tracing::info!(
+                    "Step '{}' — waiting {}s before next step",
+                    step.name,
+                    delay_secs
+                );
                 tokio::time::sleep(tokio::time::Duration::from_secs(delay_secs)).await;
             }
         }
@@ -1531,7 +1707,10 @@ pub async fn execute_run(
                 step_idx += 2; // skip next step
                 continue;
             }
-            Some(ConditionAction::Goto { ref step_name, max_iterations }) => {
+            Some(ConditionAction::Goto {
+                ref step_name,
+                max_iterations,
+            }) => {
                 if let Some(target) = workflow.steps.iter().position(|s| s.name == *step_name) {
                     // 0.7.0 Phase 6 — per-edge cap. Counter keyed by
                     // (source, target). When `max_iterations = Some(N)`,
@@ -1545,7 +1724,9 @@ pub async fn execute_run(
                         if *count >= cap {
                             tracing::info!(
                                 "Step '{}' Goto '{}' reached max_iterations ({}) — falling through",
-                                step.name, step_name, cap
+                                step.name,
+                                step_name,
+                                cap
                             );
                             // No `continue` — fall through to step_idx += 1.
                             step_idx += 1;
@@ -1555,7 +1736,10 @@ pub async fn execute_run(
                     *count += 1;
                     tracing::info!(
                         "Step '{}' triggered Goto '{}' (index {}, fire #{})",
-                        step.name, step_name, target, *count
+                        step.name,
+                        step_name,
+                        target,
+                        *count
                     );
                     step_idx = target;
                     continue;
@@ -1647,17 +1831,20 @@ pub async fn execute_run(
                 step_name: rb_step.name.clone(),
                 step_index: run.step_results.len(),
                 total_steps: run.step_results.len() + 1,
-            }).await;
+            })
+            .await;
 
             let mut rb_outcome: StepOutcome = match rb_step.step_type {
                 StepType::BatchQuickPrompt => {
                     super::batch_step::execute_batch_quick_prompt_step(
-                        rb_step, &run.id, state.clone(), &ctx,
-                    ).await
+                        rb_step,
+                        &run.id,
+                        state.clone(),
+                        &ctx,
+                    )
+                    .await
                 }
-                StepType::Notify => {
-                    super::notify_step::execute_notify_step(rb_step, &ctx).await
-                }
+                StepType::Notify => super::notify_step::execute_notify_step(rb_step, &ctx).await,
                 StepType::ApiCall => {
                     // 0.8.6 (#59) — same audit stamping as the primary
                     // step dispatch above. This is the rollback / branch
@@ -1668,16 +1855,26 @@ pub async fn execute_run(
                         &state,
                         &ctx,
                         super::api_call_executor::SecurityPolicy::production(),
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
-                    ).await
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
+                            run.id.clone(),
+                        ),
+                    )
+                    .await
                 }
                 StepType::Agent => {
                     let full_access = agents_config.full_access_for(&rb_step.agent);
                     execute_step(
-                        rb_step, &project_path, &work_dir, tokens_config,
-                        full_access, &ctx, &agent_extra_context, None,
+                        rb_step,
+                        &project_path,
+                        &work_dir,
+                        tokens_config,
+                        full_access,
+                        &ctx,
+                        &agent_extra_context,
+                        None,
                         Some(&agents_config.model_tiers),
-                    ).await
+                    )
+                    .await
                 }
                 StepType::Gate => {
                     // Gate in rollback would deadlock the run on a Failed
@@ -1694,7 +1891,8 @@ pub async fn execute_run(
                         &workflow.exec_allowlist,
                         &work_dir,
                         &ctx,
-                    ).await
+                    )
+                    .await
                 }
                 StepType::BatchApiCall => {
                     // BatchApiCall in rollback is meaningful for compensation
@@ -1706,8 +1904,11 @@ pub async fn execute_run(
                         workflow.project_id.as_deref(),
                         &state,
                         &ctx,
-                        super::api_call_executor::ApiCallLogContext::workflow_for_run(run.id.clone()),
-                    ).await
+                        super::api_call_executor::ApiCallLogContext::workflow_for_run(
+                            run.id.clone(),
+                        ),
+                    )
+                    .await
                 }
                 StepType::JsonData => {
                     // Marginal en rollback (peu d'intérêt à émettre du
@@ -1728,7 +1929,11 @@ pub async fn execute_run(
                 run.state.insert(k, v);
             }
             run.tokens_used += rb_outcome.result.tokens_used;
-            apply_step_snapshot(rb_step, &mut rb_outcome.result, Some(&agents_config.model_tiers));
+            apply_step_snapshot(
+                rb_step,
+                &mut rb_outcome.result,
+                Some(&agents_config.model_tiers),
+            );
             // 2026-06-10 (audit P1) — mark this result as COMPENSATION so the
             // UI renders it under a dedicated rollback section. Pre-fix a
             // green rollback step right after the failed step read as "the
@@ -1736,7 +1941,10 @@ pub async fn execute_run(
             rb_outcome.result.is_rollback = true;
 
             let rb_failed = rb_outcome.result.status == RunStatus::Failed;
-            emit(RunEvent::StepDone { step_result: rb_outcome.result.clone() }).await;
+            emit(RunEvent::StepDone {
+                step_result: rb_outcome.result.clone(),
+            })
+            .await;
             run.step_results.push(rb_outcome.result);
 
             if rb_failed {
@@ -1756,10 +1964,14 @@ pub async fn execute_run(
 
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
     let db5 = db.clone();
-    db5.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap)).await?;
+    db5.with_conn(move |conn| crate::db::workflows::update_run_progress(conn, snap))
+        .await?;
 
     // Emit run done
-    emit(RunEvent::RunDone { status: run.status.clone() }).await;
+    emit(RunEvent::RunDone {
+        status: run.status.clone(),
+    })
+    .await;
     // 0.8.2 — cross-tab final state flip so any open WorkflowDetail can
     // clear its live indicator without polling.
     broadcast_run_state(&run.status, run.step_results.len() as i32 - 1, None);
@@ -1786,9 +1998,12 @@ pub async fn execute_run(
                         });
                         let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                         let db = state.db.clone();
-                        if let Err(e) = db.with_conn(move |conn| {
-                            crate::db::workflows::update_run_progress(conn, snap)
-                        }).await {
+                        if let Err(e) = db
+                            .with_conn(move |conn| {
+                                crate::db::workflows::update_run_progress(conn, snap)
+                            })
+                            .await
+                        {
                             tracing::error!(
                                 run_id = %run.id,
                                 error = %e,
@@ -1876,7 +2091,8 @@ pub async fn resume_run(
         if last.status != RunStatus::WaitingApproval {
             return Err(anyhow!(
                 "Cannot resume run {}: trailing step status is {:?}, expected WaitingApproval",
-                run.id, last.status
+                run.id,
+                last.status
             ));
         }
         // 0.8.2 — Rewrite the gate's `duration_ms` to reflect the actual
@@ -1918,7 +2134,8 @@ pub async fn resume_run(
     // from the review→implement loop, but for the HUMAN gate path.)
     match &decision {
         GateDecision::RequestChanges { comment } if !comment.trim().is_empty() => {
-            run.state.insert("last_human_feedback".into(), comment.clone());
+            run.state
+                .insert("last_human_feedback".into(), comment.clone());
         }
         GateDecision::Approve { comment: Some(c) } if !c.trim().is_empty() => {
             run.state.insert("last_human_feedback".into(), c.clone());
@@ -1939,14 +2156,16 @@ pub async fn resume_run(
         // 0.8.2 — cross-tab WS broadcast: a Reject is terminal, so
         // execute_run won't re-emit. Without this, other tabs viewing
         // the same run stay stuck on "WaitingApproval" until refresh.
-        let _ = state.ws_broadcast.send(crate::models::WsMessage::WorkflowRunUpdated {
-            run_id: run.id.clone(),
-            workflow_id: workflow.id.clone(),
-            status: format!("{:?}", run.status),
-            step_index: gate_step_idx as i32,
-            total_steps: workflow.steps.len() as u32,
-            current_step: None,
-        });
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::WorkflowRunUpdated {
+                run_id: run.id.clone(),
+                workflow_id: workflow.id.clone(),
+                status: format!("{:?}", run.status),
+                step_index: gate_step_idx as i32,
+                total_steps: workflow.steps.len() as u32,
+                current_step: None,
+            });
         // Cleanup workspace if it exists.
         if let Some(ws_path) = run.workspace_path.as_ref().map(std::path::PathBuf::from) {
             if ws_path.exists() {
@@ -1983,9 +2202,12 @@ pub async fn resume_run(
                                 });
                                 let snap = crate::db::workflows::RunProgressSnapshot::from_run(run);
                                 let db = state.db.clone();
-                                if let Err(e) = db.with_conn(move |conn| {
-                                    crate::db::workflows::update_run_progress(conn, snap)
-                                }).await {
+                                if let Err(e) = db
+                                    .with_conn(move |conn| {
+                                        crate::db::workflows::update_run_progress(conn, snap)
+                                    })
+                                    .await
+                                {
                                     tracing::error!(
                                         run_id = %run.id,
                                         error = %e,
@@ -2020,8 +2242,7 @@ pub async fn resume_run(
         // place. Resolve the gate step in `workflow.steps` BY NAME instead
         // (the same model `next_step_index_for_resume` uses on resume).
         let gate_step_def = workflow.steps.iter().find(|s| s.name == gate_step_name);
-        let target_name = gate_step_def
-            .and_then(|s| s.gate_request_changes_target.clone());
+        let target_name = gate_step_def.and_then(|s| s.gate_request_changes_target.clone());
 
         // Workflow-steps index of the target (where to replay FROM).
         // Default: the step linearly before the gate. Named-but-missing
@@ -2050,11 +2271,7 @@ pub async fn resume_run(
         // post-Goto bug the most-recent variant caused). If the target
         // never ran, fall back to the bounded positional index.
         let target_step_name = workflow.steps.get(target_idx).map(|s| s.name.clone());
-        let cut = request_changes_cut(
-            &run.step_results,
-            target_step_name.as_deref(),
-            target_idx,
-        );
+        let cut = request_changes_cut(&run.step_results, target_step_name.as_deref(), target_idx);
         run.step_results.truncate(cut);
 
         // 0.8.6 (#25) — checkpoint reset. If the gate captured a
@@ -2071,9 +2288,11 @@ pub async fn resume_run(
         if let Some(sha) = run.state.get(&checkpoint_key).cloned() {
             if let Some(pid) = workflow.project_id.as_ref() {
                 let pid2 = pid.clone();
-                let project = match state.db.with_conn(move |conn| {
-                    crate::db::projects::get_project(conn, &pid2)
-                }).await {
+                let project = match state
+                    .db
+                    .with_conn(move |conn| crate::db::projects::get_project(conn, &pid2))
+                    .await
+                {
                     Ok(p) => p,
                     Err(e) => {
                         tracing::warn!(
@@ -2115,7 +2334,17 @@ pub async fn resume_run(
 
     // Approve and RequestChanges both flow into execute_run.
     run.status = RunStatus::Running;
-    execute_run(state, workflow, run, tokens_config, agents_config, events_tx, None, None).await
+    execute_run(
+        state,
+        workflow,
+        run,
+        tokens_config,
+        agents_config,
+        events_tx,
+        None,
+        None,
+    )
+    .await
 }
 
 /// A2 — validate + atomically claim an `Interrupted` run for manual resume.
@@ -2134,7 +2363,8 @@ pub async fn claim_interrupted_run(state: &AppState, run: &WorkflowRun) -> Resul
     if run.status != RunStatus::Interrupted {
         return Err(anyhow!(
             "Run {} is {:?} — only Interrupted runs can be resumed",
-            run.id, run.status
+            run.id,
+            run.status
         ));
     }
     if run.run_type == "subworkflow" || run.parent_run_id.is_some() {
@@ -2162,7 +2392,10 @@ pub async fn claim_interrupted_run(state: &AppState, run: &WorkflowRun) -> Resul
         .db
         .with_conn(move |conn| {
             crate::db::workflows::claim_run_status(
-                conn, &run_id, &RunStatus::Interrupted, &RunStatus::Running,
+                conn,
+                &run_id,
+                &RunStatus::Interrupted,
+                &RunStatus::Running,
             )
         })
         .await?;
@@ -2192,7 +2425,17 @@ pub async fn resume_interrupted_run(
 ) -> Result<()> {
     run.status = RunStatus::Running;
     run.finished_at = None;
-    execute_run(state, workflow, run, tokens_config, agents_config, events_tx, None, None).await
+    execute_run(
+        state,
+        workflow,
+        run,
+        tokens_config,
+        agents_config,
+        events_tx,
+        None,
+        None,
+    )
+    .await
 }
 
 /// Append a `> Décision: <verdict>` (and optional comment) footer to a
@@ -2298,7 +2541,11 @@ pub(crate) fn record_step_completion(
     apply_step_snapshot(step, result, model_tiers);
     ctx.set_step_output(&step.name, &result.output);
     let agent_name = result.step_agent.as_ref().map(|a| format!("{a:?}"));
-    ctx.set_step_meta(&step.name, agent_name.as_deref(), result.step_model.as_deref());
+    ctx.set_step_meta(
+        &step.name,
+        agent_name.as_deref(),
+        result.step_model.as_deref(),
+    );
 }
 
 pub(crate) fn apply_step_snapshot(
@@ -2362,7 +2609,8 @@ fn inject_trigger_context(ctx: &mut TemplateContext, trigger_json: &serde_json::
             ctx.set("issue.url", url);
         }
         if let Some(labels) = obj.get("issue_labels").and_then(|v| v.as_array()) {
-            let label_strs: Vec<String> = labels.iter()
+            let label_strs: Vec<String> = labels
+                .iter()
                 .filter_map(|l| l.as_str().map(String::from))
                 .collect();
             ctx.set("issue.labels", label_strs.join(", "));
@@ -2385,14 +2633,23 @@ mod tests {
     #[test]
     fn gate_feedback_is_injected_and_consumed_once() {
         let mut state = std::collections::HashMap::new();
-        state.insert("last_human_feedback".to_string(), "Use the existing CircuitBreaker, don't add a new one".to_string());
+        state.insert(
+            "last_human_feedback".to_string(),
+            "Use the existing CircuitBreaker, don't add a new one".to_string(),
+        );
         let mut prompt = "Implémente le plan validé.".to_string();
 
         // First step after the gate: injected + feedback present in prompt.
         let injected = inject_and_consume_gate_feedback(&mut prompt, &mut state);
         assert!(injected);
-        assert!(prompt.contains("Use the existing CircuitBreaker"), "feedback must be prepended");
-        assert!(prompt.contains("Implémente le plan validé."), "original prompt preserved");
+        assert!(
+            prompt.contains("Use the existing CircuitBreaker"),
+            "feedback must be prepended"
+        );
+        assert!(
+            prompt.contains("Implémente le plan validé."),
+            "original prompt preserved"
+        );
         // Consumed — no longer in state.
         assert!(!state.contains_key("last_human_feedback"));
 
@@ -2425,14 +2682,17 @@ mod tests {
         let root = super::SharedBudget::root(3);
         let child = root.clone();
         assert_eq!(root.llm_calls(), 0);
-        root.add_llm_calls(1);          // parent spends 1
-        child.add_llm_calls(1);         // child spends 1 — same counter
+        root.add_llm_calls(1); // parent spends 1
+        child.add_llm_calls(1); // child spends 1 — same counter
         assert_eq!(root.llm_calls(), 2, "both views observe the shared count");
         assert_eq!(child.llm_calls(), 2);
         assert_eq!(child.max_llm_calls(), 3, "child inherits the root cap");
         // The whole tree trips the cap together.
         child.add_llm_calls(1);
-        assert!(root.llm_calls() >= root.max_llm_calls(), "tree-wide quota reached");
+        assert!(
+            root.llm_calls() >= root.max_llm_calls(),
+            "tree-wide quota reached"
+        );
     }
 
     // ─── next_step_index_for_resume — Goto-loop bug fix (0.7.0) ─────────
@@ -2549,11 +2809,18 @@ mod tests {
         ];
         // Two extra results from the Goto loop firing twice.
         let results = vec![
-            fake_result("fetch"), fake_result("analyze"), fake_result("plan_gate"),
-            fake_result("implement"), fake_result("run_tests"), fake_result("review"),
+            fake_result("fetch"),
+            fake_result("analyze"),
+            fake_result("plan_gate"),
+            fake_result("implement"),
+            fake_result("run_tests"),
+            fake_result("review"),
             // Goto loop iteration:
-            fake_result("implement"), fake_result("run_tests"), fake_result("review"),
-            fake_result("create_pr"), fake_result("ready_gate"),
+            fake_result("implement"),
+            fake_result("run_tests"),
+            fake_result("review"),
+            fake_result("create_pr"),
+            fake_result("ready_gate"),
         ];
         assert_eq!(results.len(), 11, "sanity: 11 results, 9 steps");
         // Buggy old logic would return 11 → loop never runs → notify_done skipped.
@@ -2576,8 +2843,10 @@ mod tests {
         // `implement` (idx 3). Cut keeps [fetch, analyze, plan_gate] = 3,
         // exactly the old positional truncate — common case unchanged.
         let results = vec![
-            fake_result("fetch"), fake_result("analyze"),
-            fake_result("plan_gate"), fake_result("implement"),
+            fake_result("fetch"),
+            fake_result("analyze"),
+            fake_result("plan_gate"),
+            fake_result("implement"),
             fake_result("review_gate"),
         ];
         assert_eq!(request_changes_cut(&results, Some("implement"), 3), 3);
@@ -2592,20 +2861,31 @@ mod tests {
         // prefix and the run resumed at the GATE instead of the target
         // (run-10 live bug, 2026-06-13).
         let results = vec![
-            fake_result("fetch"), fake_result("analyze"),       // 0,1
-            fake_result("plan_gate"), fake_result("implement"), // 2,3
-            fake_result("review"),                              // 4
-            fake_result("implement"),                           // 5  ← Goto re-run
-            fake_result("review"), fake_result("ready_gate"),   // 6,7
+            fake_result("fetch"),
+            fake_result("analyze"), // 0,1
+            fake_result("plan_gate"),
+            fake_result("implement"), // 2,3
+            fake_result("review"),    // 4
+            fake_result("implement"), // 5  ← Goto re-run
+            fake_result("review"),
+            fake_result("ready_gate"), // 6,7
         ];
         assert_eq!(request_changes_cut(&results, Some("implement"), 3), 3);
         // resume-cursor contract: last kept row (`plan_gate`) + 1 = target
         let steps = vec![
-            fake_step("fetch"), fake_step("analyze"), fake_step("plan_gate"),
-            fake_step("implement"), fake_step("review"), fake_step("ready_gate"),
+            fake_step("fetch"),
+            fake_step("analyze"),
+            fake_step("plan_gate"),
+            fake_step("implement"),
+            fake_step("review"),
+            fake_step("ready_gate"),
         ];
         let kept = &results[..3];
-        assert_eq!(next_step_index_for_resume(&steps, kept), 3, "cursor lands ON implement");
+        assert_eq!(
+            next_step_index_for_resume(&steps, kept),
+            3,
+            "cursor lands ON implement"
+        );
     }
 
     #[test]
@@ -2633,10 +2913,19 @@ mod tests {
         inject_trigger_context(&mut ctx, &json);
 
         assert_eq!(ctx.render("{{issue.title}}").unwrap(), "Fix the bug");
-        assert_eq!(ctx.render("{{issue.body}}").unwrap(), "It crashes on startup");
+        assert_eq!(
+            ctx.render("{{issue.body}}").unwrap(),
+            "It crashes on startup"
+        );
         assert_eq!(ctx.render("{{issue.number}}").unwrap(), "42");
-        assert_eq!(ctx.render("{{issue.url}}").unwrap(), "https://github.com/owner/repo/issues/42");
-        assert_eq!(ctx.render("{{issue.labels}}").unwrap(), "bug, priority-high");
+        assert_eq!(
+            ctx.render("{{issue.url}}").unwrap(),
+            "https://github.com/owner/repo/issues/42"
+        );
+        assert_eq!(
+            ctx.render("{{issue.labels}}").unwrap(),
+            "bug, priority-high"
+        );
     }
 
     #[test]
@@ -2832,7 +3121,10 @@ mod tests {
         let mut step = mk_step_for_snapshot(StepType::Agent);
         step.agent = AgentType::ClaudeCode;
         step.agent_settings = Some(AgentSettings {
-            model: None, tier: Some(ModelTier::Reasoning), reasoning_effort: None, max_tokens: None,
+            model: None,
+            tier: Some(ModelTier::Reasoning),
+            reasoning_effort: None,
+            max_tokens: None,
         });
         let mut r = empty_result();
         apply_step_snapshot(&step, &mut r, None);
@@ -2840,7 +3132,10 @@ mod tests {
         assert_eq!(r.step_model.as_deref(), Some("opus · reasoning"));
         // explicit model override wins, default tier → bare model
         step.agent_settings = Some(AgentSettings {
-            model: Some("o3".into()), tier: None, reasoning_effort: None, max_tokens: None,
+            model: Some("o3".into()),
+            tier: None,
+            reasoning_effort: None,
+            max_tokens: None,
         });
         let mut r2 = empty_result();
         apply_step_snapshot(&step, &mut r2, None);
@@ -2853,10 +3148,15 @@ mod tests {
         let mut r = empty_result();
         apply_step_snapshot(&step, &mut r, None);
         assert_eq!(r.step_kind.as_deref(), Some("ApiCall"));
-        assert!(r.step_agent.is_none(),
-            "ApiCall has no agent — leaving step_agent null is what powers the per-step badge");
+        assert!(
+            r.step_agent.is_none(),
+            "ApiCall has no agent — leaving step_agent null is what powers the per-step badge"
+        );
         assert_eq!(r.step_api_plugin_slug.as_deref(), Some("mcp-github"));
-        assert_eq!(r.step_api_endpoint_path.as_deref(), Some("/repos/anthropics/cookbook/issues"));
+        assert_eq!(
+            r.step_api_endpoint_path.as_deref(),
+            Some("/repos/anthropics/cookbook/issues")
+        );
     }
 
     #[test]
@@ -2885,8 +3185,10 @@ mod tests {
         let mut r = empty_result();
         apply_step_snapshot(&step, &mut r, None);
         assert_eq!(r.step_kind.as_deref(), Some("Gate"));
-        assert!(r.step_agent.is_none(),
-            "Gate has no agent — the badge should render as a 'pause' chip with no agent name");
+        assert!(
+            r.step_agent.is_none(),
+            "Gate has no agent — the badge should render as a 'pause' chip with no agent name"
+        );
         assert!(r.step_api_plugin_slug.is_none());
     }
 
@@ -2918,7 +3220,10 @@ mod tests {
         append_decision_footer(&mut r, "Approuvé", None);
         assert!(r.output.starts_with("Validate the PR?"));
         assert!(r.output.contains("> **Décision : Approuvé**"));
-        assert!(r.output.contains("\n\n"), "should keep gate body and footer separated by blank line");
+        assert!(
+            r.output.contains("\n\n"),
+            "should keep gate body and footer separated by blank line"
+        );
     }
 
     #[test]
@@ -2961,7 +3266,11 @@ mod tests {
         // No bare "> " line beneath the verdict.
         let lines: Vec<&str> = r.output.lines().collect();
         let last = lines.last().copied().unwrap_or("");
-        assert!(last.contains("Approuvé**"), "last line should be the verdict line, got: {:?}", last);
+        assert!(
+            last.contains("Approuvé**"),
+            "last line should be the verdict line, got: {:?}",
+            last
+        );
     }
 
     // ─── max_iterations_for ──────────────────────────────────────────────
@@ -2973,13 +3282,13 @@ mod tests {
 
     #[test]
     fn max_iterations_typical_workflow() {
-        assert_eq!(max_iterations_for(3), 80);  // 3*10 + 50
+        assert_eq!(max_iterations_for(3), 80); // 3*10 + 50
         assert_eq!(max_iterations_for(5), 100); // 5*10 + 50
     }
 
     #[test]
     fn max_iterations_single_step() {
-        assert_eq!(max_iterations_for(1), 60);  // 1*10 + 50
+        assert_eq!(max_iterations_for(1), 60); // 1*10 + 50
     }
 
     // ─── RunEvent serialization ──────────────────────────────────────────
@@ -3000,14 +3309,18 @@ mod tests {
 
     #[test]
     fn run_event_run_done_serializes() {
-        let evt = RunEvent::RunDone { status: RunStatus::Success };
+        let evt = RunEvent::RunDone {
+            status: RunStatus::Success,
+        };
         let json = serde_json::to_value(&evt).unwrap();
         assert_eq!(json["event"], "RunDone");
     }
 
     #[test]
     fn run_event_run_error_serializes() {
-        let evt = RunEvent::RunError { error: "timeout".into() };
+        let evt = RunEvent::RunError {
+            error: "timeout".into(),
+        };
         let json = serde_json::to_value(&evt).unwrap();
         assert_eq!(json["event"], "RunError");
         assert_eq!(json["data"]["error"], "timeout");
@@ -3020,7 +3333,10 @@ mod tests {
         let g = WorkflowGuards::default().resolved();
         assert_eq!(g.timeout_seconds, DEFAULT_GUARD_TIMEOUT_SECS);
         assert_eq!(g.max_llm_calls, DEFAULT_GUARD_MAX_LLM_CALLS);
-        assert_eq!(g.loop_detection_max_revisits, DEFAULT_GUARD_LOOP_MAX_REVISITS);
+        assert_eq!(
+            g.loop_detection_max_revisits,
+            DEFAULT_GUARD_LOOP_MAX_REVISITS
+        );
     }
 
     #[test]
@@ -3034,7 +3350,10 @@ mod tests {
         let r = g.resolved();
         assert_eq!(r.timeout_seconds, 60);
         assert_eq!(r.max_llm_calls, DEFAULT_GUARD_MAX_LLM_CALLS);
-        assert_eq!(r.loop_detection_max_revisits, DEFAULT_GUARD_LOOP_MAX_REVISITS);
+        assert_eq!(
+            r.loop_detection_max_revisits,
+            DEFAULT_GUARD_LOOP_MAX_REVISITS
+        );
     }
 
     #[test]
@@ -3042,7 +3361,10 @@ mod tests {
         let r = WorkflowGuards::resolve_optional(None);
         assert_eq!(r.timeout_seconds, DEFAULT_GUARD_TIMEOUT_SECS);
         assert_eq!(r.max_llm_calls, DEFAULT_GUARD_MAX_LLM_CALLS);
-        assert_eq!(r.loop_detection_max_revisits, DEFAULT_GUARD_LOOP_MAX_REVISITS);
+        assert_eq!(
+            r.loop_detection_max_revisits,
+            DEFAULT_GUARD_LOOP_MAX_REVISITS
+        );
     }
 
     #[test]
@@ -3074,7 +3396,9 @@ mod tests {
         // The `LoopDetection` variant carries which step looped — the
         // frontend uses this to render "step 'self_review' visited 11x"
         // instead of a generic "loop detected".
-        let k = GuardKind::LoopDetection { step_name: "self_review".into() };
+        let k = GuardKind::LoopDetection {
+            step_name: "self_review".into(),
+        };
         let json = serde_json::to_value(&k).unwrap();
         assert_eq!(json["type"], "LoopDetection");
         assert_eq!(json["step_name"], "self_review");
@@ -3082,7 +3406,9 @@ mod tests {
 
     // ─── Artifacts persistence (0.7.0 Phase 3) ────────────────────────────────
 
-    fn make_workflow_with_artifacts(artifacts: ::std::collections::HashMap<String, ArtifactSpec>) -> Workflow {
+    fn make_workflow_with_artifacts(
+        artifacts: ::std::collections::HashMap<String, ArtifactSpec>,
+    ) -> Workflow {
         Workflow {
             pinned: false,
             id: "test".into(),
@@ -3091,7 +3417,12 @@ mod tests {
             trigger: WorkflowTrigger::Manual,
             steps: vec![],
             actions: vec![],
-            safety: WorkflowSafety { sandbox: false, max_files: None, max_lines: None, require_approval: false },
+            safety: WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
             workspace_config: None,
             concurrency_limit: None,
             guards: None,
@@ -3109,10 +3440,13 @@ mod tests {
     fn persist_writes_declared_artifacts_to_workspace() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut artifacts = ::std::collections::HashMap::new();
-        artifacts.insert("plan".to_string(), ArtifactSpec {
-            path: ".kronn/plan.md".into(),
-            format: Some("markdown".into()),
-        });
+        artifacts.insert(
+            "plan".to_string(),
+            ArtifactSpec {
+                path: ".kronn/plan.md".into(),
+                format: Some("markdown".into()),
+            },
+        );
         let wf = make_workflow_with_artifacts(artifacts);
 
         let mut extracted = ::std::collections::HashMap::new();
@@ -3140,19 +3474,24 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_type().is_file())
             .collect();
-        assert!(walked.is_empty(),
+        assert!(
+            walked.is_empty(),
             "no file should be written for undeclared artifacts (got {} files)",
-            walked.len());
+            walked.len()
+        );
     }
 
     #[test]
     fn persist_creates_parent_directories_on_demand() {
         let dir = tempfile::TempDir::new().unwrap();
         let mut artifacts = ::std::collections::HashMap::new();
-        artifacts.insert("trace".to_string(), ArtifactSpec {
-            path: ".kronn/deep/nested/trace.yaml".into(),
-            format: None,
-        });
+        artifacts.insert(
+            "trace".to_string(),
+            ArtifactSpec {
+                path: ".kronn/deep/nested/trace.yaml".into(),
+                format: None,
+            },
+        );
         let wf = make_workflow_with_artifacts(artifacts);
 
         let mut extracted = ::std::collections::HashMap::new();
@@ -3170,10 +3509,13 @@ mod tests {
         // `review` artifact on every iteration. The latest write wins.
         let dir = tempfile::TempDir::new().unwrap();
         let mut artifacts = ::std::collections::HashMap::new();
-        artifacts.insert("review".to_string(), ArtifactSpec {
-            path: ".kronn/review.yaml".into(),
-            format: None,
-        });
+        artifacts.insert(
+            "review".to_string(),
+            ArtifactSpec {
+                path: ".kronn/review.yaml".into(),
+                format: None,
+            },
+        );
         let wf = make_workflow_with_artifacts(artifacts);
 
         let mut e1 = ::std::collections::HashMap::new();
@@ -3208,20 +3550,32 @@ mod tests {
         s
     }
 
+    fn notify_step(name: &str, url: String, body_template: &str) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Notify;
+        step.notify_config = Some(NotifyConfig {
+            url,
+            method: "POST".into(),
+            headers: std::collections::HashMap::from([(
+                "Content-Type".into(),
+                "application/json".into(),
+            )]),
+            body_template: body_template.into(),
+        });
+        step
+    }
+
     fn test_state_and_configs() -> (
         crate::AppState,
         crate::models::TokensConfig,
         crate::models::AgentsConfig,
     ) {
-        let db = std::sync::Arc::new(
-            crate::db::Database::open_in_memory().expect("in-memory DB"),
-        );
+        let db = std::sync::Arc::new(crate::db::Database::open_in_memory().expect("in-memory DB"));
         let cfg = crate::core::config::default_config();
         let tokens = cfg.tokens.clone();
         let agents = cfg.agents.clone();
         let config = std::sync::Arc::new(tokio::sync::RwLock::new(cfg));
-        let state =
-            crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
         (state, tokens, agents)
     }
 
@@ -3268,21 +3622,36 @@ mod tests {
         // Persist workflow + run so the runner's DB write-backs have rows.
         let wf_db = wf.clone();
         let run_db = run.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::workflows::insert_workflow(conn, &wf_db)?;
-            crate::db::workflows::insert_run(conn, &run_db)?;
-            Ok(())
-        }).await.unwrap();
-
-        execute_run(state.clone(), &wf, &mut run, &tokens, &agents, None, None, None)
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)?;
+                Ok(())
+            })
             .await
-            .expect("a deterministic run must not error");
+            .unwrap();
+
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a deterministic run must not error");
 
         // In-memory run object reflects success.
         assert_eq!(run.status, RunStatus::Success, "the whole run succeeds");
         assert_eq!(run.step_results.len(), 2, "both steps executed");
         assert!(
-            run.step_results.iter().all(|r| r.status == RunStatus::Success),
+            run.step_results
+                .iter()
+                .all(|r| r.status == RunStatus::Success),
             "every step succeeded",
         );
         assert_eq!(run.step_results[0].step_name, "emit_first");
@@ -3296,13 +3665,120 @@ mod tests {
 
         // And the orchestrator persisted the terminal state to the DB — the
         // write-back path that the pure helpers never touch.
-        let persisted = state.db
+        let persisted = state
+            .db
             .with_conn(move |conn| crate::db::workflows::get_run(conn, "run-det"))
             .await
             .unwrap()
             .expect("run row exists");
-        assert_eq!(persisted.status, RunStatus::Success, "DB row reflects success");
-        assert_eq!(persisted.step_results.len(), 2, "DB persisted both step results");
+        assert_eq!(
+            persisted.status,
+            RunStatus::Success,
+            "DB row reflects success"
+        );
+        assert_eq!(
+            persisted.step_results.len(),
+            2,
+            "DB persisted both step results"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_run_drives_notify_chain_against_test_only_loopback_policy() {
+        let received = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let received_by_server = received.clone();
+        let app = axum::Router::new().route(
+            "/notify/{stage}",
+            axum::routing::post(
+                move |axum::extract::Path(stage): axum::extract::Path<String>, body: String| {
+                    let received = received_by_server.clone();
+                    async move {
+                        received.lock().await.push((stage, body));
+                        axum::Json(serde_json::json!({ "received": true }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local webhook");
+        let port = listener.local_addr().expect("local address").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve local webhook");
+        });
+
+        let (state, tokens, agents) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-notify-hermetic".into();
+        workflow.steps = vec![
+            json_data_step(
+                "seed",
+                serde_json::json!({ "ticket": "EW-9999", "priority": "P1", "count": 3 }),
+            ),
+            notify_step(
+                "notify_a",
+                format!("http://127.0.0.1:{port}/notify/a"),
+                r#"{"phase":"a","ticket":"{{steps.seed.data.ticket}}"}"#,
+            ),
+            notify_step(
+                "notify_b",
+                format!("http://127.0.0.1:{port}/notify/b"),
+                r#"{"phase":"b","previous_status":{{steps.notify_a.data.http_status}}}"#,
+            ),
+        ];
+        let mut run = pending_run("run-notify-hermetic", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run_with_notify_policy(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+            NotifySecurityPolicy::AllowLoopbackForTests,
+        )
+        .await
+        .expect("hermetic Notify chain must execute");
+        server.abort();
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.step_results.len(), 3);
+        assert!(
+            run.step_results
+                .iter()
+                .all(|result| result.status == RunStatus::Success),
+            "all runner-dispatched steps succeed: {:?}",
+            run.step_results,
+        );
+
+        let captured = received.lock().await.clone();
+        assert_eq!(captured.len(), 2, "both Notify requests reached the sink");
+        assert_eq!(captured[0].0, "a");
+        assert!(
+            captured[0].1.contains(r#""ticket":"EW-9999""#),
+            "JsonData output is interpolated into Notify A: {}",
+            captured[0].1,
+        );
+        assert_eq!(captured[1].0, "b");
+        assert!(
+            captured[1].1.contains(r#""previous_status":200"#),
+            "Notify A output is interpolated into Notify B: {}",
+            captured[1].1,
+        );
+
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-notify-hermetic"))
+            .await
+            .expect("read persisted run")
+            .expect("persisted run exists");
+        assert_eq!(persisted.status, RunStatus::Success);
+        assert_eq!(persisted.step_results.len(), 3);
     }
 
     #[tokio::test]
@@ -3323,39 +3799,57 @@ mod tests {
         let mut run = pending_run("run-fail", "wf-fail");
         let wf_db = wf.clone();
         let run_db = run.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::workflows::insert_workflow(conn, &wf_db)?;
-            crate::db::workflows::insert_run(conn, &run_db)?;
-            Ok(())
-        }).await.unwrap();
-
-        execute_run(state.clone(), &wf, &mut run, &tokens, &agents, None, None, None)
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)?;
+                Ok(())
+            })
             .await
-            .expect("a failing STEP is a run outcome, not an execute_run error");
+            .unwrap();
+
+        execute_run(
+            state.clone(),
+            &wf,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("a failing STEP is a run outcome, not an execute_run error");
 
         assert_eq!(run.status, RunStatus::Failed, "a failed step fails the run");
-        let persisted = state.db
+        let persisted = state
+            .db
             .with_conn(move |conn| crate::db::workflows::get_run(conn, "run-fail"))
             .await
             .unwrap()
             .expect("run row exists");
-        assert_eq!(persisted.status, RunStatus::Failed, "failure persisted to DB");
+        assert_eq!(
+            persisted.status,
+            RunStatus::Failed,
+            "failure persisted to DB"
+        );
     }
 
     // ─── A2 — manual resume of Interrupted runs (acceptance tests) ──────
 
-    async fn insert_wf_and_run(
-        state: &crate::AppState,
-        wf: &Workflow,
-        run: &WorkflowRun,
-    ) {
+    async fn insert_wf_and_run(state: &crate::AppState, wf: &Workflow, run: &WorkflowRun) {
         let wf_db = wf.clone();
         let run_db = run.clone();
-        state.db.with_conn(move |conn| {
-            crate::db::workflows::insert_workflow(conn, &wf_db)?;
-            crate::db::workflows::insert_run(conn, &run_db)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::workflows::insert_workflow(conn, &wf_db)?;
+                crate::db::workflows::insert_run(conn, &run_db)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -3367,21 +3861,31 @@ mod tests {
         let mut step = fake_step("reason");
         step.agent = AgentType::Codex;
         step.agent_settings = Some(crate::models::AgentSettings {
-            model: Some("gpt-5.6-sol".into()), tier: None,
-            reasoning_effort: None, max_tokens: None,
+            model: Some("gpt-5.6-sol".into()),
+            tier: None,
+            reasoning_effort: None,
+            max_tokens: None,
         });
         let mut result = fake_result("reason");
-        assert!(result.step_agent.is_none(), "raw executor output has no snapshot yet");
+        assert!(
+            result.step_agent.is_none(),
+            "raw executor output has no snapshot yet"
+        );
 
         let mut ctx = TemplateContext::new();
         record_step_completion(&step, &mut result, &mut ctx, None);
 
         assert_eq!(
-            ctx.render("({{steps.reason.agent}} - {{steps.reason.model}})").unwrap(),
+            ctx.render("({{steps.reason.agent}} - {{steps.reason.model}})")
+                .unwrap(),
             "(Codex - gpt-5.6-sol)",
             "the signature composes from the REAL run metadata"
         );
-        assert_eq!(result.step_agent, Some(AgentType::Codex), "snapshot persisted on the row too");
+        assert_eq!(
+            result.step_agent,
+            Some(AgentType::Codex),
+            "snapshot persisted on the row too"
+        );
     }
 
     #[tokio::test]
@@ -3400,7 +3904,10 @@ mod tests {
         let second = claim_interrupted_run(&state, &run).await;
         assert!(first.is_ok(), "first caller wins the claim: {first:?}");
         let err = second.expect_err("second caller must lose").to_string();
-        assert!(err.contains("another caller"), "loser gets the no-double-resume error, got: {err}");
+        assert!(
+            err.contains("another caller"),
+            "loser gets the no-double-resume error, got: {err}"
+        );
     }
 
     #[tokio::test]
@@ -3408,26 +3915,44 @@ mod tests {
         let (state, _tokens, _agents) = test_state_and_configs();
         let mut wf = make_workflow_with_artifacts(Default::default());
         wf.id = "wf-sticky".into();
-        for (id, status) in [("run-cancelled", RunStatus::Cancelled), ("run-failed", RunStatus::Failed)] {
+        for (id, status) in [
+            ("run-cancelled", RunStatus::Cancelled),
+            ("run-failed", RunStatus::Failed),
+        ] {
             let mut run = pending_run(id, "wf-sticky");
             run.status = status;
             let run_db = run.clone();
             let wf_db = wf.clone();
-            state.db.with_conn(move |conn| {
-                let _ = crate::db::workflows::insert_workflow(conn, &wf_db);
-                crate::db::workflows::insert_run(conn, &run_db)
-            }).await.unwrap();
+            state
+                .db
+                .with_conn(move |conn| {
+                    let _ = crate::db::workflows::insert_workflow(conn, &wf_db);
+                    crate::db::workflows::insert_run(conn, &run_db)
+                })
+                .await
+                .unwrap();
 
-            let err = claim_interrupted_run(&state, &run).await
-                .expect_err("non-Interrupted runs are not resumable").to_string();
+            let err = claim_interrupted_run(&state, &run)
+                .await
+                .expect_err("non-Interrupted runs are not resumable")
+                .to_string();
             assert!(err.contains("only Interrupted"), "{err}");
 
             // Belt-and-braces at the DB layer too: even a caller that skips
             // validation can't flip a terminal row.
             let rid = id.to_string();
-            let claimed = state.db.with_conn(move |conn| {
-                crate::db::workflows::claim_run_status(conn, &rid, &RunStatus::Interrupted, &RunStatus::Running)
-            }).await.unwrap();
+            let claimed = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::workflows::claim_run_status(
+                        conn,
+                        &rid,
+                        &RunStatus::Interrupted,
+                        &RunStatus::Running,
+                    )
+                })
+                .await
+                .unwrap();
             assert!(!claimed, "{id} must not be claimable Interrupted→Running");
         }
     }
@@ -3440,20 +3965,35 @@ mod tests {
         child.status = RunStatus::Interrupted;
         child.run_type = "subworkflow".into();
         child.parent_run_id = Some("run-parent".into());
-        let err = claim_interrupted_run(&state, &child).await.unwrap_err().to_string();
-        assert!(err.contains("parent"), "children resume through the parent: {err}");
+        let err = claim_interrupted_run(&state, &child)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("parent"),
+            "children resume through the parent: {err}"
+        );
 
         let mut batch = pending_run("run-batch", "wf-x");
         batch.status = RunStatus::Interrupted;
         batch.run_type = "batch".into();
-        let err = claim_interrupted_run(&state, &batch).await.unwrap_err().to_string();
+        let err = claim_interrupted_run(&state, &batch)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("batch"), "{err}");
 
         let mut gone = pending_run("run-gone-ws", "wf-x");
         gone.status = RunStatus::Interrupted;
         gone.workspace_path = Some("/nonexistent/kronn-worktree-a2".into());
-        let err = claim_interrupted_run(&state, &gone).await.unwrap_err().to_string();
-        assert!(err.contains("main checkout"), "a gone worktree must refuse, not fall back: {err}");
+        let err = claim_interrupted_run(&state, &gone)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("main checkout"),
+            "a gone worktree must refuse, not fall back: {err}"
+        );
     }
 
     #[tokio::test]
@@ -3467,8 +4007,15 @@ mod tests {
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
-                .args(args).current_dir(repo.path()).output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+                .args(args)
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-q"]);
         std::fs::write(repo.path().join("README.md"), "x").unwrap();
@@ -3482,8 +4029,11 @@ mod tests {
             "created_at": chrono::Utc::now().to_rfc3339(),
             "updated_at": chrono::Utc::now().to_rfc3339(),
         })).unwrap();
-        state.db.with_conn(move |c| crate::db::projects::insert_project(c, &project))
-            .await.unwrap();
+        state
+            .db
+            .with_conn(move |c| crate::db::projects::insert_project(c, &project))
+            .await
+            .unwrap();
 
         let mut wf = make_workflow_with_artifacts(Default::default());
         wf.id = "wf-first-step".into();
@@ -3507,7 +4057,8 @@ mod tests {
         assert_eq!(run.status, RunStatus::Success);
         assert_eq!(run.step_results.len(), 1, "the first step re-ran");
         assert_eq!(
-            run.workspace_path.as_deref(), Some(preserved_path.as_str()),
+            run.workspace_path.as_deref(),
+            Some(preserved_path.as_str()),
             "resume must ATTACH the preserved worktree, not create a second one"
         );
     }
@@ -3537,16 +4088,30 @@ mod tests {
             .expect("resume must not error");
 
         assert_eq!(run.status, RunStatus::Success);
-        assert_eq!(run.step_results.len(), 2, "only `second` re-ran — `first` was NOT re-executed");
+        assert_eq!(
+            run.step_results.len(),
+            2,
+            "only `second` re-ran — `first` was NOT re-executed"
+        );
         assert_eq!(run.step_results[0].step_name, "first");
         assert_eq!(run.step_results[1].step_name, "second");
-        assert_eq!(run.state.get("survivor").map(String::as_str), Some("kept"), "durable state survives the resume");
+        assert_eq!(
+            run.state.get("survivor").map(String::as_str),
+            Some("kept"),
+            "durable state survives the resume"
+        );
 
-        let persisted = state.db
+        let persisted = state
+            .db
             .with_conn(|conn| crate::db::workflows::get_run(conn, "run-resume"))
-            .await.unwrap().expect("row");
+            .await
+            .unwrap()
+            .expect("row");
         assert_eq!(persisted.status, RunStatus::Success);
-        assert!(persisted.finished_at.is_some(), "terminal write re-stamps finished_at");
+        assert!(
+            persisted.finished_at.is_some(),
+            "terminal write re-stamps finished_at"
+        );
     }
 }
 
@@ -3558,11 +4123,17 @@ mod preflight_validation_tests {
     /// block — keeps the contract testable without spinning up `detect_all`
     /// (which hits the host filesystem and depends on which agent binaries
     /// are actually on PATH).
-    fn missing_step_agents(step_agents: &[(&str, AgentType)], usable: &[AgentType])
-        -> Vec<(String, AgentType)>
-    {
-        step_agents.iter()
-            .filter(|(_, a)| !usable.iter().any(|u| std::mem::discriminant(u) == std::mem::discriminant(a)))
+    fn missing_step_agents(
+        step_agents: &[(&str, AgentType)],
+        usable: &[AgentType],
+    ) -> Vec<(String, AgentType)> {
+        step_agents
+            .iter()
+            .filter(|(_, a)| {
+                !usable
+                    .iter()
+                    .any(|u| std::mem::discriminant(u) == std::mem::discriminant(a))
+            })
             .map(|(n, a)| (n.to_string(), a.clone()))
             .collect()
     }

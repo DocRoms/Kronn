@@ -8,9 +8,9 @@ use rusqlite::{params, Connection};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::models::*;
-use crate::core::{registry, mcp_scanner};
+use crate::core::{mcp_scanner, registry};
 use crate::db;
+use crate::models::*;
 use crate::AppState;
 
 #[derive(Deserialize)]
@@ -30,38 +30,40 @@ pub async fn list_registry(
 }
 
 /// GET /api/mcps — full overview: servers + configs (masked)
-pub async fn overview(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<McpOverview>> {
+pub async fn overview(State(state): State<AppState>) -> Json<ApiResponse<McpOverview>> {
     let secret = state.config.read().await.encryption_secret.clone();
-    match state.db.with_conn(move |conn| {
-        let servers = db::mcps::list_servers(conn)?;
-        let configs = db::mcps::list_configs_display(conn, secret.as_deref())?;
-        let projects = db::projects::list_projects(conn)?;
-        let customized_contexts = build_customized_contexts(&configs, &projects);
-        let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
+    match state
+        .db
+        .with_conn(move |conn| {
+            let servers = db::mcps::list_servers(conn)?;
+            let configs = db::mcps::list_configs_display(conn, secret.as_deref())?;
+            let projects = db::projects::list_projects(conn)?;
+            let customized_contexts = build_customized_contexts(&configs, &projects);
+            let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-        // Compute incomplete configs (env_keys declared but values missing
-        // or cipher unreadable). We do this against the FULL configs list
-        // — `list_configs_display` returns masked configs which won't
-        // decrypt; pull the raw configs separately.
-        let raw_configs = db::mcps::list_configs(conn)?;
-        let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
-            servers.iter().map(|s| (s.id.clone(), s)).collect();
-        let incomplete_configs = if let Some(ref s) = secret {
-            mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, s)
-        } else {
-            Vec::new()
-        };
+            // Compute incomplete configs (env_keys declared but values missing
+            // or cipher unreadable). We do this against the FULL configs list
+            // — `list_configs_display` returns masked configs which won't
+            // decrypt; pull the raw configs separately.
+            let raw_configs = db::mcps::list_configs(conn)?;
+            let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
+                servers.iter().map(|s| (s.id.clone(), s)).collect();
+            let incomplete_configs = if let Some(ref s) = secret {
+                mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, s)
+            } else {
+                Vec::new()
+            };
 
-        Ok(McpOverview {
-            servers,
-            configs,
-            customized_contexts,
-            incompatibilities,
-            incomplete_configs,
+            Ok(McpOverview {
+                servers,
+                configs,
+                customized_contexts,
+                incompatibilities,
+                incomplete_configs,
+            })
         })
-    }).await {
+        .await
+    {
         Ok(data) => Json(ApiResponse::ok(data)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -91,9 +93,11 @@ pub async fn create_config(
     let custom_server = if req.server_id == registry::CUSTOM_API_SERVER_ID {
         let payload = match req.custom_spec.take() {
             Some(p) => p,
-            None => return Json(ApiResponse::err(
-                "custom_spec is required when server_id is 'api-custom'",
-            )),
+            None => {
+                return Json(ApiResponse::err(
+                    "custom_spec is required when server_id is 'api-custom'",
+                ))
+            }
         };
         if payload.name.trim().is_empty() {
             return Json(ApiResponse::err("Custom API requires a name"));
@@ -117,88 +121,98 @@ pub async fn create_config(
         None
     };
 
-    let result = state.db.with_conn(move |conn| {
-        // Find server in DB, or create from registry, or materialize Custom
-        let servers = db::mcps::list_servers(conn)?;
-        let server = if let Some(custom) = custom_server.as_ref() {
-            db::mcps::upsert_server(conn, custom)?;
-            custom.clone()
-        } else if let Some(s) = servers.iter().find(|s| s.id == req.server_id) {
-            s.clone()
-        } else if let Some(def) = reg.iter().find(|d| d.id == req.server_id) {
-            // Auto-create server from registry
-            let s = McpServer {
-                id: def.id.clone(),
-                name: def.name.clone(),
-                description: def.description.clone(),
-                transport: def.transport.clone(),
-                source: McpSource::Registry,
-                api_spec: def.api_spec.clone(),
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            // Find server in DB, or create from registry, or materialize Custom
+            let servers = db::mcps::list_servers(conn)?;
+            let server = if let Some(custom) = custom_server.as_ref() {
+                db::mcps::upsert_server(conn, custom)?;
+                custom.clone()
+            } else if let Some(s) = servers.iter().find(|s| s.id == req.server_id) {
+                s.clone()
+            } else if let Some(def) = reg.iter().find(|d| d.id == req.server_id) {
+                // Auto-create server from registry
+                let s = McpServer {
+                    id: def.id.clone(),
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    transport: def.transport.clone(),
+                    source: McpSource::Registry,
+                    api_spec: def.api_spec.clone(),
+                };
+                db::mcps::upsert_server(conn, &s)?;
+                s
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Server '{}' not found in DB or registry",
+                    req.server_id
+                ));
             };
-            db::mcps::upsert_server(conn, &s)?;
-            s
-        } else {
-            return Err(anyhow::anyhow!("Server '{}' not found in DB or registry", req.server_id));
-        };
 
-        // Compute config hash for dedup
-        let hash = db::mcps::compute_config_hash(&server, &req.env, req.args_override.as_ref());
+            // Compute config hash for dedup
+            let hash = db::mcps::compute_config_hash(&server, &req.env, req.args_override.as_ref());
 
-        // Check if identical config exists
-        if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
-            // Merge project_ids
-            let mut all_pids: Vec<String> = existing.project_ids.clone();
-            for pid in &req.project_ids {
-                if !all_pids.contains(pid) {
-                    all_pids.push(pid.clone());
+            // Check if identical config exists
+            if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
+                // Merge project_ids
+                let mut all_pids: Vec<String> = existing.project_ids.clone();
+                for pid in &req.project_ids {
+                    if !all_pids.contains(pid) {
+                        all_pids.push(pid.clone());
+                    }
+                }
+                db::mcps::set_config_projects(conn, &existing.id, &all_pids)?;
+
+                // Return updated display
+                let configs = db::mcps::list_configs_display(conn, None)?;
+                let display = configs
+                    .into_iter()
+                    .find(|c| c.id == existing.id)
+                    .ok_or_else(|| anyhow::anyhow!("Config disappeared"))?;
+                return Ok(display);
+            }
+
+            // Encrypt env
+            let env_encrypted = db::mcps::encrypt_env(&req.env, &secret)
+                .map_err(|e| anyhow::anyhow!("Encryption error: {}", e))?;
+
+            let env_keys: Vec<String> = req.env.keys().cloned().collect();
+
+            let config = McpConfig {
+                id: Uuid::new_v4().to_string(),
+                server_id: req.server_id,
+                label: req.label,
+                env_keys,
+                env_encrypted,
+                args_override: req.args_override,
+                is_global: req.is_global,
+                include_general: true,
+                config_hash: hash,
+                project_ids: req.project_ids,
+                host_sync: HostSyncMode::None,
+            };
+
+            db::mcps::insert_config(conn, &config)?;
+
+            // Sync .mcp.json to disk for affected projects
+            let mut sync_pids = config.project_ids.clone();
+            if config.is_global {
+                // Global config affects all projects
+                if let Ok(projects) = db::projects::list_projects(conn) {
+                    sync_pids = projects.iter().map(|p| p.id.clone()).collect();
                 }
             }
-            db::mcps::set_config_projects(conn, &existing.id, &all_pids)?;
+            mcp_scanner::sync_affected_projects(conn, &sync_pids, &secret);
 
-            // Return updated display
             let configs = db::mcps::list_configs_display(conn, None)?;
-            let display = configs.into_iter().find(|c| c.id == existing.id)
-                .ok_or_else(|| anyhow::anyhow!("Config disappeared"))?;
-            return Ok(display);
-        }
-
-        // Encrypt env
-        let env_encrypted = db::mcps::encrypt_env(&req.env, &secret)
-            .map_err(|e| anyhow::anyhow!("Encryption error: {}", e))?;
-
-        let env_keys: Vec<String> = req.env.keys().cloned().collect();
-
-        let config = McpConfig {
-            id: Uuid::new_v4().to_string(),
-            server_id: req.server_id,
-            label: req.label,
-            env_keys,
-            env_encrypted,
-            args_override: req.args_override,
-            is_global: req.is_global,
-            include_general: true,
-            config_hash: hash,
-            project_ids: req.project_ids,
-            host_sync: HostSyncMode::None,
-        };
-
-        db::mcps::insert_config(conn, &config)?;
-
-        // Sync .mcp.json to disk for affected projects
-        let mut sync_pids = config.project_ids.clone();
-        if config.is_global {
-            // Global config affects all projects
-            if let Ok(projects) = db::projects::list_projects(conn) {
-                sync_pids = projects.iter().map(|p| p.id.clone()).collect();
-            }
-        }
-        mcp_scanner::sync_affected_projects(conn, &sync_pids, &secret);
-
-        let configs = db::mcps::list_configs_display(conn, None)?;
-        let display = configs.into_iter().find(|c| c.id == config.id)
-            .ok_or_else(|| anyhow::anyhow!("Config disappeared after insert"))?;
-        Ok(display)
-    }).await;
+            let display = configs
+                .into_iter()
+                .find(|c| c.id == config.id)
+                .ok_or_else(|| anyhow::anyhow!("Config disappeared after insert"))?;
+            Ok(display)
+        })
+        .await;
 
     match result {
         Ok(display) => {
@@ -334,10 +348,16 @@ fn name_slug(name: &str) -> String {
 
 /// Helper: get all project IDs (for global MCP changes)
 async fn projects_for_global(state: &AppState) -> Vec<String> {
-    state.db.with_conn(|conn| {
-        Ok(crate::db::projects::list_projects(conn)?
-            .into_iter().map(|p| p.id).collect::<Vec<_>>())
-    }).await.unwrap_or_default()
+    state
+        .db
+        .with_conn(|conn| {
+            Ok(crate::db::projects::list_projects(conn)?
+                .into_iter()
+                .map(|p| p.id)
+                .collect::<Vec<_>>())
+        })
+        .await
+        .unwrap_or_default()
 }
 
 /// `PUT /api/mcps/custom/:server_id` — 0.8.6 — update a Custom API
@@ -409,10 +429,8 @@ pub(crate) fn compute_orphan_env_keys(
         .filter(|f| !f.label.trim().is_empty())
         .map(|f| slug_env_key(&f.label))
         .collect();
-    let removed: std::collections::HashSet<String> = prev_slugs
-        .difference(&new_slugs)
-        .cloned()
-        .collect();
+    let removed: std::collections::HashSet<String> =
+        prev_slugs.difference(&new_slugs).cloned().collect();
     if removed.is_empty() {
         return Vec::new();
     }
@@ -453,36 +471,42 @@ pub async fn update_custom_spec(
         return Json(ApiResponse::err("Custom API requires a base URL"));
     }
 
-    let result = state.db.with_conn(move |conn| -> anyhow::Result<UpdateCustomSpecResponse> {
-        // Verify the server exists. We rely on `list_servers` since
-        // there's no `get_server_by_id` helper today — N=registry+manual
-        // count, ~20 max in practice, perfectly fine.
-        let existing = db::mcps::list_servers(conn)?;
-        let prev = existing.iter().find(|s| s.id == server_id)
-            .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
+    let result = state
+        .db
+        .with_conn(move |conn| -> anyhow::Result<UpdateCustomSpecResponse> {
+            // Verify the server exists. We rely on `list_servers` since
+            // there's no `get_server_by_id` helper today — N=registry+manual
+            // count, ~20 max in practice, perfectly fine.
+            let existing = db::mcps::list_servers(conn)?;
+            let prev = existing
+                .iter()
+                .find(|s| s.id == server_id)
+                .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
 
-        // 0.8.6 (#60) — compute orphan env keys BEFORE upsert so we can
-        // diff old vs new slugs. The mcp_configs rows for this server
-        // may still carry encrypted values keyed by slugs that just got
-        // renamed / removed from the spec.
-        let configs_for_diff = db::mcps::list_configs_display(conn, None)?;
-        let orphan_env_keys = compute_orphan_env_keys(prev, &payload, &configs_for_diff, &server_id);
+            // 0.8.6 (#60) — compute orphan env keys BEFORE upsert so we can
+            // diff old vs new slugs. The mcp_configs rows for this server
+            // may still carry encrypted values keyed by slugs that just got
+            // renamed / removed from the spec.
+            let configs_for_diff = db::mcps::list_configs_display(conn, None)?;
+            let orphan_env_keys =
+                compute_orphan_env_keys(prev, &payload, &configs_for_diff, &server_id);
 
-        // Re-materialize the spec from the new payload, then force the
-        // pre-existing id + source + transport so referential integrity
-        // (configs, workflow steps) is preserved.
-        let mut updated = materialize_custom_server(&payload);
-        updated.id = server_id.clone();
-        updated.source = prev.source.clone();
-        updated.transport = prev.transport.clone();
+            // Re-materialize the spec from the new payload, then force the
+            // pre-existing id + source + transport so referential integrity
+            // (configs, workflow steps) is preserved.
+            let mut updated = materialize_custom_server(&payload);
+            updated.id = server_id.clone();
+            updated.source = prev.source.clone();
+            updated.transport = prev.transport.clone();
 
-        db::mcps::upsert_server(conn, &updated)?;
+            db::mcps::upsert_server(conn, &updated)?;
 
-        Ok(UpdateCustomSpecResponse {
-            server: updated,
-            orphan_env_keys,
+            Ok(UpdateCustomSpecResponse {
+                server: updated,
+                orphan_env_keys,
+            })
         })
-    }).await;
+        .await;
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -502,7 +526,8 @@ pub async fn cleanup_orphan_env(
 ) -> Json<ApiResponse<CleanupOrphanEnvResponse>> {
     if !server_id.starts_with("custom-") {
         return Json(ApiResponse::err(format!(
-            "Server `{}` is not a Custom API plugin.", server_id
+            "Server `{}` is not a Custom API plugin.",
+            server_id
         )));
     }
     if req.keys.is_empty() {
@@ -515,64 +540,72 @@ pub async fn cleanup_orphan_env(
     let Some(secret) = secret_opt else {
         return Json(ApiResponse::err("No encryption secret configured"));
     };
-    let keys_to_remove: std::collections::HashSet<String> =
-        req.keys.into_iter().collect();
+    let keys_to_remove: std::collections::HashSet<String> = req.keys.into_iter().collect();
     let keys_for_logging = keys_to_remove.clone();
     let server_id_for_closure = server_id.clone();
 
-    let result = state.db.with_conn(move |conn| -> anyhow::Result<CleanupOrphanEnvResponse> {
-        let configs = db::mcps::list_configs(conn)?;
-        let mut configs_updated = 0usize;
-        let mut total_keys_removed = 0usize;
-        for cfg in configs {
-            if cfg.server_id != server_id_for_closure {
-                continue;
-            }
-            let env = match db::mcps::decrypt_env(&cfg.env_encrypted, &secret) {
-                Ok(e) => e,
-                Err(e) => {
-                    tracing::warn!("decrypt_env failed for config {}: {}", cfg.id, e);
+    let result = state
+        .db
+        .with_conn(move |conn| -> anyhow::Result<CleanupOrphanEnvResponse> {
+            let configs = db::mcps::list_configs(conn)?;
+            let mut configs_updated = 0usize;
+            let mut total_keys_removed = 0usize;
+            for cfg in configs {
+                if cfg.server_id != server_id_for_closure {
                     continue;
                 }
-            };
-            let removed_here: Vec<String> = env
-                .keys()
-                .filter(|k| keys_to_remove.contains(k.as_str()))
-                .cloned()
-                .collect();
-            if removed_here.is_empty() {
-                continue;
+                let env = match db::mcps::decrypt_env(&cfg.env_encrypted, &secret) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        tracing::warn!("decrypt_env failed for config {}: {}", cfg.id, e);
+                        continue;
+                    }
+                };
+                let removed_here: Vec<String> = env
+                    .keys()
+                    .filter(|k| keys_to_remove.contains(k.as_str()))
+                    .cloned()
+                    .collect();
+                if removed_here.is_empty() {
+                    continue;
+                }
+                let trimmed: std::collections::HashMap<String, String> = env
+                    .into_iter()
+                    .filter(|(k, _)| !keys_to_remove.contains(k))
+                    .collect();
+                let new_encrypted = db::mcps::encrypt_env(&trimmed, &secret)
+                    .map_err(|e| anyhow::anyhow!("encrypt_env: {e}"))?;
+                let new_keys: Vec<String> = trimmed.keys().cloned().collect();
+                db::mcps::update_config(
+                    conn,
+                    &cfg.id,
+                    None,
+                    Some(&new_encrypted),
+                    Some(&new_keys),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+                total_keys_removed += removed_here.len();
+                configs_updated += 1;
             }
-            let trimmed: std::collections::HashMap<String, String> = env
-                .into_iter()
-                .filter(|(k, _)| !keys_to_remove.contains(k))
-                .collect();
-            let new_encrypted = db::mcps::encrypt_env(&trimmed, &secret)
-                .map_err(|e| anyhow::anyhow!("encrypt_env: {e}"))?;
-            let new_keys: Vec<String> = trimmed.keys().cloned().collect();
-            db::mcps::update_config(
-                conn,
-                &cfg.id,
-                None,
-                Some(&new_encrypted),
-                Some(&new_keys),
-                None,
-                None,
-                None,
-                None,
-                None,
-            )?;
-            total_keys_removed += removed_here.len();
-            configs_updated += 1;
-        }
-        Ok(CleanupOrphanEnvResponse { configs_updated, total_keys_removed })
-    }).await;
+            Ok(CleanupOrphanEnvResponse {
+                configs_updated,
+                total_keys_removed,
+            })
+        })
+        .await;
 
     match result {
         Ok(resp) => {
             tracing::info!(
                 "cleanup_orphan_env on server {}: removed {} keys from {} configs (keys: {:?})",
-                server_id, resp.total_keys_removed, resp.configs_updated, keys_for_logging,
+                server_id,
+                resp.total_keys_removed,
+                resp.configs_updated,
+                keys_for_logging,
             );
             Json(ApiResponse::ok(resp))
         }
@@ -606,59 +639,71 @@ pub async fn update_config(
     };
     drop(config_read);
 
-    let result = state.db.with_conn(move |conn| {
-        // Get config before update to know old state
-        let old_config = db::mcps::get_config(conn, &config_id)?
-            .ok_or_else(|| anyhow::anyhow!("Config not found"))?;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            // Get config before update to know old state
+            let old_config = db::mcps::get_config(conn, &config_id)?
+                .ok_or_else(|| anyhow::anyhow!("Config not found"))?;
 
-        let (env_encrypted, env_keys, new_hash) = if let Some(ref env) = req.env {
-            let encrypted = db::mcps::encrypt_env(env, &secret)
-                .map_err(|e| anyhow::anyhow!("Encryption error: {}", e))?;
-            let keys: Vec<String> = env.keys().cloned().collect();
+            let (env_encrypted, env_keys, new_hash) = if let Some(ref env) = req.env {
+                let encrypted = db::mcps::encrypt_env(env, &secret)
+                    .map_err(|e| anyhow::anyhow!("Encryption error: {}", e))?;
+                let keys: Vec<String> = env.keys().cloned().collect();
 
-            // Recompute hash
-            let servers = db::mcps::list_servers(conn)?;
-            let server = servers.iter().find(|s| s.id == old_config.server_id)
-                .ok_or_else(|| anyhow::anyhow!("Server not found"))?;
-            let hash = db::mcps::compute_config_hash(
-                server,
-                env,
-                req.args_override.as_ref().or(old_config.args_override.as_ref()),
-            );
+                // Recompute hash
+                let servers = db::mcps::list_servers(conn)?;
+                let server = servers
+                    .iter()
+                    .find(|s| s.id == old_config.server_id)
+                    .ok_or_else(|| anyhow::anyhow!("Server not found"))?;
+                let hash = db::mcps::compute_config_hash(
+                    server,
+                    env,
+                    req.args_override
+                        .as_ref()
+                        .or(old_config.args_override.as_ref()),
+                );
 
-            (Some(encrypted), Some(keys), Some(hash))
-        } else {
-            (None, None, None)
-        };
+                (Some(encrypted), Some(keys), Some(hash))
+            } else {
+                (None, None, None)
+            };
 
-        db::mcps::update_config(
-            conn,
-            &config_id,
-            req.label.as_deref(),
-            env_encrypted.as_deref(),
-            env_keys.as_deref(),
-            req.args_override.as_ref(),
-            req.is_global,
-            new_hash.as_deref(),
-            req.include_general,
-            req.host_sync.clone(),
-        )?;
+            db::mcps::update_config(
+                conn,
+                &config_id,
+                req.label.as_deref(),
+                env_encrypted.as_deref(),
+                env_keys.as_deref(),
+                req.args_override.as_ref(),
+                req.is_global,
+                new_hash.as_deref(),
+                req.include_general,
+                req.host_sync.clone(),
+            )?;
 
-        // Sync .mcp.json to disk — always sync all when secrets change
-        let secrets_changed = req.env.is_some();
-        let global_changed = req.is_global.map(|g| g != old_config.is_global).unwrap_or(false);
-        let new_global = req.is_global.unwrap_or(old_config.is_global);
-        if secrets_changed || global_changed || new_global {
-            // Secrets changed, global flag changed, or is global → sync all projects
-            mcp_scanner::sync_all_projects(conn, &secret);
-        } else {
-            mcp_scanner::sync_affected_projects(conn, &old_config.project_ids, &secret);
-        }
+            // Sync .mcp.json to disk — always sync all when secrets change
+            let secrets_changed = req.env.is_some();
+            let global_changed = req
+                .is_global
+                .map(|g| g != old_config.is_global)
+                .unwrap_or(false);
+            let new_global = req.is_global.unwrap_or(old_config.is_global);
+            if secrets_changed || global_changed || new_global {
+                // Secrets changed, global flag changed, or is global → sync all projects
+                mcp_scanner::sync_all_projects(conn, &secret);
+            } else {
+                mcp_scanner::sync_affected_projects(conn, &old_config.project_ids, &secret);
+            }
 
-        let configs = db::mcps::list_configs_display(conn, None)?;
-        configs.into_iter().find(|c| c.id == config_id)
-            .ok_or_else(|| anyhow::anyhow!("Config not found after update"))
-    }).await;
+            let configs = db::mcps::list_configs_display(conn, None)?;
+            configs
+                .into_iter()
+                .find(|c| c.id == config_id)
+                .ok_or_else(|| anyhow::anyhow!("Config not found after update"))
+        })
+        .await;
 
     match result {
         Ok(display) => Json(ApiResponse::ok(display)),
@@ -679,35 +724,46 @@ pub async fn delete_config(
     drop(config_read);
 
     // Get affected project IDs before deleting
-    let affected_pids = state.db.with_conn({
-        let cid = config_id.clone();
-        move |conn| {
-            Ok(db::mcps::get_config(conn, &cid)?
-                .map(|c| if c.is_global {
-                    crate::db::projects::list_projects(conn).ok()
-                        .map(|ps| ps.into_iter().map(|p| p.id).collect::<Vec<_>>())
-                        .unwrap_or_default()
-                } else {
-                    c.project_ids
-                })
-                .unwrap_or_default())
-        }
-    }).await.unwrap_or_default();
-
-    match state.db.with_conn(move |conn| {
-        let config = db::mcps::get_config(conn, &config_id)?;
-        let result = db::mcps::delete_config(conn, &config_id)?;
-
-        if let Some(cfg) = config {
-            if cfg.is_global {
-                mcp_scanner::sync_all_projects(conn, &secret);
-            } else {
-                mcp_scanner::sync_affected_projects(conn, &cfg.project_ids, &secret);
+    let affected_pids = state
+        .db
+        .with_conn({
+            let cid = config_id.clone();
+            move |conn| {
+                Ok(db::mcps::get_config(conn, &cid)?
+                    .map(|c| {
+                        if c.is_global {
+                            crate::db::projects::list_projects(conn)
+                                .ok()
+                                .map(|ps| ps.into_iter().map(|p| p.id).collect::<Vec<_>>())
+                                .unwrap_or_default()
+                        } else {
+                            c.project_ids
+                        }
+                    })
+                    .unwrap_or_default())
             }
-        }
+        })
+        .await
+        .unwrap_or_default();
 
-        Ok(result)
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            let config = db::mcps::get_config(conn, &config_id)?;
+            let result = db::mcps::delete_config(conn, &config_id)?;
+
+            if let Some(cfg) = config {
+                if cfg.is_global {
+                    mcp_scanner::sync_all_projects(conn, &secret);
+                } else {
+                    mcp_scanner::sync_affected_projects(conn, &cfg.project_ids, &secret);
+                }
+            }
+
+            Ok(result)
+        })
+        .await
+    {
         Ok(true) => {
             trigger_mcp_drift(&state, affected_pids);
             Json(ApiResponse::ok(()))
@@ -730,22 +786,26 @@ pub async fn set_config_projects(
     };
     drop(config_read);
 
-    match state.db.with_conn(move |conn| {
-        let old_config = db::mcps::get_config(conn, &config_id)?;
-        let old_pids = old_config.map(|c| c.project_ids).unwrap_or_default();
+    match state
+        .db
+        .with_conn(move |conn| {
+            let old_config = db::mcps::get_config(conn, &config_id)?;
+            let old_pids = old_config.map(|c| c.project_ids).unwrap_or_default();
 
-        db::mcps::set_config_projects(conn, &config_id, &req.project_ids)?;
+            db::mcps::set_config_projects(conn, &config_id, &req.project_ids)?;
 
-        let mut all_pids: Vec<String> = old_pids;
-        for pid in &req.project_ids {
-            if !all_pids.contains(pid) {
-                all_pids.push(pid.clone());
+            let mut all_pids: Vec<String> = old_pids;
+            for pid in &req.project_ids {
+                if !all_pids.contains(pid) {
+                    all_pids.push(pid.clone());
+                }
             }
-        }
-        mcp_scanner::sync_affected_projects(conn, &all_pids, &secret);
+            mcp_scanner::sync_affected_projects(conn, &all_pids, &secret);
 
-        Ok(all_pids)
-    }).await {
+            Ok(all_pids)
+        })
+        .await
+    {
         Ok(all_pids) => {
             trigger_mcp_drift(&state, all_pids);
             Json(ApiResponse::ok(()))
@@ -766,18 +826,25 @@ pub async fn reveal_secrets(
     };
     drop(config_read);
 
-    let result = state.db.with_conn(move |conn| {
-        let config = db::mcps::get_config(conn, &config_id)?
-            .ok_or_else(|| anyhow::anyhow!("Config not found"))?;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let config = db::mcps::get_config(conn, &config_id)?
+                .ok_or_else(|| anyhow::anyhow!("Config not found"))?;
 
-        let env = db::mcps::decrypt_env(&config.env_encrypted, &secret)
-            .map_err(|e| anyhow::anyhow!("Decryption error: {}", e))?;
+            let env = db::mcps::decrypt_env(&config.env_encrypted, &secret)
+                .map_err(|e| anyhow::anyhow!("Decryption error: {}", e))?;
 
-        let entries: Vec<McpEnvEntry> = env.into_iter()
-            .map(|(k, v)| McpEnvEntry { key: k, masked_value: v })
-            .collect();
-        Ok(entries)
-    }).await;
+            let entries: Vec<McpEnvEntry> = env
+                .into_iter()
+                .map(|(k, v)| McpEnvEntry {
+                    key: k,
+                    masked_value: v,
+                })
+                .collect();
+            Ok(entries)
+        })
+        .await;
 
     match result {
         Ok(entries) => Json(ApiResponse::ok(entries)),
@@ -786,9 +853,7 @@ pub async fn reveal_secrets(
 }
 
 /// POST /api/mcps/refresh — scan all projects for MCP configs, upsert to new system
-pub async fn refresh(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<McpOverview>> {
+pub async fn refresh(State(state): State<AppState>) -> Json<ApiResponse<McpOverview>> {
     let config_read = state.config.read().await;
     let secret = match &config_read.encryption_secret {
         Some(s) => s.clone(),
@@ -798,167 +863,185 @@ pub async fn refresh(
 
     let reg = registry::builtin_registry();
 
-    let result = state.db.with_conn(move |conn| {
-        // Migrate old detected:* servers to registry IDs where possible
-        migrate_detected_to_registry(conn, &reg)?;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            // Migrate old detected:* servers to registry IDs where possible
+            migrate_detected_to_registry(conn, &reg)?;
 
-        // Update registry servers' transport/description from current registry
-        // (handles package renames, description changes, etc.)
-        for def in &reg {
-            let server = McpServer {
-                id: def.id.clone(),
-                name: def.name.clone(),
-                description: def.description.clone(),
-                transport: def.transport.clone(),
-                source: McpSource::Registry,
-                api_spec: def.api_spec.clone(),
-            };
-            // Only upsert if server already exists in DB
-            let exists = db::mcps::list_servers(conn)?
-                .iter().any(|s| s.id == def.id);
-            if exists {
-                db::mcps::upsert_server(conn, &server)?;
-            }
-        }
-
-        // Rehash existing configs to match updated server transports
-        // (prevents duplicates when registry transport changes slightly)
-        rehash_configs(conn, &secret)?;
-
-        let projects = db::projects::list_projects(conn)?;
-
-        for project in &projects {
-            let parsed = match mcp_scanner::read_mcp_json(&project.path) {
-                Some(p) => p,
-                None => continue,
-            };
-
-            for (name, entry) in &parsed.mcp_servers {
-                // Determine transport
-                let transport = if let Some(cmd) = &entry.command {
-                    // SECURITY: a `.mcp.json` from an imported repo can declare ANY
-                    // command (e.g. `bash -c '…'`). Kronn syncs this verbatim into
-                    // every agent's MCP config and the agent will execute it. We
-                    // can't safely block here without breaking custom in-house
-                    // MCP servers, but we MUST surface untrusted commands so the
-                    // user notices supply-chain risk in their logs.
-                    if !is_well_known_mcp_command(cmd) {
-                        tracing::warn!(
-                            "MCP '{}' in project '{}' uses non-standard command '{}' — \
-                             ensure this binary is trusted; .mcp.json from imported repos \
-                             can introduce arbitrary code execution.",
-                            name, project.name, cmd
-                        );
-                    }
-                    McpTransport::Stdio {
-                        command: cmd.clone(),
-                        args: entry.args.clone().unwrap_or_default(),
-                    }
-                } else if let Some(url) = &entry.url {
-                    McpTransport::Sse { url: url.clone() }
-                } else {
-                    continue;
-                };
-
-                // Try to match against registry by command+args
-                let registry_match = match_registry_entry(entry, &reg);
-
-                let (server_id, server_name, description, source, server_transport) = if let Some(def) = registry_match {
-                    (def.id.clone(), def.name.clone(), def.description.clone(), McpSource::Registry, def.transport.clone())
-                } else {
-                    let desc = if let Some(cmd) = &entry.command {
-                        let args = entry.args.as_deref().unwrap_or(&[]);
-                        let pkg = args.iter()
-                            .find(|a| !a.starts_with('-'))
-                            .map(|s| s.as_str())
-                            .unwrap_or("");
-                        format!("{} {}", cmd, pkg).trim().to_string()
-                    } else if let Some(url) = &entry.url {
-                        url.clone()
-                    } else {
-                        name.to_string()
-                    };
-                    (format!("detected:{}", name), name.clone(), desc, McpSource::Detected, transport.clone())
-                };
-
-                // `.mcp.json` detection never surfaces API-only plugins —
-                // they live exclusively in the Kronn catalog, not on disk —
-                // so api_spec is always None on this path.
+            // Update registry servers' transport/description from current registry
+            // (handles package renames, description changes, etc.)
+            for def in &reg {
                 let server = McpServer {
-                    id: server_id.clone(),
-                    name: server_name,
-                    description,
-                    transport: server_transport,
-                    source,
-                    api_spec: None,
+                    id: def.id.clone(),
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    transport: def.transport.clone(),
+                    source: McpSource::Registry,
+                    api_spec: def.api_spec.clone(),
                 };
-                db::mcps::upsert_server(conn, &server)?;
-
-                // Compute config hash
-                let hash = db::mcps::compute_config_hash(&server, &entry.env, None);
-
-                // Check if config with this hash already exists
-                if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
-                    // Just link project if not already linked
-                    if !existing.project_ids.contains(&project.id) {
-                        db::mcps::link_config_project(conn, &existing.id, &project.id)?;
-                    }
-                } else {
-                    // Create new config
-                    let env_encrypted = db::mcps::encrypt_env(&entry.env, &secret)
-                        .map_err(|e| anyhow::anyhow!("Encrypt error: {}", e))?;
-                    let env_keys: Vec<String> = entry.env.keys().cloned().collect();
-
-                    let config = McpConfig {
-                        id: Uuid::new_v4().to_string(),
-                        server_id: server_id.clone(),
-                        label: name.clone(),
-                        env_keys,
-                        env_encrypted,
-                        args_override: None,
-                        is_global: false,
-                        include_general: true,
-                        config_hash: hash,
-                        project_ids: vec![project.id.clone()],
-                        host_sync: HostSyncMode::None,
-                    };
-                    db::mcps::insert_config(conn, &config)?;
+                // Only upsert if server already exists in DB
+                let exists = db::mcps::list_servers(conn)?.iter().any(|s| s.id == def.id);
+                if exists {
+                    db::mcps::upsert_server(conn, &server)?;
                 }
             }
-        }
 
-        // Deduplicate configs with the same hash (merge project linkages, keep oldest)
-        dedup_configs(conn)?;
+            // Rehash existing configs to match updated server transports
+            // (prevents duplicates when registry transport changes slightly)
+            rehash_configs(conn, &secret)?;
 
-        // Clean up orphan servers (no configs pointing to them)
-        conn.execute_batch(
+            let projects = db::projects::list_projects(conn)?;
+
+            for project in &projects {
+                let parsed = match mcp_scanner::read_mcp_json(&project.path) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                for (name, entry) in &parsed.mcp_servers {
+                    // Determine transport
+                    let transport = if let Some(cmd) = &entry.command {
+                        // SECURITY: a `.mcp.json` from an imported repo can declare ANY
+                        // command (e.g. `bash -c '…'`). Kronn syncs this verbatim into
+                        // every agent's MCP config and the agent will execute it. We
+                        // can't safely block here without breaking custom in-house
+                        // MCP servers, but we MUST surface untrusted commands so the
+                        // user notices supply-chain risk in their logs.
+                        if !is_well_known_mcp_command(cmd) {
+                            tracing::warn!(
+                                "MCP '{}' in project '{}' uses non-standard command '{}' — \
+                             ensure this binary is trusted; .mcp.json from imported repos \
+                             can introduce arbitrary code execution.",
+                                name,
+                                project.name,
+                                cmd
+                            );
+                        }
+                        McpTransport::Stdio {
+                            command: cmd.clone(),
+                            args: entry.args.clone().unwrap_or_default(),
+                        }
+                    } else if let Some(url) = &entry.url {
+                        McpTransport::Sse { url: url.clone() }
+                    } else {
+                        continue;
+                    };
+
+                    // Try to match against registry by command+args
+                    let registry_match = match_registry_entry(entry, &reg);
+
+                    let (server_id, server_name, description, source, server_transport) =
+                        if let Some(def) = registry_match {
+                            (
+                                def.id.clone(),
+                                def.name.clone(),
+                                def.description.clone(),
+                                McpSource::Registry,
+                                def.transport.clone(),
+                            )
+                        } else {
+                            let desc = if let Some(cmd) = &entry.command {
+                                let args = entry.args.as_deref().unwrap_or(&[]);
+                                let pkg = args
+                                    .iter()
+                                    .find(|a| !a.starts_with('-'))
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("");
+                                format!("{} {}", cmd, pkg).trim().to_string()
+                            } else if let Some(url) = &entry.url {
+                                url.clone()
+                            } else {
+                                name.to_string()
+                            };
+                            (
+                                format!("detected:{}", name),
+                                name.clone(),
+                                desc,
+                                McpSource::Detected,
+                                transport.clone(),
+                            )
+                        };
+
+                    // `.mcp.json` detection never surfaces API-only plugins —
+                    // they live exclusively in the Kronn catalog, not on disk —
+                    // so api_spec is always None on this path.
+                    let server = McpServer {
+                        id: server_id.clone(),
+                        name: server_name,
+                        description,
+                        transport: server_transport,
+                        source,
+                        api_spec: None,
+                    };
+                    db::mcps::upsert_server(conn, &server)?;
+
+                    // Compute config hash
+                    let hash = db::mcps::compute_config_hash(&server, &entry.env, None);
+
+                    // Check if config with this hash already exists
+                    if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
+                        // Just link project if not already linked
+                        if !existing.project_ids.contains(&project.id) {
+                            db::mcps::link_config_project(conn, &existing.id, &project.id)?;
+                        }
+                    } else {
+                        // Create new config
+                        let env_encrypted = db::mcps::encrypt_env(&entry.env, &secret)
+                            .map_err(|e| anyhow::anyhow!("Encrypt error: {}", e))?;
+                        let env_keys: Vec<String> = entry.env.keys().cloned().collect();
+
+                        let config = McpConfig {
+                            id: Uuid::new_v4().to_string(),
+                            server_id: server_id.clone(),
+                            label: name.clone(),
+                            env_keys,
+                            env_encrypted,
+                            args_override: None,
+                            is_global: false,
+                            include_general: true,
+                            config_hash: hash,
+                            project_ids: vec![project.id.clone()],
+                            host_sync: HostSyncMode::None,
+                        };
+                        db::mcps::insert_config(conn, &config)?;
+                    }
+                }
+            }
+
+            // Deduplicate configs with the same hash (merge project linkages, keep oldest)
+            dedup_configs(conn)?;
+
+            // Clean up orphan servers (no configs pointing to them)
+            conn.execute_batch(
             "DELETE FROM mcp_servers WHERE id NOT IN (SELECT DISTINCT server_id FROM mcp_configs)"
         )?;
 
-        // Sync all .mcp.json files to disk (picks up transport updates)
-        mcp_scanner::sync_all_projects(conn, &secret);
+            // Sync all .mcp.json files to disk (picks up transport updates)
+            mcp_scanner::sync_all_projects(conn, &secret);
 
-        // Return updated overview
-        let servers = db::mcps::list_servers(conn)?;
-        let configs = db::mcps::list_configs_display(conn, None)?;
-        let projects = db::projects::list_projects(conn)?;
-        let customized_contexts = build_customized_contexts(&configs, &projects);
-        let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
+            // Return updated overview
+            let servers = db::mcps::list_servers(conn)?;
+            let configs = db::mcps::list_configs_display(conn, None)?;
+            let projects = db::projects::list_projects(conn)?;
+            let customized_contexts = build_customized_contexts(&configs, &projects);
+            let incompatibilities = mcp_scanner::get_incompatibilities(&servers);
 
-        let raw_configs = db::mcps::list_configs(conn)?;
-        let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
-            servers.iter().map(|s| (s.id.clone(), s)).collect();
-        let incomplete_configs =
-            mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, &secret);
+            let raw_configs = db::mcps::list_configs(conn)?;
+            let server_map: std::collections::HashMap<String, &crate::models::McpServer> =
+                servers.iter().map(|s| (s.id.clone(), s)).collect();
+            let incomplete_configs =
+                mcp_scanner::find_incomplete_configs(&raw_configs, &server_map, &secret);
 
-        Ok(McpOverview {
-            servers,
-            configs,
-            customized_contexts,
-            incompatibilities,
-            incomplete_configs,
+            Ok(McpOverview {
+                servers,
+                configs,
+                customized_contexts,
+                incompatibilities,
+                incomplete_configs,
+            })
         })
-    }).await;
+        .await;
 
     match result {
         Ok(data) => Json(ApiResponse::ok(data)),
@@ -973,17 +1056,27 @@ pub async fn list_contexts(
     State(state): State<AppState>,
     Path(project_id): Path<String>,
 ) -> Json<ApiResponse<Vec<McpContextEntry>>> {
-    let result = state.db.with_conn(move |conn| {
-        let project = db::projects::get_project(conn, &project_id)?
-            .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
-        let files = mcp_scanner::list_mcp_context_files(&project.path);
-        let entries: Vec<McpContextEntry> = files.into_iter().map(|(slug, label)| {
-            let content = mcp_scanner::read_mcp_context(&project.path, &slug)
-                .unwrap_or_default();
-            McpContextEntry { slug, label, content }
-        }).collect();
-        Ok(entries)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let project = db::projects::get_project(conn, &project_id)?
+                .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            let files = mcp_scanner::list_mcp_context_files(&project.path);
+            let entries: Vec<McpContextEntry> = files
+                .into_iter()
+                .map(|(slug, label)| {
+                    let content =
+                        mcp_scanner::read_mcp_context(&project.path, &slug).unwrap_or_default();
+                    McpContextEntry {
+                        slug,
+                        label,
+                        content,
+                    }
+                })
+                .collect();
+            Ok(entries)
+        })
+        .await;
 
     match result {
         Ok(entries) => Json(ApiResponse::ok(entries)),
@@ -996,17 +1089,20 @@ pub async fn get_context(
     State(state): State<AppState>,
     Path((project_id, slug)): Path<(String, String)>,
 ) -> Json<ApiResponse<McpContextEntry>> {
-    let result = state.db.with_conn(move |conn| {
-        let project = db::projects::get_project(conn, &project_id)?
-            .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
-        let content = mcp_scanner::read_mcp_context(&project.path, &slug)
-            .ok_or_else(|| anyhow::anyhow!("Context file not found"))?;
-        Ok(McpContextEntry {
-            slug: slug.clone(),
-            label: slug.replace('-', " "),
-            content,
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let project = db::projects::get_project(conn, &project_id)?
+                .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            let content = mcp_scanner::read_mcp_context(&project.path, &slug)
+                .ok_or_else(|| anyhow::anyhow!("Context file not found"))?;
+            Ok(McpContextEntry {
+                slug: slug.clone(),
+                label: slug.replace('-', " "),
+                content,
+            })
         })
-    }).await;
+        .await;
 
     match result {
         Ok(entry) => Json(ApiResponse::ok(entry)),
@@ -1023,9 +1119,10 @@ pub async fn get_context(
 pub async fn host_discovery(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<crate::core::host_mcp_discovery::DiscoveredHostMcp>>> {
-    let result = state.db.with_conn(move |conn| {
-        Ok(crate::core::host_mcp_discovery::scan_all_host_mcps(conn))
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| Ok(crate::core::host_mcp_discovery::scan_all_host_mcps(conn)))
+        .await;
 
     match result {
         Ok(entries) => Json(ApiResponse::ok(entries)),
@@ -1071,85 +1168,96 @@ pub async fn adopt_host_mcp(
     };
     drop(config_read);
 
-    let result = state.db.with_conn(move |conn| {
-        // Re-scan host to find the entry — never trust the request's
-        // payload to declare the env, hash, etc. (defence in depth: a
-        // malicious request could otherwise inject arbitrary env values).
-        let discovered = crate::core::host_mcp_discovery::scan_all_host_mcps(conn);
-        let entry = discovered.iter().find(|d| {
-            d.source_file == req.source_file
-                && d.scope == req.scope
-                && d.name == req.name
-        }).ok_or_else(|| anyhow::anyhow!(
-            "Entry '{}' not found in {} — re-scan and retry",
-            req.name, req.source_file
-        ))?;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            // Re-scan host to find the entry — never trust the request's
+            // payload to declare the env, hash, etc. (defence in depth: a
+            // malicious request could otherwise inject arbitrary env values).
+            let discovered = crate::core::host_mcp_discovery::scan_all_host_mcps(conn);
+            let entry = discovered
+                .iter()
+                .find(|d| {
+                    d.source_file == req.source_file && d.scope == req.scope && d.name == req.name
+                })
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Entry '{}' not found in {} — re-scan and retry",
+                        req.name,
+                        req.source_file
+                    )
+                })?;
 
-        // Re-read the env values from the host file. The discovery struct
-        // intentionally does not expose env values, so we re-parse here.
-        let env_values = read_host_entry_env(&req.source_file, &req.scope, &req.name)?;
+            // Re-read the env values from the host file. The discovery struct
+            // intentionally does not expose env values, so we re-parse here.
+            let env_values = read_host_entry_env(&req.source_file, &req.scope, &req.name)?;
 
-        // Match against builtin registry. The matching rule is the same as
-        // the existing `.mcp.json` detection path (`refresh` endpoint):
-        // command+args identity for stdio, url for SSE/Streamable.
-        let reg = registry::builtin_registry();
-        let registry_match = match_registry_by_transport(&entry.transport, &reg);
+            // Match against builtin registry. The matching rule is the same as
+            // the existing `.mcp.json` detection path (`refresh` endpoint):
+            // command+args identity for stdio, url for SSE/Streamable.
+            let reg = registry::builtin_registry();
+            let registry_match = match_registry_by_transport(&entry.transport, &reg);
 
-        // Build the McpServer (registry hit reuses existing id; miss creates
-        // a new "host_imported:<name>" id).
-        let server = match registry_match {
-            Some(def) => McpServer {
-                id: def.id.clone(),
-                name: def.name.clone(),
-                description: def.description.clone(),
-                transport: def.transport.clone(),
-                source: McpSource::Registry,
-                api_spec: def.api_spec.clone(),
-            },
-            None => McpServer {
-                id: format!("host_imported:{}", req.name),
-                name: req.name.clone(),
-                description: format!("Adopted from {}", req.source_file),
-                transport: entry.transport.clone(),
-                source: McpSource::HostImported,
-                api_spec: None,
-            },
-        };
-        db::mcps::upsert_server(conn, &server)?;
+            // Build the McpServer (registry hit reuses existing id; miss creates
+            // a new "host_imported:<name>" id).
+            let server = match registry_match {
+                Some(def) => McpServer {
+                    id: def.id.clone(),
+                    name: def.name.clone(),
+                    description: def.description.clone(),
+                    transport: def.transport.clone(),
+                    source: McpSource::Registry,
+                    api_spec: def.api_spec.clone(),
+                },
+                None => McpServer {
+                    id: format!("host_imported:{}", req.name),
+                    name: req.name.clone(),
+                    description: format!("Adopted from {}", req.source_file),
+                    transport: entry.transport.clone(),
+                    source: McpSource::HostImported,
+                    api_spec: None,
+                },
+            };
+            db::mcps::upsert_server(conn, &server)?;
 
-        // Compute hash + dedup
-        let hash = db::mcps::compute_config_hash(&server, &env_values, None);
-        if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
-            // Already adopted — return the existing display row idempotently.
+            // Compute hash + dedup
+            let hash = db::mcps::compute_config_hash(&server, &env_values, None);
+            if let Some(existing) = db::mcps::find_config_by_hash(conn, &hash)? {
+                // Already adopted — return the existing display row idempotently.
+                let configs = db::mcps::list_configs_display(conn, None)?;
+                return configs
+                    .into_iter()
+                    .find(|c| c.id == existing.id)
+                    .ok_or_else(|| anyhow::anyhow!("Existing config disappeared"));
+            }
+
+            // Encrypt env + insert
+            let env_encrypted = db::mcps::encrypt_env(&env_values, &secret)
+                .map_err(|e| anyhow::anyhow!("Encrypt: {}", e))?;
+            let env_keys: Vec<String> = env_values.keys().cloned().collect();
+
+            let new_config = McpConfig {
+                id: Uuid::new_v4().to_string(),
+                server_id: server.id.clone(),
+                label: req.name.clone(),
+                env_keys,
+                env_encrypted,
+                args_override: None,
+                is_global: false,
+                include_general: true,
+                config_hash: hash,
+                project_ids: vec![],
+                host_sync: HostSyncMode::GlobalOnly,
+            };
+            db::mcps::insert_config(conn, &new_config)?;
+
             let configs = db::mcps::list_configs_display(conn, None)?;
-            return configs.into_iter().find(|c| c.id == existing.id)
-                .ok_or_else(|| anyhow::anyhow!("Existing config disappeared"));
-        }
-
-        // Encrypt env + insert
-        let env_encrypted = db::mcps::encrypt_env(&env_values, &secret)
-            .map_err(|e| anyhow::anyhow!("Encrypt: {}", e))?;
-        let env_keys: Vec<String> = env_values.keys().cloned().collect();
-
-        let new_config = McpConfig {
-            id: Uuid::new_v4().to_string(),
-            server_id: server.id.clone(),
-            label: req.name.clone(),
-            env_keys,
-            env_encrypted,
-            args_override: None,
-            is_global: false,
-            include_general: true,
-            config_hash: hash,
-            project_ids: vec![],
-            host_sync: HostSyncMode::GlobalOnly,
-        };
-        db::mcps::insert_config(conn, &new_config)?;
-
-        let configs = db::mcps::list_configs_display(conn, None)?;
-        configs.into_iter().find(|c| c.id == new_config.id)
-            .ok_or_else(|| anyhow::anyhow!("Inserted config not found in display list"))
-    }).await;
+            configs
+                .into_iter()
+                .find(|c| c.id == new_config.id)
+                .ok_or_else(|| anyhow::anyhow!("Inserted config not found in display list"))
+        })
+        .await;
 
     match result {
         Ok(display) => Json(ApiResponse::ok(display)),
@@ -1171,23 +1279,31 @@ fn read_host_entry_env(
     match scope {
         HostScope::ClaudeUser | HostScope::Gemini | HostScope::Copilot => {
             let v: serde_json::Value = serde_json::from_str(&raw)?;
-            let entry = v.get("mcpServers").and_then(|o| o.get(name))
+            let entry = v
+                .get("mcpServers")
+                .and_then(|o| o.get(name))
                 .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found", name))?;
             extract_env_from_json(entry)
         }
         HostScope::ClaudeLocal { project_path } => {
             let v: serde_json::Value = serde_json::from_str(&raw)?;
-            let entry = v.get("projects")
+            let entry = v
+                .get("projects")
                 .and_then(|p| p.get(project_path))
                 .and_then(|o| o.get("mcpServers"))
                 .and_then(|o| o.get(name))
-                .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found in projects[{}]", name, project_path))?;
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Entry '{}' not found in projects[{}]", name, project_path)
+                })?;
             extract_env_from_json(entry)
         }
         HostScope::Codex => {
             // toml 1.x: parse Document into Table directly.
             let v: toml::Table = raw.parse()?;
-            let entry = v.get("mcp_servers").and_then(|o| o.get(name)).and_then(|v| v.as_table())
+            let entry = v
+                .get("mcp_servers")
+                .and_then(|o| o.get(name))
+                .and_then(|v| v.as_table())
                 .ok_or_else(|| anyhow::anyhow!("Entry '{}' not found", name))?;
             let mut env = std::collections::HashMap::new();
             if let Some(t) = entry.get("env").and_then(|v| v.as_table()) {
@@ -1202,7 +1318,9 @@ fn read_host_entry_env(
     }
 }
 
-fn extract_env_from_json(entry: &serde_json::Value) -> anyhow::Result<std::collections::HashMap<String, String>> {
+fn extract_env_from_json(
+    entry: &serde_json::Value,
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
     let mut env = std::collections::HashMap::new();
     if let Some(obj) = entry.get("env").and_then(|v| v.as_object()) {
         for (k, v) in obj {
@@ -1223,8 +1341,16 @@ fn match_registry_by_transport<'a>(
     reg: &'a [McpDefinition],
 ) -> Option<&'a McpDefinition> {
     reg.iter().find(|def| match (&def.transport, transport) {
-        (McpTransport::Stdio { command: c1, args: a1 }, McpTransport::Stdio { command: c2, args: a2 }) =>
-            c1 == c2 && a1 == a2,
+        (
+            McpTransport::Stdio {
+                command: c1,
+                args: a1,
+            },
+            McpTransport::Stdio {
+                command: c2,
+                args: a2,
+            },
+        ) => c1 == c2 && a1 == a2,
         (McpTransport::Sse { url: u1 }, McpTransport::Sse { url: u2 }) => u1 == u2,
         (McpTransport::Streamable { url: u1 }, McpTransport::Streamable { url: u2 }) => u1 == u2,
         _ => false,
@@ -1237,13 +1363,16 @@ pub async fn update_context(
     Path((project_id, slug)): Path<(String, String)>,
     Json(req): Json<UpdateMcpContextRequest>,
 ) -> Json<ApiResponse<()>> {
-    let result = state.db.with_conn(move |conn| {
-        let project = db::projects::get_project(conn, &project_id)?
-            .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
-        mcp_scanner::write_mcp_context(&project.path, &slug, &req.content)
-            .map_err(|e| anyhow::anyhow!(e))?;
-        Ok(())
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            let project = db::projects::get_project(conn, &project_id)?
+                .ok_or_else(|| anyhow::anyhow!("Project not found"))?;
+            mcp_scanner::write_mcp_context(&project.path, &slug, &req.content)
+                .map_err(|e| anyhow::anyhow!(e))?;
+            Ok(())
+        })
+        .await;
 
     match result {
         Ok(()) => Json(ApiResponse::ok(())),
@@ -1302,11 +1431,15 @@ fn dedup_configs(conn: &Connection) -> anyhow::Result<()> {
     // and both registry with same server_id (keep first — happens after migration).
     {
         // Key: (lowercase_label, server_id) → keeper config_id
-        let mut seen: std::collections::HashMap<(String, String), String> = std::collections::HashMap::new();
-        let already_deleted: std::collections::HashSet<String> = to_delete.iter().map(|(d, _)| d.clone()).collect();
+        let mut seen: std::collections::HashMap<(String, String), String> =
+            std::collections::HashMap::new();
+        let already_deleted: std::collections::HashSet<String> =
+            to_delete.iter().map(|(d, _)| d.clone()).collect();
 
         for config in &configs {
-            if already_deleted.contains(&config.id) { continue; }
+            if already_deleted.contains(&config.id) {
+                continue;
+            }
             let key = (config.label.to_lowercase(), config.server_id.clone());
             if let Some(keeper_id) = seen.get(&key) {
                 to_delete.push((config.id.clone(), keeper_id.clone()));
@@ -1316,18 +1449,25 @@ fn dedup_configs(conn: &Connection) -> anyhow::Result<()> {
         }
 
         // Also merge detected:X into registry when label matches
-        let already_deleted: std::collections::HashSet<String> = to_delete.iter().map(|(d, _)| d.clone()).collect();
-        let mut label_to_registry: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let already_deleted: std::collections::HashSet<String> =
+            to_delete.iter().map(|(d, _)| d.clone()).collect();
+        let mut label_to_registry: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for config in &configs {
-            if already_deleted.contains(&config.id) { continue; }
+            if already_deleted.contains(&config.id) {
+                continue;
+            }
             if !config.server_id.starts_with("detected:") {
-                label_to_registry.entry(config.label.to_lowercase())
+                label_to_registry
+                    .entry(config.label.to_lowercase())
                     .or_insert_with(|| config.id.clone());
             }
         }
         for config in &configs {
-            if already_deleted.contains(&config.id) { continue; }
+            if already_deleted.contains(&config.id) {
+                continue;
+            }
             if config.server_id.starts_with("detected:") {
                 if let Some(keeper_id) = label_to_registry.get(&config.label.to_lowercase()) {
                     to_delete.push((config.id.clone(), keeper_id.clone()));
@@ -1369,9 +1509,8 @@ fn rehash_configs(conn: &Connection, secret: &str) -> anyhow::Result<()> {
     let servers = db::mcps::list_servers(conn)?;
     let configs = db::mcps::list_configs(conn)?;
 
-    let server_map: std::collections::HashMap<String, &McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s))
-        .collect();
+    let server_map: std::collections::HashMap<String, &McpServer> =
+        servers.iter().map(|s| (s.id.clone(), s)).collect();
 
     for config in &configs {
         let server = match server_map.get(&config.server_id) {
@@ -1404,22 +1543,31 @@ fn match_registry_entry<'a>(
     let cmd = entry.command.as_deref()?;
     let args = entry.args.as_deref().unwrap_or(&[]);
     // First non-flag arg is typically the package name
-    let pkg = args.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str());
+    let pkg = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
 
     reg.iter().find(|def| {
         // 1. Check alt_packages: if the detected package matches any alt name,
         //    this is the same MCP regardless of runtime (npx vs binary vs uvx).
         if let Some(detected_pkg) = pkg {
             let stripped = strip_version(detected_pkg);
-            if def.alt_packages.iter().any(|alt| {
-                stripped == alt.as_str() || strip_version(alt) == stripped
-            }) {
+            if def
+                .alt_packages
+                .iter()
+                .any(|alt| stripped == alt.as_str() || strip_version(alt) == stripped)
+            {
                 return true;
             }
         }
 
         // 2. Standard match: same command + matching package name
-        if let McpTransport::Stdio { command: ref reg_cmd, args: ref reg_args } = def.transport {
+        if let McpTransport::Stdio {
+            command: ref reg_cmd,
+            args: ref reg_args,
+        } = def.transport
+        {
             if reg_cmd != cmd {
                 return false;
             }
@@ -1427,16 +1575,16 @@ fn match_registry_entry<'a>(
                 Some(p) => p,
                 None => return reg_args.is_empty(), // both have no args
             };
-            let reg_pkg = reg_args.iter()
+            let reg_pkg = reg_args
+                .iter()
                 .find(|a| !a.starts_with('-'))
                 .map(|s| s.as_str())
                 .unwrap_or("");
-            !reg_pkg.is_empty() && (
-                detected_pkg == reg_pkg
-                || detected_pkg.starts_with(&format!("{}@", reg_pkg))
-                || reg_pkg.starts_with(&format!("{}@", detected_pkg))
-                || strip_version(detected_pkg) == strip_version(reg_pkg)
-            )
+            !reg_pkg.is_empty()
+                && (detected_pkg == reg_pkg
+                    || detected_pkg.starts_with(&format!("{}@", reg_pkg))
+                    || reg_pkg.starts_with(&format!("{}@", detected_pkg))
+                    || strip_version(detected_pkg) == strip_version(reg_pkg))
         } else if let McpTransport::Sse { url: ref reg_url } = def.transport {
             entry.url.as_deref() == Some(reg_url.as_str())
         } else {
@@ -1468,10 +1616,7 @@ fn is_well_known_mcp_command(cmd: &str) -> bool {
     // Manually find the last path separator — `Path::file_name` only knows
     // about the host OS separator, so on Linux it can't extract the basename
     // from "C:\\Program Files\\nodejs\\node.exe".
-    let basename_start = cmd
-        .rfind(['/', '\\'])
-        .map(|i| i + 1)
-        .unwrap_or(0);
+    let basename_start = cmd.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
     let basename = &cmd[basename_start..];
     let basename = basename
         .trim_end_matches(".exe")
@@ -1511,20 +1656,21 @@ mod adopt_tests {
     fn read_env_from_claude_user_scope() {
         let tmp = TempDir::new().unwrap();
         let claude = tmp.path().join(".claude.json");
-        fs::write(&claude, r#"{
+        fs::write(
+            &claude,
+            r#"{
             "mcpServers": {
                 "linear": {
                     "command": "npx",
                     "env": { "LINEAR_API_KEY": "secret-value", "LINEAR_TEAM": "kronn" }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
-        let env = read_host_entry_env(
-            claude.to_str().unwrap(),
-            &HostScope::ClaudeUser,
-            "linear",
-        ).unwrap();
+        let env = read_host_entry_env(claude.to_str().unwrap(), &HostScope::ClaudeUser, "linear")
+            .unwrap();
         assert_eq!(env.get("LINEAR_API_KEY"), Some(&"secret-value".to_string()));
         assert_eq!(env.get("LINEAR_TEAM"), Some(&"kronn".to_string()));
     }
@@ -1533,7 +1679,9 @@ mod adopt_tests {
     fn read_env_from_claude_local_scope() {
         let tmp = TempDir::new().unwrap();
         let claude = tmp.path().join(".claude.json");
-        fs::write(&claude, r#"{
+        fs::write(
+            &claude,
+            r#"{
             "projects": {
                 "/my/repo": {
                     "mcpServers": {
@@ -1544,13 +1692,18 @@ mod adopt_tests {
                     }
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
         let env = read_host_entry_env(
             claude.to_str().unwrap(),
-            &HostScope::ClaudeLocal { project_path: "/my/repo".into() },
+            &HostScope::ClaudeLocal {
+                project_path: "/my/repo".into(),
+            },
             "github",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(env.get("GITHUB_TOKEN"), Some(&"ghp_xxx".to_string()));
     }
 
@@ -1558,19 +1711,20 @@ mod adopt_tests {
     fn read_env_from_codex_toml() {
         let tmp = TempDir::new().unwrap();
         let codex = tmp.path().join("config.toml");
-        fs::write(&codex, r#"
+        fs::write(
+            &codex,
+            r#"
 [mcp_servers.atlassian]
 command = "uvx"
 [mcp_servers.atlassian.env]
 ATL_TOKEN = "tok-1"
 ATL_USER = "alice"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
-        let env = read_host_entry_env(
-            codex.to_str().unwrap(),
-            &HostScope::Codex,
-            "atlassian",
-        ).unwrap();
+        let env =
+            read_host_entry_env(codex.to_str().unwrap(), &HostScope::Codex, "atlassian").unwrap();
         assert_eq!(env.get("ATL_TOKEN"), Some(&"tok-1".to_string()));
         assert_eq!(env.get("ATL_USER"), Some(&"alice".to_string()));
     }
@@ -1581,38 +1735,41 @@ ATL_USER = "alice"
         let claude = tmp.path().join(".claude.json");
         fs::write(&claude, r#"{"mcpServers":{}}"#).unwrap();
 
-        let result = read_host_entry_env(
-            claude.to_str().unwrap(),
-            &HostScope::ClaudeUser,
-            "ghost",
-        );
+        let result = read_host_entry_env(claude.to_str().unwrap(), &HostScope::ClaudeUser, "ghost");
         assert!(result.is_err());
     }
 
     #[test]
     fn registry_match_by_transport() {
-        let reg = vec![
-            McpDefinition {
-                id: "linear".into(),
-                name: "Linear".into(),
-                description: String::new(),
-                transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "@linear/mcp".into()] },
-                env_keys: vec![],
-                tags: vec![],
-                token_url: None,
-                token_help: None,
-                publisher: "Test".into(),
-                official: false,
-                alt_packages: vec![],
-                default_context: None,
-                api_spec: None,
+        let reg = vec![McpDefinition {
+            id: "linear".into(),
+            name: "Linear".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "@linear/mcp".into()],
             },
-        ];
+            env_keys: vec![],
+            tags: vec![],
+            token_url: None,
+            token_help: None,
+            publisher: "Test".into(),
+            official: false,
+            alt_packages: vec![],
+            default_context: None,
+            api_spec: None,
+        }];
 
-        let probe = McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "@linear/mcp".into()] };
+        let probe = McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "@linear/mcp".into()],
+        };
         assert!(match_registry_by_transport(&probe, &reg).is_some());
 
-        let no_match = McpTransport::Stdio { command: "node".into(), args: vec!["other.js".into()] };
+        let no_match = McpTransport::Stdio {
+            command: "node".into(),
+            args: vec!["other.js".into()],
+        };
         assert!(match_registry_by_transport(&no_match, &reg).is_none());
     }
 }
@@ -1624,7 +1781,11 @@ mod command_safety_tests {
     #[test]
     fn well_known_launchers_are_accepted() {
         for cmd in ["npx", "uvx", "python3", "node", "deno", "bun"] {
-            assert!(is_well_known_mcp_command(cmd), "{} should be well-known", cmd);
+            assert!(
+                is_well_known_mcp_command(cmd),
+                "{} should be well-known",
+                cmd
+            );
         }
     }
 
@@ -1637,7 +1798,9 @@ mod command_safety_tests {
     #[test]
     fn windows_extensions_are_stripped() {
         assert!(is_well_known_mcp_command("npx.cmd"));
-        assert!(is_well_known_mcp_command("C:\\Program Files\\nodejs\\node.exe"));
+        assert!(is_well_known_mcp_command(
+            "C:\\Program Files\\nodejs\\node.exe"
+        ));
     }
 
     #[test]
@@ -1664,10 +1827,18 @@ fn migrate_detected_to_registry(conn: &Connection, reg: &[McpDefinition]) -> any
         let matched = reg.iter().find(|def| {
             // First check alt_packages (handles cross-runtime: npx vs binary)
             if let McpTransport::Stdio { args: ref sa, .. } = server.transport {
-                let s_pkg = sa.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("");
+                let s_pkg = sa
+                    .iter()
+                    .find(|a| !a.starts_with('-'))
+                    .map(|s| s.as_str())
+                    .unwrap_or("");
                 if !s_pkg.is_empty() {
                     let stripped = strip_version(s_pkg);
-                    if def.alt_packages.iter().any(|alt| stripped == alt.as_str() || strip_version(alt) == stripped) {
+                    if def
+                        .alt_packages
+                        .iter()
+                        .any(|alt| stripped == alt.as_str() || strip_version(alt) == stripped)
+                    {
                         return true;
                     }
                 }
@@ -1675,21 +1846,32 @@ fn migrate_detected_to_registry(conn: &Connection, reg: &[McpDefinition]) -> any
             // Standard transport match
             match (&server.transport, &def.transport) {
                 (
-                    McpTransport::Stdio { command: ref sc, args: ref sa },
-                    McpTransport::Stdio { command: ref rc, args: ref ra },
+                    McpTransport::Stdio {
+                        command: ref sc,
+                        args: ref sa,
+                    },
+                    McpTransport::Stdio {
+                        command: ref rc,
+                        args: ref ra,
+                    },
                 ) => {
-                    if sc != rc { return false; }
-                    let s_pkg = sa.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("");
-                    let r_pkg = ra.iter().find(|a| !a.starts_with('-')).map(|s| s.as_str()).unwrap_or("");
-                    !r_pkg.is_empty() && (
-                        s_pkg == r_pkg
-                        || strip_version(s_pkg) == strip_version(r_pkg)
-                    )
+                    if sc != rc {
+                        return false;
+                    }
+                    let s_pkg = sa
+                        .iter()
+                        .find(|a| !a.starts_with('-'))
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    let r_pkg = ra
+                        .iter()
+                        .find(|a| !a.starts_with('-'))
+                        .map(|s| s.as_str())
+                        .unwrap_or("");
+                    !r_pkg.is_empty()
+                        && (s_pkg == r_pkg || strip_version(s_pkg) == strip_version(r_pkg))
                 }
-                (
-                    McpTransport::Sse { url: ref su },
-                    McpTransport::Sse { url: ref ru },
-                ) => su == ru,
+                (McpTransport::Sse { url: ref su }, McpTransport::Sse { url: ref ru }) => su == ru,
                 _ => false,
             }
         });
@@ -1719,10 +1901,7 @@ fn migrate_detected_to_registry(conn: &Connection, reg: &[McpDefinition]) -> any
             )?;
 
             // Delete the old detected server
-            conn.execute(
-                "DELETE FROM mcp_servers WHERE id = ?1",
-                params![server.id],
-            )?;
+            conn.execute("DELETE FROM mcp_servers WHERE id = ?1", params![server.id])?;
         }
     }
 
@@ -1740,28 +1919,37 @@ fn trigger_mcp_drift(state: &AppState, project_ids: Vec<String>) {
     }
     let db = state.db.clone();
     tokio::spawn(async move {
-        let audited = match db.with_conn({
-            let pids = project_ids;
-            move |conn| {
-                let mut result = Vec::new();
-                for pid in &pids {
-                    if let Ok(Some(p)) = crate::db::projects::get_project(conn, pid) {
-                        if p.audit_status == crate::models::AiAuditStatus::Audited || p.audit_status == crate::models::AiAuditStatus::Validated {
-                            result.push(p);
+        let audited = match db
+            .with_conn({
+                let pids = project_ids;
+                move |conn| {
+                    let mut result = Vec::new();
+                    for pid in &pids {
+                        if let Ok(Some(p)) = crate::db::projects::get_project(conn, pid) {
+                            if p.audit_status == crate::models::AiAuditStatus::Audited
+                                || p.audit_status == crate::models::AiAuditStatus::Validated
+                            {
+                                result.push(p);
+                            }
                         }
                     }
+                    Ok(result)
                 }
-                Ok(result)
-            }
-        }).await {
+            })
+            .await
+        {
             Ok(ps) => ps,
-            Err(e) => { tracing::warn!("MCP drift: failed to query projects: {}", e); return; }
+            Err(e) => {
+                tracing::warn!("MCP drift: failed to query projects: {}", e);
+                return;
+            }
         };
 
         for project in audited {
             let project_path = crate::core::scanner::resolve_host_path(&project.path);
             // Path-agnostic — picks docs/ (post-pivot) or ai/ (legacy).
-            let checksums_path = crate::core::scanner::detect_docs_dir(&project_path).join("checksums.json");
+            let checksums_path =
+                crate::core::scanner::detect_docs_dir(&project_path).join("checksums.json");
             if !checksums_path.exists() {
                 continue;
             }
@@ -1805,10 +1993,14 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
         docs_url: spec.docs_url.clone(),
         // CRITICAL : `value: ""`. The export NEVER carries credentials,
         // even if the user's currently-stored env has them.
-        fields: spec.config_keys.iter().map(|k| CustomApiField {
-            label: k.label.clone(),
-            value: String::new(),
-        }).collect(),
+        fields: spec
+            .config_keys
+            .iter()
+            .map(|k| CustomApiField {
+                label: k.label.clone(),
+                value: String::new(),
+            })
+            .collect(),
         endpoints: spec.endpoints.clone(),
         auth: spec.auth.clone(),
     })
@@ -1817,7 +2009,9 @@ pub fn build_custom_plugin_export(server: &McpServer) -> Option<CustomApiPayload
 /// Normalise any payload (from JSON body or multipart upload) into a
 /// safe-to-create `CustomApiPayload`: strips `fields[].value` defensively,
 /// validates required fields. Returns Err message on invalid input.
-pub fn sanitize_imported_payload(mut payload: CustomApiPayload) -> Result<CustomApiPayload, String> {
+pub fn sanitize_imported_payload(
+    mut payload: CustomApiPayload,
+) -> Result<CustomApiPayload, String> {
     if payload.name.trim().is_empty() {
         return Err("Imported plugin: `name` is required".into());
     }
@@ -1845,33 +2039,50 @@ pub async fn export_custom_plugin_file(
         return (
             StatusCode::BAD_REQUEST,
             format!("Server `{}` is not a Custom API plugin.", server_id),
-        ).into_response();
+        )
+            .into_response();
     }
-    let result = state.db.with_conn(move |conn| -> anyhow::Result<(McpServer, CustomApiPayload)> {
-        let servers = db::mcps::list_servers(conn)?;
-        let server = servers.into_iter().find(|s| s.id == server_id)
-            .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
-        let payload = build_custom_plugin_export(&server)
-            .ok_or_else(|| anyhow::anyhow!("Plugin has no exportable spec"))?;
-        Ok((server, payload))
-    }).await;
+    let result = state
+        .db
+        .with_conn(
+            move |conn| -> anyhow::Result<(McpServer, CustomApiPayload)> {
+                let servers = db::mcps::list_servers(conn)?;
+                let server = servers
+                    .into_iter()
+                    .find(|s| s.id == server_id)
+                    .ok_or_else(|| anyhow::anyhow!("Custom plugin `{}` not found", server_id))?;
+                let payload = build_custom_plugin_export(&server)
+                    .ok_or_else(|| anyhow::anyhow!("Plugin has no exportable spec"))?;
+                Ok((server, payload))
+            },
+        )
+        .await;
     let (server, payload) = match result {
         Ok(v) => v,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     };
     let json = match serde_json::to_string_pretty(&payload) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("serialize: {e}")).into_response()
+        }
     };
     let filename = format!("{}.kronn-plugin.json", sanitize_filename(&server.name));
     let mut response = (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, "application/json; charset=utf-8".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+            (
+                header::CONTENT_TYPE,
+                "application/json; charset=utf-8".to_string(),
+            ),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
         ],
         json,
-    ).into_response();
+    )
+        .into_response();
     response
         .headers_mut()
         .insert("X-Kronn-Export-Kind", "custom-plugin".parse().unwrap());
@@ -1883,13 +2094,23 @@ pub async fn export_custom_plugin_file(
 fn sanitize_filename(input: &str) -> String {
     let mut out: String = input
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     while out.contains("--") {
         out = out.replace("--", "-");
     }
     let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() { "plugin".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "plugin".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// `POST /api/mcps/custom/import-file`
@@ -1914,36 +2135,47 @@ pub async fn import_custom_plugin_file(
     let server = materialize_custom_server(&payload);
     let server_id = server.id.clone();
     let server_id_for_log = server_id.clone();
-    let result = state.db.with_conn(move |conn| -> anyhow::Result<McpConfigDisplay> {
-        db::mcps::upsert_server(conn, &server)?;
-        let config_id = Uuid::new_v4().to_string();
-        let env_keys: Vec<String> = server.api_spec
-            .as_ref()
-            .map(|s| s.config_keys.iter().map(|k| k.env_key.clone()).collect())
-            .unwrap_or_default();
-        let config_hash = db::mcps::compute_config_hash(&server, &std::collections::HashMap::new(), None);
-        let config = McpConfig {
-            id: config_id.clone(),
-            server_id: server_id.clone(),
-            label: label.clone(),
-            env_encrypted: String::new(),
-            env_keys,
-            args_override: None,
-            is_global: false,
-            config_hash,
-            include_general: false,
-            host_sync: HostSyncMode::None,
-            project_ids: vec![],
-        };
-        db::mcps::insert_config(conn, &config)?;
-        let configs = db::mcps::list_configs_display(conn, None)?;
-        configs.into_iter().find(|c| c.id == config_id)
-            .ok_or_else(|| anyhow::anyhow!("Config not found after import"))
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| -> anyhow::Result<McpConfigDisplay> {
+            db::mcps::upsert_server(conn, &server)?;
+            let config_id = Uuid::new_v4().to_string();
+            let env_keys: Vec<String> = server
+                .api_spec
+                .as_ref()
+                .map(|s| s.config_keys.iter().map(|k| k.env_key.clone()).collect())
+                .unwrap_or_default();
+            let config_hash =
+                db::mcps::compute_config_hash(&server, &std::collections::HashMap::new(), None);
+            let config = McpConfig {
+                id: config_id.clone(),
+                server_id: server_id.clone(),
+                label: label.clone(),
+                env_encrypted: String::new(),
+                env_keys,
+                args_override: None,
+                is_global: false,
+                config_hash,
+                include_general: false,
+                host_sync: HostSyncMode::None,
+                project_ids: vec![],
+            };
+            db::mcps::insert_config(conn, &config)?;
+            let configs = db::mcps::list_configs_display(conn, None)?;
+            configs
+                .into_iter()
+                .find(|c| c.id == config_id)
+                .ok_or_else(|| anyhow::anyhow!("Config not found after import"))
+        })
+        .await;
 
     match result {
         Ok(cfg) => {
-            tracing::info!("Imported custom plugin via file: server={}, config={}", server_id_for_log, cfg.id);
+            tracing::info!(
+                "Imported custom plugin via file: server={}, config={}",
+                server_id_for_log,
+                cfg.id
+            );
             Json(ApiResponse::ok(cfg))
         }
         Err(e) => Json(ApiResponse::err(e.to_string())),
@@ -1987,14 +2219,24 @@ mod tests {
 
     #[test]
     fn match_registry_exact_command_and_package() {
-        let reg = vec![make_def("mcp-github", "npx", &["-y", "@modelcontextprotocol/server-github"], &[])];
+        let reg = vec![make_def(
+            "mcp-github",
+            "npx",
+            &["-y", "@modelcontextprotocol/server-github"],
+            &[],
+        )];
         let entry = make_entry("npx", &["-y", "@modelcontextprotocol/server-github"]);
         assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-github");
     }
 
     #[test]
     fn match_registry_versioned_package() {
-        let reg = vec![make_def("mcp-github", "npx", &["-y", "@modelcontextprotocol/server-github"], &[])];
+        let reg = vec![make_def(
+            "mcp-github",
+            "npx",
+            &["-y", "@modelcontextprotocol/server-github"],
+            &[],
+        )];
         let entry = make_entry("npx", &["-y", "@modelcontextprotocol/server-github@latest"]);
         assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-github");
     }
@@ -2002,7 +2244,12 @@ mod tests {
     #[test]
     fn match_registry_alt_package_cross_runtime() {
         // Registry uses Go binary, .mcp.json uses npm package
-        let reg = vec![make_def("mcp-fastly", "fastly-mcp", &[], &["fastly-mcp-server"])];
+        let reg = vec![make_def(
+            "mcp-fastly",
+            "fastly-mcp",
+            &[],
+            &["fastly-mcp-server"],
+        )];
         let entry = make_entry("npx", &["-y", "fastly-mcp-server@1.0.4"]);
         assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-fastly");
     }
@@ -2010,14 +2257,24 @@ mod tests {
     #[test]
     fn match_registry_alt_package_gitlab() {
         // Registry uses glab CLI, .mcp.json uses npm package
-        let reg = vec![make_def("mcp-gitlab", "glab", &["mcp", "serve"], &["@modelcontextprotocol/server-gitlab"])];
+        let reg = vec![make_def(
+            "mcp-gitlab",
+            "glab",
+            &["mcp", "serve"],
+            &["@modelcontextprotocol/server-gitlab"],
+        )];
         let entry = make_entry("npx", &["-y", "@modelcontextprotocol/server-gitlab"]);
         assert_eq!(match_registry_entry(&entry, &reg).unwrap().id, "mcp-gitlab");
     }
 
     #[test]
     fn match_registry_no_match_different_package() {
-        let reg = vec![make_def("mcp-github", "npx", &["-y", "@modelcontextprotocol/server-github"], &[])];
+        let reg = vec![make_def(
+            "mcp-github",
+            "npx",
+            &["-y", "@modelcontextprotocol/server-github"],
+            &[],
+        )];
         let entry = make_entry("npx", &["-y", "some-other-server"]);
         assert!(match_registry_entry(&entry, &reg).is_none());
     }
@@ -2031,9 +2288,18 @@ mod tests {
 
     #[test]
     fn strip_version_scoped_package() {
-        assert_eq!(strip_version("@upstash/context7-mcp@latest"), "@upstash/context7-mcp");
-        assert_eq!(strip_version("fastly-mcp-server@1.0.4"), "fastly-mcp-server");
-        assert_eq!(strip_version("@modelcontextprotocol/server-gitlab"), "@modelcontextprotocol/server-gitlab");
+        assert_eq!(
+            strip_version("@upstash/context7-mcp@latest"),
+            "@upstash/context7-mcp"
+        );
+        assert_eq!(
+            strip_version("fastly-mcp-server@1.0.4"),
+            "fastly-mcp-server"
+        );
+        assert_eq!(
+            strip_version("@modelcontextprotocol/server-gitlab"),
+            "@modelcontextprotocol/server-gitlab"
+        );
     }
 
     // ── Custom API plugin slugifier + materializer ───────────────────────
@@ -2060,8 +2326,14 @@ mod tests {
             docs_url: Some("https://developer.salesforce.com".into()),
             auth: ApiAuthKind::None,
             fields: vec![
-                CustomApiField { label: "Bearer Token".into(), value: "secret".into() },
-                CustomApiField { label: "Org ID".into(), value: "00D5g".into() },
+                CustomApiField {
+                    label: "Bearer Token".into(),
+                    value: "secret".into(),
+                },
+                CustomApiField {
+                    label: "Org ID".into(),
+                    value: "00D5g".into(),
+                },
             ],
             endpoints: vec![],
         };
@@ -2077,7 +2349,10 @@ mod tests {
         let spec = server.api_spec.expect("api_spec set");
         assert_eq!(spec.base_url, "https://my-org.salesforce.com");
         assert!(matches!(spec.auth, ApiAuthKind::None));
-        assert_eq!(spec.docs_url.as_deref(), Some("https://developer.salesforce.com"));
+        assert_eq!(
+            spec.docs_url.as_deref(),
+            Some("https://developer.salesforce.com")
+        );
         assert!(spec.endpoints.is_empty());
         // Empty-label fields are filtered, two real fields → two config keys.
         assert_eq!(spec.config_keys.len(), 2);
@@ -2095,9 +2370,18 @@ mod tests {
             docs_url: None,
             auth: ApiAuthKind::None,
             fields: vec![
-                CustomApiField { label: "Real".into(), value: "v".into() },
-                CustomApiField { label: "   ".into(), value: "ignored".into() },
-                CustomApiField { label: "".into(), value: "".into() },
+                CustomApiField {
+                    label: "Real".into(),
+                    value: "v".into(),
+                },
+                CustomApiField {
+                    label: "   ".into(),
+                    value: "ignored".into(),
+                },
+                CustomApiField {
+                    label: "".into(),
+                    value: "".into(),
+                },
             ],
             endpoints: vec![],
         };
@@ -2120,7 +2404,11 @@ mod tests {
             endpoints: vec![],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
-        assert!(spec.docs_url.is_none(), "blank docs_url should be None, got {:?}", spec.docs_url);
+        assert!(
+            spec.docs_url.is_none(),
+            "blank docs_url should be None, got {:?}",
+            spec.docs_url
+        );
     }
 
     // ─── 0.8.6 — endpoints declared at creation time ───────────────────
@@ -2141,8 +2429,14 @@ mod tests {
             docs_url: Some("https://developers.didomi.io/api".into()),
             auth: ApiAuthKind::None,
             fields: vec![
-                CustomApiField { label: "API Key".into(), value: "k".into() },
-                CustomApiField { label: "API Secret".into(), value: "s".into() },
+                CustomApiField {
+                    label: "API Key".into(),
+                    value: "k".into(),
+                },
+                CustomApiField {
+                    label: "API Secret".into(),
+                    value: "s".into(),
+                },
             ],
             endpoints: vec![
                 ApiEndpoint {
@@ -2167,7 +2461,10 @@ mod tests {
         assert_eq!(spec.endpoints.len(), 3);
         assert_eq!(spec.endpoints[0].path, "/sessions");
         assert_eq!(spec.endpoints[0].method, "POST");
-        assert_eq!(spec.endpoints[0].description, "Exchange api-key for bearer token");
+        assert_eq!(
+            spec.endpoints[0].description,
+            "Exchange api-key for bearer token"
+        );
         assert_eq!(spec.endpoints[1].path, "/widgets/notices");
         assert_eq!(spec.endpoints[1].method, "GET");
         assert_eq!(spec.endpoints[2].path, "/consents/events");
@@ -2187,9 +2484,21 @@ mod tests {
             auth: ApiAuthKind::None,
             fields: vec![],
             endpoints: vec![
-                ApiEndpoint { path: "/real".into(), method: "GET".into(), description: "ok".into() },
-                ApiEndpoint { path: "   ".into(), method: "GET".into(), description: "blank".into() },
-                ApiEndpoint { path: "".into(), method: "POST".into(), description: "also blank".into() },
+                ApiEndpoint {
+                    path: "/real".into(),
+                    method: "GET".into(),
+                    description: "ok".into(),
+                },
+                ApiEndpoint {
+                    path: "   ".into(),
+                    method: "GET".into(),
+                    description: "blank".into(),
+                },
+                ApiEndpoint {
+                    path: "".into(),
+                    method: "POST".into(),
+                    description: "also blank".into(),
+                },
             ],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
@@ -2211,13 +2520,28 @@ mod tests {
             auth: ApiAuthKind::None,
             fields: vec![],
             endpoints: vec![
-                ApiEndpoint { path: "/a".into(), method: "post".into(), description: "".into() },
-                ApiEndpoint { path: "/b".into(), method: "  ".into(), description: "blank → GET".into() },
-                ApiEndpoint { path: "/c".into(), method: "DELETE".into(), description: "".into() },
+                ApiEndpoint {
+                    path: "/a".into(),
+                    method: "post".into(),
+                    description: "".into(),
+                },
+                ApiEndpoint {
+                    path: "/b".into(),
+                    method: "  ".into(),
+                    description: "blank → GET".into(),
+                },
+                ApiEndpoint {
+                    path: "/c".into(),
+                    method: "DELETE".into(),
+                    description: "".into(),
+                },
             ],
         };
         let spec = materialize_custom_server(&payload).api_spec.unwrap();
-        assert_eq!(spec.endpoints[0].method, "POST", "lowercase normalised to upper");
+        assert_eq!(
+            spec.endpoints[0].method, "POST",
+            "lowercase normalised to upper"
+        );
         assert_eq!(spec.endpoints[1].method, "GET", "blank defaults to GET");
         assert_eq!(spec.endpoints[2].method, "DELETE", "upper preserved");
     }
@@ -2246,24 +2570,33 @@ mod tests {
             description: "Updated description".into(),
             docs_url: Some("https://developers.didomi.io/api".into()),
             auth: ApiAuthKind::None,
-            fields: vec![CustomApiField { label: "API Key".into(), value: "".into() }],
-            endpoints: vec![
-                ApiEndpoint { path: "/widgets/notices".into(), method: "GET".into(), description: "List".into() },
-            ],
+            fields: vec![CustomApiField {
+                label: "API Key".into(),
+                value: "".into(),
+            }],
+            endpoints: vec![ApiEndpoint {
+                path: "/widgets/notices".into(),
+                method: "GET".into(),
+                description: "List".into(),
+            }],
         };
         let old_id = "custom-didomi-27c67bd7".to_string();
         let old_source = McpSource::Manual;
 
         let mut updated = materialize_custom_server(&new_payload);
-        assert!(updated.id.starts_with("custom-didomi-renamed-"),
-            "materialize alone generates a NEW id (different slug + nano)");
+        assert!(
+            updated.id.starts_with("custom-didomi-renamed-"),
+            "materialize alone generates a NEW id (different slug + nano)"
+        );
 
         // Apply the handler's stitching.
         updated.id = old_id.clone();
         updated.source = old_source.clone();
 
-        assert_eq!(updated.id, "custom-didomi-27c67bd7",
-            "edit MUST preserve the original id to keep refs valid");
+        assert_eq!(
+            updated.id, "custom-didomi-27c67bd7",
+            "edit MUST preserve the original id to keep refs valid"
+        );
         assert_eq!(updated.name, "Didomi Renamed", "name field is mutable");
         assert!(matches!(updated.source, McpSource::Manual));
         let spec = updated.api_spec.expect("api_spec set");
@@ -2288,25 +2621,66 @@ mod tests {
             docs_url: Some("https://developers.didomi.io/api".into()),
             auth: ApiAuthKind::None,
             fields: vec![
-                CustomApiField { label: "API Key".into(), value: "".into() },
-                CustomApiField { label: "API Secret".into(), value: "".into() },
+                CustomApiField {
+                    label: "API Key".into(),
+                    value: "".into(),
+                },
+                CustomApiField {
+                    label: "API Secret".into(),
+                    value: "".into(),
+                },
             ],
             endpoints: vec![
-                ApiEndpoint { path: "/sessions".into(), method: "POST".into(), description: "Auth".into() },
-                ApiEndpoint { path: "/organizations".into(), method: "GET".into(), description: "Orgs".into() },
-                ApiEndpoint { path: "/widgets/notices".into(), method: "GET".into(), description: "Notices".into() },
-                ApiEndpoint { path: "/widgets/notices/configs".into(), method: "GET".into(), description: "Notice configs".into() },
-                ApiEndpoint { path: "/vendors".into(), method: "GET".into(), description: "Vendors".into() },
-                ApiEndpoint { path: "/cookies".into(), method: "GET".into(), description: "Cookies".into() },
-                ApiEndpoint { path: "/consents/users".into(), method: "GET".into(), description: "User lookup".into() },
-                ApiEndpoint { path: "/consents/events".into(), method: "GET".into(), description: "Consent events".into() },
+                ApiEndpoint {
+                    path: "/sessions".into(),
+                    method: "POST".into(),
+                    description: "Auth".into(),
+                },
+                ApiEndpoint {
+                    path: "/organizations".into(),
+                    method: "GET".into(),
+                    description: "Orgs".into(),
+                },
+                ApiEndpoint {
+                    path: "/widgets/notices".into(),
+                    method: "GET".into(),
+                    description: "Notices".into(),
+                },
+                ApiEndpoint {
+                    path: "/widgets/notices/configs".into(),
+                    method: "GET".into(),
+                    description: "Notice configs".into(),
+                },
+                ApiEndpoint {
+                    path: "/vendors".into(),
+                    method: "GET".into(),
+                    description: "Vendors".into(),
+                },
+                ApiEndpoint {
+                    path: "/cookies".into(),
+                    method: "GET".into(),
+                    description: "Cookies".into(),
+                },
+                ApiEndpoint {
+                    path: "/consents/users".into(),
+                    method: "GET".into(),
+                    description: "User lookup".into(),
+                },
+                ApiEndpoint {
+                    path: "/consents/events".into(),
+                    method: "GET".into(),
+                    description: "Consent events".into(),
+                },
             ],
         };
         let mut updated = materialize_custom_server(&payload);
-        updated.id = "custom-didomi-27c67bd7".into();  // stitched from prev
+        updated.id = "custom-didomi-27c67bd7".into(); // stitched from prev
         let spec = updated.api_spec.expect("api_spec set");
-        assert_eq!(spec.endpoints.len(), 8,
-            "the 8 endpoints proposed by the AI helper must round-trip");
+        assert_eq!(
+            spec.endpoints.len(),
+            8,
+            "the 8 endpoints proposed by the AI helper must round-trip"
+        );
         assert_eq!(spec.endpoints[0].path, "/sessions");
         assert_eq!(spec.endpoints[0].method, "POST");
         assert_eq!(spec.endpoints[7].path, "/consents/events");
@@ -2350,12 +2724,15 @@ mod tests {
                 auth: ApiAuthKind::None,
                 docs_url: None,
                 endpoints: vec![],
-                config_keys: env_keys.iter().map(|k| ApiConfigKey {
-                    env_key: k.to_string(),
-                    label: k.to_string(),
-                    placeholder: String::new(),
-                    description: String::new(),
-                }).collect(),
+                config_keys: env_keys
+                    .iter()
+                    .map(|k| ApiConfigKey {
+                        env_key: k.to_string(),
+                        label: k.to_string(),
+                        placeholder: String::new(),
+                        description: String::new(),
+                    })
+                    .collect(),
             }),
         }
     }
@@ -2366,7 +2743,13 @@ mod tests {
             base_url: "https://api.example.com".into(),
             description: "".into(),
             docs_url: None,
-            fields: labels.iter().map(|l| CustomApiField { label: l.to_string(), value: String::new() }).collect(),
+            fields: labels
+                .iter()
+                .map(|l| CustomApiField {
+                    label: l.to_string(),
+                    value: String::new(),
+                })
+                .collect(),
             endpoints: vec![],
             auth: ApiAuthKind::None,
         }
@@ -2423,11 +2806,14 @@ mod tests {
         )];
         let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
         // Sorted alpha (BTreeSet ordering).
-        assert_eq!(orphans, vec![
-            "ALPHA_KEY".to_string(),
-            "BETA_KEY".to_string(),
-            "GAMMA_KEY".to_string(),
-        ]);
+        assert_eq!(
+            orphans,
+            vec![
+                "ALPHA_KEY".to_string(),
+                "BETA_KEY".to_string(),
+                "GAMMA_KEY".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -2437,9 +2823,7 @@ mod tests {
         // Two configs: one for our server, one for a different server.
         // The other-server config has the same orphan key name — must
         // be ignored (not our problem).
-        let configs = vec![
-            mk_cfg_display("cfg-other", "custom-y-other", &["API_KEY"]),
-        ];
+        let configs = vec![mk_cfg_display("cfg-other", "custom-y-other", &["API_KEY"])];
         let orphans = compute_orphan_env_keys(&prev, &payload, &configs, "custom-x-abc");
         assert!(orphans.is_empty(), "got: {orphans:?}");
     }
@@ -2463,11 +2847,13 @@ mod tests {
         // helper MUST emit fields with empty `value` regardless of any
         // stored env state — credentials never travel inside the file.
         let server = mk_prev_server("custom-test-aaa11111", &["API_KEY"]);
-        let exported = build_custom_plugin_export(&server)
-            .expect("custom plugin must export");
+        let exported = build_custom_plugin_export(&server).expect("custom plugin must export");
         assert_eq!(exported.fields.len(), 1);
         assert_eq!(exported.fields[0].label, "API_KEY");
-        assert_eq!(exported.fields[0].value, "", "value MUST be empty in export");
+        assert_eq!(
+            exported.fields[0].value, "",
+            "value MUST be empty in export"
+        );
     }
 
     #[test]

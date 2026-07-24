@@ -40,7 +40,10 @@ pub struct ExtractionOutcome {
 /// `NodeList`; we unwrap size-1 results because downstream steps and
 /// templates ("{{steps.X.data}}") are vastly easier to read when the
 /// user gets the scalar they asked for, not a one-element array.
-pub fn apply_extract(spec: &ExtractSpec, response: &Value) -> Result<ExtractionOutcome, ExtractError> {
+pub fn apply_extract(
+    spec: &ExtractSpec,
+    response: &Value,
+) -> Result<ExtractionOutcome, ExtractError> {
     let path = JsonPath::parse(&spec.path).map_err(|e| ExtractError::InvalidPath {
         path: spec.path.clone(),
         reason: e.to_string(),
@@ -50,7 +53,10 @@ pub fn apply_extract(spec: &ExtractSpec, response: &Value) -> Result<ExtractionO
 
     if values.is_empty() {
         let value = spec.fallback.clone().unwrap_or(Value::Null);
-        return Ok(ExtractionOutcome { value, is_empty: true });
+        return Ok(ExtractionOutcome {
+            value,
+            is_empty: true,
+        });
     }
 
     // Size-1 result: unwrap. `$.total` → `42`, not `[42]`. The fallback
@@ -63,7 +69,10 @@ pub fn apply_extract(spec: &ExtractSpec, response: &Value) -> Result<ExtractionO
     }
 
     let collected = Value::Array(values.into_iter().cloned().collect());
-    Ok(ExtractionOutcome { value: collected, is_empty: false })
+    Ok(ExtractionOutcome {
+        value: collected,
+        is_empty: false,
+    })
 }
 
 /// Pagination shapes we can auto-detect from a response body.
@@ -179,7 +188,11 @@ mod tests {
     fn apply_extract_returns_scalar_for_single_match() {
         // User expectation: `$.total` on `{ total: 42 }` returns `42`, not `[42]`.
         // Downstream template `{{steps.X.data}}` should render "42" cleanly.
-        let spec = ExtractSpec { path: "$.total".into(), fallback: None, fail_on_empty: false };
+        let spec = ExtractSpec {
+            path: "$.total".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
         let response = json!({ "total": 42, "issues": [] });
         let out = apply_extract(&spec, &response).unwrap();
         assert_eq!(out.value, json!(42));
@@ -189,7 +202,11 @@ mod tests {
     #[test]
     fn apply_extract_returns_array_for_many_matches() {
         // Canonical fan-out to BatchQuickPrompt: "$.issues[*].key" on 3 issues.
-        let spec = ExtractSpec { path: "$.issues[*].key".into(), fallback: None, fail_on_empty: false };
+        let spec = ExtractSpec {
+            path: "$.issues[*].key".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
         let response = json!({
             "issues": [
                 { "key": "KR-1" },
@@ -217,7 +234,11 @@ mod tests {
 
     #[test]
     fn apply_extract_empty_match_no_fallback_returns_null() {
-        let spec = ExtractSpec { path: "$.foo.bar".into(), fallback: None, fail_on_empty: false };
+        let spec = ExtractSpec {
+            path: "$.foo.bar".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
         let out = apply_extract(&spec, &json!({})).unwrap();
         assert_eq!(out.value, Value::Null);
         assert!(out.is_empty);
@@ -245,7 +266,11 @@ mod tests {
     #[test]
     fn apply_extract_invalid_path_returns_error_not_panic() {
         // The wizard echoes this error verbatim; must not panic.
-        let spec = ExtractSpec { path: "$[**$invalid".into(), fallback: None, fail_on_empty: false };
+        let spec = ExtractSpec {
+            path: "$[**$invalid".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
         let err = apply_extract(&spec, &json!({})).unwrap_err();
         match err {
             ExtractError::InvalidPath { path, reason } => {
@@ -258,7 +283,11 @@ mod tests {
     #[test]
     fn apply_extract_unicode_values_roundtrip_safely() {
         // Kronn users run this in French/ES; JSON paths must not mangle text.
-        let spec = ExtractSpec { path: "$.title".into(), fallback: None, fail_on_empty: false };
+        let spec = ExtractSpec {
+            path: "$.title".into(),
+            fallback: None,
+            fail_on_empty: false,
+        };
         let response = json!({ "title": "Résumé — éco" });
         let out = apply_extract(&spec, &response).unwrap();
         assert_eq!(out.value, json!("Résumé — éco"));

@@ -4240,6 +4240,131 @@ class StableIdentityKeyTests(unittest.TestCase):
         self.assertEqual(len(k), 16)
         self.assertTrue(all(c in "0123456789abcdef" for c in k))
 
+    def test_claude_logical_session_wins_over_process_topology(self):
+        # Claude can route MCP through a long-lived bg-spare whose ancestor is
+        # unrelated to the foreground process.  Its logical session UUID is
+        # the durable boundary and must win over either process tree.
+        sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(10, "spare")):
+            first = self.mod._binding_identity()
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(20, "foreground")):
+            second = self.mod._binding_identity()
+        self.assertEqual(first, ("claude-session", sid))
+        self.assertEqual(first, second)
+        self.assertEqual(
+            self.mod._identity_key_from(first),
+            self.mod._identity_key_from(second),
+        )
+
+    def test_distinct_claude_sessions_never_share_a_binding(self):
+        a = self.mod._identity_key_from(
+            ("claude-session", "baa5dce7-f178-4e7d-b35f-34ee2db6b33d")
+        )
+        b = self.mod._identity_key_from(
+            ("claude-session", "c7648454-7f13-4488-b17c-1b4fb7e32935")
+        )
+        self.assertNotEqual(a, b)
+
+    def test_invalid_claude_session_id_falls_back_to_cli_ancestor(self):
+        ancestor = (4321, "starttok")
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        for value in ("", "not-a-uuid", "baa5dce7f1784e7db35f34ee2db6b33d"):
+            with self.subTest(value=value), \
+                 mock.patch.dict(
+                     self.mod.os.environ,
+                     {"CLAUDE_CODE_SESSION_ID": value},
+                     clear=True,
+                 ), \
+                 mock.patch.object(
+                     self.mod, "_cli_ancestor_identity", return_value=ancestor
+                ):
+                self.assertEqual(self.mod._binding_identity(), ancestor)
+
+    def test_inherited_claude_session_id_is_ignored_for_another_cli(self):
+        sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
+        ancestor = (9876, "codex-start")
+        self.mod._CLIENT_INFO["name"] = "Codex"
+        with mock.patch.dict(
+                 self.mod.os.environ, {"CLAUDE_CODE_SESSION_ID": sid}, clear=True
+             ), \
+             mock.patch.object(
+                 self.mod, "_cli_ancestor_identity", return_value=ancestor
+             ):
+            self.assertEqual(self.mod._binding_identity(), ancestor)
+
+    def test_terminal_project_scope_survives_bg_spare_and_conversation_rotation(self):
+        common = {
+            "TERM_SESSION_ID": "w0t0p0:11111111-1111-1111-1111-111111111111",
+            "CLAUDE_PROJECT_DIR": "/workspace/Kronn",
+        }
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        with mock.patch.dict(
+                 self.mod.os.environ,
+                 {**common, "CLAUDE_CODE_SESSION_ID": "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"},
+                 clear=True,
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(10, "spare")):
+            first = self.mod._binding_identity()
+        with mock.patch.dict(
+                 self.mod.os.environ,
+                 {**common, "CLAUDE_CODE_SESSION_ID": "c7648454-7f13-4488-b17c-1b4fb7e32935"},
+                 clear=True,
+             ), \
+             mock.patch.object(self.mod, "_cli_ancestor_identity", return_value=(20, "foreground")):
+            second = self.mod._binding_identity()
+        self.assertEqual(first, second)
+        self.assertEqual(first[0], "claude-terminal")
+        self.assertEqual(
+            self.mod._identity_key_from(first),
+            self.mod._identity_key_from(second),
+        )
+
+    def test_terminal_scope_isolated_by_terminal_pane_and_project(self):
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+
+        def key(**overrides):
+            env = {
+                "TERM_SESSION_ID": "terminal-a",
+                "TMUX_PANE": "%1",
+                "CLAUDE_PROJECT_DIR": "/workspace/Kronn",
+                **overrides,
+            }
+            with mock.patch.dict(self.mod.os.environ, env, clear=True):
+                return self.mod._identity_key_from(self.mod._binding_identity())
+
+        self.assertEqual(len({
+            key(),
+            key(TERM_SESSION_ID="terminal-b"),
+            key(TMUX_PANE="%2"),
+            key(CLAUDE_PROJECT_DIR="/workspace/Other"),
+        }), 4)
+
+    def test_incomplete_terminal_scope_falls_back_to_logical_session(self):
+        sid = "baa5dce7-f178-4e7d-b35f-34ee2db6b33d"
+        self.mod._CLIENT_INFO["name"] = "ClaudeCode"
+        for env in (
+            {"TERM_SESSION_ID": "terminal-a", "CLAUDE_CODE_SESSION_ID": sid},
+            {"CLAUDE_PROJECT_DIR": "/workspace/Kronn", "CLAUDE_CODE_SESSION_ID": sid},
+            {
+                "TERM_SESSION_ID": " bad ",
+                "CLAUDE_PROJECT_DIR": "/workspace/Kronn",
+                "CLAUDE_CODE_SESSION_ID": sid,
+            },
+        ):
+            with self.subTest(env=env), \
+                 mock.patch.dict(self.mod.os.environ, env, clear=True):
+                self.assertEqual(
+                    self.mod._binding_identity(),
+                    ("claude-session", sid),
+                )
+
     def test_ancestor_walk_returns_outermost_match_not_nearest(self):
         # A reconnect may respawn an intermediate runner whose cmdline also
         # carries the CLI name; the NEAREST match would then rotate on reload.
@@ -4281,6 +4406,16 @@ class ResumeBindingTests(unittest.TestCase):
 
     def _envelope(self, data):
         return {"success": True, "data": data}
+
+    def _resume_responder(self, disc_id, session_pk=7):
+        def respond(method, path, body=None):
+            self.assertEqual((method, path), ("POST", "/api/discussions/peer-resume"))
+            return self._envelope({
+                "disc_id": disc_id,
+                "session_pk": session_pk,
+                "resume_token": body["next_resume_token"],
+            })
+        return respond
 
     def test_binding_roundtrip_is_0600(self):
         import stat
@@ -4348,6 +4483,22 @@ class ResumeBindingTests(unittest.TestCase):
         self.assertTrue(stat.S_ISREG(st.st_mode), "must be a regular file, not a symlink")
         self.assertEqual(stat.S_IMODE(st.st_mode), 0o600)
 
+    def test_binding_lock_refuses_symlink_or_weak_permissions(self):
+        lock_path = f"{self.mod._binding_path()}.lock"
+        target = os.path.join(self._tmp.name, "lock-target")
+        with open(target, "w") as f:
+            f.write("sentinel")
+        os.chmod(target, 0o600)
+        os.symlink(target, lock_path)
+        self.assertIsNone(self.mod._open_binding_lock())
+        self.assertEqual(Path(target).read_text(), "sentinel")
+
+        os.unlink(lock_path)
+        with open(lock_path, "w") as f:
+            f.write("x")
+        os.chmod(lock_path, 0o644)
+        self.assertIsNone(self.mod._open_binding_lock())
+
     def test_no_identity_disables_all_persistence(self):
         # Fail-closed: when no durable identity resolved, `_binding_path` is
         # None → write/read/clear are no-ops and resume never calls the backend.
@@ -4362,17 +4513,17 @@ class ResumeBindingTests(unittest.TestCase):
 
     def test_attempt_resume_success_rebinds_and_rotates(self):
         self.mod._write_binding("d-42", "kr-resume-old")
-        http = mock.MagicMock(return_value=self._envelope(
-            {"disc_id": "d-42", "session_pk": 7, "resume_token": "kr-resume-new"}))
+        http = mock.MagicMock(side_effect=self._resume_responder("d-42"))
         with mock.patch.object(self.mod, "_http", http):
             resumed = self.mod._attempt_resume()
         self.assertEqual(resumed, "d-42")
         self.assertEqual(self.mod._CURRENT_DISC_ID, "d-42")
         # The rotated credential replaced the old one on disk.
-        self.assertEqual(self.mod._read_binding()["resume_token"], "kr-resume-new")
+        body = http.call_args.args[2]
+        self.assertEqual(self.mod._read_binding()["resume_token"], body["next_resume_token"])
+        self.assertNotIn("pending_resume_token", self.mod._read_binding())
         # The request went to peer-resume with the OLD credential.
         method, path = http.call_args.args[0], http.call_args.args[1]
-        body = http.call_args.args[2]
         self.assertEqual((method, path), ("POST", "/api/discussions/peer-resume"))
         self.assertEqual(body["resume_token"], "kr-resume-old")
 
@@ -4396,9 +4547,8 @@ class ResumeBindingTests(unittest.TestCase):
         # reconnect legitimately gives a NEW bridge session id; the resume
         # credential is what re-attaches — _attempt_resume must post the
         # CURRENT (new) session_id and return the SAME room.
-        self.mod._write_binding("d-room", "kr-resume-1")
-        http = mock.MagicMock(return_value=self._envelope(
-            {"disc_id": "d-room", "session_pk": 5, "resume_token": "kr-resume-2"}))
+        self.mod._write_binding("d-room", "kr-resume-1", agent_type="Codex")
+        http = mock.MagicMock(side_effect=self._resume_responder("d-room", 5))
         with mock.patch.object(self.mod, "_session_id_for_caller", return_value="bridge-after-reload"), \
              mock.patch.object(self.mod, "_http", http):
             resumed = self.mod._attempt_resume()
@@ -4412,8 +4562,7 @@ class ResumeBindingTests(unittest.TestCase):
         # The end-to-end reload path: unbound + no env, but a binding exists →
         # `_disc_id()` transparently re-attaches instead of raising.
         self.mod._write_binding("d-99", "kr-resume-x")
-        http = mock.MagicMock(return_value=self._envelope(
-            {"disc_id": "d-99", "session_pk": 3, "resume_token": "kr-resume-y"}))
+        http = mock.MagicMock(side_effect=self._resume_responder("d-99", 3))
         with mock.patch.dict(os.environ, {}, clear=True), \
              mock.patch.object(self.mod, "_http", http):
             self.assertEqual(self.mod._disc_id(), "d-99")
@@ -4432,11 +4581,126 @@ class ResumeBindingTests(unittest.TestCase):
             returned = self.mod.call_disc_join({"token": "kr-join-abc"})
         self.assertEqual(self.mod._CURRENT_DISC_ID, "d-join")
         # Credential persisted 0600…
-        self.assertEqual(self.mod._read_binding(),
-                         {"disc_id": "d-join", "resume_token": "kr-resume-j"})
+        binding = self.mod._read_binding()
+        self.assertEqual(binding["disc_id"], "d-join")
+        self.assertEqual(binding["resume_token"], "kr-resume-j")
+        self.assertEqual(binding["agent_type"], http.call_args.args[2]["agent_type"])
         # …but stripped from the value handed to the model.
         self.assertNotIn("resume_token", returned,
                          "the resume credential must never reach the model context")
+
+    def test_response_loss_retries_the_exact_durable_successor(self):
+        import urllib.error
+        self.mod._write_binding("d-loss", "kr-resume-old", agent_type="Codex")
+        bodies = []
+
+        def lost_then_replayed(method, path, body=None):
+            bodies.append(dict(body))
+            if len(bodies) == 1:
+                # Model the transport dying after the backend committed.
+                raise urllib.error.URLError("response lost after commit")
+            return self._envelope({
+                "disc_id": "d-loss",
+                "session_pk": 9,
+                "resume_token": body["next_resume_token"],
+            })
+
+        with mock.patch.object(self.mod, "_http", side_effect=lost_then_replayed):
+            self.assertIsNone(self.mod._attempt_resume())
+            pending = self.mod._read_binding()
+            self.assertEqual(pending["resume_token"], "kr-resume-old")
+            self.assertIn("pending_resume_token", pending)
+            self.assertEqual(self.mod._attempt_resume(), "d-loss")
+
+        self.assertEqual(bodies[0], bodies[1], "retry must replay exact (old,next)")
+        final = self.mod._read_binding()
+        self.assertEqual(final["resume_token"], bodies[0]["next_resume_token"])
+        self.assertNotIn("pending_resume_token", final)
+
+    def test_failed_promotion_keeps_pending_and_next_reload_heals(self):
+        pending = "kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        self.mod._write_binding(
+            "d-write-fail",
+            "kr-resume-old",
+            agent_type="Codex",
+            pending_resume_token=pending,
+        )
+        http = mock.MagicMock(side_effect=self._resume_responder("d-write-fail", 11))
+        real_write = self.mod._write_binding
+        with mock.patch.object(self.mod, "_http", http), \
+             mock.patch.object(self.mod, "_write_binding", return_value=False):
+            self.assertEqual(self.mod._attempt_resume(), "d-write-fail")
+        self.assertEqual(
+            self.mod._read_binding()["pending_resume_token"], pending,
+            "failed promotion must leave the recoverable old+pending state",
+        )
+
+        self.mod._CURRENT_DISC_ID = None
+        with mock.patch.object(self.mod, "_http", http), \
+             mock.patch.object(self.mod, "_write_binding", side_effect=real_write):
+            self.assertEqual(self.mod._attempt_resume(), "d-write-fail")
+        final = self.mod._read_binding()
+        self.assertEqual(final["resume_token"], pending)
+        self.assertNotIn("pending_resume_token", final)
+        self.assertEqual(http.call_args_list[0].args[2], http.call_args_list[1].args[2])
+
+    def test_persisted_agent_type_wins_over_reload_reinference(self):
+        self.mod._write_binding("d-agent", "kr-resume-old", agent_type="Codex")
+        http = mock.MagicMock(side_effect=self._resume_responder("d-agent"))
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._attempt_resume(), "d-agent")
+        self.assertEqual(http.call_args.args[2]["agent_type"], "Codex")
+
+    def test_legacy_binding_does_not_fossilize_failed_agent_inference(self):
+        self.mod._write_binding("d-legacy-agent", "kr-resume-old")
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Unknown"), \
+             mock.patch.object(self.mod, "_http", side_effect=RuntimeError("wrong agent")):
+            self.assertIsNone(self.mod._attempt_resume())
+        pending = self.mod._read_binding()
+        self.assertNotIn("agent_type", pending)
+        self.assertIn("pending_resume_token", pending)
+
+        http = mock.MagicMock(side_effect=self._resume_responder("d-legacy-agent"))
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._attempt_resume(), "d-legacy-agent")
+        self.assertEqual(self.mod._read_binding()["agent_type"], "Codex")
+
+    def test_concurrent_resume_calls_are_serialized(self):
+        import time
+        self.mod._write_binding("d-race", "kr-resume-old", agent_type="Codex")
+        state_lock = self.mod.threading.Lock()
+        in_flight = 0
+        max_in_flight = 0
+
+        def slow_success(method, path, body=None):
+            nonlocal in_flight, max_in_flight
+            with state_lock:
+                in_flight += 1
+                max_in_flight = max(max_in_flight, in_flight)
+            time.sleep(0.03)
+            with state_lock:
+                in_flight -= 1
+            return self._envelope({
+                "disc_id": "d-race",
+                "session_pk": 12,
+                "resume_token": body["next_resume_token"],
+            })
+
+        results = []
+        with mock.patch.object(self.mod, "_http", side_effect=slow_success):
+            threads = [
+                self.mod.threading.Thread(target=lambda: results.append(self.mod._attempt_resume()))
+                for _ in range(2)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=2)
+
+        self.assertEqual(results, ["d-race", "d-race"])
+        self.assertEqual(max_in_flight, 1, "binding transaction lock must serialize HTTP CAS")
 
     def test_disc_append_scopes_presence_to_this_session(self):
         # 0.8.13 — append must carry session_id so the backend heartbeat/clear

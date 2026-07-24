@@ -1,5 +1,3 @@
-use std::convert::Infallible;
-use std::pin::Pin;
 use axum::{
     extract::{Path, Query, State},
     response::sse::{Event, Sse},
@@ -7,6 +5,8 @@ use axum::{
 };
 use chrono::Utc;
 use futures::Stream;
+use std::convert::Infallible;
+use std::pin::Pin;
 use uuid::Uuid;
 
 use crate::models::*;
@@ -51,11 +51,17 @@ pub(crate) fn build_manual_trigger_obj(
     // User vars first so reserved seeds always overwrite below.
     for (name, val) in provided_vars {
         if !is_safe_trigger_var_name(name) {
-            tracing::warn!("Workflow trigger: dropping malformed variable name `{}`", name);
+            tracing::warn!(
+                "Workflow trigger: dropping malformed variable name `{}`",
+                name
+            );
             continue;
         }
         if RESERVED_KEYS.contains(&name.as_str()) {
-            tracing::warn!("Workflow trigger: dropping reserved variable name `{}`", name);
+            tracing::warn!(
+                "Workflow trigger: dropping reserved variable name `{}`",
+                name
+            );
             continue;
         }
         obj.insert(name.clone(), serde_json::Value::String(val.clone()));
@@ -90,7 +96,10 @@ fn validate_artifact_specs(
             return Err("Artifact name cannot be empty.".into());
         }
         if spec.path.trim().is_empty() {
-            return Err(format!("Artifact « {} » : le chemin est obligatoire.", name));
+            return Err(format!(
+                "Artifact « {} » : le chemin est obligatoire.",
+                name
+            ));
         }
         let p = std::path::Path::new(&spec.path);
         if p.is_absolute() {
@@ -164,7 +173,9 @@ fn validate_exec_allowlist(entries: &[String]) -> Result<(), String> {
     for raw in entries {
         let entry = raw.trim();
         if entry.is_empty() {
-            return Err("Exec allowlist : chaque entrée doit être un nom de binaire non vide.".into());
+            return Err(
+                "Exec allowlist : chaque entrée doit être un nom de binaire non vide.".into(),
+            );
         }
         if entry.contains('/') || entry.contains('\\') {
             return Err(format!(
@@ -173,14 +184,11 @@ fn validate_exec_allowlist(entries: &[String]) -> Result<(), String> {
             ));
         }
         if entry.contains("..") {
-            return Err(format!(
-                "Exec allowlist « {} » : « .. » interdit.", entry
-            ));
+            return Err(format!("Exec allowlist « {} » : « .. » interdit.", entry));
         }
         const FORBIDDEN: &[char] = &[
-            ' ', '\t', '\n', '\r',
-            ';', '|', '&', '$', '`', '>', '<', '*', '?', '(', ')', '{', '}', '[', ']',
-            '\'', '"', '\\',
+            ' ', '\t', '\n', '\r', ';', '|', '&', '$', '`', '>', '<', '*', '?', '(', ')', '{', '}',
+            '[', ']', '\'', '"', '\\',
         ];
         if entry.chars().any(|c| FORBIDDEN.contains(&c)) {
             return Err(format!(
@@ -248,10 +256,16 @@ pub(crate) fn validate_launch_variables(
     provided: &std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     for d in declared {
-        let label = if d.label.is_empty() { &d.name } else { &d.label };
+        let label = if d.label.is_empty() {
+            &d.name
+        } else {
+            &d.label
+        };
         let val = provided.get(&d.name).map(|s| s.trim()).unwrap_or("");
         if d.required && val.is_empty() {
-            return Err(format!("Variable « {label} » est obligatoire pour lancer ce workflow."));
+            return Err(format!(
+                "Variable « {label} » est obligatoire pour lancer ce workflow."
+            ));
         }
         if val.is_empty() {
             continue; // optional + empty → nothing to shape-check
@@ -266,7 +280,9 @@ pub(crate) fn validate_launch_variables(
                 Ok(_) => {}
                 Err(e) => tracing::warn!(
                     "Variable '{}' has an invalid pattern '{}' ({}); skipping shape check",
-                    d.name, pat, e
+                    d.name,
+                    pat,
+                    e
                 ),
             }
         }
@@ -361,7 +377,10 @@ pub(crate) fn validate_sub_workflow_graph(
                 format!("Le sous-workflow référencé « {target} » est introuvable (supprimé ? id erroné ?).")
             })?;
             // MVP: no Gate inside a sub-workflow (can't resume a nested gate).
-            if child_steps.iter().any(|s| matches!(s.step_type, StepType::Gate)) {
+            if child_steps
+                .iter()
+                .any(|s| matches!(s.step_type, StepType::Gate))
+            {
                 return Err(format!(
                     "Le sous-workflow « {target} » contient une étape Gate — interdit en sous-workflow (un gate imbriqué n'est pas encore reprenable). Retire le Gate du sous-workflow ou ne l'utilise pas comme sous-workflow.",
                 ));
@@ -384,7 +403,10 @@ async fn validate_sub_workflow_graph_db(
     start_id: &str,
     steps: &[WorkflowStep],
 ) -> Result<(), String> {
-    if !steps.iter().any(|s| matches!(s.step_type, StepType::SubWorkflow)) {
+    if !steps
+        .iter()
+        .any(|s| matches!(s.step_type, StepType::SubWorkflow))
+    {
         return Ok(());
     }
     let all = state
@@ -403,89 +425,108 @@ async fn validate_sub_workflow_graph_db(
 /// intentionally no-ops here — they have dedicated validators
 /// (`validate_exec_steps`, `validate_json_data_steps`).
 fn validate_step_required_fields(s: &WorkflowStep) -> Result<(), String> {
-        match s.step_type {
-            StepType::Agent => {
-                let has_inline = !s.prompt_template.trim().is_empty();
-                let has_qp_ref = s.quick_prompt_id.as_deref()
-                    .map(|v| !v.trim().is_empty())
-                    .unwrap_or(false);
-                if !has_inline && !has_qp_ref {
-                    return Err(format!(
+    match s.step_type {
+        StepType::Agent => {
+            let has_inline = !s.prompt_template.trim().is_empty();
+            let has_qp_ref = s
+                .quick_prompt_id
+                .as_deref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            if !has_inline && !has_qp_ref {
+                return Err(format!(
                         "Step Agent « {} » : `prompt_template` est obligatoire (ou bien lie un Quick Prompt via `quick_prompt_id`).",
                         s.name
                     ));
-                }
             }
-            StepType::ApiCall => validate_api_call_minimum(s, false)?,
-            StepType::BatchApiCall => validate_api_call_minimum(s, true)?,
-            StepType::BatchQuickPrompt => {
-                if s.batch_quick_prompt_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                    return Err(format!(
+        }
+        StepType::ApiCall => validate_api_call_minimum(s, false)?,
+        StepType::BatchApiCall => validate_api_call_minimum(s, true)?,
+        StepType::BatchQuickPrompt => {
+            if s.batch_quick_prompt_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err(format!(
                         "Step BatchQuickPrompt « {} » : `batch_quick_prompt_id` est obligatoire (le QP à fan-out).",
                         s.name
                     ));
-                }
-                if s.batch_items_from.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                    return Err(format!(
+            }
+            if s.batch_items_from
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err(format!(
                         "Step BatchQuickPrompt « {} » : `batch_items_from` est obligatoire (ex. `{{{{steps.fetch.data.items}}}}`).",
                         s.name
                     ));
-                }
             }
-            StepType::Notify => {
-                let cfg = match s.notify_config.as_ref() {
-                    Some(c) => c,
-                    None => return Err(format!(
+        }
+        StepType::Notify => {
+            let cfg = match s.notify_config.as_ref() {
+                Some(c) => c,
+                None => {
+                    return Err(format!(
                         "Step Notify « {} » : `notify_config` est obligatoire (URL + body).",
                         s.name
-                    )),
-                };
-                if cfg.url.trim().is_empty() {
-                    return Err(format!(
-                        "Step Notify « {} » : `notify_config.url` ne peut pas être vide.",
-                        s.name
-                    ));
+                    ))
                 }
+            };
+            if cfg.url.trim().is_empty() {
+                return Err(format!(
+                    "Step Notify « {} » : `notify_config.url` ne peut pas être vide.",
+                    s.name
+                ));
             }
-            StepType::Gate => {
-                // 0.8.6 (#26) — bound the auto-approve countdown. 0
-                // would skip the gate instantly (doesn't pass smell
-                // test) and > 24h is almost always a typo. Refuse at
-                // save time so the user catches it before a run goes
-                // sideways.
-                if let Some(secs) = s.gate_auto_approve_after_secs {
-                    if secs == 0 {
-                        return Err(format!(
+        }
+        StepType::Gate => {
+            // 0.8.6 (#26) — bound the auto-approve countdown. 0
+            // would skip the gate instantly (doesn't pass smell
+            // test) and > 24h is almost always a typo. Refuse at
+            // save time so the user catches it before a run goes
+            // sideways.
+            if let Some(secs) = s.gate_auto_approve_after_secs {
+                if secs == 0 {
+                    return Err(format!(
                             "Step Gate « {} » : `gate_auto_approve_after_secs` doit être > 0 (un 0 reviendrait à supprimer la gate).",
                             s.name
                         ));
-                    }
-                    if secs > 86400 {
-                        return Err(format!(
+                }
+                if secs > 86400 {
+                    return Err(format!(
                             "Step Gate « {} » : `gate_auto_approve_after_secs` ne peut pas dépasser 86400s (24h). Reçu : {}s.",
                             s.name, secs
                         ));
-                    }
                 }
             }
-            StepType::SubWorkflow => {
-                // 2026-06-11 Phase 1 — a SubWorkflow step MUST name a target.
-                // Existence + cycle + depth + "no Gate inside" are checked by
-                // the dedicated graph validator (validate_sub_workflow_graph,
-                // which needs DB access); here we only enforce the field is
-                // present (mirrors the unwired-API check).
-                if s.sub_workflow_id.as_deref().map(str::trim).unwrap_or("").is_empty() {
-                    return Err(format!(
+        }
+        StepType::SubWorkflow => {
+            // 2026-06-11 Phase 1 — a SubWorkflow step MUST name a target.
+            // Existence + cycle + depth + "no Gate inside" are checked by
+            // the dedicated graph validator (validate_sub_workflow_graph,
+            // which needs DB access); here we only enforce the field is
+            // present (mirrors the unwired-API check).
+            if s.sub_workflow_id
+                .as_deref()
+                .map(str::trim)
+                .unwrap_or("")
+                .is_empty()
+            {
+                return Err(format!(
                         "Step SubWorkflow « {} » : `sub_workflow_id` est requis (choisis le workflow enfant à lancer).",
                         s.name
                     ));
-                }
             }
-            // Other variants have their own dedicated validators:
-            //   Exec       → validate_exec_steps
-            //   JsonData   → validate_json_data_steps
-            StepType::Exec | StepType::JsonData => {}
         }
+        // Other variants have their own dedicated validators:
+        //   Exec       → validate_exec_steps
+        //   JsonData   → validate_json_data_steps
+        StepType::Exec | StepType::JsonData => {}
+    }
     Ok(())
 }
 
@@ -506,7 +547,10 @@ pub(crate) fn count_misconfigured_steps(steps: &[WorkflowStep]) -> u32 {
 /// `batch_items_from` requirement on top of the shared API minimum.
 fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), String> {
     let kind = if is_batch { "BatchApiCall" } else { "ApiCall" };
-    let has_qa_ref = s.quick_api_id.as_deref().map(str::trim)
+    let has_qa_ref = s
+        .quick_api_id
+        .as_deref()
+        .map(str::trim)
         .map(|v| !v.is_empty())
         .unwrap_or(false);
     // A saved Quick API reference carries endpoint + plugin + config and is
@@ -515,13 +559,21 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
     // per-field override pattern as Agent's `quick_prompt_id`. A QA is also
     // runnable standalone, so demanding `api_endpoint_path` here was wrong.
     if !has_qa_ref {
-        if s.api_endpoint_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        if s.api_endpoint_path
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
             return Err(format!(
                 "Step {} « {} » : `api_endpoint_path` est obligatoire (ex. `/rest/api/3/issue/{{{{issue_key}}}}`).",
                 kind, s.name
             ));
         }
-        let has_plugin = s.api_plugin_slug.as_deref().map(str::trim)
+        let has_plugin = s
+            .api_plugin_slug
+            .as_deref()
+            .map(str::trim)
             .map(|v| !v.is_empty())
             .unwrap_or(false);
         if !has_plugin {
@@ -531,7 +583,13 @@ fn validate_api_call_minimum(s: &WorkflowStep, is_batch: bool) -> Result<(), Str
             ));
         }
     }
-    if is_batch && s.batch_items_from.as_deref().map(str::trim).unwrap_or("").is_empty() {
+    if is_batch
+        && s.batch_items_from
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+    {
         return Err(format!(
             "Step BatchApiCall « {} » : `batch_items_from` est obligatoire (la source d'items à itérer).",
             s.name
@@ -562,10 +620,12 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
         }
         let cmd = match s.exec_command.as_deref().map(str::trim) {
             Some(c) if !c.is_empty() => c,
-            _ => return Err(format!(
-                "Step Exec « {} » : `exec_command` est obligatoire (le binaire à exécuter).",
-                s.name
-            )),
+            _ => {
+                return Err(format!(
+                    "Step Exec « {} » : `exec_command` est obligatoire (le binaire à exécuter).",
+                    s.name
+                ))
+            }
         };
         // Apply allowlist-entry rules to the command itself — same
         // character-level discipline (rejects `bash -c`, `npm; rm`, etc.).
@@ -581,13 +641,17 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
         if !allowlist.iter().any(|a| a == cmd) {
             return Err(format!(
                 "Step Exec « {} » : binaire `{}` absent de l'allowlist. Allowlist actuelle : [{}].",
-                s.name, cmd, allowlist.join(", ")
+                s.name,
+                cmd,
+                allowlist.join(", ")
             ));
         }
         if s.exec_args.len() > MAX_ARGS {
             return Err(format!(
                 "Step Exec « {} » : trop d'arguments ({}, max {}).",
-                s.name, s.exec_args.len(), MAX_ARGS
+                s.name,
+                s.exec_args.len(),
+                MAX_ARGS
             ));
         }
         // 0.8.2 — Catch the "bash + multi-word arg" foot-gun. A user who
@@ -600,7 +664,8 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
         let is_shell = matches!(cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
         if is_shell && !s.exec_args.is_empty() {
             let first = &s.exec_args[0];
-            let looks_like_oneliner = first.contains(' ') || first.contains(';') || first.contains('|');
+            let looks_like_oneliner =
+                first.contains(' ') || first.contains(';') || first.contains('|');
             if looks_like_oneliner && first != "-c" {
                 return Err(format!(
                     "Step Exec « {step} » : commande `{shell}` avec un argument multi-mots `{arg}` — \
@@ -619,7 +684,12 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
         // 0.8.2 — Validate `exec_setup_command` (worktree dep install)
         // through the same gate as the main command: allowlist + path
         // separator + shell-multi-word.
-        if let Some(setup_cmd) = s.exec_setup_command.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
+        if let Some(setup_cmd) = s
+            .exec_setup_command
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
             if let Err(e) = validate_exec_allowlist(&[setup_cmd.to_string()]) {
                 return Err(format!("Step Exec « {} » setup : {}", s.name, e));
             }
@@ -632,13 +702,16 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
             if s.exec_setup_args.len() > MAX_ARGS {
                 return Err(format!(
                     "Step Exec « {} » setup : trop d'arguments ({}, max {}).",
-                    s.name, s.exec_setup_args.len(), MAX_ARGS
+                    s.name,
+                    s.exec_setup_args.len(),
+                    MAX_ARGS
                 ));
             }
             let setup_is_shell = matches!(setup_cmd, "bash" | "sh" | "zsh" | "dash" | "fish");
             if setup_is_shell && !s.exec_setup_args.is_empty() {
                 let first = &s.exec_setup_args[0];
-                let looks_like_oneliner = first.contains(' ') || first.contains(';') || first.contains('|');
+                let looks_like_oneliner =
+                    first.contains(' ') || first.contains(';') || first.contains('|');
                 if looks_like_oneliner && first != "-c" {
                     return Err(format!(
                         "Step Exec « {} » setup : `{}` avec argument multi-mots `{}` — utilise `bash` + `[\"-c\", \"<commande>\"]`.",
@@ -660,51 +733,58 @@ fn validate_exec_steps(steps: &[WorkflowStep], allowlist: &[String]) -> Result<(
 }
 
 /// GET /api/workflows
-pub async fn list(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
-    match state.db.with_conn(|conn| {
-        let workflows = crate::db::workflows::list_workflows(conn)?;
-        // Batch-load last runs and project names (avoids N+1 queries)
-        let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
-        let project_names = crate::db::projects::get_project_names(conn)?;
+pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<WorkflowSummary>>> {
+    match state
+        .db
+        .with_conn(|conn| {
+            let workflows = crate::db::workflows::list_workflows(conn)?;
+            // Batch-load last runs and project names (avoids N+1 queries)
+            let last_runs = crate::db::workflows::get_last_runs_all(conn)?;
+            let project_names = crate::db::projects::get_project_names(conn)?;
 
-        let summaries = workflows.into_iter().map(|wf| {
-            let last_run = last_runs.get(&wf.id)
-                .map(|r| WorkflowRunSummary {
-                    id: r.id.clone(),
-                    status: r.status.clone(),
-                    started_at: r.started_at,
-                    finished_at: r.finished_at,
-                    tokens_used: r.tokens_used,
-                });
+            let summaries = workflows
+                .into_iter()
+                .map(|wf| {
+                    let last_run = last_runs.get(&wf.id).map(|r| WorkflowRunSummary {
+                        id: r.id.clone(),
+                        status: r.status.clone(),
+                        started_at: r.started_at,
+                        finished_at: r.finished_at,
+                        tokens_used: r.tokens_used,
+                    });
 
-            let project_name = wf.project_id.as_ref()
-                .and_then(|pid| project_names.get(pid).cloned());
+                    let project_name = wf
+                        .project_id
+                        .as_ref()
+                        .and_then(|pid| project_names.get(pid).cloned());
 
-            let trigger_type = match &wf.trigger {
-                WorkflowTrigger::Cron { .. } => "cron",
-                WorkflowTrigger::Tracker { .. } => "tracker",
-                WorkflowTrigger::Manual => "manual",
-            }.to_string();
+                    let trigger_type = match &wf.trigger {
+                        WorkflowTrigger::Cron { .. } => "cron",
+                        WorkflowTrigger::Tracker { .. } => "tracker",
+                        WorkflowTrigger::Manual => "manual",
+                    }
+                    .to_string();
 
-            WorkflowSummary {
-                id: wf.id,
-                name: wf.name,
-                project_id: wf.project_id,
-                project_name,
-                trigger_type,
-                step_count: wf.steps.len() as u32,
-                misconfigured_step_count: count_misconfigured_steps(&wf.steps),
-                enabled: wf.enabled,
-                pinned: wf.pinned,
-                last_run,
-                created_at: wf.created_at,
-            }
-        }).collect();
+                    WorkflowSummary {
+                        id: wf.id,
+                        name: wf.name,
+                        project_id: wf.project_id,
+                        project_name,
+                        trigger_type,
+                        step_count: wf.steps.len() as u32,
+                        misconfigured_step_count: count_misconfigured_steps(&wf.steps),
+                        enabled: wf.enabled,
+                        pinned: wf.pinned,
+                        last_run,
+                        created_at: wf.created_at,
+                    }
+                })
+                .collect();
 
-        Ok(summaries)
-    }).await {
+            Ok(summaries)
+        })
+        .await
+    {
         Ok(summaries) => Json(ApiResponse::ok(summaries)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -715,9 +795,16 @@ pub async fn get(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Workflow>> {
-    match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &id))
+        .await
+    {
         Ok(Some(wf)) => Json(ApiResponse::ok(wf)),
-        Ok(None) => Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Workflow not found",
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -731,13 +818,19 @@ pub async fn create(
         return Json(ApiResponse::err("Workflow must have at least one step"));
     }
     if req.steps.len() > 20 {
-        return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", req.steps.len())));
+        return Json(ApiResponse::err(format!(
+            "Too many steps ({}, max 20)",
+            req.steps.len()
+        )));
     }
     if req.name.len() > 200 {
         return Json(ApiResponse::err("Workflow name too long (max 200 chars)"));
     }
     if let Err(errors) = crate::workflows::template::validate_step_references(&req.steps) {
-        return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
+        return Json(ApiResponse::err(format!(
+            "Références d'étapes invalides :\n- {}",
+            errors.join("\n- ")
+        )));
     }
 
     if let Some(ref guards) = req.guards {
@@ -817,7 +910,11 @@ pub async fn create(
     };
 
     let w = wf.clone();
-    match state.db.with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::insert_workflow(conn, &w))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(wf)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -836,19 +933,25 @@ pub async fn list_agent_decisions(
     let result = match (params.run_id.as_deref(), params.project_id.as_deref()) {
         (Some(run_id), None) => {
             let run_id = run_id.to_string();
-            state.db.with_conn(move |conn| {
-                crate::db::agent_decisions::list_for_run(conn, &run_id)
-            }).await
+            state
+                .db
+                .with_conn(move |conn| crate::db::agent_decisions::list_for_run(conn, &run_id))
+                .await
         }
         (None, Some(project_id)) => {
             let project_id = project_id.to_string();
-            state.db.with_conn(move |conn| {
-                crate::db::agent_decisions::list_recent_for_project(conn, &project_id, limit)
-            }).await
+            state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::agent_decisions::list_recent_for_project(conn, &project_id, limit)
+                })
+                .await
         }
-        _ => return Json(ApiResponse::err(
-            "Provide exactly one of `run_id` or `project_id` as a query parameter"
-        )),
+        _ => {
+            return Json(ApiResponse::err(
+                "Provide exactly one of `run_id` or `project_id` as a query parameter",
+            ))
+        }
     };
     match result {
         Ok(rows) => Json(ApiResponse::ok(rows)),
@@ -879,14 +982,29 @@ pub async fn create_feasibility_autopilot(
     // Create the CHILD first so the parent's `feasibility_impl` SubWorkflow
     // step references its real id — the child then exists when the parent's
     // sub-workflow-graph validation runs in `create()`.
-    let agent = params.agent.clone().unwrap_or(crate::models::AgentType::ClaudeCode);
-    let ticket_ref = params.ticket_ref.clone().unwrap_or_else(|| "{{ticket_ref}}".into());
+    let agent = params
+        .agent
+        .clone()
+        .unwrap_or(crate::models::AgentType::ClaudeCode);
+    let ticket_ref = params
+        .ticket_ref
+        .clone()
+        .unwrap_or_else(|| "{{ticket_ref}}".into());
     let project_id = params.project_id.clone();
     let parent_name = params.name.clone().unwrap_or_else(|| {
-        format!("Big-ticket AutoPilot ({})", params.ticket_ref.clone().unwrap_or_else(|| "manual".into()))
+        format!(
+            "Big-ticket AutoPilot ({})",
+            params.ticket_ref.clone().unwrap_or_else(|| "manual".into())
+        )
     });
 
-    let child_req = tpl::build_feasibility_child(agent, &ticket_ref, project_id, &parent_name, params.decomposed);
+    let child_req = tpl::build_feasibility_child(
+        agent,
+        &ticket_ref,
+        project_id,
+        &parent_name,
+        params.decomposed,
+    );
     let child_resp = create(State(state.clone()), Json(child_req)).await;
     let child = match child_resp.0.data {
         Some(w) => w,
@@ -910,18 +1028,33 @@ pub async fn update(
     Json(req): Json<UpdateWorkflowRequest>,
 ) -> Json<ApiResponse<Workflow>> {
     let wf_id = id.clone();
-    let existing = match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id)).await {
+    let existing = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
         Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     if let Some(ref steps) = req.steps {
         if steps.len() > 20 {
-            return Json(ApiResponse::err(format!("Too many steps ({}, max 20)", steps.len())));
+            return Json(ApiResponse::err(format!(
+                "Too many steps ({}, max 20)",
+                steps.len()
+            )));
         }
         if let Err(errors) = crate::workflows::template::validate_step_references(steps) {
-            return Json(ApiResponse::err(format!("Références d'étapes invalides :\n- {}", errors.join("\n- "))));
+            return Json(ApiResponse::err(format!(
+                "Références d'étapes invalides :\n- {}",
+                errors.join("\n- ")
+            )));
         }
     }
     if let Some(ref name) = req.name {
@@ -960,7 +1093,10 @@ pub async fn update(
 
     // Validate Exec steps against the EFFECTIVE allowlist (the patch's
     // allowlist if provided, else the existing one).
-    let effective_allowlist = req.exec_allowlist.as_ref().unwrap_or(&existing.exec_allowlist);
+    let effective_allowlist = req
+        .exec_allowlist
+        .as_ref()
+        .unwrap_or(&existing.exec_allowlist);
     if let Some(ref new_steps) = req.steps {
         if let Err(e) = validate_exec_steps(new_steps, effective_allowlist) {
             return Json(ApiResponse::err(e));
@@ -1010,11 +1146,18 @@ pub async fn update(
     };
 
     let w = updated.clone();
-    match state.db.with_conn(move |conn| crate::db::workflows::update_workflow(conn, &w)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::update_workflow(conn, &w))
+        .await
+    {
         Ok(true) => Json(ApiResponse::ok(updated)),
         // The workflow existed when we loaded it above but was deleted
         // concurrently before the UPDATE landed → 404, not a fake success.
-        Ok(false) => Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
+        Ok(false) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Workflow not found",
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -1024,7 +1167,11 @@ pub async fn delete(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    match state.db.with_conn(move |conn| crate::db::workflows::delete_workflow(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::delete_workflow(conn, &id))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -1046,7 +1193,8 @@ const WORKFLOW_EXPORT_KIND: &str = "kronn.workflow";
 /// SubWorkflow steps. Used to bundle (export) and remap (import) the child
 /// workflow graph. Pure + unit-tested.
 pub(crate) fn sub_workflow_child_ids(steps: &[WorkflowStep]) -> Vec<String> {
-    steps.iter()
+    steps
+        .iter()
         .filter(|s| matches!(s.step_type, StepType::SubWorkflow))
         .filter_map(|s| s.sub_workflow_id.clone())
         .filter(|id| !id.trim().is_empty())
@@ -1061,60 +1209,80 @@ pub async fn export_workflow(
     use axum::response::IntoResponse;
 
     let wf_id = id.clone();
-    let wf = match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id)).await {
+    let wf = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
         Ok(Some(wf)) => wf,
         Ok(None) => return (StatusCode::NOT_FOUND, "Workflow not found").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     // #10 — bundle the transitive SubWorkflow children + every QP referenced
     // by a BatchQuickPrompt step across the whole graph, in ONE DB round-trip.
     // Load all workflows once and BFS in memory (cheap; N_workflows is small).
     let root = wf.clone();
-    let (referenced_workflows, referenced_quick_prompts) = match state.db.with_conn(move |conn| {
-        let all = crate::db::workflows::list_workflows(conn)?;
-        let by_id: std::collections::HashMap<String, Workflow> =
-            all.into_iter().map(|w| (w.id.clone(), w)).collect();
+    let (referenced_workflows, referenced_quick_prompts) = match state
+        .db
+        .with_conn(move |conn| {
+            let all = crate::db::workflows::list_workflows(conn)?;
+            let by_id: std::collections::HashMap<String, Workflow> =
+                all.into_iter().map(|w| (w.id.clone(), w)).collect();
 
-        // BFS over sub_workflow_id refs, excluding the root (and dedup / cycle-safe).
-        let mut bundled: Vec<Workflow> = Vec::new();
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        seen.insert(root.id.clone());
-        let mut queue: std::collections::VecDeque<String> =
-            sub_workflow_child_ids(&root.steps).into_iter().collect();
-        while let Some(cid) = queue.pop_front() {
-            if !seen.insert(cid.clone()) {
-                continue;
+            // BFS over sub_workflow_id refs, excluding the root (and dedup / cycle-safe).
+            let mut bundled: Vec<Workflow> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            seen.insert(root.id.clone());
+            let mut queue: std::collections::VecDeque<String> =
+                sub_workflow_child_ids(&root.steps).into_iter().collect();
+            while let Some(cid) = queue.pop_front() {
+                if !seen.insert(cid.clone()) {
+                    continue;
+                }
+                if let Some(child) = by_id.get(&cid) {
+                    for gc in sub_workflow_child_ids(&child.steps) {
+                        if !seen.contains(&gc) {
+                            queue.push_back(gc);
+                        }
+                    }
+                    bundled.push(child.clone());
+                }
             }
-            if let Some(child) = by_id.get(&cid) {
-                for gc in sub_workflow_child_ids(&child.steps) {
-                    if !seen.contains(&gc) {
-                        queue.push_back(gc);
+
+            // QPs referenced anywhere in the bundle (root + children).
+            let mut qp_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for w in std::iter::once(&root).chain(bundled.iter()) {
+                for s in w.steps.iter().chain(w.on_failure.iter()) {
+                    if let Some(q) = &s.batch_quick_prompt_id {
+                        qp_ids.insert(q.clone());
                     }
                 }
-                bundled.push(child.clone());
             }
-        }
-
-        // QPs referenced anywhere in the bundle (root + children).
-        let mut qp_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for w in std::iter::once(&root).chain(bundled.iter()) {
-            for s in w.steps.iter().chain(w.on_failure.iter()) {
-                if let Some(q) = &s.batch_quick_prompt_id {
-                    qp_ids.insert(q.clone());
+            let mut qps = Vec::with_capacity(qp_ids.len());
+            for q in &qp_ids {
+                if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, q)? {
+                    qps.push(qp);
                 }
             }
-        }
-        let mut qps = Vec::with_capacity(qp_ids.len());
-        for q in &qp_ids {
-            if let Some(qp) = crate::db::quick_prompts::get_quick_prompt(conn, q)? {
-                qps.push(qp);
-            }
-        }
-        Ok((bundled, qps))
-    }).await {
+            Ok((bundled, qps))
+        })
+        .await
+    {
         Ok(t) => t,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("DB error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     let envelope = WorkflowExportEnvelope {
@@ -1128,23 +1296,41 @@ pub async fn export_workflow(
 
     // Sanitised filename: `<workflow_name>.kronn-workflow.json`. Replace
     // anything outside a-zA-Z0-9_- with `-`.
-    let safe_name: String = wf.name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+    let safe_name: String = wf
+        .name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let filename = format!("{}.kronn-workflow.json", safe_name);
 
     let body = match serde_json::to_string_pretty(&envelope) {
         Ok(s) => s,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("Serialization error: {}", e)).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Serialization error: {}", e),
+            )
+                .into_response()
+        }
     };
 
     (
         [
             (header::CONTENT_TYPE, "application/json".to_string()),
-            (header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", filename)),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{}\"", filename),
+            ),
         ],
         body,
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// Validate one workflow from an import bundle exactly like a fresh create
@@ -1184,7 +1370,9 @@ fn rebind_api_configs(
     project_id: Option<&str>,
 ) {
     for s in steps.iter_mut() {
-        let Some(slug) = s.api_plugin_slug.clone() else { continue };
+        let Some(slug) = s.api_plugin_slug.clone() else {
+            continue;
+        };
         // Current id still valid for this server on this instance → keep it.
         let keep = match s.api_config_id.as_deref() {
             Some(id) => crate::db::mcps::get_config(conn, id)
@@ -1263,7 +1451,8 @@ pub async fn import_workflow(
     // QP remap (source → fresh). The export bundles QPs referenced anywhere in
     // the graph (root + children), so a step pointing to an unbundled QP fails.
     let mut qp_id_remap: std::collections::HashMap<String, String> = Default::default();
-    let mut qps_to_insert: Vec<QuickPrompt> = Vec::with_capacity(envelope.referenced_quick_prompts.len());
+    let mut qps_to_insert: Vec<QuickPrompt> =
+        Vec::with_capacity(envelope.referenced_quick_prompts.len());
     for mut qp in envelope.referenced_quick_prompts {
         let old_id = qp.id.clone();
         let new_id = Uuid::new_v4().to_string();
@@ -1321,8 +1510,12 @@ pub async fn import_workflow(
     let new_ids: std::collections::HashSet<String> = wf_id_remap.values().cloned().collect();
     let db_ids: std::collections::HashSet<String> = match state
         .db
-        .with_conn(|conn| Ok(crate::db::workflows::list_workflows(conn)?
-            .into_iter().map(|w| w.id).collect::<std::collections::HashSet<String>>()))
+        .with_conn(|conn| {
+            Ok(crate::db::workflows::list_workflows(conn)?
+                .into_iter()
+                .map(|w| w.id)
+                .collect::<std::collections::HashSet<String>>())
+        })
         .await
     {
         Ok(s) => s,
@@ -1343,24 +1536,31 @@ pub async fn import_workflow(
     let qps = qps_to_insert;
     let rebind_project = req.project_id.clone();
     let root_id_for_return = root_new_id;
-    match state.db.with_conn(move |conn| {
-        for qp in &qps {
-            crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
-        }
-        let mut root_out: Option<Workflow> = None;
-        for mut w in prepared {
-            // #9 — retarget ApiCall configs to this instance before insert.
-            rebind_api_configs(conn, &mut w.steps, rebind_project.as_deref());
-            rebind_api_configs(conn, &mut w.on_failure, rebind_project.as_deref());
-            crate::db::workflows::insert_workflow(conn, &w)?;
-            if w.id == root_id_for_return {
-                root_out = Some(w);
+    match state
+        .db
+        .with_conn(move |conn| {
+            for qp in &qps {
+                crate::db::quick_prompts::insert_quick_prompt(conn, qp)?;
             }
-        }
-        Ok(root_out)
-    }).await {
+            let mut root_out: Option<Workflow> = None;
+            for mut w in prepared {
+                // #9 — retarget ApiCall configs to this instance before insert.
+                rebind_api_configs(conn, &mut w.steps, rebind_project.as_deref());
+                rebind_api_configs(conn, &mut w.on_failure, rebind_project.as_deref());
+                crate::db::workflows::insert_workflow(conn, &w)?;
+                if w.id == root_id_for_return {
+                    root_out = Some(w);
+                }
+            }
+            Ok(root_out)
+        })
+        .await
+    {
         Ok(Some(w)) => Json(ApiResponse::ok(w)),
-        Ok(None) => Json(ApiResponse::err_coded(ApiErrorCode::Internal, "Import interne : workflow racine introuvable après insertion")),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::Internal,
+            "Import interne : workflow racine introuvable après insertion",
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -1379,7 +1579,11 @@ pub async fn trigger(
     body: Option<Json<TriggerWorkflowRequest>>,
 ) -> Sse<SseStream> {
     let wf_id = id.clone();
-    let wf = match state.db.with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id)).await {
+    let wf = match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_workflow(conn, &wf_id))
+        .await
+    {
         Ok(Some(wf)) => wf,
         Ok(None) => {
             return sse_error("Workflow not found");
@@ -1432,17 +1636,21 @@ pub async fn trigger(
     let r = run.clone();
     let limit = wf.concurrency_limit;
     let wf_id_check = wf.id.clone();
-    match state.db.with_conn(move |conn| {
-        // Single transaction: check + insert atomically
-        if let Some(max) = limit {
-            let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
-            if active >= max {
-                anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
+    match state
+        .db
+        .with_conn(move |conn| {
+            // Single transaction: check + insert atomically
+            if let Some(max) = limit {
+                let active = crate::db::workflows::count_active_runs(conn, &wf_id_check)?;
+                if active >= max {
+                    anyhow::bail!("CONCURRENCY_LIMIT:{}/{}", active, max);
+                }
             }
-        }
-        crate::db::workflows::insert_run(conn, &r)?;
-        Ok(())
-    }).await {
+            crate::db::workflows::insert_run(conn, &r)?;
+            Ok(())
+        })
+        .await
+    {
         Ok(()) => {}
         Err(e) => {
             let msg = e.to_string();
@@ -1469,8 +1677,17 @@ pub async fn trigger(
         drop(cfg);
 
         if let Err(e) = crate::workflows::runner::execute_run(
-            state_for_run, &wf, &mut run_exec, &tokens, &agents, Some(tx), None, None,
-        ).await {
+            state_for_run,
+            &wf,
+            &mut run_exec,
+            &tokens,
+            &agents,
+            Some(tx),
+            None,
+            None,
+        )
+        .await
+        {
             tracing::error!("Workflow run {} failed: {}", run_exec.id, e);
         }
     });
@@ -1528,9 +1745,9 @@ fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
     let msg = msg.into();
     let stream: SseStream = Box::pin(futures::stream::once(async move {
         Ok::<_, Infallible>(
-            Event::default().event("error").data(
-                serde_json::json!({ "error": msg }).to_string()
-            )
+            Event::default()
+                .event("error")
+                .data(serde_json::json!({ "error": msg }).to_string()),
         )
     }));
     Sse::new(stream)
@@ -1699,9 +1916,11 @@ pub async fn test_batch_step(
 
     // 4. Load the Quick Prompt.
     let qp_lookup = qp_id.clone();
-    let qp = match state.db.with_conn(move |conn| {
-        crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup)
-    }).await {
+    let qp = match state
+        .db
+        .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_lookup))
+        .await
+    {
         Ok(Some(q)) => Some(q),
         Ok(None) => {
             errors.push(format!("Quick prompt '{}' not found", qp_id));
@@ -1714,34 +1933,37 @@ pub async fn test_batch_step(
     };
 
     // 5. Worktree safety check (same as runtime).
-    let workspace_mode = req.step.batch_workspace_mode
+    let workspace_mode = req
+        .step
+        .batch_workspace_mode
         .clone()
         .unwrap_or_else(|| "Direct".to_string());
-    if workspace_mode == "Isolated"
-        && qp.as_ref().map(|q| q.project_id.is_none()).unwrap_or(false)
+    if workspace_mode == "Isolated" && qp.as_ref().map(|q| q.project_id.is_none()).unwrap_or(false)
     {
-        errors.push(
-            "Isolated workspace mode requires a project-linked Quick Prompt"
-                .to_string()
-        );
+        errors.push("Isolated workspace mode requires a project-linked Quick Prompt".to_string());
     }
 
     // 6. Render every sample item's prompt for the user to spot-check.
     //    Was rendering only the first item — but Marie wants to see the
     //    rendering for each ticket of her batch, not just one (otherwise
     //    she can't catch per-ticket template surprises).
-    let first_variable_name = qp.as_ref()
+    let first_variable_name = qp
+        .as_ref()
         .and_then(|q| q.variables.first())
         .map(|v| v.name.clone());
     const SAMPLE_LIMIT: usize = 10;
     let sample_rendered_prompts: Vec<String> = if let Some(qp) = &qp {
-        items.iter().take(SAMPLE_LIMIT).map(|item| {
-            crate::workflows::batch_step::render_qp_prompt_for_test(
-                &qp.prompt_template,
-                first_variable_name.as_deref(),
-                item,
-            )
-        }).collect()
+        items
+            .iter()
+            .take(SAMPLE_LIMIT)
+            .map(|item| {
+                crate::workflows::batch_step::render_qp_prompt_for_test(
+                    &qp.prompt_template,
+                    first_variable_name.as_deref(),
+                    item,
+                )
+            })
+            .collect()
     } else {
         Vec::new()
     };
@@ -1769,7 +1991,10 @@ pub async fn test_batch_step(
         quick_prompt_name: qp.as_ref().map(|q| q.name.clone()),
         quick_prompt_icon: qp.as_ref().map(|q| q.icon.clone()),
         quick_prompt_agent: qp.as_ref().map(|q| {
-            serde_json::to_string(&q.agent).unwrap_or_default().trim_matches('"').to_string()
+            serde_json::to_string(&q.agent)
+                .unwrap_or_default()
+                .trim_matches('"')
+                .to_string()
         }),
         first_variable_name,
         sample_rendered_prompt,
@@ -1795,7 +2020,10 @@ fn empty_preview(step: &WorkflowStep, errors: Vec<String>) -> BatchPreview {
         first_variable_name: None,
         sample_rendered_prompt: None,
         sample_rendered_prompts: Vec::new(),
-        workspace_mode: step.batch_workspace_mode.clone().unwrap_or_else(|| "Direct".into()),
+        workspace_mode: step
+            .batch_workspace_mode
+            .clone()
+            .unwrap_or_else(|| "Direct".into()),
         wait_for_completion: step.batch_wait_for_completion.unwrap_or(true),
         errors,
         warnings: Vec::new(),
@@ -1817,17 +2045,19 @@ pub async fn test_step(
     // production-run prompt content. Symmetric with execute_run.
     let project_path = if let Some(pid) = &req.project_id {
         let id = pid.clone();
-        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+        match state
+            .db
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+            .await
+        {
             Ok(Some(p)) => p.path,
             _ => std::env::temp_dir().to_string_lossy().to_string(),
         }
     } else {
         std::env::temp_dir().to_string_lossy().to_string()
     };
-    let agent_extra_context = crate::api::projects::compute_companion_context(
-        &state,
-        req.project_id.as_deref(),
-    ).await;
+    let agent_extra_context =
+        crate::api::projects::compute_companion_context(&state, req.project_id.as_deref()).await;
     let work_dir = project_path.clone();
 
     // Build template context with mock data
@@ -1867,16 +2097,22 @@ pub async fn test_step(
     //     contract to preserve, so describing the plan is fine.
     let mut step = req.step.clone();
     if req.dry_run {
-        step.prompt_template = format!("{}{}", build_dry_run_preamble(&step.output_format), step.prompt_template);
+        step.prompt_template = format!(
+            "{}{}",
+            build_dry_run_preamble(&step.output_format),
+            step.prompt_template
+        );
     }
     let (tx, mut rx) = tokio::sync::mpsc::channel::<crate::workflows::runner::RunEvent>(64);
 
     tokio::spawn(async move {
-        let _ = tx.send(crate::workflows::runner::RunEvent::StepStart {
-            step_name: step.name.clone(),
-            step_index: 0,
-            total_steps: 1,
-        }).await;
+        let _ = tx
+            .send(crate::workflows::runner::RunEvent::StepStart {
+                step_name: step.name.clone(),
+                step_index: 0,
+                total_steps: 1,
+            })
+            .await;
 
         // Create a progress channel to stream partial output
         let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel::<String>(256);
@@ -1884,24 +2120,35 @@ pub async fn test_step(
         // Forward progress chunks as StepProgress events
         tokio::spawn(async move {
             while let Some(text) = progress_rx.recv().await {
-                let _ = tx_progress.send(crate::workflows::runner::RunEvent::StepProgress {
-                    text,
-                }).await;
+                let _ = tx_progress
+                    .send(crate::workflows::runner::RunEvent::StepProgress { text })
+                    .await;
             }
         });
 
         let outcome = crate::workflows::steps::execute_step(
-            &step, &project_path, &work_dir, &tokens, full_access, &ctx,
-            &agent_extra_context, Some(progress_tx),
+            &step,
+            &project_path,
+            &work_dir,
+            &tokens,
+            full_access,
+            &ctx,
+            &agent_extra_context,
+            Some(progress_tx),
             Some(&model_tiers),
-        ).await;
+        )
+        .await;
 
-        let _ = tx.send(crate::workflows::runner::RunEvent::StepDone {
-            step_result: outcome.result.clone(),
-        }).await;
+        let _ = tx
+            .send(crate::workflows::runner::RunEvent::StepDone {
+                step_result: outcome.result.clone(),
+            })
+            .await;
 
         let status = outcome.result.status.clone();
-        let _ = tx.send(crate::workflows::runner::RunEvent::RunDone { status }).await;
+        let _ = tx
+            .send(crate::workflows::runner::RunEvent::RunDone { status })
+            .await;
     });
 
     let stream: SseStream = Box::pin(async_stream::try_stream! {
@@ -1954,7 +2201,11 @@ pub async fn list_runs(
 ) -> Json<ApiResponse<Vec<WorkflowRun>>> {
     // ADR-001 O2 — heaviest read of the app (full step_results per run):
     // served from the read connection so a busy writer can't freeze it.
-    match state.db.with_read_conn(move |conn| crate::db::workflows::list_runs(conn, &id)).await {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::workflows::list_runs(conn, &id))
+        .await
+    {
         Ok(runs) => Json(ApiResponse::ok(runs)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -1969,7 +2220,11 @@ pub async fn list_runs(
 pub async fn list_batch_run_summaries(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<BatchRunSummary>>> {
-    match state.db.with_conn(crate::db::workflows::list_batch_run_summaries).await {
+    match state
+        .db
+        .with_conn(crate::db::workflows::list_batch_run_summaries)
+        .await
+    {
         Ok(summaries) => Json(ApiResponse::ok(summaries)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -2018,20 +2273,31 @@ pub async fn cancel_run(
     //    delete_batch_run uses). For each disc, trigger its cancel token if one
     //    is registered (i.e. agent still running).
     let run_id_for_db = run_id.clone();
-    let child_disc_ids: Vec<String> = match state.db.with_conn(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT d.id FROM discussions d \
+    let child_disc_ids: Vec<String> = match state
+        .db
+        .with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT d.id FROM discussions d \
              JOIN workflow_runs wr ON d.workflow_run_id = wr.id \
-             WHERE wr.parent_run_id = ?1 OR d.workflow_run_id = ?1"
-        )?;
-        let ids: Vec<String> = stmt
-            .query_map(rusqlite::params![&run_id_for_db], |row| row.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(ids)
-    }).await {
+             WHERE wr.parent_run_id = ?1 OR d.workflow_run_id = ?1",
+            )?;
+            let ids: Vec<String> = stmt
+                .query_map(rusqlite::params![&run_id_for_db], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(ids)
+        })
+        .await
+    {
         Ok(ids) => ids,
-        Err(e) => return Json(ApiResponse::err(format!("DB error finding child discs: {}", e))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "DB error finding child discs: {}",
+                e
+            )))
+        }
     };
 
     let mut never_started: Vec<String> = Vec::new();
@@ -2061,15 +2327,22 @@ pub async fn cancel_run(
     // at spawn, so the race is self-correcting. Best-effort.
     if !never_started.is_empty() {
         let ids = never_started;
-        let _ = state.db.with_conn(move |conn| {
-            for id in &ids {
-                // No `?`: one failed clear must not skip the remaining ids.
-                if let Err(e) = crate::db::discussions::set_awaiting_agent(conn, id, false) {
-                    tracing::warn!("cancel_run: failed to clear awaiting_agent for {}: {}", id, e);
+        let _ = state
+            .db
+            .with_conn(move |conn| {
+                for id in &ids {
+                    // No `?`: one failed clear must not skip the remaining ids.
+                    if let Err(e) = crate::db::discussions::set_awaiting_agent(conn, id, false) {
+                        tracing::warn!(
+                            "cancel_run: failed to clear awaiting_agent for {}: {}",
+                            id,
+                            e
+                        );
+                    }
                 }
-            }
-            Ok(())
-        }).await;
+                Ok(())
+            })
+            .await;
     }
 
     // 3. Force-mark this run AND any Running child batch runs as Cancelled in
@@ -2084,28 +2357,35 @@ pub async fn cancel_run(
     //    We don't touch discussions — they get their Cancelled/Failed status
     //    from the agent-task finally path on their own tokens.
     let run_id_for_db2 = run_id.clone();
-    let forced_statuses = state.db.with_conn(move |conn| {
-        // Pending (inserted, runner not started) and WaitingApproval (gate-
-        // paused, token dropped at pause) runs were UNCANCELLABLE before:
-        // the token no-ops and this UPDATE only matched 'Running'.
-        let parent_n = conn.execute(
-            "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
+    let forced_statuses = state
+        .db
+        .with_conn(move |conn| {
+            // Pending (inserted, runner not started) and WaitingApproval (gate-
+            // paused, token dropped at pause) runs were UNCANCELLABLE before:
+            // the token no-ops and this UPDATE only matched 'Running'.
+            let parent_n = conn.execute(
+                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
              WHERE id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
-            rusqlite::params![&run_id_for_db2],
-        )?;
-        let children_n = conn.execute(
-            "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
+                rusqlite::params![&run_id_for_db2],
+            )?;
+            let children_n = conn.execute(
+                "UPDATE workflow_runs SET status = 'Cancelled', finished_at = datetime('now') \
              WHERE parent_run_id = ?1 AND status IN ('Running', 'Pending', 'WaitingApproval')",
-            rusqlite::params![&run_id_for_db2],
-        )?;
-        Ok((parent_n, children_n))
-    }).await.unwrap_or((0, 0));
+                rusqlite::params![&run_id_for_db2],
+            )?;
+            Ok((parent_n, children_n))
+        })
+        .await
+        .unwrap_or((0, 0));
 
     tracing::info!(
         "Cancel run {}: token_triggered={}, {} child disc agents stopped, \
          parent_forced={}, child_batches_forced={}",
-        run_id, run_cancelled, child_discs_cancelled,
-        forced_statuses.0, forced_statuses.1,
+        run_id,
+        run_cancelled,
+        child_discs_cancelled,
+        forced_statuses.0,
+        forced_statuses.1,
     );
 
     // From the user's point of view, "cancel worked" if either the in-memory
@@ -2164,7 +2444,12 @@ pub async fn decide_run(
         .await
     {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Run not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2199,7 +2484,12 @@ pub async fn decide_run(
         .await
     {
         Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2207,18 +2497,33 @@ pub async fn decide_run(
     // auto-approve timer used to send "Approve" and the strict lowercase
     // match silently rejected it (wrapped in an HTTP 200 envelope).
     let decision = match payload.decision.to_ascii_lowercase().as_str() {
-        "approve" => GateDecision::Approve { comment: payload.comment.clone() },
-        "request_changes" => match payload.comment.as_deref().map(str::trim).filter(|c| !c.is_empty()) {
-            Some(c) => GateDecision::RequestChanges { comment: c.to_string() },
-            None => return Json(ApiResponse::err(
-                "request_changes requires a non-empty `comment`",
-            )),
+        "approve" => GateDecision::Approve {
+            comment: payload.comment.clone(),
         },
-        "reject" => GateDecision::Reject { comment: payload.comment.clone() },
-        other => return Json(ApiResponse::err(format!(
-            "Unknown decision `{}` (expected approve | request_changes | reject)",
-            other
-        ))),
+        "request_changes" => match payload
+            .comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            Some(c) => GateDecision::RequestChanges {
+                comment: c.to_string(),
+            },
+            None => {
+                return Json(ApiResponse::err(
+                    "request_changes requires a non-empty `comment`",
+                ))
+            }
+        },
+        "reject" => GateDecision::Reject {
+            comment: payload.comment.clone(),
+        },
+        other => {
+            return Json(ApiResponse::err(format!(
+                "Unknown decision `{}` (expected approve | request_changes | reject)",
+                other
+            )))
+        }
     };
 
     let new_status = match &decision {
@@ -2235,7 +2540,9 @@ pub async fn decide_run(
     let claim_status = new_status.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status))
+        .with_conn(move |conn| {
+            crate::db::workflows::claim_waiting_run(conn, &claim_run_id, &claim_status)
+        })
         .await
     {
         Ok(true) => {} // we won the claim — proceed
@@ -2260,8 +2567,16 @@ pub async fn decide_run(
         drop(cfg);
         let mut run_mut = run_for_resume;
         if let Err(e) = crate::workflows::runner::resume_run(
-            state_clone.clone(), &workflow, &mut run_mut, decision, &tokens, &agents, None,
-        ).await {
+            state_clone.clone(),
+            &workflow,
+            &mut run_mut,
+            decision,
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        {
             tracing::error!("Resume run {} failed: {}", run_id_for_log, e);
         }
         // A gate-resumed run (human approve or the auto-approve timer) that
@@ -2302,7 +2617,12 @@ pub async fn resume_interrupted(
         .await
     {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Run not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2313,7 +2633,12 @@ pub async fn resume_interrupted(
         .await
     {
         Ok(Some(wf)) => wf,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Workflow not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Workflow not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
@@ -2332,8 +2657,15 @@ pub async fn resume_interrupted(
         let agents = cfg.agents.clone();
         drop(cfg);
         if let Err(e) = crate::workflows::runner::resume_interrupted_run(
-            state_clone.clone(), &workflow, &mut run_mut, &tokens, &agents, None,
-        ).await {
+            state_clone.clone(),
+            &workflow,
+            &mut run_mut,
+            &tokens,
+            &agents,
+            None,
+        )
+        .await
+        {
             tracing::error!("Resume of interrupted run {} failed: {}", run_id_for_log, e);
         }
         // Same unattended-failure contract as the gate resume path.
@@ -2374,21 +2706,26 @@ pub async fn delete_batch_run(
     // then let the DB delete proceed. Best-effort: a registry hiccup must not
     // block the delete. A child's own agent-task finally path handles the rest.
     let run_id_for_discs = run_id.clone();
-    let child_disc_ids: Vec<String> = match state.db.with_conn(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT id FROM discussions WHERE workflow_run_id = ?1",
-        )?;
-        let ids: Vec<String> = stmt
-            .query_map(rusqlite::params![&run_id_for_discs], |row| row.get::<_, String>(0))?
-            .filter_map(|r| r.ok())
-            .collect();
-        Ok(ids)
-    }).await {
+    let child_disc_ids: Vec<String> = match state
+        .db
+        .with_conn(move |conn| {
+            let mut stmt = conn.prepare("SELECT id FROM discussions WHERE workflow_run_id = ?1")?;
+            let ids: Vec<String> = stmt
+                .query_map(rusqlite::params![&run_id_for_discs], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            Ok(ids)
+        })
+        .await
+    {
         Ok(ids) => ids,
         Err(e) => {
             tracing::warn!(
                 "delete_batch_run {}: failed to load child discussions for pre-cancel: {}",
-                run_id, e
+                run_id,
+                e
             );
             Vec::new()
         }
@@ -2409,17 +2746,25 @@ pub async fn delete_batch_run(
         if cancelled > 0 {
             tracing::info!(
                 "delete_batch_run {}: cancelled {} live token(s) before delete",
-                run_id, cancelled,
+                run_id,
+                cancelled,
             );
         }
     } else {
-        tracing::warn!("delete_batch_run {}: cancel registry poisoned — deleting without cancel", run_id);
+        tracing::warn!(
+            "delete_batch_run {}: cancel registry poisoned — deleting without cancel",
+            run_id
+        );
     }
 
     let run_id_for_db = run_id.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::workflows::delete_batch_run_with_discussions(conn, &run_id_for_db)
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::delete_batch_run_with_discussions(conn, &run_id_for_db)
+        })
+        .await
+    {
         Ok(summary) => Json(ApiResponse::ok(DeletedBatchResponse {
             run_id: summary.run_id,
             discussions_deleted: summary.discussions_deleted as u32,
@@ -2433,9 +2778,16 @@ pub async fn get_run(
     State(state): State<AppState>,
     Path((_id, run_id)): Path<(String, String)>,
 ) -> Json<ApiResponse<WorkflowRun>> {
-    match state.db.with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::get_run(conn, &run_id))
+        .await
+    {
         Ok(Some(run)) => Json(ApiResponse::ok(run)),
-        Ok(None) => Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Run not found",
+        )),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
 }
@@ -2445,7 +2797,11 @@ pub async fn delete_all_runs(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<()>> {
-    match state.db.with_conn(move |conn| crate::db::workflows::delete_all_runs(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::delete_all_runs(conn, &id))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -2456,7 +2812,11 @@ pub async fn delete_run(
     State(state): State<AppState>,
     Path((_id, run_id)): Path<(String, String)>,
 ) -> Json<ApiResponse<()>> {
-    match state.db.with_conn(move |conn| crate::db::workflows::delete_run(conn, &run_id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::workflows::delete_run(conn, &run_id))
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(())),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -2500,43 +2860,81 @@ pub async fn test_worktree(
     Path((_id, run_id)): Path<(String, String)>,
     body: Option<Json<TestWorktreeRequest>>,
 ) -> Json<ApiResponse<TestWorktreeResponse>> {
-    let req = body.map(|Json(b)| b).unwrap_or(TestWorktreeRequest { branch_index: None });
+    let req = body
+        .map(|Json(b)| b)
+        .unwrap_or(TestWorktreeRequest { branch_index: None });
     let idx = req.branch_index.unwrap_or(0);
 
     // Load the run + parent workflow to find the project repo path.
-    let run = match state.db.with_conn({
-        let run_id = run_id.clone();
-        move |conn| crate::db::workflows::get_run(conn, &run_id)
-    }).await {
+    let run = match state
+        .db
+        .with_conn({
+            let run_id = run_id.clone();
+            move |conn| crate::db::workflows::get_run(conn, &run_id)
+        })
+        .await
+    {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Run not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     let branch = match run.produced_branches.get(idx) {
         Some(b) => b.clone(),
-        None => return Json(ApiResponse::err(
-            "No produced branch at that index for this run",
-        )),
+        None => {
+            return Json(ApiResponse::err(
+                "No produced branch at that index for this run",
+            ))
+        }
     };
 
-    let workflow = match state.db.with_conn({
-        let wf_id = run.workflow_id.clone();
-        move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
-    }).await {
+    let workflow = match state
+        .db
+        .with_conn({
+            let wf_id = run.workflow_id.clone();
+            move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
+        })
+        .await
+    {
         Ok(Some(w)) => w,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Parent workflow not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Parent workflow not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     let project_path = if let Some(pid) = workflow.project_id.clone() {
-        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+        match state
+            .db
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+            .await
+        {
             Ok(Some(p)) => p.path,
-            Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Project not found for this workflow")),
-            Err(e) => return Json(ApiResponse::err_coded(ApiErrorCode::Internal, format!("DB error: {}", e))),
+            Ok(None) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::NotFound,
+                    "Project not found for this workflow",
+                ))
+            }
+            Err(e) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Internal,
+                    format!("DB error: {}", e),
+                ))
+            }
         }
     } else {
-        return Json(ApiResponse::err("Workflow has no project — cannot create a test worktree"));
+        return Json(ApiResponse::err(
+            "Workflow has no project — cannot create a test worktree",
+        ));
     };
 
     let repo_path = crate::core::scanner::resolve_host_path(&project_path);
@@ -2552,7 +2950,10 @@ pub async fn test_worktree(
     }
 
     if let Err(e) = std::fs::create_dir_all(test_dir.parent().unwrap_or(&test_dir)) {
-        return Json(ApiResponse::err(format!("Failed to create parent dir: {}", e)));
+        return Json(ApiResponse::err(format!(
+            "Failed to create parent dir: {}",
+            e
+        )));
     }
 
     // `git worktree add --detach <path> <sha>` parks the worktree at the
@@ -2574,7 +2975,10 @@ pub async fn test_worktree(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Json(ApiResponse::err(format!("git worktree add failed: {}", stderr)));
+        return Json(ApiResponse::err(format!(
+            "git worktree add failed: {}",
+            stderr
+        )));
     }
 
     Json(ApiResponse::ok(TestWorktreeResponse {
@@ -2593,29 +2997,66 @@ pub async fn delete_test_worktree(
     State(state): State<AppState>,
     Path((_id, run_id)): Path<(String, String)>,
 ) -> Json<ApiResponse<()>> {
-    let run = match state.db.with_conn({
-        let run_id = run_id.clone();
-        move |conn| crate::db::workflows::get_run(conn, &run_id)
-    }).await {
+    let run = match state
+        .db
+        .with_conn({
+            let run_id = run_id.clone();
+            move |conn| crate::db::workflows::get_run(conn, &run_id)
+        })
+        .await
+    {
         Ok(Some(r)) => r,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Run not found")),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Run not found",
+            ))
+        }
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let workflow = match state.db.with_conn({
-        let wf_id = run.workflow_id.clone();
-        move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
-    }).await {
+    let workflow = match state
+        .db
+        .with_conn({
+            let wf_id = run.workflow_id.clone();
+            move |conn| crate::db::workflows::get_workflow(conn, &wf_id)
+        })
+        .await
+    {
         Ok(Some(w)) => w,
-        Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Parent workflow not found")),
-        Err(e) => return Json(ApiResponse::err_coded(ApiErrorCode::Internal, format!("DB error: {}", e))),
+        Ok(None) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Parent workflow not found",
+            ))
+        }
+        Err(e) => {
+            return Json(ApiResponse::err_coded(
+                ApiErrorCode::Internal,
+                format!("DB error: {}", e),
+            ))
+        }
     };
 
     let project_path = if let Some(pid) = workflow.project_id.clone() {
-        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+        match state
+            .db
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+            .await
+        {
             Ok(Some(p)) => p.path,
-            Ok(None) => return Json(ApiResponse::err_coded(ApiErrorCode::NotFound, "Project not found")),
-            Err(e) => return Json(ApiResponse::err_coded(ApiErrorCode::Internal, format!("DB error: {}", e))),
+            Ok(None) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::NotFound,
+                    "Project not found",
+                ))
+            }
+            Err(e) => {
+                return Json(ApiResponse::err_coded(
+                    ApiErrorCode::Internal,
+                    format!("DB error: {}", e),
+                ))
+            }
         }
     } else {
         return Json(ApiResponse::err("Workflow has no project"));
@@ -2636,7 +3077,12 @@ pub async fn delete_test_worktree(
         .await
     {
         Ok(o) => o,
-        Err(e) => return Json(ApiResponse::err(format!("git worktree remove failed: {}", e))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "git worktree remove failed: {}",
+                e
+            )))
+        }
     };
 
     if !output.status.success() {
@@ -2834,12 +3280,17 @@ const CATALOGUE: &[CatalogueEntry] = &[
 /// Normalize MCP server names to catalogue keys.
 /// e.g. "mcp-github" → "github", "mcp-atlassian" → "jira", "Jira" → "jira"
 fn normalize_mcp_name(name: &str) -> String {
-    let n = name.to_lowercase()
+    let n = name
+        .to_lowercase()
         .replace("mcp-", "")
         .replace("server-", "");
     // Known aliases
-    if n.contains("atlassian") { return "jira".to_string(); }
-    if n.contains("cloudwatch") { return "cloudwatch".to_string(); }
+    if n.contains("atlassian") {
+        return "jira".to_string();
+    }
+    if n.contains("cloudwatch") {
+        return "cloudwatch".to_string();
+    }
     n
 }
 
@@ -2851,26 +3302,35 @@ pub async fn suggestions(
     // 1. Ensure the project exists (else no suggestions). We don't need the
     //    row itself anymore — the per-MCP `mcp-servers.md` hints read was
     //    removed with the per-MCP doc auto-gen.
-    match state.db.with_conn({
-        let pid = project_id.clone();
-        move |conn| crate::db::projects::get_project(conn, &pid)
-    }).await {
+    match state
+        .db
+        .with_conn({
+            let pid = project_id.clone();
+            move |conn| crate::db::projects::get_project(conn, &pid)
+        })
+        .await
+    {
         Ok(Some(_)) => {}
         _ => return Json(ApiResponse::ok(vec![])),
     };
 
     // 2. Get MCP configs linked to this project (global + project-specific)
-    let mcp_names: Vec<String> = match state.db.with_conn({
-        let pid = project_id.clone();
-        move |conn| {
-            let configs = crate::db::mcps::list_configs_display(conn, None)?;
-            let names: Vec<String> = configs.into_iter()
-                .filter(|c| c.is_global || c.project_ids.contains(&pid))
-                .map(|c| normalize_mcp_name(&c.server_name))
-                .collect();
-            Ok(names)
-        }
-    }).await {
+    let mcp_names: Vec<String> = match state
+        .db
+        .with_conn({
+            let pid = project_id.clone();
+            move |conn| {
+                let configs = crate::db::mcps::list_configs_display(conn, None)?;
+                let names: Vec<String> = configs
+                    .into_iter()
+                    .filter(|c| c.is_global || c.project_ids.contains(&pid))
+                    .map(|c| normalize_mcp_name(&c.server_name))
+                    .collect();
+                Ok(names)
+            }
+        })
+        .await
+    {
         Ok(n) => n,
         Err(_) => return Json(ApiResponse::ok(vec![])),
     };
@@ -2886,13 +3346,19 @@ pub async fn suggestions(
     // 5. Match catalogue entries against available MCPs
     let mut suggestions = Vec::new();
     for entry in CATALOGUE {
-        let all_present = entry.required_mcps.iter()
+        let all_present = entry
+            .required_mcps
+            .iter()
             .all(|req| mcp_names.iter().any(|m| m.contains(req)));
         if !all_present {
             continue;
         }
 
-        let title = if is_fr { entry.title_fr } else { entry.title_en };
+        let title = if is_fr {
+            entry.title_fr
+        } else {
+            entry.title_en
+        };
         let desc = if is_fr { entry.desc_fr } else { entry.desc_en };
 
         let reason = if is_fr {
@@ -2910,63 +3376,71 @@ pub async fn suggestions(
             audience: entry.audience.to_string(),
             complexity: entry.complexity.to_string(),
             trigger: (entry.trigger)(),
-            steps: entry.step_prompts.iter().map(|(step_name, prompt, structured)| WorkflowStep {
-                name: step_name.to_string(),
-                step_type: StepType::Agent,
-                description: None,
-                agent: AgentType::ClaudeCode,
-                prompt_template: prompt.to_string(),
-                mode: StepMode::Normal,
-                output_format: if *structured { StepOutputFormat::Structured } else { StepOutputFormat::FreeText },
-                on_result: vec![],
-                on_timeout: None,
-                agent_settings: None,
-                stall_timeout_secs: None,
-                retry: None,
-                delay_after_secs: None,
-                mcp_config_ids: vec![],
-                skill_ids: vec![],
-                profile_ids: vec![],
-                directive_ids: vec![],
-                batch_quick_prompt_id: None,
-                batch_items_from: None,
-                batch_wait_for_completion: None,
-                batch_max_items: None,
-                batch_workspace_mode: None,
-                batch_chain_prompt_ids: vec![],
-                batch_concurrent_limit: None,
-                quick_api_id: None,
-                notify_config: None,
-                api_plugin_slug: None,
-                api_config_id: None,
-                api_endpoint_path: None,
-                api_method: None,
-                api_query: None,
-                api_path_params: None,
-                api_headers: None,
-                api_body: None,
-                api_extract: None,
-                api_pagination: None,
-                api_timeout_ms: None,
-                api_max_retries: None,
-                api_output_var: None,
-                gate_message: None,
-                gate_request_changes_target: None,
-                gate_notify_url: None,
-                gate_checkpoint_before: None,
-                gate_auto_approve_after_secs: None,
-                exec_command: None,
-                exec_args: vec![],
-                exec_timeout_secs: None,
-                exec_setup_command: None,
-                exec_setup_args: vec![],
-                exec_stdin: None,
-                quick_prompt_id: None,
-                json_data_payload: None,
-                sub_workflow_id: None,
-                sub_workflow_foreach_file: None,
-                multi_agent_review: None,
-            }).collect(),
+            steps: entry
+                .step_prompts
+                .iter()
+                .map(|(step_name, prompt, structured)| WorkflowStep {
+                    name: step_name.to_string(),
+                    step_type: StepType::Agent,
+                    description: None,
+                    agent: AgentType::ClaudeCode,
+                    prompt_template: prompt.to_string(),
+                    mode: StepMode::Normal,
+                    output_format: if *structured {
+                        StepOutputFormat::Structured
+                    } else {
+                        StepOutputFormat::FreeText
+                    },
+                    on_result: vec![],
+                    on_timeout: None,
+                    agent_settings: None,
+                    stall_timeout_secs: None,
+                    retry: None,
+                    delay_after_secs: None,
+                    mcp_config_ids: vec![],
+                    skill_ids: vec![],
+                    profile_ids: vec![],
+                    directive_ids: vec![],
+                    batch_quick_prompt_id: None,
+                    batch_items_from: None,
+                    batch_wait_for_completion: None,
+                    batch_max_items: None,
+                    batch_workspace_mode: None,
+                    batch_chain_prompt_ids: vec![],
+                    batch_concurrent_limit: None,
+                    quick_api_id: None,
+                    notify_config: None,
+                    api_plugin_slug: None,
+                    api_config_id: None,
+                    api_endpoint_path: None,
+                    api_method: None,
+                    api_query: None,
+                    api_path_params: None,
+                    api_headers: None,
+                    api_body: None,
+                    api_extract: None,
+                    api_pagination: None,
+                    api_timeout_ms: None,
+                    api_max_retries: None,
+                    api_output_var: None,
+                    gate_message: None,
+                    gate_request_changes_target: None,
+                    gate_notify_url: None,
+                    gate_checkpoint_before: None,
+                    gate_auto_approve_after_secs: None,
+                    exec_command: None,
+                    exec_args: vec![],
+                    exec_timeout_secs: None,
+                    exec_setup_command: None,
+                    exec_setup_args: vec![],
+                    exec_stdin: None,
+                    quick_prompt_id: None,
+                    json_data_payload: None,
+                    sub_workflow_id: None,
+                    sub_workflow_foreach_file: None,
+                    multi_agent_review: None,
+                })
+                .collect(),
         });
     }
 
@@ -3153,8 +3627,8 @@ pub async fn test_api_call(
     let envelope: Option<serde_json::Value> = if success {
         crate::workflows::template::extract_step_envelope(&outcome.result.output)
             .map(|e| {
-                let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
-                    .unwrap_or(serde_json::Value::Null);
+                let data_value: serde_json::Value =
+                    serde_json::from_str(&e.data_json).unwrap_or(serde_json::Value::Null);
                 serde_json::json!({
                     "data": data_value,
                     "status": e.status,
@@ -3163,7 +3637,9 @@ pub async fn test_api_call(
             })
             // Last-resort fallback: pre-0.8.5 bare-JSON envelopes.
             .or_else(|| {
-                let json_part = outcome.result.output
+                let json_part = outcome
+                    .result
+                    .output
                     .split("\n[SIGNAL:")
                     .next()
                     .unwrap_or(&outcome.result.output);
@@ -3172,7 +3648,11 @@ pub async fn test_api_call(
     } else {
         None
     };
-    let error = if success { None } else { Some(outcome.result.output) };
+    let error = if success {
+        None
+    } else {
+        Some(outcome.result.output)
+    };
 
     Json(ApiResponse::ok(TestApiCallResponse {
         success,
@@ -3240,10 +3720,19 @@ mod tests {
         assert_eq!(resp.0.data.unwrap().discussions_deleted, 2);
 
         // Every token fired (agents told to stop) and left the registry.
-        assert!(t_run.is_cancelled(), "the run's own token must be cancelled");
-        assert!(t_a.is_cancelled() && t_b.is_cancelled(), "child disc tokens must be cancelled");
+        assert!(
+            t_run.is_cancelled(),
+            "the run's own token must be cancelled"
+        );
+        assert!(
+            t_a.is_cancelled() && t_b.is_cancelled(),
+            "child disc tokens must be cancelled"
+        );
         let map = state.cancel_registry.lock().unwrap();
-        assert!(map.is_empty(), "cancelled tokens must be removed from the registry");
+        assert!(
+            map.is_empty(),
+            "cancelled tokens must be removed from the registry"
+        );
     }
 
     /// Cancelling a batch run directly must (a) cascade to its
@@ -3255,13 +3744,17 @@ mod tests {
     #[tokio::test]
     async fn cancel_run_clears_awaiting_marker_on_unstarted_children() {
         let state = state_with_batch("run-c", &["d-running", "d-queued"]).await;
-        state.db.with_conn(|conn| {
-            conn.execute(
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
                 "UPDATE discussions SET awaiting_agent = 1 WHERE id IN ('d-running', 'd-queued')",
                 [],
             )?;
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
         // Only d-running has a live agent; d-queued sat in the batch queue.
         let t_child;
         {
@@ -3273,22 +3766,39 @@ mod tests {
         let resp = cancel_run(
             State(state.clone()),
             Path(("wf-t2".to_string(), "run-c".to_string())),
-        ).await;
+        )
+        .await;
         assert!(resp.0.success, "cancel must succeed: {:?}", resp.0.error);
         let data = resp.0.data.unwrap();
-        assert!(data.run_cancelled, "the Running row must be force-marked Cancelled");
-        assert_eq!(data.child_discs_cancelled, 1, "only the live child token fires");
+        assert!(
+            data.run_cancelled,
+            "the Running row must be force-marked Cancelled"
+        );
+        assert_eq!(
+            data.child_discs_cancelled, 1,
+            "only the live child token fires"
+        );
         assert!(t_child.is_cancelled());
 
-        let flags: Vec<(String, i64)> = state.db.with_conn(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, awaiting_agent FROM discussions ORDER BY id",
-            )?;
-            let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
-            Ok(rows.filter_map(|r| r.ok()).collect())
-        }).await.unwrap();
-        assert!(flags.contains(&("d-queued".to_string(), 0)), "unstarted child cleared: {flags:?}");
-        assert!(flags.contains(&("d-running".to_string(), 1)), "running child keeps its flag: {flags:?}");
+        let flags: Vec<(String, i64)> = state
+            .db
+            .with_conn(|conn| {
+                let mut stmt =
+                    conn.prepare("SELECT id, awaiting_agent FROM discussions ORDER BY id")?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+                Ok(rows.filter_map(|r| r.ok()).collect())
+            })
+            .await
+            .unwrap();
+        assert!(
+            flags.contains(&("d-queued".to_string(), 0)),
+            "unstarted child cleared: {flags:?}"
+        );
+        assert!(
+            flags.contains(&("d-running".to_string(), 1)),
+            "running child keeps its flag: {flags:?}"
+        );
     }
 
     #[tokio::test]
@@ -3303,14 +3813,26 @@ mod tests {
 
     // ── validate_sub_workflow_graph (2026-06-11 Phase 1) ──
     fn subwf_step(name: &str, target: &str) -> WorkflowStep {
-        WorkflowStep { name: name.into(), step_type: StepType::SubWorkflow,
-            sub_workflow_id: Some(target.into()), ..Default::default() }
+        WorkflowStep {
+            name: name.into(),
+            step_type: StepType::SubWorkflow,
+            sub_workflow_id: Some(target.into()),
+            ..Default::default()
+        }
     }
     fn gate_step(name: &str) -> WorkflowStep {
-        WorkflowStep { name: name.into(), step_type: StepType::Gate, ..Default::default() }
+        WorkflowStep {
+            name: name.into(),
+            step_type: StepType::Gate,
+            ..Default::default()
+        }
     }
     fn agent_step(name: &str) -> WorkflowStep {
-        WorkflowStep { name: name.into(), step_type: StepType::Agent, ..Default::default() }
+        WorkflowStep {
+            name: name.into(),
+            step_type: StepType::Agent,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -3323,35 +3845,49 @@ mod tests {
         assert!(err.contains("Cycle"), "got: {err}");
         // Self-reference too.
         let self_ref = vec![subwf_step("s", "A")];
-        assert!(validate_sub_workflow_graph("A", &self_ref, &g).unwrap_err().contains("Cycle"));
+        assert!(validate_sub_workflow_graph("A", &self_ref, &g)
+            .unwrap_err()
+            .contains("Cycle"));
     }
 
     #[test]
     fn subwf_graph_rejects_overdepth_and_dangling() {
         let mut g = std::collections::HashMap::new();
         // Chain A→B→C→D→E→F = depth 6 > MAX (5).
-        for (id, next) in [("A","B"),("B","C"),("C","D"),("D","E"),("E","F")] {
+        for (id, next) in [("A", "B"), ("B", "C"), ("C", "D"), ("D", "E"), ("E", "F")] {
             g.insert(id.to_string(), vec![subwf_step("s", next)]);
         }
         g.insert("F".to_string(), vec![agent_step("done")]);
-        assert!(validate_sub_workflow_graph("A", &g["A"], &g).unwrap_err().contains("Profondeur"));
+        assert!(validate_sub_workflow_graph("A", &g["A"], &g)
+            .unwrap_err()
+            .contains("Profondeur"));
         // Dangling target.
         let dangling = vec![subwf_step("s", "GHOST")];
-        assert!(validate_sub_workflow_graph("X", &dangling, &g).unwrap_err().contains("introuvable"));
+        assert!(validate_sub_workflow_graph("X", &dangling, &g)
+            .unwrap_err()
+            .contains("introuvable"));
     }
 
     #[test]
     fn subwf_graph_rejects_gate_inside_child() {
         let mut g = std::collections::HashMap::new();
-        g.insert("child".to_string(), vec![agent_step("impl"), gate_step("review")]);
+        g.insert(
+            "child".to_string(),
+            vec![agent_step("impl"), gate_step("review")],
+        );
         let parent = vec![subwf_step("s", "child")];
-        assert!(validate_sub_workflow_graph("parent", &parent, &g).unwrap_err().contains("Gate"));
+        assert!(validate_sub_workflow_graph("parent", &parent, &g)
+            .unwrap_err()
+            .contains("Gate"));
     }
 
     #[test]
     fn subwf_graph_accepts_valid_nesting() {
         let mut g = std::collections::HashMap::new();
-        g.insert("leaf".to_string(), vec![agent_step("impl"), agent_step("tests")]);
+        g.insert(
+            "leaf".to_string(),
+            vec![agent_step("impl"), agent_step("tests")],
+        );
         g.insert("mid".to_string(), vec![subwf_step("s", "leaf")]);
         let parent = vec![agent_step("plan"), subwf_step("s", "mid")];
         assert!(validate_sub_workflow_graph("parent", &parent, &g).is_ok());
@@ -3360,8 +3896,12 @@ mod tests {
     // ── validate_launch_variables (2026-06-10, the `7152` shape bug) ──
     fn var(name: &str, required: bool, pattern: Option<&str>) -> crate::models::PromptVariable {
         crate::models::PromptVariable {
-            name: name.into(), label: String::new(), placeholder: String::new(),
-            description: None, required, pattern: pattern.map(str::to_string),
+            name: name.into(),
+            label: String::new(),
+            placeholder: String::new(),
+            description: None,
+            required,
+            pattern: pattern.map(str::to_string),
         }
     }
 
@@ -3422,7 +3962,10 @@ mod tests {
         };
 
         // ApiCall with no plugin/endpoint AND no quick_api_id → misconfigured.
-        assert_eq!(count_misconfigured_steps(&[api_step.clone(), agent_ok.clone()]), 1);
+        assert_eq!(
+            count_misconfigured_steps(&[api_step.clone(), agent_ok.clone()]),
+            1
+        );
 
         // Wire the API step (plugin + config + endpoint) → clears.
         api_step.api_plugin_slug = Some("atlassian".into());
@@ -3448,16 +3991,20 @@ mod tests {
     // This guards the strip-then-parse logic the handler now uses.
     #[test]
     fn test_api_call_strips_trailing_signal_line_before_json_parse() {
-        let envelope_json = r#"{"data":{"key":"EW-1"},"status":"OK","summary":"GET /search → 1 issue"}"#;
+        let envelope_json =
+            r#"{"data":{"key":"EW-1"},"status":"OK","summary":"GET /search → 1 issue"}"#;
         let with_signal = format!("{}\n[SIGNAL: OK]", envelope_json);
 
         // Same logic the handler runs.
         let json_part = with_signal.split("\n[SIGNAL:").next().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(json_part)
-            .expect("strip-then-parse should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(json_part).expect("strip-then-parse should succeed");
 
         assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("OK"));
-        assert_eq!(parsed.pointer("/data/key").and_then(|v| v.as_str()), Some("EW-1"));
+        assert_eq!(
+            parsed.pointer("/data/key").and_then(|v| v.as_str()),
+            Some("EW-1")
+        );
     }
 
     #[test]
@@ -3581,7 +4128,11 @@ mod tests {
             mk_step("ask_for_review", StepType::Gate),
         ];
         let err = validate_on_failure_steps(&chain).expect_err("expected validation error");
-        assert!(err.contains("ask_for_review"), "error should name the offending step, got: {}", err);
+        assert!(
+            err.contains("ask_for_review"),
+            "error should name the offending step, got: {}",
+            err
+        );
         assert!(err.to_lowercase().contains("gate"));
     }
 
@@ -3591,7 +4142,13 @@ mod tests {
     fn validate_allowlist_accepts_simple_binaries() {
         // Bare names with hyphens, underscores, digits — common binary
         // naming. Don't reject `npm`, `cargo-clippy`, `python3`.
-        let allowed = vec!["npm".into(), "cargo".into(), "cargo-clippy".into(), "python3".into(), "make".into()];
+        let allowed = vec![
+            "npm".into(),
+            "cargo".into(),
+            "cargo-clippy".into(),
+            "python3".into(),
+            "make".into(),
+        ];
         assert!(validate_exec_allowlist(&allowed).is_ok());
     }
 
@@ -3617,10 +4174,25 @@ mod tests {
         // Defence in depth: even though we never invoke a shell, an
         // entry like `npm; rm -rf /` looks suspicious and would
         // exercise the matcher in surprising ways. Reject loudly.
-        let cases = ["npm; rm", "npm|cat", "npm&", "npm$", "npm`whoami`", "npm>out", "npm<in", "npm*", "npm?"];
+        let cases = [
+            "npm; rm",
+            "npm|cat",
+            "npm&",
+            "npm$",
+            "npm`whoami`",
+            "npm>out",
+            "npm<in",
+            "npm*",
+            "npm?",
+        ];
         for raw in cases {
             let err = validate_exec_allowlist(&[raw.into()]).unwrap_err();
-            assert!(err.contains("caractères spéciaux"), "case `{}` got: {}", raw, err);
+            assert!(
+                err.contains("caractères spéciaux"),
+                "case `{}` got: {}",
+                raw,
+                err
+            );
         }
     }
 
@@ -3648,7 +4220,12 @@ mod tests {
 
     // ─── Phase 5 — Exec step validation ──────────────────────────────────
 
-    fn mk_exec_step(name: &str, command: Option<&str>, args: Vec<&str>, timeout: Option<u32>) -> WorkflowStep {
+    fn mk_exec_step(
+        name: &str,
+        command: Option<&str>,
+        args: Vec<&str>,
+        timeout: Option<u32>,
+    ) -> WorkflowStep {
         let mut s = mk_step(name, StepType::Exec);
         s.exec_command = command.map(String::from);
         s.exec_args = args.into_iter().map(String::from).collect();
@@ -3700,7 +4277,12 @@ mod tests {
 
     #[test]
     fn validate_exec_step_accepts_valid_config() {
-        let chain = vec![mk_exec_step("test", Some("cargo"), vec!["test", "--", "{{steps.x.summary}}"], Some(120))];
+        let chain = vec![mk_exec_step(
+            "test",
+            Some("cargo"),
+            vec!["test", "--", "{{steps.x.summary}}"],
+            Some(120),
+        )];
         assert!(validate_exec_steps(&chain, &["cargo".into()]).is_ok());
     }
 
@@ -3711,17 +4293,35 @@ mod tests {
         // "make test" as a SCRIPT FILE name, exit 127. The validator
         // catches this at save time with an actionable message that
         // suggests the two correct shapes (bare binary OR `bash -c`).
-        let chain = vec![mk_exec_step("run_tests", Some("bash"), vec!["make test"], None)];
+        let chain = vec![mk_exec_step(
+            "run_tests",
+            Some("bash"),
+            vec!["make test"],
+            None,
+        )];
         let err = validate_exec_steps(&chain, &["bash".into(), "make".into()]).unwrap_err();
         assert!(err.contains("run_tests"), "got: {}", err);
-        assert!(err.contains("multi-mots"), "must explain the multi-word issue: {}", err);
-        assert!(err.contains("-c"), "must suggest the `bash -c` form: {}", err);
+        assert!(
+            err.contains("multi-mots"),
+            "must explain the multi-word issue: {}",
+            err
+        );
+        assert!(
+            err.contains("-c"),
+            "must suggest the `bash -c` form: {}",
+            err
+        );
     }
 
     #[test]
     fn validate_exec_step_accepts_bash_with_dash_c() {
         // The correct shape for a shell one-liner: bash -c "the command".
-        let chain = vec![mk_exec_step("run_tests", Some("bash"), vec!["-c", "make test && echo ok"], None)];
+        let chain = vec![mk_exec_step(
+            "run_tests",
+            Some("bash"),
+            vec!["-c", "make test && echo ok"],
+            None,
+        )];
         assert!(validate_exec_steps(&chain, &["bash".into()]).is_ok());
     }
 
@@ -3741,8 +4341,12 @@ mod tests {
         for shell in &["sh", "zsh", "dash", "fish"] {
             let chain = vec![mk_exec_step("run", Some(shell), vec!["foo bar"], None)];
             let err = validate_exec_steps(&chain, &[shell.to_string()]).unwrap_err();
-            assert!(err.contains("multi-mots"),
-                "{} should be caught by the multi-word guard, got: {}", shell, err);
+            assert!(
+                err.contains("multi-mots"),
+                "{} should be caught by the multi-word guard, got: {}",
+                shell,
+                err
+            );
         }
     }
 
@@ -3765,7 +4369,11 @@ mod tests {
         // The canonical use case: `composer install` setup before `make test`.
         let mut step = mk_exec_step("run_tests", Some("make"), vec!["test"], None);
         step.exec_setup_command = Some("composer".into());
-        step.exec_setup_args = vec!["install".into(), "--no-interaction".into(), "--prefer-dist".into()];
+        step.exec_setup_args = vec![
+            "install".into(),
+            "--no-interaction".into(),
+            "--prefer-dist".into(),
+        ];
         assert!(validate_exec_steps(&[step], &["make".into(), "composer".into()]).is_ok());
     }
 
@@ -3777,7 +4385,11 @@ mod tests {
         step.exec_setup_args = vec!["composer install".into()];
         let err = validate_exec_steps(&[step], &["make".into(), "bash".into()]).unwrap_err();
         assert!(err.contains("setup"), "must mention setup: {}", err);
-        assert!(err.contains("multi-mots"), "must explain the multi-word issue: {}", err);
+        assert!(
+            err.contains("multi-mots"),
+            "must explain the multi-word issue: {}",
+            err
+        );
     }
 
     #[test]
@@ -3831,7 +4443,10 @@ mod tests {
             steps: vec![mk_step("main", StepType::Agent)],
             actions: vec![],
             safety: WorkflowSafety {
-                sandbox: false, max_files: None, max_lines: None, require_approval: false,
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
             },
             workspace_config: None,
             concurrency_limit: None,
@@ -3856,8 +4471,17 @@ mod tests {
         sw_empty.sub_workflow_id = Some("  ".into()); // blank → ignored
         let mut agent_with_id = mk_step("not_subwf", StepType::Agent);
         agent_with_id.sub_workflow_id = Some("wf-ignored".into()); // non-SubWorkflow → ignored
-        let ids = sub_workflow_child_ids(&[sw1, sw2, sw_empty, agent_with_id, mk_step("plain", StepType::Exec)]);
-        assert_eq!(ids, vec!["wf-child-a".to_string(), "wf-child-b".to_string()]);
+        let ids = sub_workflow_child_ids(&[
+            sw1,
+            sw2,
+            sw_empty,
+            agent_with_id,
+            mk_step("plain", StepType::Exec),
+        ]);
+        assert_eq!(
+            ids,
+            vec!["wf-child-a".to_string(), "wf-child-b".to_string()]
+        );
     }
 
     #[test]
@@ -3890,7 +4514,10 @@ mod tests {
             referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
-        assert!(!json.contains("referenced_workflows"), "empty list must be omitted: {json}");
+        assert!(
+            !json.contains("referenced_workflows"),
+            "empty list must be omitted: {json}"
+        );
     }
 
     #[test]
@@ -3926,8 +4553,11 @@ mod tests {
             referenced_workflows: vec![],
         };
         let json = serde_json::to_string(&env).unwrap();
-        assert!(!json.contains("referenced_quick_prompts"),
-            "empty QP vec should be omitted; got: {}", json);
+        assert!(
+            !json.contains("referenced_quick_prompts"),
+            "empty QP vec should be omitted; got: {}",
+            json
+        );
     }
 
     #[test]
@@ -3957,8 +4587,10 @@ mod tests {
         };
         let json = serde_json::to_string(&env).unwrap();
         let parsed: WorkflowExportEnvelope = serde_json::from_str(&json).unwrap();
-        assert!(parsed.version > EXPORT_VERSION,
-            "version mismatch should be detectable post-decode");
+        assert!(
+            parsed.version > EXPORT_VERSION,
+            "version mismatch should be detectable post-decode"
+        );
     }
 
     #[test]
@@ -4007,34 +4639,69 @@ mod tests {
         assert_eq!(normalize_mcp_name("GitHub"), "github");
         assert_eq!(normalize_mcp_name("mcp-atlassian"), "jira");
         assert_eq!(normalize_mcp_name("Atlassian"), "jira");
-        assert_eq!(normalize_mcp_name("awslabs.cloudwatch-mcp-server"), "cloudwatch");
+        assert_eq!(
+            normalize_mcp_name("awslabs.cloudwatch-mcp-server"),
+            "cloudwatch"
+        );
         assert_eq!(normalize_mcp_name("Slack"), "slack");
     }
 
     #[test]
     fn catalogue_has_entries() {
-        assert!(CATALOGUE.len() >= 10, "Catalogue should have at least 10 entries");
+        assert!(
+            CATALOGUE.len() >= 10,
+            "Catalogue should have at least 10 entries"
+        );
     }
 
     #[test]
     fn catalogue_entries_have_valid_fields() {
         for entry in CATALOGUE {
             assert!(!entry.id.is_empty(), "Entry must have an id");
-            assert!(!entry.title_fr.is_empty(), "Entry {} must have a French title", entry.id);
-            assert!(!entry.title_en.is_empty(), "Entry {} must have an English title", entry.id);
-            assert!(!entry.required_mcps.is_empty(), "Entry {} must require at least one MCP", entry.id);
+            assert!(
+                !entry.title_fr.is_empty(),
+                "Entry {} must have a French title",
+                entry.id
+            );
+            assert!(
+                !entry.title_en.is_empty(),
+                "Entry {} must have an English title",
+                entry.id
+            );
+            assert!(
+                !entry.required_mcps.is_empty(),
+                "Entry {} must require at least one MCP",
+                entry.id
+            );
             assert!(
                 ["dev", "pm", "ops"].contains(&entry.audience),
-                "Entry {} has invalid audience: {}", entry.id, entry.audience
+                "Entry {} has invalid audience: {}",
+                entry.id,
+                entry.audience
             );
             assert!(
                 ["simple", "advanced"].contains(&entry.complexity),
-                "Entry {} has invalid complexity: {}", entry.id, entry.complexity
+                "Entry {} has invalid complexity: {}",
+                entry.id,
+                entry.complexity
             );
-            assert!(!entry.step_prompts.is_empty(), "Entry {} must have at least one step", entry.id);
+            assert!(
+                !entry.step_prompts.is_empty(),
+                "Entry {} must have at least one step",
+                entry.id
+            );
             for (sname, sprompt, _structured) in entry.step_prompts {
-                assert!(!sname.is_empty(), "Entry {} has a step with empty name", entry.id);
-                assert!(!sprompt.is_empty(), "Entry {} step '{}' has empty prompt", entry.id, sname);
+                assert!(
+                    !sname.is_empty(),
+                    "Entry {} has a step with empty name",
+                    entry.id
+                );
+                assert!(
+                    !sprompt.is_empty(),
+                    "Entry {} step '{}' has empty prompt",
+                    entry.id,
+                    sname
+                );
             }
         }
     }
@@ -4043,20 +4710,38 @@ mod tests {
     fn catalogue_ids_are_unique() {
         let mut seen = std::collections::HashSet::new();
         for entry in CATALOGUE {
-            assert!(seen.insert(entry.id), "Duplicate catalogue id: {}", entry.id);
+            assert!(
+                seen.insert(entry.id),
+                "Duplicate catalogue id: {}",
+                entry.id
+            );
         }
     }
 
     #[test]
     fn github_only_suggestions_match() {
         let mcps = ["github".to_string()];
-        let matches: Vec<&str> = CATALOGUE.iter()
-            .filter(|e| e.required_mcps.iter().all(|req| mcps.iter().any(|m| m.contains(req))))
+        let matches: Vec<&str> = CATALOGUE
+            .iter()
+            .filter(|e| {
+                e.required_mcps
+                    .iter()
+                    .all(|req| mcps.iter().any(|m| m.contains(req)))
+            })
             .map(|e| e.id)
             .collect();
-        assert!(matches.contains(&"changelog-release"), "GitHub alone should suggest changelog");
-        assert!(matches.contains(&"pr-quality"), "GitHub alone should suggest PR quality");
-        assert!(!matches.contains(&"orphan-prs"), "GitHub alone should NOT suggest orphan PRs (needs jira)");
+        assert!(
+            matches.contains(&"changelog-release"),
+            "GitHub alone should suggest changelog"
+        );
+        assert!(
+            matches.contains(&"pr-quality"),
+            "GitHub alone should suggest PR quality"
+        );
+        assert!(
+            !matches.contains(&"orphan-prs"),
+            "GitHub alone should NOT suggest orphan PRs (needs jira)"
+        );
     }
 
     // ─── Dry-run preamble ────────────────────────────────────────────────
@@ -4070,15 +4755,23 @@ mod tests {
     #[test]
     fn dry_run_preamble_freetext_keeps_narrative() {
         let p = build_dry_run_preamble(&StepOutputFormat::FreeText);
-        assert!(p.contains("plan d'exécution détaillé"), "FreeText preamble must keep the narrative instruction");
-        assert!(p.contains("RIEN écrire"), "FreeText preamble must keep the read-only rule");
+        assert!(
+            p.contains("plan d'exécution détaillé"),
+            "FreeText preamble must keep the narrative instruction"
+        );
+        assert!(
+            p.contains("RIEN écrire"),
+            "FreeText preamble must keep the read-only rule"
+        );
     }
 
     #[test]
     fn dry_run_preamble_structured_does_not_force_narrative() {
         let p = build_dry_run_preamble(&StepOutputFormat::Structured);
-        assert!(!p.contains("plan d'exécution détaillé"),
-            "Structured preamble must NOT push the agent toward narrative output");
+        assert!(
+            !p.contains("plan d'exécution détaillé"),
+            "Structured preamble must NOT push the agent toward narrative output"
+        );
         assert!(!p.contains("Formate ta réponse comme un plan"),
             "Structured preamble must NOT replace the structured contract with a format instruction");
     }
@@ -4086,28 +4779,45 @@ mod tests {
     #[test]
     fn dry_run_preamble_structured_protects_envelope() {
         let p = build_dry_run_preamble(&StepOutputFormat::Structured);
-        assert!(p.contains("---STEP_OUTPUT---"),
-            "Structured preamble must explicitly name the envelope so the agent keeps it");
-        assert!(p.contains("data"),
-            "Structured preamble must reference the `data` field — downstream steps consume it");
+        assert!(
+            p.contains("---STEP_OUTPUT---"),
+            "Structured preamble must explicitly name the envelope so the agent keeps it"
+        );
+        assert!(
+            p.contains("data"),
+            "Structured preamble must reference the `data` field — downstream steps consume it"
+        );
     }
 
     #[test]
     fn dry_run_preamble_structured_enforces_read_only() {
         let p = build_dry_run_preamble(&StepOutputFormat::Structured);
-        assert!(p.contains("lecture seule") || p.to_lowercase().contains("read-only"),
-            "Structured preamble must still enforce read-only tool usage");
+        assert!(
+            p.contains("lecture seule") || p.to_lowercase().contains("read-only"),
+            "Structured preamble must still enforce read-only tool usage"
+        );
     }
 
     #[test]
     fn github_jira_suggestions_match() {
         let mcps = ["github".to_string(), "jira".to_string()];
-        let matches: Vec<&str> = CATALOGUE.iter()
-            .filter(|e| e.required_mcps.iter().all(|req| mcps.iter().any(|m| m.contains(req))))
+        let matches: Vec<&str> = CATALOGUE
+            .iter()
+            .filter(|e| {
+                e.required_mcps
+                    .iter()
+                    .all(|req| mcps.iter().any(|m| m.contains(req)))
+            })
             .map(|e| e.id)
             .collect();
-        assert!(matches.contains(&"orphan-prs"), "GitHub+Jira should suggest orphan PRs");
-        assert!(matches.contains(&"changelog-release"), "GitHub+Jira should still suggest changelog");
+        assert!(
+            matches.contains(&"orphan-prs"),
+            "GitHub+Jira should suggest orphan PRs"
+        );
+        assert!(
+            matches.contains(&"changelog-release"),
+            "GitHub+Jira should still suggest changelog"
+        );
     }
 
     // ─── test_extract handler (P0.5) ────────────────────────────────────
@@ -4170,7 +4880,10 @@ mod tests {
         let resp = test_extract(Json(req)).await.0;
         let body = resp.data.unwrap();
         assert_eq!(body.value, serde_json::json!([]));
-        assert!(body.is_empty, "is_empty flag must be set so wizard can warn");
+        assert!(
+            body.is_empty,
+            "is_empty flag must be set so wizard can warn"
+        );
     }
 
     #[tokio::test]
@@ -4196,7 +4909,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn provided(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -4214,7 +4930,10 @@ mod tests {
         // the value was dropped. Now it must land in the trigger_obj
         // verbatim so `inject_trigger_context` can expose it.
         let obj = build_manual_trigger_obj(&provided(&[("issue_key", "EW-7247")]), Utc::now());
-        assert_eq!(obj.get("issue_key").and_then(|v| v.as_str()), Some("EW-7247"));
+        assert_eq!(
+            obj.get("issue_key").and_then(|v| v.as_str()),
+            Some("EW-7247")
+        );
     }
 
     #[test]
@@ -4233,7 +4952,10 @@ mod tests {
         // Dotted keys are legitimate — `inject_trigger_context` uses
         // `{{issue.title}}` etc. for tracker payloads.
         let obj = build_manual_trigger_obj(&provided(&[("issue.title", "Hello")]), Utc::now());
-        assert_eq!(obj.get("issue.title").and_then(|v| v.as_str()), Some("Hello"));
+        assert_eq!(
+            obj.get("issue.title").and_then(|v| v.as_str()),
+            Some("Hello")
+        );
     }
 
     #[test]
@@ -4289,10 +5011,7 @@ mod tests {
         // backdate the run.
         let now = Utc::now();
         let obj = build_manual_trigger_obj(
-            &provided(&[
-                ("type", "Cron"),
-                ("triggered_at", "1970-01-01T00:00:00Z"),
-            ]),
+            &provided(&[("type", "Cron"), ("triggered_at", "1970-01-01T00:00:00Z")]),
             now,
         );
         assert_eq!(obj.get("type").and_then(|v| v.as_str()), Some("manual"));
@@ -4314,8 +5033,16 @@ mod tests {
         let mut s = mk_step("plan", StepType::Agent);
         s.prompt_template = String::new();
         let err = validate_required_fields_per_type(&[s]).expect_err("must reject");
-        assert!(err.contains("plan"), "should name the offending step, got: {}", err);
-        assert!(err.contains("prompt_template"), "should name the field, got: {}", err);
+        assert!(
+            err.contains("plan"),
+            "should name the offending step, got: {}",
+            err
+        );
+        assert!(
+            err.contains("prompt_template"),
+            "should name the field, got: {}",
+            err
+        );
     }
 
     #[test]
@@ -4392,7 +5119,8 @@ mod tests {
         assert!(err.contains("batch_items_from"), "got: {err}");
         // With items_from it validates.
         s.batch_items_from = Some("{{steps.fetch.data.items}}".into());
-        validate_required_fields_per_type(&[s]).expect("QA-ref batch with items_from should validate");
+        validate_required_fields_per_type(&[s])
+            .expect("QA-ref batch with items_from should validate");
     }
 
     #[test]
@@ -4406,8 +5134,13 @@ mod tests {
     #[test]
     fn required_fields_batch_qp_rejects_missing_qp_id_and_items_from() {
         let s = mk_step("fan_out", StepType::BatchQuickPrompt);
-        let err = validate_required_fields_per_type(std::slice::from_ref(&s)).expect_err("must reject");
-        assert!(err.contains("batch_quick_prompt_id"), "should flag qp id first, got: {}", err);
+        let err =
+            validate_required_fields_per_type(std::slice::from_ref(&s)).expect_err("must reject");
+        assert!(
+            err.contains("batch_quick_prompt_id"),
+            "should flag qp id first, got: {}",
+            err
+        );
 
         let mut s2 = s;
         s2.batch_quick_prompt_id = Some("qp-review".into());
@@ -4429,7 +5162,8 @@ mod tests {
         s.api_plugin_slug = Some("github".into());
         s.api_endpoint_path = Some("/repos/{owner}/{repo}".into());
         // Missing batch_items_from → reject.
-        let err = validate_required_fields_per_type(std::slice::from_ref(&s)).expect_err("must reject");
+        let err =
+            validate_required_fields_per_type(std::slice::from_ref(&s)).expect_err("must reject");
         assert!(err.contains("batch_items_from"));
 
         s.batch_items_from = Some("{{steps.fetch.data}}".into());
@@ -4464,7 +5198,8 @@ mod tests {
             mk_step("run_make", StepType::Exec),
             mk_step("seed", StepType::JsonData),
         ];
-        validate_required_fields_per_type(&chain).expect("non-API/Agent steps deferred to other validators");
+        validate_required_fields_per_type(&chain)
+            .expect("non-API/Agent steps deferred to other validators");
     }
 
     #[test]
@@ -4473,12 +5208,20 @@ mod tests {
         // the right UX: the wizard surfaces one error at a time and
         // the user fixes them top-to-bottom.
         let chain = vec![
-            mk_step("notify_ops", StepType::Notify),  // missing notify_config
-            mk_step("plan", StepType::Agent),         // missing prompt_template
+            mk_step("notify_ops", StepType::Notify), // missing notify_config
+            mk_step("plan", StepType::Agent),        // missing prompt_template
         ];
         let err = validate_required_fields_per_type(&chain).expect_err("must reject");
-        assert!(err.contains("notify_ops"), "first offender wins, got: {}", err);
-        assert!(!err.contains("plan"), "should not mention later offenders, got: {}", err);
+        assert!(
+            err.contains("notify_ops"),
+            "first offender wins, got: {}",
+            err
+        );
+        assert!(
+            !err.contains("plan"),
+            "should not mention later offenders, got: {}",
+            err
+        );
     }
 
     // ─── 0.8.6 (#26) gate_auto_approve_after_secs bounds ─────────────

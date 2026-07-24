@@ -123,16 +123,22 @@ mod tests {
         use std::ffi::OsString;
         // Absolute path → skip
         let abs = OsString::from(r"C:\Program Files\nodejs\npx.cmd");
-        assert!(resolve_windows_program(&abs).is_none(),
-            "absolute path with backslash + extension must skip resolution");
+        assert!(
+            resolve_windows_program(&abs).is_none(),
+            "absolute path with backslash + extension must skip resolution"
+        );
         // Relative path containing slash → skip
         let rel = OsString::from("./bin/foo");
-        assert!(resolve_windows_program(&rel).is_none(),
-            "path containing slash must skip resolution");
+        assert!(
+            resolve_windows_program(&rel).is_none(),
+            "path containing slash must skip resolution"
+        );
         // Bare extension → skip (Windows can resolve .exe natively)
         let with_ext = OsString::from("npx.cmd");
         // We skip on extension presence — caller passes the explicit form.
-        assert!(resolve_windows_program(&with_ext).is_none(),
-            "name with extension must skip resolution");
+        assert!(
+            resolve_windows_program(&with_ext).is_none(),
+            "name with extension must skip resolution"
+        );
     }
 }

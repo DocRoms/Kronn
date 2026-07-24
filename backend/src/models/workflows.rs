@@ -11,7 +11,6 @@ use ts_rs::TS;
 
 use super::{AgentType, ModelTier, PromptVariable};
 
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct Workflow {
@@ -128,7 +127,7 @@ pub struct WorkflowGuards {
 /// Soft backend defaults applied when `Workflow.guards` is `None` or any
 /// individual field is `None`. Acts as a kill-switch against runaway runs
 /// without forcing every user to configure the limits manually.
-pub const DEFAULT_GUARD_TIMEOUT_SECS: u64 = 7200;       // 2 hours
+pub const DEFAULT_GUARD_TIMEOUT_SECS: u64 = 7200; // 2 hours
 pub const DEFAULT_GUARD_MAX_LLM_CALLS: u32 = 100;
 pub const DEFAULT_GUARD_LOOP_MAX_REVISITS: usize = 10;
 
@@ -139,7 +138,8 @@ impl WorkflowGuards {
         ResolvedGuards {
             timeout_seconds: self.timeout_seconds.unwrap_or(DEFAULT_GUARD_TIMEOUT_SECS),
             max_llm_calls: self.max_llm_calls.unwrap_or(DEFAULT_GUARD_MAX_LLM_CALLS),
-            loop_detection_max_revisits: self.loop_detection_max_revisits
+            loop_detection_max_revisits: self
+                .loop_detection_max_revisits
                 .unwrap_or(DEFAULT_GUARD_LOOP_MAX_REVISITS),
         }
     }
@@ -147,7 +147,8 @@ impl WorkflowGuards {
     /// Resolve from an `Option<WorkflowGuards>` — `None` (no overrides at
     /// all) yields full defaults.
     pub fn resolve_optional(opt: Option<&WorkflowGuards>) -> ResolvedGuards {
-        opt.map(|g| g.resolved()).unwrap_or_else(|| WorkflowGuards::default().resolved())
+        opt.map(|g| g.resolved())
+            .unwrap_or_else(|| WorkflowGuards::default().resolved())
     }
 }
 
@@ -191,10 +192,7 @@ pub enum WorkflowTrigger {
 #[ts(export)]
 #[serde(tag = "type")]
 pub enum TrackerSourceConfig {
-    GitHub {
-        owner: String,
-        repo: String,
-    },
+    GitHub { owner: String, repo: String },
 }
 
 /// How a step's output is formatted and extracted.
@@ -315,7 +313,6 @@ pub struct WorkflowStep {
     // ─── BatchQuickPrompt fields ─────────────────────────────────────────
     // All Option<> so existing Agent/ApiCall steps deserialize unchanged.
     // Only meaningful when `step_type == BatchQuickPrompt`.
-
     /// Id of the Quick Prompt to fan out. Required for BatchQuickPrompt steps.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_quick_prompt_id: Option<String>,
@@ -392,7 +389,6 @@ pub struct WorkflowStep {
     // Only meaningful when `step_type == Notify`. Webhook-based workflow
     // finalizer: posts to an external URL with a rendered body. Zero agent
     // tokens consumed — direct HTTP from Rust.
-
     /// Webhook configuration for `StepType::Notify`. URL and body support
     /// the same `{{steps.X.output}}` / `{{steps.X.data}}` templates as
     /// agent prompts.
@@ -404,7 +400,6 @@ pub struct WorkflowStep {
     // API plugin directly from the Rust engine — zero agent tokens. Params
     // support the same `{{steps.X.data}}` templates as agent prompts.
     // See `docs/operations/deagent-apicall.md` for the full contract.
-
     /// Registry slug of the plugin to invoke (e.g. `"chartbeat"`, `"jira"`).
     /// The slug resolves to an `ApiSpec` in the plugin registry; the request
     /// base URL comes from that spec and is NEVER templated from the step.
@@ -492,7 +487,6 @@ pub struct WorkflowStep {
     // run with `RunStatus::WaitingApproval`; a human decides via the
     // dashboard. Templates resolve at gate-execution time so the
     // operator sees the actual values, not the literal `{{X}}`.
-
     /// Markdown message shown to the operator on the run-detail page.
     /// Templates supported. Empty string falls back to a default
     /// "Décision humaine requise" placeholder in the UI.
@@ -553,7 +547,6 @@ pub struct WorkflowStep {
     //      if it contains `; rm -rf /`, the OS receives one argv string,
     //      not a shell command.
     //   4. `command` itself is NOT templated — locked at save time.
-
     /// Binary to execute. Must match an entry in `Workflow.exec_allowlist`
     /// exactly (no glob, no regex). NOT templated — locked at save time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -607,7 +600,6 @@ pub struct WorkflowStep {
     // réseau. Le runner sérialise `json_data_payload` dans une envelope
     // Structured et la passe au step suivant. Cas d'usage : alimenter un
     // BatchQuickPrompt sans API derrière. Voir json_data_step.rs.
-
     /// Payload JSON émis par le step. Validé au save (parse JSON valide,
     /// taille raisonnable). Aucun templating au runtime — la valeur est
     /// retournée telle quelle, ce qui permet à un downstream batch de la
@@ -794,7 +786,9 @@ pub struct NotifyConfig {
     pub body_template: String,
 }
 
-fn default_notify_method() -> String { "POST".to_string() }
+fn default_notify_method() -> String {
+    "POST".to_string()
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1071,7 +1065,9 @@ pub struct ProducedBranch {
     pub pushed_upstream: bool,
 }
 
-fn default_run_type() -> String { "linear".to_string() }
+fn default_run_type() -> String {
+    "linear".to_string()
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -1193,7 +1189,6 @@ pub struct StepResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_run_id: Option<String>,
 }
-
 
 // ─── Workflow API requests ────────────────────────────────────────────────
 

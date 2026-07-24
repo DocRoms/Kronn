@@ -6,9 +6,7 @@
 //! anti-halluc spec. We also probe the hard invariants: no traversal ever comes
 //! back Verified, no panic on hostile input, determinism.
 
-use kronn::core::anti_halluc::{
-    analyze, verify_source_marker, SourceKind, SourceStatus,
-};
+use kronn::core::anti_halluc::{analyze, verify_source_marker, SourceKind, SourceStatus};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -75,7 +73,10 @@ fn file_line_out_of_bounds_is_fabricated() {
         c.status,
         c.detail
     );
-    assert!(c.status.is_fabricated(), "OutOfBounds must count as fabricated");
+    assert!(
+        c.status.is_fabricated(),
+        "OutOfBounds must count as fabricated"
+    );
     cleanup(&p);
 }
 
@@ -99,7 +100,10 @@ fn url_is_unchecked() {
     let c = vsm("url: https://example.com/spec", &p);
     assert_eq!(c.kind, SourceKind::Url, "url prefix → Url");
     assert_eq!(c.status, SourceStatus::Unchecked);
-    assert!(!c.status.is_fabricated(), "an unchecked URL is not fabricated");
+    assert!(
+        !c.status.is_fabricated(),
+        "an unchecked URL is not fabricated"
+    );
     cleanup(&p);
 }
 
@@ -195,7 +199,11 @@ fn api_is_unchecked() {
 fn code_comment_existing_is_verified_low_trust() {
     let p = temp_project();
     let c = vsm("code-comment: src/foo.rs:2", &p);
-    assert_eq!(c.kind, SourceKind::CodeComment, "code-comment → CodeComment");
+    assert_eq!(
+        c.kind,
+        SourceKind::CodeComment,
+        "code-comment → CodeComment"
+    );
     assert_eq!(
         c.status,
         SourceStatus::Verified,
@@ -216,13 +224,20 @@ fn code_comment_existing_is_verified_low_trust() {
 fn training_data_is_rejected() {
     let p = temp_project();
     let c = vsm("training-data: I recall the default is 8080", &p);
-    assert_eq!(c.kind, SourceKind::TrainingData, "training-data → TrainingData");
+    assert_eq!(
+        c.kind,
+        SourceKind::TrainingData,
+        "training-data → TrainingData"
+    );
     assert_eq!(
         c.status,
         SourceStatus::Rejected,
         "model prior knowledge is refused as a source"
     );
-    assert!(c.status.is_fabricated(), "Rejected must count as fabricated (RED)");
+    assert!(
+        c.status.is_fabricated(),
+        "Rejected must count as fabricated (RED)"
+    );
     cleanup(&p);
 }
 
@@ -289,7 +304,12 @@ fn inline_anchor_with_slash_resolves_verified() {
         .iter()
         .filter(|s| s.kind == SourceKind::File)
         .collect();
-    assert_eq!(file_sources.len(), 1, "exactly one inline file anchor; got {:?}", r.sources);
+    assert_eq!(
+        file_sources.len(),
+        1,
+        "exactly one inline file anchor; got {:?}",
+        r.sources
+    );
     assert_eq!(
         file_sources[0].status,
         SourceStatus::Verified,
@@ -350,7 +370,10 @@ fn inline_anchor_unresolved_is_soft_unverified_not_red() {
         "unresolved inline anchor is soft Unchecked, NOT a fabricated red"
     );
     assert!(
-        file_sources[0].detail.to_lowercase().contains("couldn't verify"),
+        file_sources[0]
+            .detail
+            .to_lowercase()
+            .contains("couldn't verify"),
         "detail should say couldn't verify: {}",
         file_sources[0].detail
     );
@@ -386,9 +409,15 @@ fn relative_traversal_never_verified() {
     let p = temp_project();
     // Plant a real file OUTSIDE the root so the only thing protecting us is the
     // jail, not non-existence.
-    let outside = p.parent().unwrap().join(format!("ahcf_secret_{}.rs", std::process::id()));
+    let outside = p
+        .parent()
+        .unwrap()
+        .join(format!("ahcf_secret_{}.rs", std::process::id()));
     std::fs::write(&outside, "s\ne\nc\n").unwrap();
-    let inner = format!("file: ../{}:1", outside.file_name().unwrap().to_str().unwrap());
+    let inner = format!(
+        "file: ../{}:1",
+        outside.file_name().unwrap().to_str().unwrap()
+    );
     let c = vsm(&inner, &p);
     assert_ne!(
         c.status,
@@ -398,7 +427,10 @@ fn relative_traversal_never_verified() {
         c.detail
     );
     assert!(
-        matches!(c.status, SourceStatus::OutsideProject | SourceStatus::NotFound),
+        matches!(
+            c.status,
+            SourceStatus::OutsideProject | SourceStatus::NotFound
+        ),
         "traversal must be OutsideProject or NotFound; got {:?}",
         c.status
     );
@@ -412,7 +444,13 @@ fn relative_traversal_never_verified() {
 fn deep_traversal_to_etc_passwd_is_outside_project() {
     let p = temp_project();
     let c = vsm("file: ../../../../../../etc/passwd:1", &p);
-    assert_ne!(c.status, SourceStatus::Verified, "{:?} {}", c.status, c.detail);
+    assert_ne!(
+        c.status,
+        SourceStatus::Verified,
+        "{:?} {}",
+        c.status,
+        c.detail
+    );
     assert!(
         c.status.is_fabricated(),
         "a root-escaping probe must count as fabricated; got {:?}",
@@ -449,12 +487,12 @@ fn no_panic_on_hostile_input_and_deterministic() {
         "[src: file: ]",                           // empty after type
         "[src: [src: file: src/foo.rs ] ]",        // nested brackets
         "file: src/foo\0.rs:1",                    // null-ish
-        "url: https://例え.テスト/路径/файл.rs:5",   // CJK/RTL/cyrillic + emoji below
+        "url: https://例え.テスト/路径/файл.rs:5", // CJK/RTL/cyrillic + emoji below
         "file: 😀/💥.rs:1",
         "training-data:",
         "code-comment:",
-        "file: src/foo.rs:0",                      // zero line → no line spec
-        "file: src/foo.rs:2-1",                    // inverted range
+        "file: src/foo.rs:0",   // zero line → no line spec
+        "file: src/foo.rs:2-1", // inverted range
     ];
     for h in hostile {
         // Marker-level: must not panic.
@@ -477,6 +515,9 @@ fn no_panic_on_hostile_input_and_deterministic() {
     );
     let r1 = analyze(&huge, Some(&p));
     let r2 = analyze(&huge, Some(&p));
-    assert_eq!(r1, r2, "analyze must be deterministic on huge multibyte input");
+    assert_eq!(
+        r1, r2,
+        "analyze must be deterministic on huge multibyte input"
+    );
     cleanup(&p);
 }

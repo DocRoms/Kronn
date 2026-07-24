@@ -1,9 +1,9 @@
 //! Shared git operation helpers used by both project and discussion endpoints.
 
-use std::path::Path;
-use rusqlite::Connection;
 use crate::core::cmd::sync_cmd;
 use crate::models::*;
+use rusqlite::Connection;
+use std::path::Path;
 
 /// Resolve a GitHub token from MCP configs in the database.
 /// Looks for configs with server_id "mcp-github" and extracts GITHUB_PERSONAL_ACCESS_TOKEN.
@@ -67,12 +67,11 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     };
 
     let run_with_status = |args: &[&str]| -> (String, bool) {
-        match sync_cmd("git")
-            .args(args)
-            .current_dir(repo_path)
-            .output()
-        {
-            Ok(o) => (String::from_utf8_lossy(&o.stdout).trim().to_string(), o.status.success()),
+        match sync_cmd("git").args(args).current_dir(repo_path).output() {
+            Ok(o) => (
+                String::from_utf8_lossy(&o.stdout).trim().to_string(),
+                o.status.success(),
+            ),
             Err(_) => (String::new(), false),
         }
     };
@@ -91,11 +90,13 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
                 "master".to_string()
             } else {
                 // Fallback: check remote refs (worktrees may not have local main/master)
-                let (_, ok_remote_main) = run_with_status(&["rev-parse", "--verify", "origin/main"]);
+                let (_, ok_remote_main) =
+                    run_with_status(&["rev-parse", "--verify", "origin/main"]);
                 if ok_remote_main {
                     "main".to_string()
                 } else {
-                    let (_, ok_remote_master) = run_with_status(&["rev-parse", "--verify", "origin/master"]);
+                    let (_, ok_remote_master) =
+                        run_with_status(&["rev-parse", "--verify", "origin/master"]);
                     if ok_remote_master {
                         "master".to_string()
                     } else {
@@ -121,7 +122,11 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
             // Some git versions may use XY<space><space>filename, so skip all leading spaces after XY
             let raw_path = line[2..].trim_start().to_string();
             let path = if raw_path.contains(" -> ") {
-                raw_path.split(" -> ").last().unwrap_or(&raw_path).to_string()
+                raw_path
+                    .split(" -> ")
+                    .last()
+                    .unwrap_or(&raw_path)
+                    .to_string()
             } else {
                 raw_path
             };
@@ -135,11 +140,16 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
                 ('M', _) | (_, 'M') => "modified",
                 ('C', _) => "copied",
                 _ => "modified",
-            }.to_string();
+            }
+            .to_string();
 
             let staged = staged_char != ' ' && staged_char != '?';
 
-            GitFileStatus { path, status, staged }
+            GitFileStatus {
+                path,
+                status,
+                staged,
+            }
         })
         .collect();
 
@@ -150,14 +160,19 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     let committed_files = if !is_default_branch && !default_branch.is_empty() {
         let range = format!("{}...HEAD", default_branch);
         let (diff_out, ok) = run_with_status(&["diff", "--name-status", &range]);
-        if ok { parse_committed_diff(&diff_out) } else { Vec::new() }
+        if ok {
+            parse_committed_diff(&diff_out)
+        } else {
+            Vec::new()
+        }
     } else {
         Vec::new()
     };
 
     // Ahead/behind upstream
     let (ahead, behind) = {
-        let (ab_output, ab_ok) = run_with_status(&["rev-list", "--count", "--left-right", "@{upstream}...HEAD"]);
+        let (ab_output, ab_ok) =
+            run_with_status(&["rev-list", "--count", "--left-right", "@{upstream}...HEAD"]);
         if ab_ok {
             let parts: Vec<&str> = ab_output.split_whitespace().collect();
             if parts.len() == 2 {
@@ -169,7 +184,8 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
             }
         } else if !branch.is_empty() && !default_branch.is_empty() && branch != default_branch {
             // No upstream: count commits ahead of the default branch (for worktree branches)
-            let (count_output, count_ok) = run_with_status(&["rev-list", "--count", &format!("{}..HEAD", default_branch)]);
+            let (count_output, count_ok) =
+                run_with_status(&["rev-list", "--count", &format!("{}..HEAD", default_branch)]);
             if count_ok {
                 let a = count_output.trim().parse::<u32>().unwrap_or(1);
                 // Use at least 1 so the Push button appears (branch needs to be pushed)
@@ -218,12 +234,18 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
 /// Returns an empty string when none resolves (detached / fresh repo).
 pub fn resolve_default_branch(repo_path: &Path) -> String {
     let ok = |args: &[&str]| -> bool {
-        sync_cmd("git").args(args).current_dir(repo_path).output()
-            .map(|o| o.status.success()).unwrap_or(false)
+        sync_cmd("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
     };
     for (refname, branch) in [
-        ("main", "main"), ("master", "master"),
-        ("origin/main", "main"), ("origin/master", "master"),
+        ("main", "main"),
+        ("master", "master"),
+        ("origin/main", "main"),
+        ("origin/master", "master"),
     ] {
         if ok(&["rev-parse", "--verify", refname]) {
             return branch.to_string();
@@ -236,20 +258,34 @@ pub fn resolve_default_branch(repo_path: &Path) -> String {
 /// (triple-dot = vs the merge-base, so unrelated default-branch commits don't
 /// leak in). Falls back to the last commit's change when no default branch
 /// resolves. Used by the GitPanel "committed on branch" section.
-pub fn run_git_diff_committed(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
+pub fn run_git_diff_committed(
+    repo_path: &Path,
+    file_path: &str,
+) -> Result<GitDiffResponse, String> {
     let git_stdout = |args: &[&str]| -> String {
-        sync_cmd("git").args(args).current_dir(repo_path).output()
+        sync_cmd("git")
+            .args(args)
+            .current_dir(repo_path)
+            .output()
             .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
             .unwrap_or_default()
     };
     let default_branch = resolve_default_branch(repo_path);
     let diff = if !default_branch.is_empty() {
-        git_stdout(&["diff", &format!("{}...HEAD", default_branch), "--", file_path])
+        git_stdout(&[
+            "diff",
+            &format!("{}...HEAD", default_branch),
+            "--",
+            file_path,
+        ])
     } else {
         // No default branch (detached / fresh): show the file's last-commit change.
         git_stdout(&["diff", "HEAD~1", "HEAD", "--", file_path])
     };
-    Ok(GitDiffResponse { path: file_path.to_string(), diff })
+    Ok(GitDiffResponse {
+        path: file_path.to_string(),
+        diff,
+    })
 }
 
 pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse, String> {
@@ -273,14 +309,16 @@ pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse
         if full_path.exists() {
             match std::fs::read_to_string(&full_path) {
                 Ok(content) => {
-                    let lines: Vec<String> = content.lines()
-                        .map(|l| format!("+{}", l))
-                        .collect();
+                    let lines: Vec<String> = content.lines().map(|l| format!("+{}", l)).collect();
                     if lines.is_empty() {
                         String::new()
                     } else {
-                        format!("--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n{}",
-                            file_path, lines.len(), lines.join("\n"))
+                        format!(
+                            "--- /dev/null\n+++ b/{}\n@@ -0,0 +1,{} @@\n{}",
+                            file_path,
+                            lines.len(),
+                            lines.join("\n")
+                        )
                     }
                 }
                 Err(_) => String::new(),
@@ -303,11 +341,20 @@ pub fn run_git_diff(repo_path: &Path, file_path: &str) -> Result<GitDiffResponse
         untracked_diff
     };
 
-    Ok(GitDiffResponse { path: file_path.to_string(), diff })
+    Ok(GitDiffResponse {
+        path: file_path.to_string(),
+        diff,
+    })
 }
 
 /// Stage files and commit in the given repo directory.
-pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: bool, sign: bool) -> Result<GitCommitResponse, String> {
+pub fn run_git_commit(
+    repo_path: &Path,
+    files: &[String],
+    message: &str,
+    amend: bool,
+    sign: bool,
+) -> Result<GitCommitResponse, String> {
     // git add each file individually, skip missing files gracefully
     let mut added = 0;
     for file in files {
@@ -323,8 +370,11 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
             if add_output.status.success() {
                 added += 1;
             } else {
-                tracing::warn!("git add skipped '{}': {}", clean_file,
-                    String::from_utf8_lossy(&add_output.stderr).trim());
+                tracing::warn!(
+                    "git add skipped '{}': {}",
+                    clean_file,
+                    String::from_utf8_lossy(&add_output.stderr).trim()
+                );
             }
         } else {
             let rm_output = sync_cmd("git")
@@ -350,10 +400,12 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
     if !has_user {
         let _ = sync_cmd("git")
             .args(["config", "user.name", "Kronn"])
-            .current_dir(repo_path).status();
+            .current_dir(repo_path)
+            .status();
         let _ = sync_cmd("git")
             .args(["config", "user.email", "kronn@localhost"])
-            .current_dir(repo_path).status();
+            .current_dir(repo_path)
+            .status();
     }
 
     let mut commit_args = vec!["commit"];
@@ -386,22 +438,34 @@ pub fn run_git_commit(repo_path: &Path, files: &[String], message: &str, amend: 
         .output()
         .map_err(|e| format!("Failed to get commit hash: {}", e))?;
 
-    let hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+    let hash = String::from_utf8_lossy(&hash_output.stdout)
+        .trim()
+        .to_string();
 
-    Ok(GitCommitResponse { hash, message: message.to_string() })
+    Ok(GitCommitResponse {
+        hash,
+        message: message.to_string(),
+    })
 }
 
 /// Convert a git SSH URL to HTTPS with embedded token for push.
 /// `git@github.com:org/repo.git` → `https://x-access-token:TOKEN@github.com/org/repo.git`
 fn ssh_to_https_with_token(remote_url: &str, token: &str) -> Option<String> {
-    remote_url.strip_prefix("git@github.com:")
+    remote_url
+        .strip_prefix("git@github.com:")
         .map(|rest| format!("https://x-access-token:{}@github.com/{}", token, rest))
-        .or_else(|| remote_url.strip_prefix("git@gitlab.com:")
-            .map(|rest| format!("https://oauth2:{}@gitlab.com/{}", token, rest)))
+        .or_else(|| {
+            remote_url
+                .strip_prefix("git@gitlab.com:")
+                .map(|rest| format!("https://oauth2:{}@gitlab.com/{}", token, rest))
+        })
 }
 
 /// Push the current branch to origin.
-pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitPushResponse, String> {
+pub fn run_git_push(
+    repo_path: &Path,
+    github_token: Option<&str>,
+) -> Result<GitPushResponse, String> {
     let branch_output = sync_cmd("git")
         .env("GIT_TERMINAL_PROMPT", "0")
         .args(["branch", "--show-current"])
@@ -409,7 +473,9 @@ pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitP
         .output()
         .map_err(|e| format!("Failed to get branch: {}", e))?;
 
-    let branch = String::from_utf8_lossy(&branch_output.stdout).trim().to_string();
+    let branch = String::from_utf8_lossy(&branch_output.stdout)
+        .trim()
+        .to_string();
     if branch.is_empty() {
         return Err("Cannot determine current branch (detached HEAD?)".to_string());
     }
@@ -447,7 +513,8 @@ pub fn run_git_push(repo_path: &Path, github_token: Option<&str>) -> Result<GitP
     if let Some(token) = github_token {
         cmd.env("GH_TOKEN", token);
     }
-    let push_output = cmd.output()
+    let push_output = cmd
+        .output()
         .map_err(|e| format!("Failed to run git push: {}", e))?;
 
     if push_output.status.success() {
@@ -491,10 +558,9 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
 
     // Allowlist of safe commands
     const ALLOWED_CMDS: &[&str] = &[
-        "git", "ls", "find", "wc", "head", "tail", "cat",
-        "echo", "date", "whoami", "pwd", "env",
-        "npm", "node", "cargo", "python3", "pnpm",
-        "which", "grep", "rg", "tree", "file", "stat", "du",
+        "git", "ls", "find", "wc", "head", "tail", "cat", "echo", "date", "whoami", "pwd", "env",
+        "npm", "node", "cargo", "python3", "pnpm", "which", "grep", "rg", "tree", "file", "stat",
+        "du",
     ];
 
     if !ALLOWED_CMDS.contains(&first_word) {
@@ -509,15 +575,13 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
         return Err(DENY_MSG.to_string());
     }
 
-
-
-
-
-
     // Block dangerous git subcommands
     if first_word == "git" && parts.len() >= 2 {
         let subcommand = parts[1];
-        const BLOCKED_GIT: &[&str] = &["push", "rm", "mv", "clean", "checkout", "rebase", "merge", "pull", "fetch", "clone", "init", "remote", "config"];
+        const BLOCKED_GIT: &[&str] = &[
+            "push", "rm", "mv", "clean", "checkout", "rebase", "merge", "pull", "fetch", "clone",
+            "init", "remote", "config",
+        ];
         if BLOCKED_GIT.contains(&subcommand) {
             return Err(DENY_MSG.to_string());
         }
@@ -526,7 +590,9 @@ pub fn validate_exec_command(cmd: &str) -> Result<(), String> {
             return Err(DENY_MSG.to_string());
         }
         // Only allow known safe git subcommands
-        const SAFE_GIT: &[&str] = &["status", "diff", "log", "branch", "stash", "show", "blame", "shortlog", "reset"];
+        const SAFE_GIT: &[&str] = &[
+            "status", "diff", "log", "branch", "stash", "show", "blame", "shortlog", "reset",
+        ];
         if !SAFE_GIT.contains(&subcommand) {
             return Err(DENY_MSG.to_string());
         }
@@ -552,11 +618,12 @@ pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() && (stderr.contains("not found") || stderr.contains("No such file")) {
+    if !output.status.success() && (stderr.contains("not found") || stderr.contains("No such file"))
+    {
         stderr.push_str(
             "\n\nCommand not found. The terminal runs inside the Docker container \
             with access to host binaries (/usr/bin). If the tool is installed elsewhere, \
-            check your PATH or install it in the container."
+            check your PATH or install it in the container.",
         );
     }
 
@@ -566,7 +633,6 @@ pub fn run_exec(repo_path: &Path, cmd: &str) -> Result<ExecResponse, String> {
         exit_code: output.status.code().unwrap_or(-1),
     })
 }
-
 
 /// Detect the git hosting provider from the remote origin URL.
 /// Returns "github", "gitlab", or "unknown".
@@ -595,7 +661,13 @@ pub fn detect_provider(repo_path: &Path) -> &'static str {
 
 /// Create a pull/merge request via gh (GitHub) or glab (GitLab) CLI.
 /// Automatically pushes the current branch first if it has no upstream.
-pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, github_token: Option<&str>) -> Result<String, String> {
+pub fn run_create_pr(
+    repo_path: &Path,
+    title: &str,
+    body: &str,
+    base: &str,
+    github_token: Option<&str>,
+) -> Result<String, String> {
     // Ensure the branch is pushed before creating the PR
     let has_upstream = sync_cmd("git")
         .args(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])
@@ -607,7 +679,10 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, gith
     if !has_upstream {
         let push_result = run_git_push(repo_path, github_token)?;
         if !push_result.success {
-            return Err(format!("Auto-push failed before PR creation: {}", push_result.message));
+            return Err(format!(
+                "Auto-push failed before PR creation: {}",
+                push_result.message
+            ));
         }
     }
 
@@ -615,7 +690,15 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, gith
 
     let output = match provider {
         "gitlab" => {
-            let mut args = vec!["mr", "create", "--title", title, "--target-branch", base, "--no-editor"];
+            let mut args = vec![
+                "mr",
+                "create",
+                "--title",
+                title,
+                "--target-branch",
+                base,
+                "--no-editor",
+            ];
             if !body.is_empty() {
                 args.push("--description");
                 args.push(body);
@@ -647,7 +730,11 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, gith
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        let cmd = if provider == "gitlab" { "glab mr create" } else { "gh pr create" };
+        let cmd = if provider == "gitlab" {
+            "glab mr create"
+        } else {
+            "gh pr create"
+        };
         return Err(format!("{} failed: {}", cmd, stderr.trim()));
     }
 
@@ -659,22 +746,26 @@ pub fn run_create_pr(repo_path: &Path, title: &str, body: &str, base: &str, gith
 pub fn check_pr_url(repo_path: &Path, branch: &str) -> Option<String> {
     let provider = detect_provider(repo_path);
     let output = match provider {
-        "gitlab" => {
-            sync_cmd("glab")
-                .args(["mr", "view", branch, "--json", "web_url", "--jq", ".web_url"])
-                .current_dir(repo_path)
-                .output().ok()?
-        }
-        _ => {
-            sync_cmd("gh")
-                .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
-                .current_dir(repo_path)
-                .output().ok()?
-        }
+        "gitlab" => sync_cmd("glab")
+            .args([
+                "mr", "view", branch, "--json", "web_url", "--jq", ".web_url",
+            ])
+            .current_dir(repo_path)
+            .output()
+            .ok()?,
+        _ => sync_cmd("gh")
+            .args(["pr", "view", branch, "--json", "url", "--jq", ".url"])
+            .current_dir(repo_path)
+            .output()
+            .ok()?,
     };
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if url.is_empty() { None } else { Some(url) }
+        if url.is_empty() {
+            None
+        } else {
+            Some(url)
+        }
     } else {
         None
     }
@@ -707,7 +798,7 @@ pub fn read_pr_template(repo_path: &Path) -> Option<String> {
 /// Default Kronn PR template when no project template exists.
 pub fn default_pr_template(branch: &str) -> String {
     format!(
-"## Summary
+        "## Summary
 
 <!-- Describe what this PR does -->
 
@@ -719,8 +810,9 @@ pub fn default_pr_template(branch: &str) -> String {
 ## Branch: `{branch}`
 
 ---
-*Created via [Kronn](https://github.com/DocRoms/Kronn)*"
-    , branch = branch)
+*Created via [Kronn](https://github.com/DocRoms/Kronn)*",
+        branch = branch
+    )
 }
 
 #[cfg(test)]
@@ -882,13 +974,36 @@ mod tests {
     // ── Commit args tests ────────────────────────────────────────────────────
 
     fn make_test_repo(name: &str) -> tempfile::TempDir {
-        let dir = tempfile::Builder::new().prefix(&format!("kronn-git-{}", name)).tempdir().unwrap();
-        std::process::Command::new("git").args(["init", "-b", "main"]).current_dir(dir.path()).output().unwrap();
-        std::process::Command::new("git").args(["config", "user.email", "test@test.com"]).current_dir(dir.path()).output().unwrap();
-        std::process::Command::new("git").args(["config", "user.name", "Test User"]).current_dir(dir.path()).output().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("kronn-git-{}", name))
+            .tempdir()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.email", "test@test.com"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["config", "user.name", "Test User"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         std::fs::write(dir.path().join("init.txt"), "init").unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(dir.path()).output().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", "init"]).current_dir(dir.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
         dir
     }
 
@@ -896,7 +1011,13 @@ mod tests {
     fn commit_adds_signoff_by_default() {
         let repo = make_test_repo("signoff");
         std::fs::write(repo.path().join("file.txt"), "content").unwrap();
-        let result = run_git_commit(repo.path(), &["file.txt".into()], "test signoff", false, false);
+        let result = run_git_commit(
+            repo.path(),
+            &["file.txt".into()],
+            "test signoff",
+            false,
+            false,
+        );
         assert!(result.is_ok(), "commit failed: {:?}", result.err());
 
         // Check that the commit message contains Signed-off-by
@@ -906,7 +1027,11 @@ mod tests {
             .output()
             .unwrap();
         let msg = String::from_utf8_lossy(&log.stdout);
-        assert!(msg.contains("Signed-off-by:"), "Commit should have Signed-off-by, got: {}", msg);
+        assert!(
+            msg.contains("Signed-off-by:"),
+            "Commit should have Signed-off-by, got: {}",
+            msg
+        );
     }
 
     // ── parse_committed_diff tests ───────────────────────────────────────────
@@ -955,11 +1080,23 @@ mod tests {
     fn make_branch_repo(name: &str) -> tempfile::TempDir {
         let repo = make_test_repo(name);
         // Create a feature branch with two commits worth of changes.
-        std::process::Command::new("git").args(["checkout", "-b", "feature/x"]).current_dir(repo.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["checkout", "-b", "feature/x"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
         std::fs::write(repo.path().join("added.txt"), "added").unwrap();
         std::fs::write(repo.path().join("init.txt"), "modified").unwrap();
-        std::process::Command::new("git").args(["add", "."]).current_dir(repo.path()).output().unwrap();
-        std::process::Command::new("git").args(["commit", "-m", "feature changes"]).current_dir(repo.path()).output().unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "feature changes"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
         repo
     }
 
@@ -970,9 +1107,21 @@ mod tests {
         assert_eq!(status.branch, "feature/x");
         assert_eq!(status.default_branch, "main");
         assert!(!status.is_default_branch);
-        let paths: Vec<&str> = status.committed_files.iter().map(|f| f.path.as_str()).collect();
-        assert!(paths.contains(&"added.txt"), "expected added.txt in {:?}", paths);
-        assert!(paths.contains(&"init.txt"), "expected init.txt in {:?}", paths);
+        let paths: Vec<&str> = status
+            .committed_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
+        assert!(
+            paths.contains(&"added.txt"),
+            "expected added.txt in {:?}",
+            paths
+        );
+        assert!(
+            paths.contains(&"init.txt"),
+            "expected init.txt in {:?}",
+            paths
+        );
         for f in &status.committed_files {
             assert!(f.staged, "committed files should be marked staged: {:?}", f);
         }
@@ -991,10 +1140,16 @@ mod tests {
         // the committed diff (`main...HEAD`) must surface the change.
         let repo = make_branch_repo("committed-diff");
         let res = run_git_diff_committed(repo.path(), "added.txt").unwrap();
-        assert!(res.diff.contains("added.txt"),
-            "committed diff must reference the file, got: {:?}", res.diff);
-        assert!(res.diff.contains("@@"),
-            "committed diff must contain a hunk header, got: {:?}", res.diff);
+        assert!(
+            res.diff.contains("added.txt"),
+            "committed diff must reference the file, got: {:?}",
+            res.diff
+        );
+        assert!(
+            res.diff.contains("@@"),
+            "committed diff must contain a hunk header, got: {:?}",
+            res.diff
+        );
     }
 
     #[test]
@@ -1002,7 +1157,11 @@ mod tests {
         let repo = make_test_repo("on-main");
         let status = run_git_status(repo.path()).unwrap();
         assert!(status.is_default_branch);
-        assert!(status.committed_files.is_empty(), "expected no committed_files on default branch, got {:?}", status.committed_files);
+        assert!(
+            status.committed_files.is_empty(),
+            "expected no committed_files on default branch, got {:?}",
+            status.committed_files
+        );
     }
 
     #[test]
@@ -1011,7 +1170,11 @@ mod tests {
         // Add an uncommitted change on top of the committed work.
         std::fs::write(repo.path().join("untracked.txt"), "wip").unwrap();
         let status = run_git_status(repo.path()).unwrap();
-        let committed_paths: Vec<&str> = status.committed_files.iter().map(|f| f.path.as_str()).collect();
+        let committed_paths: Vec<&str> = status
+            .committed_files
+            .iter()
+            .map(|f| f.path.as_str())
+            .collect();
         let uncommitted_paths: Vec<&str> = status.files.iter().map(|f| f.path.as_str()).collect();
         assert!(committed_paths.contains(&"added.txt"));
         assert!(uncommitted_paths.contains(&"untracked.txt"));
@@ -1038,6 +1201,10 @@ mod tests {
 
         std::fs::write(repo.path().join("file.txt"), "content").unwrap();
         let result = run_git_commit(repo.path(), &["file.txt".into()], "no gpg", false, false);
-        assert!(result.is_ok(), "commit should succeed with --no-gpg-sign even when gpgsign=true: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "commit should succeed with --no-gpg-sign even when gpgsign=true: {:?}",
+            result.err()
+        );
     }
 }

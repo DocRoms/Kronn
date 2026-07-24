@@ -106,10 +106,7 @@ pub(crate) struct OwnershipIndex {
 impl OwnershipIndex {
     fn from_db(conn: &Connection) -> Result<Self> {
         let configs = db::mcps::list_configs(conn)?;
-        let by_hash = configs
-            .into_iter()
-            .map(|c| (c.config_hash, c.id))
-            .collect();
+        let by_hash = configs.into_iter().map(|c| (c.config_hash, c.id)).collect();
         Ok(Self { by_hash })
     }
 
@@ -141,7 +138,9 @@ pub fn scan_all_host_mcps(conn: &Connection) -> Vec<DiscoveredHostMcp> {
         Ok(idx) => idx,
         Err(e) => {
             tracing::warn!("host_mcp_discovery: failed to build ownership index: {}", e);
-            OwnershipIndex { by_hash: HashMap::new() }
+            OwnershipIndex {
+                by_hash: HashMap::new(),
+            }
         }
     };
     scan_all_with_home(&home, &index)
@@ -181,13 +180,9 @@ fn scan_claude(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
     // Top-level mcpServers (scope user)
     if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, entry) in servers {
-            if let Some(disc) = build_from_json_entry(
-                &path_str,
-                HostScope::ClaudeUser,
-                name,
-                entry,
-                index,
-            ) {
+            if let Some(disc) =
+                build_from_json_entry(&path_str, HostScope::ClaudeUser, name, entry, index)
+            {
                 out.push(disc);
             }
         }
@@ -203,7 +198,9 @@ fn scan_claude(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
             for (name, entry) in servers {
                 if let Some(disc) = build_from_json_entry(
                     &path_str,
-                    HostScope::ClaudeLocal { project_path: project_path.clone() },
+                    HostScope::ClaudeLocal {
+                        project_path: project_path.clone(),
+                    },
                     name,
                     entry,
                     index,
@@ -236,13 +233,9 @@ fn scan_gemini(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
     let mut out = Vec::new();
     if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, entry) in servers {
-            if let Some(disc) = build_from_json_entry(
-                &path_str,
-                HostScope::Gemini,
-                name,
-                entry,
-                index,
-            ) {
+            if let Some(disc) =
+                build_from_json_entry(&path_str, HostScope::Gemini, name, entry, index)
+            {
                 out.push(disc);
             }
         }
@@ -269,13 +262,9 @@ fn scan_copilot(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
     let mut out = Vec::new();
     if let Some(servers) = value.get("mcpServers").and_then(|v| v.as_object()) {
         for (name, entry) in servers {
-            if let Some(disc) = build_from_json_entry(
-                &path_str,
-                HostScope::Copilot,
-                name,
-                entry,
-                index,
-            ) {
+            if let Some(disc) =
+                build_from_json_entry(&path_str, HostScope::Copilot, name, entry, index)
+            {
                 out.push(disc);
             }
         }
@@ -316,18 +305,27 @@ fn scan_codex(home: &Path, index: &OwnershipIndex) -> Vec<DiscoveredHostMcp> {
             Some(c) => c.to_string(),
             None => continue, // Codex requires command (stdio only)
         };
-        let args: Vec<String> = table.get("args")
+        let args: Vec<String> = table
+            .get("args")
             .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let env_map: HashMap<String, String> = table.get("env")
+        let env_map: HashMap<String, String> = table
+            .get("env")
             .and_then(|v| v.as_table())
-            .map(|t| t.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect())
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
             .unwrap_or_default();
         let env_keys: Vec<String> = env_map.keys().cloned().collect();
-        let marker_id = table.get("_kronn")
+        let marker_id = table
+            .get("_kronn")
             .and_then(|v| v.as_table())
             .and_then(|t| t.get("config_id"))
             .and_then(|v| v.as_str())
@@ -361,23 +359,41 @@ fn build_from_json_entry(
     index: &OwnershipIndex,
 ) -> Option<DiscoveredHostMcp> {
     let entry_obj = entry.as_object()?;
-    let command = entry_obj.get("command").and_then(|v| v.as_str()).map(String::from);
-    let url = entry_obj.get("url").and_then(|v| v.as_str()).map(String::from);
-    let http_url = entry_obj.get("httpUrl").and_then(|v| v.as_str()).map(String::from);
+    let command = entry_obj
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let url = entry_obj
+        .get("url")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let http_url = entry_obj
+        .get("httpUrl")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     let entry_type = entry_obj.get("type").and_then(|v| v.as_str());
-    let args: Vec<String> = entry_obj.get("args")
+    let args: Vec<String> = entry_obj
+        .get("args")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
-    let env_map: HashMap<String, String> = entry_obj.get("env")
+    let env_map: HashMap<String, String> = entry_obj
+        .get("env")
         .and_then(|v| v.as_object())
-        .map(|m| m.iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect())
+        .map(|m| {
+            m.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
         .unwrap_or_default();
 
     // _kronn marker (future-proof — Phase 3 will write this)
-    let marker_id = entry_obj.get("_kronn")
+    let marker_id = entry_obj
+        .get("_kronn")
         .and_then(|v| v.as_object())
         .and_then(|m| m.get("config_id"))
         .and_then(|v| v.as_str())
@@ -439,14 +455,16 @@ fn sort_keys(mut v: Vec<String>) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use serial_test::serial;
     use super::*;
+    use serial_test::serial;
     use std::collections::HashSet;
     use std::fs;
     use tempfile::TempDir;
 
     fn empty_index() -> OwnershipIndex {
-        OwnershipIndex { by_hash: HashMap::new() }
+        OwnershipIndex {
+            by_hash: HashMap::new(),
+        }
     }
 
     fn index_with_hash(hash: &str, config_id: &str) -> OwnershipIndex {
@@ -515,8 +533,12 @@ mod tests {
         assert_eq!(result.len(), 2);
 
         let scopes: HashSet<HostScope> = result.iter().map(|d| d.scope.clone()).collect();
-        assert!(scopes.contains(&HostScope::ClaudeLocal { project_path: "/home/me/repo-a".into() }));
-        assert!(scopes.contains(&HostScope::ClaudeLocal { project_path: "/home/me/repo-b".into() }));
+        assert!(scopes.contains(&HostScope::ClaudeLocal {
+            project_path: "/home/me/repo-a".into()
+        }));
+        assert!(scopes.contains(&HostScope::ClaudeLocal {
+            project_path: "/home/me/repo-b".into()
+        }));
     }
 
     #[test]
@@ -537,8 +559,12 @@ mod tests {
         fs::write(tmp.path().join(".claude.json"), claude).unwrap();
         let result = scan_claude(tmp.path(), &empty_index());
         assert_eq!(result.len(), 2);
-        assert!(result.iter().any(|d| d.name == "global-one" && d.scope == HostScope::ClaudeUser));
-        assert!(result.iter().any(|d| matches!(&d.scope, HostScope::ClaudeLocal { project_path } if project_path == "/p")));
+        assert!(result
+            .iter()
+            .any(|d| d.name == "global-one" && d.scope == HostScope::ClaudeUser));
+        assert!(result.iter().any(
+            |d| matches!(&d.scope, HostScope::ClaudeLocal { project_path } if project_path == "/p")
+        ));
     }
 
     #[test]
@@ -570,7 +596,10 @@ mod tests {
         fs::write(tmp.path().join(".gemini/settings.json"), gemini).unwrap();
         let result = scan_gemini(tmp.path(), &empty_index());
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0].transport, McpTransport::Streamable { .. }));
+        assert!(matches!(
+            result[0].transport,
+            McpTransport::Streamable { .. }
+        ));
     }
 
     #[test]
@@ -711,8 +740,11 @@ ATLASSIAN_TOKEN = "x"
         fs::write(tmp.path().join(".claude.json"), claude).unwrap();
         let result = scan_claude(tmp.path(), &empty_index());
         let serialized = serde_json::to_string(&result).unwrap();
-        assert!(!serialized.contains("very-secret-do-not-expose"),
-            "env value leaked in serialized output: {}", serialized);
+        assert!(
+            !serialized.contains("very-secret-do-not-expose"),
+            "env value leaked in serialized output: {}",
+            serialized
+        );
     }
 
     #[test]
@@ -721,12 +753,21 @@ ATLASSIAN_TOKEN = "x"
         let tmp = TempDir::new().unwrap();
         fs::create_dir_all(tmp.path().join(".gemini")).unwrap();
         fs::create_dir_all(tmp.path().join(".codex")).unwrap();
-        fs::write(tmp.path().join(".claude.json"),
-            r#"{"mcpServers":{"a":{"command":"x"}}}"#).unwrap();
-        fs::write(tmp.path().join(".gemini/settings.json"),
-            r#"{"mcpServers":{"b":{"command":"y"}}}"#).unwrap();
-        fs::write(tmp.path().join(".codex/config.toml"),
-            "[mcp_servers.c]\ncommand = \"z\"\n").unwrap();
+        fs::write(
+            tmp.path().join(".claude.json"),
+            r#"{"mcpServers":{"a":{"command":"x"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join(".gemini/settings.json"),
+            r#"{"mcpServers":{"b":{"command":"y"}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            tmp.path().join(".codex/config.toml"),
+            "[mcp_servers.c]\ncommand = \"z\"\n",
+        )
+        .unwrap();
 
         let r1 = scan_all_with_home(tmp.path(), &empty_index());
         let r2 = scan_all_with_home(tmp.path(), &empty_index());

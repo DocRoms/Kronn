@@ -28,7 +28,9 @@ async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
 /// Helper: resolve a project's filesystem path from its DB id.
 async fn resolve_project_path(state: &AppState, id: &str) -> Result<std::path::PathBuf, String> {
     let pid = id.to_string();
-    let project = state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
         .await
         .map_err(|e| format!("DB error: {}", e))?;
     let project = project.ok_or_else(|| "Project not found".to_string())?;
@@ -49,9 +51,10 @@ pub async fn git_status(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_git_status(&repo_path)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let result =
+        tokio::task::spawn_blocking(move || crate::api::git_ops::run_git_status(&repo_path))
+            .await
+            .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(status) => Json(ApiResponse::ok(status)),
@@ -83,7 +86,9 @@ pub async fn git_diff(
         } else {
             crate::api::git_ops::run_git_diff(&repo_path, &file_path)
         }
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(diff) => Json(ApiResponse::ok(diff)),
@@ -120,8 +125,12 @@ pub async fn git_branch(
             return Err(format!("git checkout -b failed: {}", stderr.trim()));
         }
 
-        Ok(GitBranchResponse { branch: branch_name })
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        Ok(GitBranchResponse {
+            branch: branch_name,
+        })
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -158,7 +167,9 @@ pub async fn git_commit(
     let sign = req.sign;
     let result = tokio::task::spawn_blocking(move || {
         crate::api::git_ops::run_git_commit(&repo_path, &files, &message, amend, sign)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -179,7 +190,9 @@ pub async fn git_push(
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
         crate::api::git_ops::run_git_push(&repo_path, github_token.as_deref())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -203,7 +216,9 @@ pub async fn project_exec(
     {
         let config = state.config.read().await;
         if config.agents.any_installed() && !config.agents.any_full_access() {
-            return Json(ApiResponse::err("Terminal requires full_access enabled on at least one agent"));
+            return Json(ApiResponse::err(
+                "Terminal requires full_access enabled on at least one agent",
+            ));
         }
     }
 
@@ -223,9 +238,10 @@ pub async fn project_exec(
         Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_exec(&repo_path, &cmd)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let result =
+        tokio::task::spawn_blocking(move || crate::api::git_ops::run_exec(&repo_path, &cmd))
+            .await
+            .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -249,8 +265,16 @@ pub async fn create_pr(
     let base = req.base.clone();
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
-        crate::api::git_ops::run_create_pr(&repo_path, &title, &body, &base, github_token.as_deref())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+        crate::api::git_ops::run_create_pr(
+            &repo_path,
+            &title,
+            &body,
+            &base,
+            github_token.as_deref(),
+        )
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(url) => Json(ApiResponse::ok(serde_json::json!({ "url": url }))),

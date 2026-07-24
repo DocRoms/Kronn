@@ -597,17 +597,15 @@ Quality rules:\n\
 // prompts. The dispatcher (`kind_to_steps`) is stable now so the
 // front-end can already wire kind selection.
 
-pub(crate) const DRIFT_STEPS: &[AnalysisStep] = &[
-    AnalysisStep {
-        target_file: "REVIEW",
-        prompt: "\
+pub(crate) const DRIFT_STEPS: &[AnalysisStep] = &[AnalysisStep {
+    target_file: "REVIEW",
+    prompt: "\
 DRIFT AUDIT (0.8.2) — placeholder body, content lands in S2.D3.\n\n\
 Read docs/checksums.json. For every (file, sha256) recorded there, recompute the sha and \
 list the files where the recorded hash no longer matches. Do NOT rewrite any file — \
 your output is a short bullet list of stale docs/ files only.",
-        sources: &["docs/checksums.json"],
-    },
-];
+    sources: &["docs/checksums.json"],
+}];
 
 pub(crate) const SECURITY_STEPS: &[AnalysisStep] = &[
     AnalysisStep {
@@ -1123,7 +1121,11 @@ line `Not applicable: <one-sentence reason>` and STOP — no findings, no TD fil
 /// foundation) open with the relevance gate; foundation steps and
 /// standalone sub-audits (deliberately chosen by the user) never do.
 pub(crate) fn gate_for_step(step_1_based: usize, first_chained_step: usize) -> &'static str {
-    if step_1_based >= first_chained_step { CHAINED_STEP_GATE } else { "" }
+    if step_1_based >= first_chained_step {
+        CHAINED_STEP_GATE
+    } else {
+        ""
+    }
 }
 
 pub(crate) fn assemble_chained_steps(kind: crate::models::AuditKind) -> Vec<AnalysisStep> {
@@ -1154,7 +1156,10 @@ pub(crate) fn step8_context_block(
     signals: &[crate::core::audit_detectors::DetectedSignal],
     prior_td_digests: &[reconciliation::PriorDigest],
 ) -> String {
-    let mut out = format!("\n\n{}\n", crate::core::audit_detectors::render_signals_block(signals));
+    let mut out = format!(
+        "\n\n{}\n",
+        crate::core::audit_detectors::render_signals_block(signals)
+    );
     if !prior_td_digests.is_empty() {
         out.push_str(&format!(
             "\n\n{}\n",
@@ -1196,26 +1201,30 @@ pub(crate) fn agent_can_audit(agent: &crate::models::AgentType) -> bool {
 pub(crate) fn kind_to_steps(kind: crate::models::AuditKind) -> &'static [AnalysisStep] {
     use crate::models::AuditKind;
     match kind {
-        AuditKind::Full          => ANALYSIS_STEPS,
-        AuditKind::Drift         => DRIFT_STEPS,
-        AuditKind::Security      => SECURITY_STEPS,
-        AuditKind::Docker        => DOCKER_STEPS,
-        AuditKind::Performance   => PERFORMANCE_STEPS,
+        AuditKind::Full => ANALYSIS_STEPS,
+        AuditKind::Drift => DRIFT_STEPS,
+        AuditKind::Security => SECURITY_STEPS,
+        AuditKind::Docker => DOCKER_STEPS,
+        AuditKind::Performance => PERFORMANCE_STEPS,
         AuditKind::Accessibility => ACCESSIBILITY_STEPS,
-        AuditKind::Rgaa          => RGAA_STEPS,
-        AuditKind::Database      => DATABASE_STEPS,
-        AuditKind::ApiDesign     => API_DESIGN_STEPS,
-        AuditKind::CodeQuality   => CODE_QUALITY_STEPS,
+        AuditKind::Rgaa => RGAA_STEPS,
+        AuditKind::Database => DATABASE_STEPS,
+        AuditKind::ApiDesign => API_DESIGN_STEPS,
+        AuditKind::CodeQuality => CODE_QUALITY_STEPS,
         // Custom is handled at the call site: it builds a one-off
         // AnalysisStep from req.custom_prompt rather than using a const.
-        AuditKind::Custom        => &[],
+        AuditKind::Custom => &[],
     }
 }
 
 /// Files installed by the audit template (to be removed on cancel).
 pub(crate) const AUDIT_REDIRECTOR_FILES: &[&str] = &[
-    "CLAUDE.md", "GEMINI.md", "AGENTS.md",
-    ".cursorrules", ".windsurfrules", ".clinerules",
+    "CLAUDE.md",
+    "GEMINI.md",
+    "AGENTS.md",
+    ".cursorrules",
+    ".windsurfrules",
+    ".clinerules",
     ".github/copilot-instructions.md",
 ];
 
@@ -1231,10 +1240,8 @@ mod kind_dispatch_tests {
             .expect("backend crate must live below the repository root");
         let readme = std::fs::read_to_string(repo_root.join("README.md"))
             .expect("README.md must be readable");
-        let architecture = std::fs::read_to_string(
-            repo_root.join("docs/architecture/overview.md"),
-        )
-        .expect("architecture overview must be readable");
+        let architecture = std::fs::read_to_string(repo_root.join("docs/architecture/overview.md"))
+            .expect("architecture overview must be readable");
 
         for expected in ["Step 8", "CodeQuality", "Rgaa"] {
             assert!(
@@ -1298,10 +1305,16 @@ mod kind_dispatch_tests {
     #[test]
     fn full_kind_returns_canonical_9_step_foundation() {
         let steps = kind_to_steps(AuditKind::Full);
-        assert_eq!(steps.len(), ANALYSIS_STEPS.len(),
-            "Full kind must return the canonical step list, not a subset");
-        assert_eq!(steps.len(), 9,
-            "kind_to_steps(Full) is the 9-step foundation before launch-time chaining");
+        assert_eq!(
+            steps.len(),
+            ANALYSIS_STEPS.len(),
+            "Full kind must return the canonical step list, not a subset"
+        );
+        assert_eq!(
+            steps.len(),
+            9,
+            "kind_to_steps(Full) is the 9-step foundation before launch-time chaining"
+        );
     }
 
     #[test]
@@ -1318,8 +1331,12 @@ mod kind_dispatch_tests {
             AuditKind::CodeQuality,
         ] {
             let steps = kind_to_steps(kind);
-            assert_eq!(steps.len(), 1,
-                "{:?} should expose one focused step in 0.8.2 (S2.D3-D5 fill the body)", kind);
+            assert_eq!(
+                steps.len(),
+                1,
+                "{:?} should expose one focused step in 0.8.2 (S2.D3-D5 fill the body)",
+                kind
+            );
         }
     }
 
@@ -1329,10 +1346,18 @@ mod kind_dispatch_tests {
         // the 7 chained dimensions, each single-step. RGAA stays on-demand.
         let chain = assemble_chained_steps(AuditKind::Full);
         assert_eq!(chain.len(), ANALYSIS_STEPS.len() + 7);
-        assert_eq!(chain[ANALYSIS_STEPS.len()].target_file, "docs/inconsistencies-security.md");
-        assert_eq!(chain.last().unwrap().target_file, "docs/inconsistencies-code-quality.md");
-        assert!(!chain.iter().any(|s| s.target_file.contains("rgaa")),
-            "RGAA is legal/on-demand, never chained by default");
+        assert_eq!(
+            chain[ANALYSIS_STEPS.len()].target_file,
+            "docs/inconsistencies-security.md"
+        );
+        assert_eq!(
+            chain.last().unwrap().target_file,
+            "docs/inconsistencies-code-quality.md"
+        );
+        assert!(
+            !chain.iter().any(|s| s.target_file.contains("rgaa")),
+            "RGAA is legal/on-demand, never chained by default"
+        );
     }
 
     #[test]
@@ -1352,12 +1377,22 @@ mod kind_dispatch_tests {
         // tracking them no longer self-drifts on the audit's own commit.
         let chain = assemble_chained_steps(AuditKind::Full);
         let subs = &chain[ANALYSIS_STEPS.len()..];
-        assert_eq!(subs.len(), 7, "7 chained sub-audits after the 9 foundation steps");
+        assert_eq!(
+            subs.len(),
+            7,
+            "7 chained sub-audits after the 9 foundation steps"
+        );
         for s in subs {
-            assert!(s.target_file.contains("inconsistencies-"),
-                "{} must be a findings index", s.target_file);
-            assert!(!s.sources.is_empty(),
-                "{} must carry a drift source (F27 fingerprint or file set)", s.target_file);
+            assert!(
+                s.target_file.contains("inconsistencies-"),
+                "{} must be a findings index",
+                s.target_file
+            );
+            assert!(
+                !s.sources.is_empty(),
+                "{} must carry a drift source (F27 fingerprint or file set)",
+                s.target_file
+            );
         }
     }
 
@@ -1366,7 +1401,10 @@ mod kind_dispatch_tests {
         let first_chained = ANALYSIS_STEPS.len() + 1;
         assert_eq!(gate_for_step(1, first_chained), "");
         assert_eq!(gate_for_step(ANALYSIS_STEPS.len(), first_chained), "");
-        assert_eq!(gate_for_step(first_chained, first_chained), CHAINED_STEP_GATE);
+        assert_eq!(
+            gate_for_step(first_chained, first_chained),
+            CHAINED_STEP_GATE
+        );
         assert_eq!(gate_for_step(16, first_chained), CHAINED_STEP_GATE);
         // A standalone sub-audit (1 step, user-chosen) never gets gated.
         assert_eq!(gate_for_step(1, first_chained), "");
@@ -1393,20 +1431,30 @@ mod kind_dispatch_tests {
         // doesn't clobber `docs/inconsistencies-tech-debt.md`.
         let canonical = "docs/inconsistencies-tech-debt.md";
         for (kind, expected_prefix) in [
-            (AuditKind::Security,      "docs/inconsistencies-security"),
-            (AuditKind::Docker,        "docs/inconsistencies-docker"),
-            (AuditKind::Performance,   "docs/inconsistencies-performance"),
-            (AuditKind::Accessibility, "docs/inconsistencies-accessibility"),
-            (AuditKind::Rgaa,          "docs/inconsistencies-rgaa"),
-            (AuditKind::Database,      "docs/inconsistencies-database"),
-            (AuditKind::ApiDesign,     "docs/inconsistencies-api"),
-            (AuditKind::CodeQuality,   "docs/inconsistencies-code-quality"),
+            (AuditKind::Security, "docs/inconsistencies-security"),
+            (AuditKind::Docker, "docs/inconsistencies-docker"),
+            (AuditKind::Performance, "docs/inconsistencies-performance"),
+            (
+                AuditKind::Accessibility,
+                "docs/inconsistencies-accessibility",
+            ),
+            (AuditKind::Rgaa, "docs/inconsistencies-rgaa"),
+            (AuditKind::Database, "docs/inconsistencies-database"),
+            (AuditKind::ApiDesign, "docs/inconsistencies-api"),
+            (AuditKind::CodeQuality, "docs/inconsistencies-code-quality"),
         ] {
             let steps = kind_to_steps(kind);
-            assert_ne!(steps[0].target_file, canonical,
-                "{:?} must NOT write into the Full audit's index", kind);
-            assert!(steps[0].target_file.starts_with(expected_prefix),
-                "{:?} target_file should start with {expected_prefix}, got {}", kind, steps[0].target_file);
+            assert_ne!(
+                steps[0].target_file, canonical,
+                "{:?} must NOT write into the Full audit's index",
+                kind
+            );
+            assert!(
+                steps[0].target_file.starts_with(expected_prefix),
+                "{:?} target_file should start with {expected_prefix}, got {}",
+                kind,
+                steps[0].target_file
+            );
         }
     }
 
@@ -1417,8 +1465,10 @@ mod kind_dispatch_tests {
         // therefore lists checksums.json as its source.
         let drift = kind_to_steps(AuditKind::Drift);
         assert_eq!(drift.len(), 1);
-        assert!(drift[0].sources.contains(&"docs/checksums.json"),
-            "Drift step must hash docs/checksums.json to compute drift");
+        assert!(
+            drift[0].sources.contains(&"docs/checksums.json"),
+            "Drift step must hash docs/checksums.json to compute drift"
+        );
     }
 
     #[test]
@@ -1427,16 +1477,16 @@ mod kind_dispatch_tests {
         // event filtering on the front-end. Drift in labels would break
         // existing rows after a deploy.
         let expected = [
-            (AuditKind::Full,          "Full"),
-            (AuditKind::Drift,         "Drift"),
-            (AuditKind::Security,      "Security"),
-            (AuditKind::Docker,        "Docker"),
-            (AuditKind::Performance,   "Performance"),
+            (AuditKind::Full, "Full"),
+            (AuditKind::Drift, "Drift"),
+            (AuditKind::Security, "Security"),
+            (AuditKind::Docker, "Docker"),
+            (AuditKind::Performance, "Performance"),
             (AuditKind::Accessibility, "Accessibility"),
-            (AuditKind::Rgaa,          "Rgaa"),
-            (AuditKind::Database,      "Database"),
-            (AuditKind::ApiDesign,     "ApiDesign"),
-            (AuditKind::Custom,        "Custom"),
+            (AuditKind::Rgaa, "Rgaa"),
+            (AuditKind::Database, "Database"),
+            (AuditKind::ApiDesign, "ApiDesign"),
+            (AuditKind::Custom, "Custom"),
         ];
         for (kind, label) in expected {
             assert_eq!(kind.as_label(), label, "label drift on {:?}", kind);
@@ -1450,10 +1500,16 @@ mod kind_dispatch_tests {
         // (`as_label()`) leak as "Rgaa" which reads as a typo — this
         // helper exposes the human form ("RGAA 4.1", "Sécurité").
         use crate::models::AuditKind;
-        assert_eq!(AuditKind::Rgaa.display_name(), "RGAA 4.1",
-            "RGAA must keep its uppercase acronym + version");
-        assert_eq!(AuditKind::Security.display_name(), "Sécurité",
-            "FR: must say Sécurité not Security");
+        assert_eq!(
+            AuditKind::Rgaa.display_name(),
+            "RGAA 4.1",
+            "RGAA must keep its uppercase acronym + version"
+        );
+        assert_eq!(
+            AuditKind::Security.display_name(),
+            "Sécurité",
+            "FR: must say Sécurité not Security"
+        );
         assert_eq!(AuditKind::Accessibility.display_name(), "Accessibilité");
         assert_eq!(AuditKind::Database.display_name(), "Base de données");
         assert_eq!(AuditKind::ApiDesign.display_name(), "Design d'API");
@@ -1475,44 +1531,72 @@ mod kind_dispatch_tests {
         let steps = kind_to_steps(AuditKind::Rgaa);
         assert_eq!(steps.len(), 1, "Rgaa is a single-step focused audit");
         let prompt = steps[0].prompt;
-        assert!(prompt.contains("RGAA"), "must reference the French norm by name");
-        assert!(prompt.contains("4.1"), "must pin the RGAA version (4.1 as of 2026)");
+        assert!(
+            prompt.contains("RGAA"),
+            "must reference the French norm by name"
+        );
+        assert!(
+            prompt.contains("4.1"),
+            "must pin the RGAA version (4.1 as of 2026)"
+        );
         // A handful of canonical criteria — drift in any of these means
         // the prompt was edited to remove the French specificity, which
         // defeats the whole reason this kind exists.
-        assert!(prompt.contains("11.10"), "must cover form-error binding (critère 11.10)");
-        assert!(prompt.contains("autocomplete"), "must cover the RGPD-adjacent autocomplete reqs");
-        assert!(prompt.contains("contrast") || prompt.contains("contrast"),
-            "must cover thématique 3 (couleurs + contraste)");
-        assert_eq!(steps[0].target_file, "docs/inconsistencies-rgaa.md",
-            "RGAA must NOT clobber the WCAG-flavored accessibility index");
+        assert!(
+            prompt.contains("11.10"),
+            "must cover form-error binding (critère 11.10)"
+        );
+        assert!(
+            prompt.contains("autocomplete"),
+            "must cover the RGPD-adjacent autocomplete reqs"
+        );
+        assert!(
+            prompt.contains("contrast") || prompt.contains("contrast"),
+            "must cover thématique 3 (couleurs + contraste)"
+        );
+        assert_eq!(
+            steps[0].target_file, "docs/inconsistencies-rgaa.md",
+            "RGAA must NOT clobber the WCAG-flavored accessibility index"
+        );
         // Manual-audit-is-mandatory section: must educate the user that
         // automation only covers 30-40% of RGAA, and point them to the
         // two French training references (Access42 + Opquast). Without
         // this, the audit ships a false sense of compliance.
-        assert!(prompt.contains("audit") && prompt.contains("manuel"),
-            "must explicitly require the manual-audit section");
-        assert!(prompt.contains("Access42"),
-            "must reference Access42 — the certifying-RGAA reference (audit officiel + expertise)");
-        assert!(prompt.contains("Opquast"),
-            "must reference Opquast — the broader web-quality certification with RGAA coverage");
-        assert!(prompt.contains("W3C") || prompt.contains("DINUM"),
-            "must cite the authority recommending manual audit");
+        assert!(
+            prompt.contains("audit") && prompt.contains("manuel"),
+            "must explicitly require the manual-audit section"
+        );
+        assert!(
+            prompt.contains("Access42"),
+            "must reference Access42 — the certifying-RGAA reference (audit officiel + expertise)"
+        );
+        assert!(
+            prompt.contains("Opquast"),
+            "must reference Opquast — the broader web-quality certification with RGAA coverage"
+        );
+        assert!(
+            prompt.contains("W3C") || prompt.contains("DINUM"),
+            "must cite the authority recommending manual audit"
+        );
         // Anti-false-sense-of-compliance: explicitly tell the agent to
         // warn the user that automated audits do NOT mean the site is
         // conforming. Without this, users tend to read the empty-findings
         // case as "all good".
-        assert!(prompt.contains("ne remplace") || prompt.contains("non trouvées")
-                || prompt.contains("retestent") || prompt.contains("appel à un pro"),
-            "must explicitly warn against the false sense of compliance");
+        assert!(
+            prompt.contains("ne remplace")
+                || prompt.contains("non trouvées")
+                || prompt.contains("retestent")
+                || prompt.contains("appel à un pro"),
+            "must explicitly warn against the false sense of compliance"
+        );
     }
 
     #[test]
     fn launch_audit_request_defaults_kind_to_full() {
         // Backwards-compat: clients that don't send `kind` get Full.
         let json = r#"{"agent":"ClaudeCode"}"#;
-        let req: crate::models::LaunchAuditRequest = serde_json::from_str(json)
-            .expect("LaunchAuditRequest must still parse without `kind`");
+        let req: crate::models::LaunchAuditRequest =
+            serde_json::from_str(json).expect("LaunchAuditRequest must still parse without `kind`");
         assert_eq!(req.kind.unwrap_or_default(), AuditKind::Full);
         assert!(req.custom_prompt.is_none());
     }
@@ -1520,7 +1604,10 @@ mod kind_dispatch_tests {
 
 #[cfg(test)]
 mod prompt_tests {
-    use super::helpers::{build_briefing_prompt, build_sub_audit_validation_prompt, build_validation_prompt, run_scope_block};
+    use super::helpers::{
+        build_briefing_prompt, build_sub_audit_validation_prompt, build_validation_prompt,
+        run_scope_block,
+    };
     use super::*;
     use crate::models::AuditInfo;
 
@@ -1531,12 +1618,19 @@ mod prompt_tests {
         // the agent to validate against inconsistencies-tech-debt.md while
         // the audit had written inconsistencies-code-quality.md.
         let p = build_sub_audit_validation_prompt(
-            crate::models::AuditKind::CodeQuality, "fr", false, &[],
+            crate::models::AuditKind::CodeQuality,
+            "fr",
+            false,
+            &[],
         );
-        assert!(p.contains("docs/inconsistencies-code-quality.md"),
-            "CodeQuality validation must target its own index");
-        assert!(!p.contains("docs/inconsistencies-tech-debt.md"),
-            "…and never the Full-audit fallback index");
+        assert!(
+            p.contains("docs/inconsistencies-code-quality.md"),
+            "CodeQuality validation must target its own index"
+        );
+        assert!(
+            !p.contains("docs/inconsistencies-tech-debt.md"),
+            "…and never the Full-audit fallback index"
+        );
     }
 
     #[test]
@@ -1544,19 +1638,28 @@ mod prompt_tests {
         // Codex r6 P0 — option (c) auto-confirmed every unselected TD while
         // the same prompt forbade batch confirmation. Silence must never
         // become `Confirmed by user`, in any locale or variant.
-        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        let info = AuditInfo {
+            files: vec![],
+            todos: vec![],
+            tech_debt_items: vec![],
+        };
         for lang in ["fr", "en", "es"] {
             let p = build_validation_prompt(lang, &info, false, &[]);
-            assert!(!p.contains("automatiquement marqu") && !p.contains("automaticamente `Confirmed"),
-                "{lang}: no TD may be auto-confirmed");
-            assert!(!p.contains("default to `Confirmed by user`"),
-                "{lang}: unselected TDs must keep their status");
+            assert!(
+                !p.contains("automatiquement marqu") && !p.contains("automaticamente `Confirmed"),
+                "{lang}: no TD may be auto-confirmed"
+            );
+            assert!(
+                !p.contains("default to `Confirmed by user`"),
+                "{lang}: unselected TDs must keep their status"
+            );
         }
-        let sub = build_sub_audit_validation_prompt(
-            crate::models::AuditKind::Security, "fr", false, &[],
+        let sub =
+            build_sub_audit_validation_prompt(crate::models::AuditKind::Security, "fr", false, &[]);
+        assert!(
+            sub.contains("gardent leur statut actuel"),
+            "sub-audit variant must state that unselected TDs keep their status"
         );
-        assert!(sub.contains("gardent leur statut actuel"),
-            "sub-audit variant must state that unselected TDs keep their status");
     }
 
     #[test]
@@ -1568,27 +1671,47 @@ mod prompt_tests {
         let block = run_scope_block(&ids, "fr");
         assert!(block.contains("TD-20260720-a, TD-20260720-b"));
         assert!(block.contains("UNIQUEMENT"));
-        assert!(run_scope_block(&[], "fr").is_empty(), "no ids → no scope block (fresh install)");
-
-        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
-        let p = build_validation_prompt("fr", &info, false, &ids);
-        assert!(p.contains("TD-20260720-a"), "Full validation prompt must embed the run scope");
-        let sub = build_sub_audit_validation_prompt(
-            crate::models::AuditKind::Docker, "fr", false, &ids,
+        assert!(
+            run_scope_block(&[], "fr").is_empty(),
+            "no ids → no scope block (fresh install)"
         );
-        assert!(sub.contains("TD-20260720-b"), "sub-audit prompt must embed the run scope");
+
+        let info = AuditInfo {
+            files: vec![],
+            todos: vec![],
+            tech_debt_items: vec![],
+        };
+        let p = build_validation_prompt("fr", &info, false, &ids);
+        assert!(
+            p.contains("TD-20260720-a"),
+            "Full validation prompt must embed the run scope"
+        );
+        let sub =
+            build_sub_audit_validation_prompt(crate::models::AuditKind::Docker, "fr", false, &ids);
+        assert!(
+            sub.contains("TD-20260720-b"),
+            "sub-audit prompt must embed the run scope"
+        );
     }
 
     #[test]
     fn validation_no_longer_claims_a_ten_step_pipeline() {
         // Codex r6 P1 — the prompt announced "step 10/10" and "9 analysis
         // steps" after the pipeline grew to 16 chained steps.
-        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        let info = AuditInfo {
+            files: vec![],
+            todos: vec![],
+            tech_debt_items: vec![],
+        };
         for lang in ["fr", "en", "es"] {
             let p = build_validation_prompt(lang, &info, false, &[]);
             assert!(!p.contains("10/10"), "{lang}: stale step count");
-            assert!(!p.contains("9 analysis steps") && !p.contains("9 etapes") && !p.contains("9 étapes"),
-                "{lang}: stale analysis-step count");
+            assert!(
+                !p.contains("9 analysis steps")
+                    && !p.contains("9 etapes")
+                    && !p.contains("9 étapes"),
+                "{lang}: stale analysis-step count"
+            );
         }
     }
 
@@ -1599,40 +1722,76 @@ mod prompt_tests {
         // Canary on the assembled step prompt (static — values only ever
         // enter via tool use the prompt now forbids).
         let p = SECURITY_STEPS[0].prompt;
-        assert!(!p.contains("and read each"), "must never instruct reading .env content");
-        assert!(!p.contains("-p -S") && !p.contains("--all -p"), "git history search must never dump patches");
+        assert!(
+            !p.contains("and read each"),
+            "must never instruct reading .env content"
+        );
+        assert!(
+            !p.contains("-p -S") && !p.contains("--all -p"),
+            "git history search must never dump patches"
+        );
         assert!(p.contains("--name-only"), "history search is metadata-only");
-        assert!(p.contains("EXFILTRATION GUARD"), "the absolute never-transmit rule must be present");
+        assert!(
+            p.contains("EXFILTRATION GUARD"),
+            "the absolute never-transmit rule must be present"
+        );
         assert!(p.contains("Findings carry file + line + pattern type only"));
         // Codex r9 — the value-scan is not safely runnable by an LLM agent:
         // the prompt must claim honest non-coverage, never a clean bill.
-        assert!(p.matches("Not evaluated safely").count() >= 3,
-            "each secret-content sub-check must be individually labeled");
+        assert!(
+            p.matches("Not evaluated safely").count() >= 3,
+            "each secret-content sub-check must be individually labeled"
+        );
         // Codex sync (msg 105) — positive semantic coverage on the FULL
         // pipeline's own secret mentions, not just the Security sub-audit.
         let full: String = ANALYSIS_STEPS.iter().map(|s| s.prompt).collect();
-        assert!(full.contains("CI secret sourcing: `Not evaluated safely"),
-            "Full step 7 CI credential check must be honestly non-evaluated");
-        assert!(full.contains("Values inside tracked `.env*` files: `Not evaluated safely"),
-            "Full step 7 .env value check must be honestly non-evaluated");
-        assert!(full.contains("git ls-files -- '*.env*' '.env*'"),
-            "tracked-.env detection must be the quoted pathspec form");
+        assert!(
+            full.contains("CI secret sourcing: `Not evaluated safely"),
+            "Full step 7 CI credential check must be honestly non-evaluated"
+        );
+        assert!(
+            full.contains("Values inside tracked `.env*` files: `Not evaluated safely"),
+            "Full step 7 .env value check must be honestly non-evaluated"
+        );
+        assert!(
+            full.contains("git ls-files -- '*.env*' '.env*'"),
+            "tracked-.env detection must be the quoted pathspec form"
+        );
         // The RULE, over EVERY step prompt of all three lists: any grep
         // command shape near credential material must be filename-only, and
         // no content-inspection recipe may exist anywhere.
-        let all_prompts: Vec<&str> = ANALYSIS_STEPS.iter()
+        let all_prompts: Vec<&str> = ANALYSIS_STEPS
+            .iter()
             .chain(SECURITY_STEPS.iter())
             .chain(DOCKER_STEPS.iter())
             .map(|s| s.prompt)
             .collect();
         for prompt in all_prompts {
-            for recipe in ["grep -cE", "grep -nE", "search for `Bearer ", "and read each", "emit TD if literal credentials found", "emit TD if found, this is almost always a leak"] {
-                assert!(!prompt.contains(recipe), "content-inspection recipe survived: {recipe}");
+            for recipe in [
+                "grep -cE",
+                "grep -nE",
+                "search for `Bearer ",
+                "and read each",
+                "emit TD if literal credentials found",
+                "emit TD if found, this is almost always a leak",
+            ] {
+                assert!(
+                    !prompt.contains(recipe),
+                    "content-inspection recipe survived: {recipe}"
+                );
             }
             for (i, _) in prompt.match_indices("grep -") {
                 let window = &prompt[i..(i + 60).min(prompt.len())];
-                let near_secrets = ["secret", "credential", "env_file", "_PASSWORD", "Bearer", ".env"]
-                    .iter().any(|w| prompt[i.saturating_sub(300)..(i + 200).min(prompt.len())].contains(w));
+                let near_secrets = [
+                    "secret",
+                    "credential",
+                    "env_file",
+                    "_PASSWORD",
+                    "Bearer",
+                    ".env",
+                ]
+                .iter()
+                .any(|w| prompt[i.saturating_sub(300)..(i + 200).min(prompt.len())].contains(w));
                 if near_secrets {
                     assert!(window.starts_with("grep -l"),
                         "only filename-only grep (-l) allowed near credential material, found: {window}");
@@ -1678,21 +1837,34 @@ mod prompt_tests {
             // With TDs: allowlist = index + exact detail file, review phase present.
             let p = build_partial_validation_prompt(&files, &ids, lang);
             assert!(p.contains("docs/inconsistencies-security.md"), "{lang}");
-            assert!(p.contains("docs/tech-debt/TD-20260720-x.md"),
-                "{lang}: the exact TD detail file must be allowlisted");
+            assert!(
+                p.contains("docs/tech-debt/TD-20260720-x.md"),
+                "{lang}: the exact TD detail file must be allowlisted"
+            );
             assert!(p.contains("TD-20260720-x"), "{lang}: scope block present");
             assert!(p.contains("KRONN:VALIDATION_COMPLETE"), "{lang}");
             // Without TDs: no scope block, no TD phase, explicit no-TD note.
             let p0 = build_partial_validation_prompt(&files, &[], lang);
             assert!(!p0.contains("SCOPE"), "{lang}: empty ids → no scope block");
             assert!(!p0.contains("BULK-FIRST"), "{lang}: no TD review phase");
-            assert!(!p0.contains("audit_history"), "{lang}: no TD instruction at all");
+            assert!(
+                !p0.contains("audit_history"),
+                "{lang}: no TD instruction at all"
+            );
         }
         // EN/ES carry none of the French protocol.
         for lang in ["en", "es"] {
             let p = build_partial_validation_prompt(&files, &ids, lang);
-            for french in ["Marqueurs", "Revue des TDs", "gardent leur statut", "ré-émis"] {
-                assert!(!p.contains(french), "{lang} must not contain French: {french}");
+            for french in [
+                "Marqueurs",
+                "Revue des TDs",
+                "gardent leur statut",
+                "ré-émis",
+            ] {
+                assert!(
+                    !p.contains(french),
+                    "{lang} must not contain French: {french}"
+                );
             }
         }
         // FR sanity.
@@ -1702,16 +1874,26 @@ mod prompt_tests {
 
     #[test]
     fn preamble_says_autonomous() {
-        assert!(PROMPT_PREAMBLE.contains("autonomous") || PROMPT_PREAMBLE.contains("non-interactive"),
-            "PREAMBLE must instruct the agent not to ask questions");
-        assert!(PROMPT_PREAMBLE.contains("Do NOT ask questions") || PROMPT_PREAMBLE.contains("Do not ask"),
-            "PREAMBLE must explicitly forbid questions");
+        assert!(
+            PROMPT_PREAMBLE.contains("autonomous") || PROMPT_PREAMBLE.contains("non-interactive"),
+            "PREAMBLE must instruct the agent not to ask questions"
+        );
+        assert!(
+            PROMPT_PREAMBLE.contains("Do NOT ask questions")
+                || PROMPT_PREAMBLE.contains("Do not ask"),
+            "PREAMBLE must explicitly forbid questions"
+        );
     }
 
     #[test]
     fn analysis_steps_include_decisions_md() {
-        let has_decisions = ANALYSIS_STEPS.iter().any(|step| step.prompt.contains("decisions.md"));
-        assert!(has_decisions, "At least one audit step must fill decisions.md");
+        let has_decisions = ANALYSIS_STEPS
+            .iter()
+            .any(|step| step.prompt.contains("decisions.md"));
+        assert!(
+            has_decisions,
+            "At least one audit step must fill decisions.md"
+        );
     }
 
     #[test]
@@ -1720,9 +1902,18 @@ mod prompt_tests {
         // bracketed hints (observed on the docroms-web run) — the prompt
         // must order their removal explicitly.
         let prompt = ANALYSIS_STEPS[0].prompt;
-        assert!(prompt.contains("CLEANUP ONCE FILLED"), "cleanup section missing");
-        assert!(prompt.contains("TEMPLATE FILE"), "must name the banner to remove");
-        assert!(prompt.contains("bracketed hint"), "must order inline-hint removal");
+        assert!(
+            prompt.contains("CLEANUP ONCE FILLED"),
+            "cleanup section missing"
+        );
+        assert!(
+            prompt.contains("TEMPLATE FILE"),
+            "must name the banner to remove"
+        );
+        assert!(
+            prompt.contains("bracketed hint"),
+            "must order inline-hint removal"
+        );
     }
 
     #[test]
@@ -1738,17 +1929,27 @@ mod prompt_tests {
             .find(|s| s.target_file == "docs/architecture/overview.md")
             .expect("architecture step must exist");
         let p = arch_step.prompt;
-        assert!(p.contains("Mermaid sequenceDiagram safety rules"),
-            "Step 6 must surface the safety rules section by name");
+        assert!(
+            p.contains("Mermaid sequenceDiagram safety rules"),
+            "Step 6 must surface the safety rules section by name"
+        );
         // The 4 specific gotchas the user hit:
-        assert!(p.contains("ASCII-only"),
-            "Step 6 must require ASCII-only message text (Unicode … breaks parser)");
-        assert!(p.contains(": ") && p.contains(";"),
-            "Step 6 must call out `:` + `;` inside message text as risky");
-        assert!(p.contains("Note over"),
-            "Step 6 must redirect detailed info to Note blocks");
-        assert!(p.contains("100 char") || p.contains("≤ 100"),
-            "Step 6 must cap line length to surface parser-state issues");
+        assert!(
+            p.contains("ASCII-only"),
+            "Step 6 must require ASCII-only message text (Unicode … breaks parser)"
+        );
+        assert!(
+            p.contains(": ") && p.contains(";"),
+            "Step 6 must call out `:` + `;` inside message text as risky"
+        );
+        assert!(
+            p.contains("Note over"),
+            "Step 6 must redirect detailed info to Note blocks"
+        );
+        assert!(
+            p.contains("100 char") || p.contains("≤ 100"),
+            "Step 6 must cap line length to surface parser-state issues"
+        );
         // 0.8.6 — DOCROMS_WEB's request-lifecycle diagram broke: a participant
         // aliased `Alt` collided with the `alt` block keyword. The prompt must
         // forbid reserved-keyword aliases and offer a safe alternative.
@@ -1767,18 +1968,25 @@ mod prompt_tests {
         // the prompt is short + focused (2 phases: review + decisions).
         let step9 = ANALYSIS_STEPS.last().expect("at least one step");
         assert_eq!(
-            step9.target_file,
-            "docs/decisions.md",
+            step9.target_file, "docs/decisions.md",
             "Step 9 must target decisions.md so validate_step_output catches an unfilled file"
         );
         // The prompt must still cover the original "final review" duty.
-        assert!(step9.prompt.contains("PHASE 1"), "Step 9 must keep the final-review phase");
-        assert!(step9.prompt.contains("PHASE 2"), "Step 9 must include the decisions.md fill phase");
+        assert!(
+            step9.prompt.contains("PHASE 1"),
+            "Step 9 must keep the final-review phase"
+        );
+        assert!(
+            step9.prompt.contains("PHASE 2"),
+            "Step 9 must include the decisions.md fill phase"
+        );
         // And explicitly mention all 3 marker types so the agent
         // applies the discipline rules added in #303 (F2).
         for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
-            assert!(step9.prompt.contains(marker),
-                "Step 9 prompt must mention `{marker}` so the agent disambiguates marker types");
+            assert!(
+                step9.prompt.contains(marker),
+                "Step 9 prompt must mention `{marker}` so the agent disambiguates marker types"
+            );
         }
     }
 
@@ -1795,18 +2003,25 @@ mod prompt_tests {
         assert!(PROMPT_PREAMBLE.contains("MARKER DISCIPLINE"),
             "PREAMBLE must surface the marker discipline section by name (it's the regression we're guarding)");
         for marker in ["TODO: verify", "TODO: ask user", "TODO: unknown"] {
-            assert!(PROMPT_PREAMBLE.contains(marker),
-                "PREAMBLE must mention `{marker}` so the agent knows the 3 types");
+            assert!(
+                PROMPT_PREAMBLE.contains(marker),
+                "PREAMBLE must mention `{marker}` so the agent knows the 3 types"
+            );
         }
         // The WRONG/RIGHT pair is what teaches the agent to skip the
         // marker after a confirmed Glob — preserve both labels.
-        assert!(PROMPT_PREAMBLE.contains("WRONG:") && PROMPT_PREAMBLE.contains("RIGHT:"),
-            "PREAMBLE must show the WRONG/RIGHT example pair");
+        assert!(
+            PROMPT_PREAMBLE.contains("WRONG:") && PROMPT_PREAMBLE.contains("RIGHT:"),
+            "PREAMBLE must show the WRONG/RIGHT example pair"
+        );
         // Anti-regression: the old terse line "mark unknowns with TODO: verify"
         // was the very pattern that caused the over-use. Make sure the
         // new wording mentions the unverified case explicitly.
-        assert!(PROMPT_PREAMBLE.contains("could not check") || PROMPT_PREAMBLE.contains("couldn't check"),
-            "PREAMBLE must qualify TODO: verify as 'could not check', not generic 'unknown'");
+        assert!(
+            PROMPT_PREAMBLE.contains("could not check")
+                || PROMPT_PREAMBLE.contains("couldn't check"),
+            "PREAMBLE must qualify TODO: verify as 'could not check', not generic 'unknown'"
+        );
     }
 
     #[test]
@@ -1863,8 +2078,14 @@ mod prompt_tests {
         );
         // Citation grammar must remain inline so agents writing into
         // `docs/` know the structured form Kronn verifies mechanically.
-        assert!(PROMPT_PREAMBLE.contains("[src: file:"), "[src: file:] grammar missing");
-        assert!(PROMPT_PREAMBLE.contains("[src: url:"), "[src: url:] grammar missing");
+        assert!(
+            PROMPT_PREAMBLE.contains("[src: file:"),
+            "[src: file:] grammar missing"
+        );
+        assert!(
+            PROMPT_PREAMBLE.contains("[src: url:"),
+            "[src: url:] grammar missing"
+        );
         // The TODO: ask user escalation path is still the audit-specific
         // way to surface gaps — distinct from the runtime PREAMBLE's
         // `ASK THE USER` cascade step.
@@ -1899,8 +2120,10 @@ mod prompt_tests {
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .expect("Step 8 must exist");
         // The "ALSO FILL" pattern is the regex marker for the bug.
-        assert!(!step8.prompt.contains("ALSO FILL docs/decisions.md"),
-            "Step 8 must NOT instruct decisions.md fill anymore — Step 9 owns it now");
+        assert!(
+            !step8.prompt.contains("ALSO FILL docs/decisions.md"),
+            "Step 8 must NOT instruct decisions.md fill anymore — Step 9 owns it now"
+        );
     }
 
     #[test]
@@ -1918,22 +2141,30 @@ mod prompt_tests {
             .unwrap_or_else(|e| panic!("read template {}: {e}", tpl_path.display()));
         assert!(body.contains("{{ARCHITECTURE_MERMAID}}"),
             "template must expose `{{{{ARCHITECTURE_MERMAID}}}}` so the audit step can write into it");
-        assert!(body.contains("Architecture diagram"),
-            "template must have an `Architecture diagram` section header");
-        assert!(body.contains("Sequence diagrams"),
-            "template must have a `Sequence diagrams` section that points to `sequences/`");
-        assert!(body.contains("sequences/"),
-            "template must link to the dedicated sequences subfolder");
+        assert!(
+            body.contains("Architecture diagram"),
+            "template must have an `Architecture diagram` section header"
+        );
+        assert!(
+            body.contains("Sequence diagrams"),
+            "template must have a `Sequence diagrams` section that points to `sequences/`"
+        );
+        assert!(
+            body.contains("sequences/"),
+            "template must link to the dedicated sequences subfolder"
+        );
         // Sanity: the sequences/ subfolder ships with a README and a
         // TEMPLATE.md so the audit doesn't generate orphan files.
-        let seq_readme = tpl_path
-            .parent().unwrap()
-            .join("sequences/README.md");
-        let seq_tpl = tpl_path
-            .parent().unwrap()
-            .join("sequences/TEMPLATE.md");
-        assert!(seq_readme.exists(), "sequences/README.md must ship with the template tree");
-        assert!(seq_tpl.exists(), "sequences/TEMPLATE.md must ship with the template tree");
+        let seq_readme = tpl_path.parent().unwrap().join("sequences/README.md");
+        let seq_tpl = tpl_path.parent().unwrap().join("sequences/TEMPLATE.md");
+        assert!(
+            seq_readme.exists(),
+            "sequences/README.md must ship with the template tree"
+        );
+        assert!(
+            seq_tpl.exists(),
+            "sequences/TEMPLATE.md must ship with the template tree"
+        );
         let tpl_body = std::fs::read_to_string(&seq_tpl).unwrap();
         assert!(tpl_body.contains("sequenceDiagram"),
             "sequences/TEMPLATE.md must show a Mermaid `sequenceDiagram` so the audit fills follow the same shape");
@@ -1951,18 +2182,30 @@ mod prompt_tests {
             .find(|s| s.target_file == "docs/architecture/overview.md")
             .expect("audit must include an architecture step");
         let p = arch_step.prompt;
-        assert!(p.contains("Mermaid") || p.contains("mermaid"),
-            "architecture step must instruct the agent to emit Mermaid syntax");
-        assert!(p.contains("flowchart"),
-            "architecture step must specify a `flowchart` Mermaid block for the overview");
-        assert!(p.contains("ARCHITECTURE_MERMAID"),
-            "the template placeholder must match the prompt's named field");
-        assert!(p.contains("sequenceDiagram"),
-            "architecture step must mention `sequenceDiagram` so per-flow files are also Mermaid");
-        assert!(p.contains("sequences/"),
-            "architecture step must point to the dedicated `sequences/` subfolder");
-        assert!(p.contains("3 files maximum") || p.contains("max 3") || p.contains("3 maximum"),
-            "architecture step must cap sequence diagrams to avoid token explosion on big projects");
+        assert!(
+            p.contains("Mermaid") || p.contains("mermaid"),
+            "architecture step must instruct the agent to emit Mermaid syntax"
+        );
+        assert!(
+            p.contains("flowchart"),
+            "architecture step must specify a `flowchart` Mermaid block for the overview"
+        );
+        assert!(
+            p.contains("ARCHITECTURE_MERMAID"),
+            "the template placeholder must match the prompt's named field"
+        );
+        assert!(
+            p.contains("sequenceDiagram"),
+            "architecture step must mention `sequenceDiagram` so per-flow files are also Mermaid"
+        );
+        assert!(
+            p.contains("sequences/"),
+            "architecture step must point to the dedicated `sequences/` subfolder"
+        );
+        assert!(
+            p.contains("3 files maximum") || p.contains("max 3") || p.contains("3 maximum"),
+            "architecture step must cap sequence diagrams to avoid token explosion on big projects"
+        );
     }
 
     #[test]
@@ -1971,18 +2214,32 @@ mod prompt_tests {
         // section (LICENSE / README description / issue+PR templates /
         // SECURITY / CONTRIBUTING / CODE_OF_CONDUCT). Regress against
         // any future cleanup that accidentally strips it.
-        let step8 = ANALYSIS_STEPS.iter()
+        let step8 = ANALYSIS_STEPS
+            .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .expect("Step 8 prompt must target docs/inconsistencies-tech-debt.md");
         let prompt = step8.prompt;
-        assert!(prompt.contains("Community standards"),
-            "Step 8 must include the 'Community standards' section header");
-        assert!(prompt.contains("OSS intent"),
-            "Section must be gated on OSS intent (private projects skipped)");
-        for needle in ["LICENSE", "ISSUE_TEMPLATE", "pull_request_template",
-                       "SECURITY.md", "CONTRIBUTING.md", "CODE_OF_CONDUCT.md"] {
-            assert!(prompt.contains(needle),
-                "Community-standards block must check `{}`", needle);
+        assert!(
+            prompt.contains("Community standards"),
+            "Step 8 must include the 'Community standards' section header"
+        );
+        assert!(
+            prompt.contains("OSS intent"),
+            "Section must be gated on OSS intent (private projects skipped)"
+        );
+        for needle in [
+            "LICENSE",
+            "ISSUE_TEMPLATE",
+            "pull_request_template",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+        ] {
+            assert!(
+                prompt.contains(needle),
+                "Community-standards block must check `{}`",
+                needle
+            );
         }
     }
 
@@ -1991,20 +2248,31 @@ mod prompt_tests {
         // The drastic improvement: every dimension is ACCOUNTABLE via the
         // `## Dimension coverage` matrix — a dimension can't be silently
         // skipped (the root cause of the "partially complete" audit).
-        let step = ANALYSIS_STEPS.iter()
+        let step = ANALYSIS_STEPS
+            .iter()
             .find(|s| s.target_file == "docs/inconsistencies-tech-debt.md")
             .expect("Step 8 must target docs/inconsistencies-tech-debt.md");
         let p = step.prompt;
-        assert!(p.contains("Dimension coverage"),
-            "Step 8 must require the `## Dimension coverage` matrix");
-        assert!(p.contains("scanned — nothing substantiable"),
-            "must offer the explicit 'scanned, nothing' outcome (≠ 'didn't look')");
-        assert!(p.contains("verifiable reason"),
-            "an N/A dimension must carry a human-verifiable reason");
-        assert!(p.contains("incomplete audit"),
-            "a dimension absent from the matrix must mark the audit incomplete");
-        assert!(p.contains("Self-critic"),
-            "must include the pre-finish self-critic pass");
+        assert!(
+            p.contains("Dimension coverage"),
+            "Step 8 must require the `## Dimension coverage` matrix"
+        );
+        assert!(
+            p.contains("scanned — nothing substantiable"),
+            "must offer the explicit 'scanned, nothing' outcome (≠ 'didn't look')"
+        );
+        assert!(
+            p.contains("verifiable reason"),
+            "an N/A dimension must carry a human-verifiable reason"
+        );
+        assert!(
+            p.contains("incomplete audit"),
+            "a dimension absent from the matrix must mark the audit incomplete"
+        );
+        assert!(
+            p.contains("Self-critic"),
+            "must include the pre-finish self-critic pass"
+        );
     }
 
     #[test]
@@ -2013,14 +2281,24 @@ mod prompt_tests {
         // gated on `has_issue_tracker_mcp` because it only makes sense
         // when we're actually going to push tickets. Without a tracker
         // the nudge is noise.
-        let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+        let info = AuditInfo {
+            files: vec![],
+            todos: vec![],
+            tech_debt_items: vec![],
+        };
         for lang in ["fr", "en", "es"] {
-            let with    = build_validation_prompt(lang, &info, true, &[]);
+            let with = build_validation_prompt(lang, &info, true, &[]);
             let without = build_validation_prompt(lang, &info, false, &[]);
-            assert!(with.contains(".github/ISSUE_TEMPLATE"),
-                "{} prompt with tracker MCP must contain the template check", lang);
-            assert!(!without.contains(".github/ISSUE_TEMPLATE"),
-                "{} prompt WITHOUT tracker MCP must NOT contain the template check (noise)", lang);
+            assert!(
+                with.contains(".github/ISSUE_TEMPLATE"),
+                "{} prompt with tracker MCP must contain the template check",
+                lang
+            );
+            assert!(
+                !without.contains(".github/ISSUE_TEMPLATE"),
+                "{} prompt WITHOUT tracker MCP must NOT contain the template check (noise)",
+                lang
+            );
         }
     }
 
@@ -2033,15 +2311,23 @@ mod prompt_tests {
         // never converted to user questions. The new Phase 2 explicitly
         // enumerates all 3 types AND tells the agent to grep + resolve.
         for lang in ["fr", "en", "es"] {
-            let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+            let info = AuditInfo {
+                files: vec![],
+                todos: vec![],
+                tech_debt_items: vec![],
+            };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
             for marker in ["TODO: ask user", "TODO: verify", "TODO: unknown"] {
-                assert!(prompt.contains(marker),
-                    "{lang} Phase 2 must mention `{marker}` so the agent processes it");
+                assert!(
+                    prompt.contains(marker),
+                    "{lang} Phase 2 must mention `{marker}` so the agent processes it"
+                );
             }
             // The grep instruction is what makes the scan systematic.
-            assert!(prompt.contains("grep") || prompt.contains("MCP"),
-                "{lang} Phase 2 must instruct an enumeration step (grep / MCP)");
+            assert!(
+                prompt.contains("grep") || prompt.contains("MCP"),
+                "{lang} Phase 2 must instruct an enumeration step (grep / MCP)"
+            );
         }
     }
 
@@ -2054,41 +2340,67 @@ mod prompt_tests {
         // Pin the rewrite so a future "drive-by simplification" can't
         // silently revert it.
         for lang in ["fr", "en", "es"] {
-            let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+            let info = AuditInfo {
+                files: vec![],
+                todos: vec![],
+                tech_debt_items: vec![],
+            };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
             // The new flow advertises itself with "BULK-FIRST" — a
             // marker an unfamiliar editor will see + understand.
-            assert!(prompt.contains("BULK-FIRST"),
-                "{} Phase 3 must use BULK-FIRST protocol (marker missing)", lang);
+            assert!(
+                prompt.contains("BULK-FIRST"),
+                "{} Phase 3 must use BULK-FIRST protocol (marker missing)",
+                lang
+            );
             // Compact table header must be in the prompt so the
             // agent renders the same shape across languages.
-            assert!(prompt.contains("| ID | Severity"),
-                "{} Phase 3 must instruct the compact markdown table", lang);
+            assert!(
+                prompt.contains("| ID | Severity"),
+                "{} Phase 3 must instruct the compact markdown table",
+                lang
+            );
             // Three bulk options (a) / (b) / (c) are the contract.
             let lower = prompt.to_lowercase();
-            assert!(lower.contains("(a)") && lower.contains("(b)") && lower.contains("(c)"),
-                "{} Phase 3 must offer 3 bulk options (a)/(b)/(c)", lang);
+            assert!(
+                lower.contains("(a)") && lower.contains("(b)") && lower.contains("(c)"),
+                "{} Phase 3 must offer 3 bulk options (a)/(b)/(c)",
+                lang
+            );
             // Default for non-selected TDs is `Confirmed by user`
             // (per user UX decision in 0.8.3 session).
-            assert!(prompt.contains("Confirmed by user"),
-                "{} Phase 3 must default non-selected TDs to `Confirmed by user`", lang);
+            assert!(
+                prompt.contains("Confirmed by user"),
+                "{} Phase 3 must default non-selected TDs to `Confirmed by user`",
+                lang
+            );
         }
     }
 
     #[test]
     fn validation_prompt_forbids_code_modification() {
         for lang in ["fr", "en", "es"] {
-            let info = AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] };
+            let info = AuditInfo {
+                files: vec![],
+                todos: vec![],
+                tech_debt_items: vec![],
+            };
             let prompt = build_validation_prompt(lang, &info, false, &[]);
             let lower = prompt.to_lowercase();
-            assert!(lower.contains("never modify") || lower.contains("ne modifie jamais") || lower.contains("nunca modifiques"),
-                "Validation prompt ({}) must forbid code modification", lang);
+            assert!(
+                lower.contains("never modify")
+                    || lower.contains("ne modifie jamais")
+                    || lower.contains("nunca modifiques"),
+                "Validation prompt ({}) must forbid code modification",
+                lang
+            );
         }
     }
 
     #[test]
     fn analysis_steps_have_sources_field() {
-        let with_sources: Vec<_> = ANALYSIS_STEPS.iter()
+        let with_sources: Vec<_> = ANALYSIS_STEPS
+            .iter()
             .filter(|step| !step.sources.is_empty())
             .collect();
         assert!(
@@ -2122,17 +2434,25 @@ mod prompt_tests {
 
     #[test]
     fn briefing_notes_injected_into_prompt() {
-        let briefing_notes: Option<String> = Some("This project uses microservices with gRPC".into());
+        let briefing_notes: Option<String> =
+            Some("This project uses microservices with gRPC".into());
         let mut full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, ANALYSIS_STEPS[0].prompt);
 
         if let Some(ref notes) = briefing_notes {
-            full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+            full_prompt.push_str(&format!(
+                "\n\n## Project briefing (from the user)\n{}\n",
+                notes
+            ));
         }
 
-        assert!(full_prompt.contains("## Project briefing (from the user)"),
-            "Briefing section header must be present when notes are set");
-        assert!(full_prompt.contains("microservices with gRPC"),
-            "User's briefing content must appear in the prompt");
+        assert!(
+            full_prompt.contains("## Project briefing (from the user)"),
+            "Briefing section header must be present when notes are set"
+        );
+        assert!(
+            full_prompt.contains("microservices with gRPC"),
+            "User's briefing content must appear in the prompt"
+        );
     }
 
     #[test]
@@ -2141,11 +2461,16 @@ mod prompt_tests {
         let mut full_prompt = format!("{}\n\n{}", PROMPT_PREAMBLE, ANALYSIS_STEPS[0].prompt);
 
         if let Some(ref notes) = briefing_notes {
-            full_prompt.push_str(&format!("\n\n## Project briefing (from the user)\n{}\n", notes));
+            full_prompt.push_str(&format!(
+                "\n\n## Project briefing (from the user)\n{}\n",
+                notes
+            ));
         }
 
-        assert!(!full_prompt.contains("## Project briefing"),
-            "Briefing section must NOT appear when notes are None");
+        assert!(
+            !full_prompt.contains("## Project briefing"),
+            "Briefing section must NOT appear when notes are None"
+        );
     }
 
     #[test]
@@ -2163,23 +2488,37 @@ mod prompt_tests {
         let fr = build_briefing_prompt("fr", None);
         let en = build_briefing_prompt("en", None);
         let es = build_briefing_prompt("es", None);
-        assert!(fr.contains("ne lis PAS"),
-            "FR briefing prompt must contain 'ne lis PAS'");
-        assert!(en.contains("Do NOT read"),
-            "EN briefing prompt must contain 'Do NOT read'");
-        assert!(es.contains("NO leas"),
-            "ES briefing prompt must contain 'NO leas'");
+        assert!(
+            fr.contains("ne lis PAS"),
+            "FR briefing prompt must contain 'ne lis PAS'"
+        );
+        assert!(
+            en.contains("Do NOT read"),
+            "EN briefing prompt must contain 'Do NOT read'"
+        );
+        assert!(
+            es.contains("NO leas"),
+            "ES briefing prompt must contain 'NO leas'"
+        );
     }
 
     #[test]
     fn briefing_prompt_requires_answers_1_to_5() {
         for lang in ["fr", "en", "es"] {
             let prompt = build_briefing_prompt(lang, None);
-            assert!(prompt.contains("1-5") || prompt.contains("1 a 5") || prompt.contains("1-5"),
-                "Briefing prompt ({}) must reference questions 1-5 as required", lang);
+            assert!(
+                prompt.contains("1-5") || prompt.contains("1 a 5") || prompt.contains("1-5"),
+                "Briefing prompt ({}) must reference questions 1-5 as required",
+                lang
+            );
             let lower = prompt.to_lowercase();
-            assert!(lower.contains("optional") || lower.contains("optionnel") || lower.contains("opcional"),
-                "Briefing prompt ({}) must mark Q6 as optional", lang);
+            assert!(
+                lower.contains("optional")
+                    || lower.contains("optionnel")
+                    || lower.contains("opcional"),
+                "Briefing prompt ({}) must mark Q6 as optional",
+                lang
+            );
         }
     }
 
@@ -2188,8 +2527,11 @@ mod prompt_tests {
         for lang in ["fr", "en", "es"] {
             let prompt = build_briefing_prompt(lang, None);
             let lower = prompt.to_lowercase();
-            assert!(lower.contains("auto-detect") || lower.contains("auto-detect"),
-                "Briefing prompt ({}) must mention stack is auto-detected", lang);
+            assert!(
+                lower.contains("auto-detect") || lower.contains("auto-detect"),
+                "Briefing prompt ({}) must mention stack is auto-detected",
+                lang
+            );
         }
     }
 
@@ -2197,8 +2539,11 @@ mod prompt_tests {
     fn briefing_prompt_contains_completion_signal() {
         for lang in ["fr", "en", "es"] {
             let prompt = build_briefing_prompt(lang, None);
-            assert!(prompt.contains("KRONN:BRIEFING_COMPLETE"),
-                "Briefing prompt ({}) must contain KRONN:BRIEFING_COMPLETE", lang);
+            assert!(
+                prompt.contains("KRONN:BRIEFING_COMPLETE"),
+                "Briefing prompt ({}) must contain KRONN:BRIEFING_COMPLETE",
+                lang
+            );
         }
     }
 
@@ -2221,12 +2566,15 @@ mod prompt_tests {
         // (which the ts-rs auto-export sometimes fails to refresh —
         // see B4 in `PLAYWRIGHT_AUDIT_REVIEW.md`).
         use crate::models::{AgentType, AuditKind, LaunchAuditRequest};
-        let req: LaunchAuditRequest = serde_json::from_str(r#"{
+        let req: LaunchAuditRequest = serde_json::from_str(
+            r#"{
             "agent": "ClaudeCode",
             "kind": "Rgaa",
             "custom_prompt": null,
             "resume_run_id": "run-abc"
-        }"#).expect("LaunchAuditRequest must accept the current shape");
+        }"#,
+        )
+        .expect("LaunchAuditRequest must accept the current shape");
         assert!(matches!(req.agent, AgentType::ClaudeCode));
         assert_eq!(req.kind, Some(AuditKind::Rgaa));
         assert!(req.custom_prompt.is_none());
@@ -2252,19 +2600,21 @@ mod prompt_tests {
     fn launch_audit_request_ts_file_covers_all_rust_fields() {
         // The .ts file lives outside the crate; resolve via
         // CARGO_MANIFEST_DIR which points at `backend/`.
-        let manifest = std::env::var("CARGO_MANIFEST_DIR")
-            .expect("CARGO_MANIFEST_DIR set by cargo");
+        let manifest =
+            std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
         let ts_path = std::path::Path::new(&manifest)
             .join("..")
             .join("frontend")
             .join("src")
             .join("types")
             .join("LaunchAuditRequest.ts");
-        let content = std::fs::read_to_string(&ts_path)
-            .unwrap_or_else(|e| panic!(
+        let content = std::fs::read_to_string(&ts_path).unwrap_or_else(|e| {
+            panic!(
                 "Cannot read {} — did the file get deleted? ({})",
-                ts_path.display(), e,
-            ));
+                ts_path.display(),
+                e,
+            )
+        });
 
         // Each Rust field must appear in the .ts shape, in some form
         // (with `?` for Option<T>). The test is intentionally loose
@@ -2279,10 +2629,14 @@ mod prompt_tests {
         // The enum-typed fields must import their referenced types so
         // tsc compiles. A regen that strips the import would compile
         // fine in isolation but break consumers.
-        assert!(content.contains("AgentType"),
-            "LaunchAuditRequest.ts must reference AgentType");
-        assert!(content.contains("AuditKind"),
-            "LaunchAuditRequest.ts must reference AuditKind (0.8.4)");
+        assert!(
+            content.contains("AgentType"),
+            "LaunchAuditRequest.ts must reference AgentType"
+        );
+        assert!(
+            content.contains("AuditKind"),
+            "LaunchAuditRequest.ts must reference AuditKind (0.8.4)"
+        );
     }
 
     #[test]
@@ -2294,22 +2648,30 @@ mod prompt_tests {
         let prefilled = "## Purpose\nA Kronn-managed audit dashboard.\n\n## Team\nSolo dev.\n";
         for lang in ["fr", "en", "es"] {
             let prompt = build_briefing_prompt(lang, Some(prefilled));
-            assert!(prompt.contains(prefilled),
-                "Review prompt ({lang}) must echo the user's answers verbatim");
+            assert!(
+                prompt.contains(prefilled),
+                "Review prompt ({lang}) must echo the user's answers verbatim"
+            );
             // Must explicitly forbid re-asking the 6 questions wholesale.
             let lower = prompt.to_lowercase();
             assert!(
-                lower.contains("ne repose pas") || lower.contains("not re-ask") || lower.contains("no repreguntes"),
+                lower.contains("ne repose pas")
+                    || lower.contains("not re-ask")
+                    || lower.contains("no repreguntes"),
                 "Review prompt ({lang}) must forbid re-asking the full 6-question set",
             );
             // Still ends with the completion signal so the audit pipeline
             // can detect readiness.
-            assert!(prompt.contains("KRONN:BRIEFING_COMPLETE"),
-                "Review prompt ({lang}) must keep the completion signal");
+            assert!(
+                prompt.contains("KRONN:BRIEFING_COMPLETE"),
+                "Review prompt ({lang}) must keep the completion signal"
+            );
             // Must NOT include the legacy 6-question enumeration that the
             // None branch ships — that's the whole point.
             assert!(
-                !prompt.contains("STEP 1") && !prompt.contains("ETAPE 1") && !prompt.contains("PASO 1"),
+                !prompt.contains("STEP 1")
+                    && !prompt.contains("ETAPE 1")
+                    && !prompt.contains("PASO 1"),
                 "Review prompt ({lang}) must NOT re-display the legacy 6-step interrogation header",
             );
         }
@@ -2324,7 +2686,9 @@ mod prompt_tests {
         for lang in ["fr", "en", "es"] {
             let prompt = build_briefing_prompt(lang, None);
             assert!(
-                prompt.contains("STEP 1") || prompt.contains("ETAPE 1") || prompt.contains("PASO 1"),
+                prompt.contains("STEP 1")
+                    || prompt.contains("ETAPE 1")
+                    || prompt.contains("PASO 1"),
                 "Legacy briefing prompt ({lang}) must still expose the step header when no prefill",
             );
         }

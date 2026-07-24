@@ -64,7 +64,8 @@ mod rate_limit {
         // Opportunistic GC: drop entries that are neither banned nor in-window
         map.retain(|_, s| {
             s.banned_until.is_some_and(|until| until > now)
-                || s.first_failure.is_some_and(|t| now.duration_since(t) < WINDOW)
+                || s.first_failure
+                    .is_some_and(|t| now.duration_since(t) < WINDOW)
         });
         map.get(&ip)
             .and_then(|s| s.banned_until)
@@ -179,10 +180,7 @@ pub(crate) fn classify_pre_presence(msg: &WsMessage) -> PrePresenceAction {
 ///
 /// Pure decision so we can unit-test the policy without mounting a
 /// full WebSocket harness.
-pub(crate) fn should_reject_empty_invite(
-    invite_code: &str,
-    is_local: bool,
-) -> bool {
+pub(crate) fn should_reject_empty_invite(invite_code: &str, is_local: bool) -> bool {
     invite_code.is_empty() && !is_local
 }
 
@@ -217,7 +215,7 @@ pub async fn ws_handler(
     State(state): State<AppState>,
 ) -> impl IntoResponse {
     let socket_ip = connect_info
-        .map(|ext| ext.0.0.ip())
+        .map(|ext| ext.0 .0.ip())
         .unwrap_or_else(|| IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
     let peer_ip = resolve_client_ip(&headers, socket_ip);
     ws.on_upgrade(move |socket| handle_socket(socket, state, peer_ip))
@@ -417,7 +415,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                             PrePresenceAction::Drop => {
                                 tracing::debug!(
                                     "WS: ignoring pre-presence frame from {}: {:?}",
-                                    peer_ip, ws_msg
+                                    peer_ip,
+                                    ws_msg
                                 );
                                 continue;
                             }
@@ -493,7 +492,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                                         }
                                         tracing::warn!(
                                             "WS: rejected invalid invite code from {}: {}",
-                                            peer_ip, from_invite_code
+                                            peer_ip,
+                                            from_invite_code
                                         );
                                         break;
                                     }
@@ -521,7 +521,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, peer_ip: IpAddr) {
                         // broadcasting, so the send half (Task 1) won't echo it
                         // straight back to the peer it came from.
                         if let Some(key) = ws_msg.relay_dedup_key() {
-                            recv_guard.lock().unwrap_or_else(|e| e.into_inner()).record(key);
+                            recv_guard
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .record(key);
                         }
                         let _ = broadcast_tx.send(ws_msg);
                     }
@@ -560,23 +563,29 @@ fn handle_incoming_chat_message(
     agent_type: Option<crate::models::AgentType>,
 ) -> anyhow::Result<bool> {
     // Find local discussion by shared_id
-    let Some(disc_id) = crate::db::discussions::find_discussion_by_shared_id(conn, shared_discussion_id)? else {
-        tracing::warn!("WS: ChatMessage for unknown shared_id {}, dropping", shared_discussion_id);
+    let Some(disc_id) =
+        crate::db::discussions::find_discussion_by_shared_id(conn, shared_discussion_id)?
+    else {
+        tracing::warn!(
+            "WS: ChatMessage for unknown shared_id {}, dropping",
+            shared_discussion_id
+        );
         return Ok(false);
     };
 
     // Check for duplicate (idempotent — same message_id won't be inserted twice)
-    let exists: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM messages WHERE id = ?1",
-        rusqlite::params![message_id],
-        |row| row.get(0),
-    ).unwrap_or(false);
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM messages WHERE id = ?1",
+            rusqlite::params![message_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
     if exists {
         return Ok(false);
     }
 
-    let ts = chrono::DateTime::from_timestamp_millis(timestamp)
-        .unwrap_or_else(Utc::now);
+    let ts = chrono::DateTime::from_timestamp_millis(timestamp).unwrap_or_else(Utc::now);
     // role + agent_type come from the wire (F2): a federated AGENT reply lands
     // as an Agent message carrying its CLI name, not a generic User. Frames
     // from an older peer carry no fields → serde defaults (User / None), i.e.
@@ -595,11 +604,16 @@ fn handle_incoming_chat_message(
         cost_usd: None,
         author_pseudo: Some(from_pseudo.to_string()),
         author_avatar_email: from_avatar_email.map(|s| s.to_string()),
-        source_msg_id: None, duration_ms: None,
+        source_msg_id: None,
+        duration_ms: None,
     };
 
     crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
-    tracing::info!("WS: inserted remote message from {} in shared disc {}", from_pseudo, shared_discussion_id);
+    tracing::info!(
+        "WS: inserted remote message from {} in shared disc {}",
+        from_pseudo,
+        shared_discussion_id
+    );
     Ok(true)
 }
 
@@ -620,12 +634,24 @@ fn handle_discussion_invite(
     // helper so this path and the HTTP `claim-by-token` join path converge on
     // an identical local representation (same title format, same defaults).
     if crate::db::discussions::find_discussion_by_shared_id(conn, shared_discussion_id)?.is_some() {
-        tracing::debug!("WS: DiscussionInvite for already-known shared_id {}", shared_discussion_id);
+        tracing::debug!(
+            "WS: DiscussionInvite for already-known shared_id {}",
+            shared_discussion_id
+        );
         return Ok(false);
     }
 
-    crate::db::discussions::ensure_mirror_by_shared_id(conn, shared_discussion_id, title, from_pseudo)?;
-    tracing::info!("WS: created shared discussion '{}' from invite by {}", title, from_pseudo);
+    crate::db::discussions::ensure_mirror_by_shared_id(
+        conn,
+        shared_discussion_id,
+        title,
+        from_pseudo,
+    )?;
+    tracing::info!(
+        "WS: created shared discussion '{}' from invite by {}",
+        title,
+        from_pseudo
+    );
     Ok(true)
 }
 
@@ -667,7 +693,17 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             state
                 .db
                 .with_conn(move |conn| {
-                    handle_incoming_chat_message(conn, &sid, &mid, &pseudo, avatar.as_deref(), &text, ts, r, at)
+                    handle_incoming_chat_message(
+                        conn,
+                        &sid,
+                        &mid,
+                        &pseudo,
+                        avatar.as_deref(),
+                        &text,
+                        ts,
+                        r,
+                        at,
+                    )
                 })
                 .await
                 .unwrap_or(false)
@@ -678,7 +714,11 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
             from_pseudo,
             ..
         } => {
-            let (sid, t, p) = (shared_discussion_id.clone(), title.clone(), from_pseudo.clone());
+            let (sid, t, p) = (
+                shared_discussion_id.clone(),
+                title.clone(),
+                from_pseudo.clone(),
+            );
             state
                 .db
                 .with_conn(move |conn| handle_discussion_invite(conn, &sid, &t, &p))
@@ -719,7 +759,8 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                 state
                     .db
                     .with_conn(move |conn| {
-                        crate::db::discussions::context_file_exists(conn, &fid).map_err(|e| anyhow::anyhow!(e))
+                        crate::db::discussions::context_file_exists(conn, &fid)
+                            .map_err(|e| anyhow::anyhow!(e))
                     })
                     .await
                     .unwrap_or(false)
@@ -769,10 +810,7 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
 
 /// Auto-create a pending contact from an incoming invite code.
 /// Returns the created contact, or None if the code is invalid.
-async fn auto_add_peer(
-    state: &AppState,
-    invite_code: &str,
-) -> Option<crate::models::Contact> {
+async fn auto_add_peer(state: &AppState, invite_code: &str) -> Option<crate::models::Contact> {
     let (pseudo, kronn_url) = crate::db::contacts::parse_invite_code(invite_code)?;
 
     let now = Utc::now();
@@ -940,15 +978,17 @@ mod handshake_tests {
         use super::super::is_trusted_client_ip;
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-        fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr { IpAddr::V4(Ipv4Addr::new(a, b, c, d)) }
+        fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+            IpAddr::V4(Ipv4Addr::new(a, b, c, d))
+        }
 
         #[test]
         fn loopback_and_private_are_trusted() {
-            assert!(is_trusted_client_ip(v4(127, 0, 0, 1)));            // loopback
-            assert!(is_trusted_client_ip(v4(172, 19, 0, 4)));          // docker bridge (the storm IP)
-            assert!(is_trusted_client_ip(v4(172, 17, 0, 1)));          // docker default gateway
-            assert!(is_trusted_client_ip(v4(10, 0, 0, 5)));            // RFC1918 10/8
-            assert!(is_trusted_client_ip(v4(192, 168, 1, 50)));        // RFC1918 192.168/16
+            assert!(is_trusted_client_ip(v4(127, 0, 0, 1))); // loopback
+            assert!(is_trusted_client_ip(v4(172, 19, 0, 4))); // docker bridge (the storm IP)
+            assert!(is_trusted_client_ip(v4(172, 17, 0, 1))); // docker default gateway
+            assert!(is_trusted_client_ip(v4(10, 0, 0, 5))); // RFC1918 10/8
+            assert!(is_trusted_client_ip(v4(192, 168, 1, 50))); // RFC1918 192.168/16
             assert!(is_trusted_client_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
             assert!(is_trusted_client_ip("fd00::1".parse().unwrap())); // IPv6 ULA
         }
@@ -958,7 +998,9 @@ mod handshake_tests {
             // A real cross-internet peer: must present a valid invite + is ban-eligible.
             assert!(!is_trusted_client_ip(v4(8, 8, 8, 8)));
             assert!(!is_trusted_client_ip(v4(203, 0, 113, 7)));
-            assert!(!is_trusted_client_ip("2001:4860:4860::8888".parse().unwrap()));
+            assert!(!is_trusted_client_ip(
+                "2001:4860:4860::8888".parse().unwrap()
+            ));
         }
     }
 }
@@ -993,11 +1035,44 @@ mod relay_dedup_tests {
         let c = conn();
         use crate::models::MessageRole;
         // No local disc with this shared_id yet → dropped → NOT new.
-        assert!(!handle_incoming_chat_message(&c, "shared-2", "m1", "Romu", None, "hi", 0, MessageRole::User, None).unwrap());
+        assert!(!handle_incoming_chat_message(
+            &c,
+            "shared-2",
+            "m1",
+            "Romu",
+            None,
+            "hi",
+            0,
+            MessageRole::User,
+            None
+        )
+        .unwrap());
         // Create the shared disc, then the same chat inserts once → new…
         assert!(handle_discussion_invite(&c, "shared-2", "T", "Romu").unwrap());
-        assert!(handle_incoming_chat_message(&c, "shared-2", "m1", "Romu", None, "hi", 0, MessageRole::User, None).unwrap());
+        assert!(handle_incoming_chat_message(
+            &c,
+            "shared-2",
+            "m1",
+            "Romu",
+            None,
+            "hi",
+            0,
+            MessageRole::User,
+            None
+        )
+        .unwrap());
         // …and a duplicate message_id is NOT new (idempotent + loop-safe).
-        assert!(!handle_incoming_chat_message(&c, "shared-2", "m1", "Romu", None, "hi", 0, MessageRole::User, None).unwrap());
+        assert!(!handle_incoming_chat_message(
+            &c,
+            "shared-2",
+            "m1",
+            "Romu",
+            None,
+            "hi",
+            0,
+            MessageRole::User,
+            None
+        )
+        .unwrap());
     }
 }

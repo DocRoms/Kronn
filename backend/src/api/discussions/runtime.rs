@@ -58,9 +58,11 @@ async fn run_with_silent_retry(state: &AppState, discussion_id: &str) {
             // the trailing assistant message(s) since the last user turn.
             let did = state.db.clone();
             let did2 = discussion_id.to_string();
-            let _ = did.with_conn(move |conn| {
-                crate::db::discussions::delete_last_agent_messages(conn, &did2)
-            }).await;
+            let _ = did
+                .with_conn(move |conn| {
+                    crate::db::discussions::delete_last_agent_messages(conn, &did2)
+                })
+                .await;
             // Backoff: lets the auth file lock release, the API rate
             // limiter window slide, etc. 5s is the sweet spot we observed
             // empirically — short enough not to feel laggy on the UI,
@@ -78,9 +80,12 @@ async fn run_with_silent_retry(state: &AppState, discussion_id: &str) {
 /// fire spuriously when the lookup itself goes wrong.
 async fn last_message_is_silent_crash(state: &AppState, discussion_id: &str) -> bool {
     let did = discussion_id.to_string();
-    let messages = match state.db.clone().with_conn(move |conn| {
-        crate::db::discussions::list_messages(conn, &did)
-    }).await {
+    let messages = match state
+        .db
+        .clone()
+        .with_conn(move |conn| crate::db::discussions::list_messages(conn, &did))
+        .await
+    {
         Ok(m) => m,
         Err(_) => return false,
     };
@@ -129,12 +134,19 @@ pub async fn spawn_agent_run_with_chain(
     for (i, qp_id) in chain_prompt_ids.iter().enumerate() {
         // Load the QP
         let qp_id_clone = qp_id.clone();
-        let qp = match state.db.with_conn(move |conn| {
-            crate::db::quick_prompts::get_quick_prompt(conn, &qp_id_clone)
-        }).await {
+        let qp = match state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id_clone))
+            .await
+        {
             Ok(Some(qp)) => qp,
             Ok(None) => {
-                tracing::warn!("Chain QP '{}' not found — skipping (step {}/{})", qp_id, i + 1, chain_prompt_ids.len());
+                tracing::warn!(
+                    "Chain QP '{}' not found — skipping (step {}/{})",
+                    qp_id,
+                    i + 1,
+                    chain_prompt_ids.len()
+                );
                 continue;
             }
             Err(e) => {
@@ -153,13 +165,17 @@ pub async fn spawn_agent_run_with_chain(
         // replying), the placeholder is substituted with an empty string —
         // template rendering must not fail the chain.
         let disc_for_lookup = discussion_id.clone();
-        let previous_output = state.db.with_conn(move |conn| {
-            crate::db::discussions::list_messages(conn, &disc_for_lookup)
-        }).await
+        let previous_output = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, &disc_for_lookup))
+            .await
             .ok()
-            .and_then(|msgs| msgs.into_iter().rev()
-                .find(|m| matches!(m.role, crate::models::MessageRole::Agent))
-                .map(|m| m.content))
+            .and_then(|msgs| {
+                msgs.into_iter()
+                    .rev()
+                    .find(|m| matches!(m.role, crate::models::MessageRole::Agent))
+                    .map(|m| m.content)
+            })
             .unwrap_or_default();
 
         // Render the chain QP's template (pure helper — see tests below).
@@ -184,19 +200,32 @@ pub async fn spawn_agent_run_with_chain(
             model_tier: None,
             cost_usd: None,
             author_pseudo: Some(format!("⚡ {}", qp.name)),
-            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
         };
         let disc_id_for_insert = discussion_id.clone();
-        if let Err(e) = state.db.with_conn(move |conn| {
-            crate::db::discussions::insert_message(conn, &disc_id_for_insert, &msg)
-        }).await {
-            tracing::error!("Failed to insert chain QP '{}' message: {} — aborting chain", qp.name, e);
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(conn, &disc_id_for_insert, &msg)
+            })
+            .await
+        {
+            tracing::error!(
+                "Failed to insert chain QP '{}' message: {} — aborting chain",
+                qp.name,
+                e
+            );
             break;
         }
 
         tracing::info!(
             "Chain QP '{}'  ({}/{}) injected into disc {} — firing agent",
-            qp.name, i + 1, chain_prompt_ids.len(), discussion_id
+            qp.name,
+            i + 1,
+            chain_prompt_ids.len(),
+            discussion_id
         );
 
         // Re-fire the agent
@@ -240,7 +269,9 @@ mod chain_render_tests {
         // `{{previous_qp.output}}`. Use case: "brief → plan → tickets".
         let out = render_chain_qp_prompt(
             "Make tickets from this plan:\n{{previous_qp.output}}",
-            None, None, "Step 1: foo\nStep 2: bar",
+            None,
+            None,
+            "Step 1: foo\nStep 2: bar",
         );
         assert!(out.contains("Step 1: foo\nStep 2: bar"));
         assert!(!out.contains("{{previous_qp.output}}"));
@@ -251,10 +282,8 @@ mod chain_render_tests {
         // If the agent crashed before replying, the chain var must
         // resolve to empty string — never leave the placeholder syntax
         // exposed to the agent prompt.
-        let out = render_chain_qp_prompt(
-            "Refine:\n{{previous_qp.output}}\n— done.",
-            None, None, "",
-        );
+        let out =
+            render_chain_qp_prompt("Refine:\n{{previous_qp.output}}\n— done.", None, None, "");
         assert_eq!(out, "Refine:\n\n— done.");
     }
 
@@ -262,10 +291,7 @@ mod chain_render_tests {
     fn first_var_substituted_with_batch_item() {
         // Phase 2 behavior — first user-defined var receives the batch
         // item value. Unchanged by Phase 4.
-        let out = render_chain_qp_prompt(
-            "Analyse {{ticket}}",
-            Some("ticket"), Some("EW-1234"), "",
-        );
+        let out = render_chain_qp_prompt("Analyse {{ticket}}", Some("ticket"), Some("EW-1234"), "");
         assert_eq!(out, "Analyse EW-1234");
     }
 
@@ -273,12 +299,11 @@ mod chain_render_tests {
     fn previous_output_and_batch_item_both_substituted() {
         let out = render_chain_qp_prompt(
             "On {{ticket}}: refine the plan below.\n{{previous_qp.output}}",
-            Some("ticket"), Some("EW-1234"), "Plan v1",
+            Some("ticket"),
+            Some("EW-1234"),
+            "Plan v1",
         );
-        assert_eq!(
-            out,
-            "On EW-1234: refine the plan below.\nPlan v1",
-        );
+        assert_eq!(out, "On EW-1234: refine the plan below.\nPlan v1",);
     }
 
     #[test]
@@ -295,8 +320,10 @@ mod chain_render_tests {
             Some("{{previous_qp.output}}-EW-1"),
             "<<should-not-leak>>",
         );
-        assert_eq!(out, "Title: {{previous_qp.output}}-EW-1",
-            "batch_item value must not be re-rendered against the chain var");
+        assert_eq!(
+            out, "Title: {{previous_qp.output}}-EW-1",
+            "batch_item value must not be re-rendered against the chain var"
+        );
     }
 
     #[test]

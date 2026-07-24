@@ -99,7 +99,9 @@ fn matches_simple_glob(pattern: &str, name: &str) -> bool {
     if parts.len() == 2 {
         let prefix = parts[0];
         let suffix = parts[1];
-        return name.starts_with(prefix) && name.ends_with(suffix) && name.len() >= prefix.len() + suffix.len();
+        return name.starts_with(prefix)
+            && name.ends_with(suffix)
+            && name.len() >= prefix.len() + suffix.len();
     }
     // Fallback: exact match
     pattern == name
@@ -114,8 +116,13 @@ fn matches_simple_glob(pattern: &str, name: &str) -> bool {
 /// stripped, so user-authored rules in them DO count as source while Kronn's
 /// own (re)generation does not.
 const ROOT_AGENT_CONTEXT_FILES: &[&str] = &[
-    "CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules",
-    "AGENTS.md", "GEMINI.md", ".github/copilot-instructions.md",
+    "CLAUDE.md",
+    ".cursorrules",
+    ".windsurfrules",
+    ".clinerules",
+    "AGENTS.md",
+    "GEMINI.md",
+    ".github/copilot-instructions.md",
 ];
 
 /// Paths Kronn itself generates wholesale — excluded from the source-tree
@@ -125,7 +132,8 @@ const ROOT_AGENT_CONTEXT_FILES: &[&str] = &[
 /// keeps it counted when its docs live in `docs/`) and the `.kronn` state
 /// files. Root agent files are NOT here — they get normalized hashing.
 fn is_kronn_generated_path(path: &str, docs_dir_rel: &str) -> bool {
-    (!docs_dir_rel.is_empty() && (path == docs_dir_rel || path.starts_with(&format!("{docs_dir_rel}/"))))
+    (!docs_dir_rel.is_empty()
+        && (path == docs_dir_rel || path.starts_with(&format!("{docs_dir_rel}/"))))
         || path == ".kronn.json"
         || path == ".kronn.lock"
         || path.starts_with(".kronn/")
@@ -145,7 +153,9 @@ fn strip_kronn_regions(content: &str) -> String {
         ("<!-- KRONN:FACTS", "<!-- END KRONN:FACTS -->"),
     ] {
         while let Some(s) = out.find(start) {
-            let Some(e) = out[s..].find(end).map(|rel| s + rel + end.len()) else { break };
+            let Some(e) = out[s..].find(end).map(|rel| s + rel + end.len()) else {
+                break;
+            };
             out.replace_range(s..e, "");
         }
     }
@@ -191,9 +201,15 @@ fn manifest_record_path(record: &[u8]) -> &[u8] {
         return path;
     }
     if record.starts_with(b"normalized:") {
-        return record.splitn(2, |byte| *byte == b' ').nth(1).unwrap_or_default();
+        return record
+            .splitn(2, |byte| *byte == b' ')
+            .nth(1)
+            .unwrap_or_default();
     }
-    record.splitn(3, |byte| *byte == b' ').nth(2).unwrap_or_default()
+    record
+        .splitn(3, |byte| *byte == b' ')
+        .nth(2)
+        .unwrap_or_default()
 }
 
 fn trace_source_tree_manifest(observation: &str, records: &[Vec<u8>], fingerprint: &str) {
@@ -217,7 +233,11 @@ fn trace_source_tree_manifest(observation: &str, records: &[Vec<u8>], fingerprin
         let mut hasher = Sha256::new();
         hasher.update(salt);
         hasher.update(record);
-        let opaque_tag: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let opaque_tag: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         tracing::info!(
             target: "kronn::f27_manifest",
             observation,
@@ -228,7 +248,10 @@ fn trace_source_tree_manifest(observation: &str, records: &[Vec<u8>], fingerprin
     }
 }
 
-fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option<&str>) -> Option<String> {
+fn git_source_tree_fingerprint_observed(
+    project_path: &Path,
+    observation: Option<&str>,
+) -> Option<String> {
     let docs_dir_rel = crate::core::scanner::detect_docs_dir(project_path)
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -237,7 +260,8 @@ fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option
     let untracked = run_git_bytes(
         project_path,
         &["ls-files", "-z", "--others", "--exclude-standard"],
-    ).unwrap_or_default();
+    )
+    .unwrap_or_default();
 
     let mut paths: std::collections::BTreeSet<Vec<u8>> = std::collections::BTreeSet::new();
     for listing in [&tracked, &untracked] {
@@ -283,7 +307,9 @@ fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option
             // presence tracked, inner content out of scope.
             "gitlink".to_string()
         } else {
-            let Ok(content) = std::fs::read(&full) else { continue };
+            let Ok(content) = std::fs::read(&full) else {
+                continue;
+            };
             #[cfg(unix)]
             let exec = {
                 use std::os::unix::fs::PermissionsExt;
@@ -291,7 +317,11 @@ fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option
             };
             #[cfg(not(unix))]
             let exec = false;
-            format!("{} {}", if exec { "x" } else { "f" }, sha256_of_bytes(&content))
+            format!(
+                "{} {}",
+                if exec { "x" } else { "f" },
+                sha256_of_bytes(&content)
+            )
         };
         let mut record = record_head.into_bytes();
         record.push(b' ');
@@ -299,14 +329,19 @@ fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option
         kept.push(record);
     }
     for &agent_file in ROOT_AGENT_CONTEXT_FILES {
-        let Ok(content) = std::fs::read_to_string(project_path.join(agent_file)) else { continue };
+        let Ok(content) = std::fs::read_to_string(project_path.join(agent_file)) else {
+            continue;
+        };
         let user_part = strip_kronn_regions(&content);
         if user_part.trim().is_empty() {
             continue;
         }
         kept.push(
-            format!("normalized:{} {agent_file}", sha256_of_bytes(user_part.as_bytes()))
-                .into_bytes(),
+            format!(
+                "normalized:{} {agent_file}",
+                sha256_of_bytes(user_part.as_bytes())
+            )
+            .into_bytes(),
         );
     }
     kept.sort();
@@ -317,7 +352,11 @@ fn git_source_tree_fingerprint_observed(project_path: &Path, observation: Option
         }
         hasher.update(record);
     }
-    let fingerprint: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+    let fingerprint: String = hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect();
     if let Some(label) = observation {
         trace_source_tree_manifest(label, &kept, &fingerprint);
     }
@@ -381,7 +420,9 @@ where
             "source-tree fingerprint changed during quiescence window; baseline not frozen"
                 .to_string(),
         ),
-        _ => Err("source-tree fingerprint availability changed during quiescence window".to_string()),
+        _ => {
+            Err("source-tree fingerprint availability changed during quiescence window".to_string())
+        }
     }
 }
 
@@ -465,7 +506,11 @@ fn compute_step_checksums_impl(
                     let mut hasher = Sha256::new();
                     hasher.update(sorted.as_bytes());
                     // sha2 0.11 — see compute_sha256 above for context.
-                    let digest: String = hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect();
+                    let digest: String = hasher
+                        .finalize()
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect();
                     map.insert("__GIT_LS_FILES__".to_string(), digest);
                 }
             }
@@ -510,8 +555,8 @@ fn publish_checksums_file(
         mappings: mappings.to_vec(),
     };
 
-    let json = serde_json::to_vec_pretty(&file)
-        .map_err(|e| format!("JSON serialize error: {e}"))?;
+    let json =
+        serde_json::to_vec_pretty(&file).map_err(|e| format!("JSON serialize error: {e}"))?;
 
     // Atomic sibling-temp + rename (Codex lot-2 #4): a direct fs::write
     // that fails mid-stream truncates the manifest — read_checksums_file
@@ -529,8 +574,12 @@ fn restore_checksums_bytes(
     previous: Option<&[u8]>,
     published: &[u8],
 ) -> Result<(), String> {
-    let current = std::fs::read(path)
-        .map_err(|e| format!("Failed to verify published checksum baseline {}: {e}", path.display()))?;
+    let current = std::fs::read(path).map_err(|e| {
+        format!(
+            "Failed to verify published checksum baseline {}: {e}",
+            path.display()
+        )
+    })?;
     if current != published {
         return Err(format!(
             "checksum baseline {} changed concurrently after publication; refusing to overwrite or delete it",
@@ -538,12 +587,19 @@ fn restore_checksums_bytes(
         ));
     }
     match previous {
-        Some(bytes) => crate::core::mcp_scanner::atomic_write_bytes(path, bytes)
-            .map_err(|e| format!("Failed to restore previous checksum baseline {}: {e}", path.display())),
+        Some(bytes) => crate::core::mcp_scanner::atomic_write_bytes(path, bytes).map_err(|e| {
+            format!(
+                "Failed to restore previous checksum baseline {}: {e}",
+                path.display()
+            )
+        }),
         None => match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("Failed to remove newly-published checksum baseline {}: {e}", path.display())),
+            Err(e) => Err(format!(
+                "Failed to remove newly-published checksum baseline {}: {e}",
+                path.display()
+            )),
         },
     }
 }
@@ -566,7 +622,12 @@ where
     let previous = match std::fs::read(&path) {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("Could not preserve previous checksum baseline {}: {e}", path.display())),
+        Err(e) => {
+            return Err(format!(
+                "Could not preserve previous checksum baseline {}: {e}",
+                path.display()
+            ))
+        }
     };
 
     let (published_path, published) = publish_checksums_file(project_path, mappings)?;
@@ -636,7 +697,12 @@ pub fn read_checksums_file_strict(project_path: &Path) -> Result<Option<Checksum
     let data = match std::fs::read_to_string(&path) {
         Ok(d) => d,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("checksums manifest unreadable ({}): {e}", path.display())),
+        Err(e) => {
+            return Err(format!(
+                "checksums manifest unreadable ({}): {e}",
+                path.display()
+            ))
+        }
     };
     serde_json::from_str(&data)
         .map(Some)
@@ -659,18 +725,23 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
 
     let mut stale_sections = Vec::new();
     let mut fresh_sections = Vec::new();
-    let source_tree_snapshot = checksums_file.mappings.iter()
-        .any(|mapping| mapping.sources.iter().any(|source| source == "__GIT_SOURCE_TREE__"))
+    let source_tree_snapshot = checksums_file
+        .mappings
+        .iter()
+        .any(|mapping| {
+            mapping
+                .sources
+                .iter()
+                .any(|source| source == "__GIT_SOURCE_TREE__")
+        })
         .then(|| git_source_tree_fingerprint(project_path));
 
     for mapping in &checksums_file.mappings {
         let patterns: Vec<&str> = mapping.sources.iter().map(|s| s.as_str()).collect();
         let current = match &source_tree_snapshot {
-            Some(snapshot) => compute_step_checksums_from_snapshot(
-                project_path,
-                &patterns,
-                snapshot.as_deref(),
-            ),
+            Some(snapshot) => {
+                compute_step_checksums_from_snapshot(project_path, &patterns, snapshot.as_deref())
+            }
             None => compute_step_checksums(project_path, &patterns),
         };
 
@@ -697,10 +768,7 @@ pub fn check_drift(project_path: &Path) -> DriftResult {
         }
 
         if changed_sources.is_empty() {
-            fresh_sections.push(format!(
-                "{}#step{}",
-                mapping.ai_file, mapping.audit_step
-            ));
+            fresh_sections.push(format!("{}#step{}", mapping.ai_file, mapping.audit_step));
         } else {
             stale_sections.push(StaleSection {
                 ai_file: mapping.ai_file.clone(),

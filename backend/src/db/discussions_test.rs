@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
+    use crate::db::discussions::*;
+    use crate::db::migrations;
     use chrono::Utc;
     use rusqlite::Connection;
-    use crate::db::migrations;
-    use crate::db::discussions::*;
 
     /// Create an in-memory database with all migrations applied
     fn test_conn() -> Connection {
@@ -24,7 +24,8 @@ mod tests {
             language: "en".into(),
             participants: vec![AgentType::ClaudeCode],
             messages: vec![],
-            message_count: 0, non_system_message_count: 0,
+            message_count: 0,
+            non_system_message_count: 0,
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
@@ -38,12 +39,13 @@ mod tests {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
+            summary_strategy: crate::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
-        workflow_run_id: None,
-        test_mode_restore_branch: None,
-        test_mode_stash_ref: None,
+            workflow_run_id: None,
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
             created_at: now,
             updated_at: now,
         }
@@ -60,7 +62,12 @@ mod tests {
             timestamp: Utc::now(),
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
         }
     }
 
@@ -114,12 +121,14 @@ mod tests {
             "INSERT INTO workflows (id, name, trigger_json, steps_json, created_at, updated_at)
              VALUES ('wf-x', 'Test WF', '{}', '[]', ?1, ?1)",
             rusqlite::params![ts],
-        ).unwrap();
+        )
+        .unwrap();
         for run_id in ["run-x", "run-y"] {
             conn.execute(
                 "INSERT INTO workflow_runs (id, workflow_id, started_at) VALUES (?1, 'wf-x', ?2)",
                 rusqlite::params![run_id, ts],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Two children of run-x (inserted newest-first to prove ASC sort),
@@ -148,7 +157,9 @@ mod tests {
         assert_eq!(run_x[1].id, "child-a");
 
         // Unknown run → empty, never an error.
-        assert!(list_discussions_by_run(&conn, "run-does-not-exist").unwrap().is_empty());
+        assert!(list_discussions_by_run(&conn, "run-does-not-exist")
+            .unwrap()
+            .is_empty());
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -195,7 +206,8 @@ mod tests {
     #[test]
     fn update_discussion_title_nonexistent_returns_false() {
         let conn = test_conn();
-        let updated = update_discussion(&conn, "nonexistent", Some("Title"), None, None, None).unwrap();
+        let updated =
+            update_discussion(&conn, "nonexistent", Some("Title"), None, None, None).unwrap();
         assert!(!updated);
     }
 
@@ -282,7 +294,12 @@ mod tests {
 
         // User -> Agent -> System (trailing non-user messages)
         insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d1", &make_message("m2", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d1",
+            &make_message("m2", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
         insert_message(&conn, "d1", &make_message("m3", MessageRole::System, None)).unwrap();
 
         let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
@@ -301,9 +318,19 @@ mod tests {
 
         // User -> Agent -> User -> Agent (only the last Agent after last User should go)
         insert_message(&conn, "d1", &make_message("m1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d1", &make_message("m2", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d1",
+            &make_message("m2", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
         insert_message(&conn, "d1", &make_message("m3", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d1", &make_message("m4", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d1",
+            &make_message("m4", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
 
         let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
         assert_eq!(deleted, 1); // Only m4
@@ -321,7 +348,12 @@ mod tests {
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
 
         // Only agent messages, no user messages
-        insert_message(&conn, "d1", &make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d1",
+            &make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
         insert_message(&conn, "d1", &make_message("m2", MessageRole::System, None)).unwrap();
 
         let deleted = delete_last_agent_messages(&conn, "d1").unwrap();
@@ -371,7 +403,12 @@ mod tests {
     fn update_message_tokens_sets_values() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
-        insert_message(&conn, "d1", &make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d1",
+            &make_message("m1", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
 
         update_message_tokens(&conn, "m1", 2500, Some("override")).unwrap();
 
@@ -427,7 +464,14 @@ mod tests {
     fn agent_type_round_trips_through_db() {
         let conn = test_conn();
 
-        for agent in &[AgentType::ClaudeCode, AgentType::Codex, AgentType::Vibe, AgentType::GeminiCli, AgentType::Kiro, AgentType::CopilotCli] {
+        for agent in &[
+            AgentType::ClaudeCode,
+            AgentType::Codex,
+            AgentType::Vibe,
+            AgentType::GeminiCli,
+            AgentType::Kiro,
+            AgentType::CopilotCli,
+        ] {
             let id = format!("d-{:?}", agent);
             let mut disc = make_discussion(&id);
             disc.agent = agent.clone();
@@ -447,11 +491,17 @@ mod tests {
         insert_discussion(&conn, &disc).unwrap();
 
         // Read raw string from DB to verify format
-        let raw: String = conn.query_row(
-            "SELECT agent FROM discussions WHERE id = 'd-format-check'",
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(raw, "CopilotCli", "DB string for CopilotCli must be 'CopilotCli'");
+        let raw: String = conn
+            .query_row(
+                "SELECT agent FROM discussions WHERE id = 'd-format-check'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            raw, "CopilotCli",
+            "DB string for CopilotCli must be 'CopilotCli'"
+        );
     }
 
     #[test]
@@ -463,7 +513,11 @@ mod tests {
             [],
         ).unwrap();
         let loaded = get_discussion(&conn, "d-unknown").unwrap().unwrap();
-        assert_eq!(loaded.agent, AgentType::Custom, "Unknown agent strings should map to Custom");
+        assert_eq!(
+            loaded.agent,
+            AgentType::Custom,
+            "Unknown agent strings should map to Custom"
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -496,7 +550,8 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
 
-        let updated = update_discussion_skill_ids(&conn, "d1", &["security-auditor".into()]).unwrap();
+        let updated =
+            update_discussion_skill_ids(&conn, "d1", &["security-auditor".into()]).unwrap();
         assert!(updated);
 
         let loaded = get_discussion(&conn, "d1").unwrap().unwrap();
@@ -539,7 +594,8 @@ mod tests {
         assert!(matches!(before.agent, AgentType::ClaudeCode));
 
         // Switch to GeminiCli
-        let updated = update_discussion_agent(&conn, "agent-switch", &AgentType::GeminiCli).unwrap();
+        let updated =
+            update_discussion_agent(&conn, "agent-switch", &AgentType::GeminiCli).unwrap();
         assert!(updated);
 
         let after = get_discussion(&conn, "agent-switch").unwrap().unwrap();
@@ -570,7 +626,10 @@ mod tests {
 
         let after = get_discussion(&conn, "switch-summary").unwrap().unwrap();
         assert!(matches!(after.agent, AgentType::Kiro));
-        assert!(after.summary_cache.is_none(), "Summary should be invalidated after agent switch");
+        assert!(
+            after.summary_cache.is_none(),
+            "Summary should be invalidated after agent switch"
+        );
     }
 
     #[test]
@@ -590,7 +649,12 @@ mod tests {
             timestamp: chrono::Utc::now(),
             tokens_used: 0,
             auth_mode: None,
-            model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
         };
         insert_message(&conn, "switch-msg", &msg).unwrap();
 
@@ -608,8 +672,21 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-ctx")).unwrap();
 
-        insert_context_file(&conn, "cf1", "d-ctx", "notes.txt", "text/plain", 100, "Hello world", None).unwrap();
-        insert_context_file(&conn, "cf2", "d-ctx", "data.csv", "text/csv", 200, "a,b\n1,2", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-ctx",
+            "notes.txt",
+            "text/plain",
+            100,
+            "Hello world",
+            None,
+        )
+        .unwrap();
+        insert_context_file(
+            &conn, "cf2", "d-ctx", "data.csv", "text/csv", 200, "a,b\n1,2", None,
+        )
+        .unwrap();
 
         let files = list_context_files(&conn, "d-ctx").unwrap();
         assert_eq!(files.len(), 2);
@@ -626,10 +703,30 @@ mod tests {
 
         assert_eq!(count_context_files(&conn, "d-count").unwrap(), 0);
 
-        insert_context_file(&conn, "cf1", "d-count", "a.txt", "text/plain", 10, "A", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-count",
+            "a.txt",
+            "text/plain",
+            10,
+            "A",
+            None,
+        )
+        .unwrap();
         assert_eq!(count_context_files(&conn, "d-count").unwrap(), 1);
 
-        insert_context_file(&conn, "cf2", "d-count", "b.txt", "text/plain", 10, "B", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf2",
+            "d-count",
+            "b.txt",
+            "text/plain",
+            10,
+            "B",
+            None,
+        )
+        .unwrap();
         assert_eq!(count_context_files(&conn, "d-count").unwrap(), 2);
     }
 
@@ -637,7 +734,17 @@ mod tests {
     fn delete_context_file_removes_it() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-del")).unwrap();
-        insert_context_file(&conn, "cf1", "d-del", "test.txt", "text/plain", 50, "Test", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-del",
+            "test.txt",
+            "text/plain",
+            50,
+            "Test",
+            None,
+        )
+        .unwrap();
 
         let deleted = delete_context_file(&conn, "d-del", "cf1").unwrap();
         assert!(deleted, "Should return true when file existed");
@@ -651,11 +758,24 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-a")).unwrap();
         insert_discussion(&conn, &make_discussion("d-b")).unwrap();
-        insert_context_file(&conn, "cf1", "d-a", "test.txt", "text/plain", 50, "Test", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-a",
+            "test.txt",
+            "text/plain",
+            50,
+            "Test",
+            None,
+        )
+        .unwrap();
 
         // Try deleting from wrong discussion
         let deleted = delete_context_file(&conn, "d-b", "cf1").unwrap();
-        assert!(!deleted, "Should return false when file doesn't belong to discussion");
+        assert!(
+            !deleted,
+            "Should return false when file doesn't belong to discussion"
+        );
 
         // File should still exist in d-a
         assert_eq!(count_context_files(&conn, "d-a").unwrap(), 1);
@@ -665,8 +785,28 @@ mod tests {
     fn get_context_files_for_prompt_text_only() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-prompt")).unwrap();
-        insert_context_file(&conn, "cf1", "d-prompt", "code.rs", "text/plain", 100, "fn main() {}", None).unwrap();
-        insert_context_file(&conn, "cf2", "d-prompt", "data.sql", "text/plain", 50, "SELECT 1", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-prompt",
+            "code.rs",
+            "text/plain",
+            100,
+            "fn main() {}",
+            None,
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "cf2",
+            "d-prompt",
+            "data.sql",
+            "text/plain",
+            50,
+            "SELECT 1",
+            None,
+        )
+        .unwrap();
 
         let entries = get_context_files_for_prompt(&conn, "d-prompt").unwrap();
         assert_eq!(entries.len(), 2);
@@ -680,22 +820,46 @@ mod tests {
     fn get_context_files_for_prompt_with_image() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-img")).unwrap();
-        insert_context_file(&conn, "cf1", "d-img", "screenshot.png", "image/png", 5000, "[Image: screenshot.png]", Some("/tmp/screenshot.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-img",
+            "screenshot.png",
+            "image/png",
+            5000,
+            "[Image: screenshot.png]",
+            Some("/tmp/screenshot.png"),
+        )
+        .unwrap();
 
         let entries = get_context_files_for_prompt(&conn, "d-img").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].filename, "screenshot.png");
-        assert_eq!(entries[0].disk_path, Some("/tmp/screenshot.png".to_string()));
+        assert_eq!(
+            entries[0].disk_path,
+            Some("/tmp/screenshot.png".to_string())
+        );
     }
 
     #[test]
     fn context_files_cascade_on_discussion_delete() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-cascade")).unwrap();
-        insert_context_file(&conn, "cf1", "d-cascade", "file.txt", "text/plain", 10, "X", None).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-cascade",
+            "file.txt",
+            "text/plain",
+            10,
+            "X",
+            None,
+        )
+        .unwrap();
 
         // Delete the discussion
-        conn.execute("DELETE FROM discussions WHERE id = 'd-cascade'", []).unwrap();
+        conn.execute("DELETE FROM discussions WHERE id = 'd-cascade'", [])
+            .unwrap();
 
         // Context files should be gone (CASCADE)
         assert_eq!(count_context_files(&conn, "d-cascade").unwrap(), 0);
@@ -705,11 +869,24 @@ mod tests {
     fn context_file_with_disk_path() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-disk")).unwrap();
-        insert_context_file(&conn, "cf1", "d-disk", "chart.png", "image/png", 50000, "[Image]", Some("/project/.kronn/context-files/abc_chart.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-disk",
+            "chart.png",
+            "image/png",
+            50000,
+            "[Image]",
+            Some("/project/.kronn/context-files/abc_chart.png"),
+        )
+        .unwrap();
 
         let files = list_context_files(&conn, "d-disk").unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].disk_path, Some("/project/.kronn/context-files/abc_chart.png".to_string()));
+        assert_eq!(
+            files[0].disk_path,
+            Some("/project/.kronn/context-files/abc_chart.png".to_string())
+        );
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -722,12 +899,25 @@ mod tests {
     fn freshly_inserted_context_file_is_pending() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-pend")).unwrap();
-        insert_context_file(&conn, "cf1", "d-pend", "shot.png", "image/png", 10, "[Image]", Some("/tmp/shot.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-pend",
+            "shot.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/shot.png"),
+        )
+        .unwrap();
 
         // Uploaded but not yet sent → no message_id.
         let files = list_context_files(&conn, "d-pend").unwrap();
         assert_eq!(files.len(), 1);
-        assert_eq!(files[0].message_id, None, "an upload is pending until a message is sent");
+        assert_eq!(
+            files[0].message_id, None,
+            "an upload is pending until a message is sent"
+        );
     }
 
     #[test]
@@ -735,19 +925,75 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-link")).unwrap();
         // Two pending uploads + one already attached to an older message.
-        insert_context_file(&conn, "cf1", "d-link", "a.png", "image/png", 10, "[Image]", Some("/tmp/a.png")).unwrap();
-        insert_context_file(&conn, "cf2", "d-link", "b.png", "image/png", 10, "[Image]", Some("/tmp/b.png")).unwrap();
-        insert_context_file(&conn, "cf3", "d-link", "old.png", "image/png", 10, "[Image]", Some("/tmp/old.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-link",
+            "a.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/a.png"),
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "cf2",
+            "d-link",
+            "b.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/b.png"),
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "cf3",
+            "d-link",
+            "old.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/old.png"),
+        )
+        .unwrap();
         link_pending_context_files_to_message(&conn, "d-link", "msg-old").unwrap();
 
         // Two MORE pending uploads arrive, then the user sends a new message.
-        insert_context_file(&conn, "cf4", "d-link", "c.png", "image/png", 10, "[Image]", Some("/tmp/c.png")).unwrap();
-        insert_context_file(&conn, "cf5", "d-link", "d.png", "image/png", 10, "[Image]", Some("/tmp/d.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf4",
+            "d-link",
+            "c.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/c.png"),
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "cf5",
+            "d-link",
+            "d.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/d.png"),
+        )
+        .unwrap();
         let n = link_pending_context_files_to_message(&conn, "d-link", "msg-new").unwrap();
 
-        assert_eq!(n, 2, "only the two still-pending files get pinned to the new message");
+        assert_eq!(
+            n, 2,
+            "only the two still-pending files get pinned to the new message"
+        );
         let on_new = list_context_files_for_message(&conn, "msg-new").unwrap();
-        assert_eq!(on_new.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), vec!["cf4", "cf5"]);
+        assert_eq!(
+            on_new.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["cf4", "cf5"]
+        );
         // The earlier batch stays on its original message — never re-pinned.
         let on_old = list_context_files_for_message(&conn, "msg-old").unwrap();
         assert_eq!(on_old.len(), 3);
@@ -757,13 +1003,25 @@ mod tests {
     fn link_pending_is_a_no_op_when_nothing_is_pending() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-noop")).unwrap();
-        insert_context_file(&conn, "cf1", "d-noop", "a.png", "image/png", 10, "[Image]", Some("/tmp/a.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-noop",
+            "a.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/a.png"),
+        )
+        .unwrap();
         link_pending_context_files_to_message(&conn, "d-noop", "msg-1").unwrap();
 
         // A second send with no new uploads links nothing.
         let n = link_pending_context_files_to_message(&conn, "d-noop", "msg-2").unwrap();
         assert_eq!(n, 0);
-        assert!(list_context_files_for_message(&conn, "msg-2").unwrap().is_empty());
+        assert!(list_context_files_for_message(&conn, "msg-2")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
@@ -771,8 +1029,28 @@ mod tests {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-x")).unwrap();
         insert_discussion(&conn, &make_discussion("d-y")).unwrap();
-        insert_context_file(&conn, "cfx", "d-x", "x.png", "image/png", 10, "[Image]", Some("/tmp/x.png")).unwrap();
-        insert_context_file(&conn, "cfy", "d-y", "y.png", "image/png", 10, "[Image]", Some("/tmp/y.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cfx",
+            "d-x",
+            "x.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/x.png"),
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "cfy",
+            "d-y",
+            "y.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/y.png"),
+        )
+        .unwrap();
 
         let n = link_pending_context_files_to_message(&conn, "d-x", "msg-x").unwrap();
         assert_eq!(n, 1, "a send in d-x must not touch pending files of d-y");
@@ -787,32 +1065,99 @@ mod tests {
         // (so they're NULL = would be "pending") alongside one already pinned.
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-legacy")).unwrap();
-        insert_context_file(&conn, "old1", "d-legacy", "spec.pdf", "application/pdf", 10, "ref", None).unwrap();
-        insert_context_file(&conn, "old2", "d-legacy", "data.csv", "text/csv", 10, "a,b", None).unwrap();
-        insert_context_file(&conn, "pinned", "d-legacy", "shot.png", "image/png", 10, "[Image]", Some("/tmp/s.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "old1",
+            "d-legacy",
+            "spec.pdf",
+            "application/pdf",
+            10,
+            "ref",
+            None,
+        )
+        .unwrap();
+        insert_context_file(
+            &conn, "old2", "d-legacy", "data.csv", "text/csv", 10, "a,b", None,
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "pinned",
+            "d-legacy",
+            "shot.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/s.png"),
+        )
+        .unwrap();
         link_pending_context_files_to_message(&conn, "d-legacy", "msg-real").unwrap(); // pins old1, old2, pinned
 
         // Re-create the "uploaded before the column" case: two fresh NULL rows.
-        insert_context_file(&conn, "legacyA", "d-legacy", "a.txt", "text/plain", 1, "A", None).unwrap();
-        insert_context_file(&conn, "legacyB", "d-legacy", "b.txt", "text/plain", 1, "B", None).unwrap();
+        insert_context_file(
+            &conn,
+            "legacyA",
+            "d-legacy",
+            "a.txt",
+            "text/plain",
+            1,
+            "A",
+            None,
+        )
+        .unwrap();
+        insert_context_file(
+            &conn,
+            "legacyB",
+            "d-legacy",
+            "b.txt",
+            "text/plain",
+            1,
+            "B",
+            None,
+        )
+        .unwrap();
 
         // Apply the exact backfill migration SQL.
-        conn.execute_batch(include_str!("sql/067_context_files_backfill_legacy.sql")).unwrap();
+        conn.execute_batch(include_str!("sql/067_context_files_backfill_legacy.sql"))
+            .unwrap();
 
         // The NULL rows are now the inert sentinel — NOT pending.
-        let a: Option<String> = conn.query_row("SELECT message_id FROM context_files WHERE id='legacyA'", [], |r| r.get(0)).unwrap();
-        let b: Option<String> = conn.query_row("SELECT message_id FROM context_files WHERE id='legacyB'", [], |r| r.get(0)).unwrap();
+        let a: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM context_files WHERE id='legacyA'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let b: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM context_files WHERE id='legacyB'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(a.as_deref(), Some("__legacy_disc_wide__"));
         assert_eq!(b.as_deref(), Some("__legacy_disc_wide__"));
         // The already-pinned files keep their real message id.
-        let p: Option<String> = conn.query_row("SELECT message_id FROM context_files WHERE id='old1'", [], |r| r.get(0)).unwrap();
+        let p: Option<String> = conn
+            .query_row(
+                "SELECT message_id FROM context_files WHERE id='old1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(p.as_deref(), Some("msg-real"));
 
         // Crucially: a later send links NOTHING — legacy files are no longer
         // pending, so they can't be vacuumed into a new message.
         let n = link_pending_context_files_to_message(&conn, "d-legacy", "msg-next").unwrap();
-        assert_eq!(n, 0, "backfilled legacy files must not attach to the next message");
-        assert!(list_context_files_for_message(&conn, "msg-next").unwrap().is_empty());
+        assert_eq!(
+            n, 0,
+            "backfilled legacy files must not attach to the next message"
+        );
+        assert!(list_context_files_for_message(&conn, "msg-next")
+            .unwrap()
+            .is_empty());
         // ...and they stay disc-wide context (still listed for the discussion).
         assert_eq!(list_context_files(&conn, "d-legacy").unwrap().len(), 5);
     }
@@ -821,7 +1166,17 @@ mod tests {
     fn list_for_message_returns_message_id_on_each_row() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-roundtrip")).unwrap();
-        insert_context_file(&conn, "cf1", "d-roundtrip", "a.png", "image/png", 10, "[Image]", Some("/tmp/a.png")).unwrap();
+        insert_context_file(
+            &conn,
+            "cf1",
+            "d-roundtrip",
+            "a.png",
+            "image/png",
+            10,
+            "[Image]",
+            Some("/tmp/a.png"),
+        )
+        .unwrap();
         link_pending_context_files_to_message(&conn, "d-roundtrip", "msg-rt").unwrap();
 
         let per_msg = list_context_files_for_message(&conn, "msg-rt").unwrap();
@@ -850,12 +1205,19 @@ mod tests {
         // Two real exchanges (User → Agent) + six System breadcrumbs
         // (simulates a workflow run with 6 tool / summary lines per reply).
         insert_message(&conn, "d-mix", &make_message("u1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-mix", &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d-mix",
+            &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
         for i in 0..6 {
             insert_message(
-                &conn, "d-mix",
+                &conn,
+                "d-mix",
                 &make_message(&format!("s{i}"), MessageRole::System, None),
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let listed = list_discussions(&conn).unwrap();
@@ -889,9 +1251,24 @@ mod tests {
         // counts equal (otherwise the badge would under-count real replies).
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-clean")).unwrap();
-        insert_message(&conn, "d-clean", &make_message("u1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-clean", &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
-        insert_message(&conn, "d-clean", &make_message("u2", MessageRole::User, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-clean",
+            &make_message("u1", MessageRole::User, None),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-clean",
+            &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-clean",
+            &make_message("u2", MessageRole::User, None),
+        )
+        .unwrap();
 
         let listed = list_discussions(&conn).unwrap();
         let d = listed.iter().find(|d| d.id == "d-clean").unwrap();
@@ -914,9 +1291,15 @@ mod tests {
 
         let recent = Utc::now() - chrono::Duration::seconds(60);
         let any = last_message_at(&conn, "d-anchor").unwrap().unwrap();
-        assert!(any > recent, "anchor must be reception time (~now), got {any}");
+        assert!(
+            any > recent,
+            "anchor must be reception time (~now), got {any}"
+        );
         let user = last_user_message_at(&conn, "d-anchor").unwrap().unwrap();
-        assert!(user > recent, "lease anchor must renew on reception, got {user}");
+        assert!(
+            user > recent,
+            "lease anchor must renew on reception, got {user}"
+        );
     }
 
     #[test]
@@ -925,8 +1308,18 @@ mod tests {
         // over clocks — received_at values are skewed by hand to prove it.
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-order")).unwrap();
-        insert_message(&conn, "d-order", &make_message("m1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-order", &make_message("m2", MessageRole::User, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-order",
+            &make_message("m1", MessageRole::User, None),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-order",
+            &make_message("m2", MessageRole::User, None),
+        )
+        .unwrap();
 
         let older = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
         conn.execute(
@@ -937,7 +1330,11 @@ mod tests {
 
         // m1 has the LARGER received_at, but m2 is the newest event.
         let any = last_message_at(&conn, "d-order").unwrap().unwrap();
-        assert_eq!(any.to_rfc3339(), older, "anchor follows sort_order, not MAX(received_at)");
+        assert_eq!(
+            any.to_rfc3339(),
+            older,
+            "anchor follows sort_order, not MAX(received_at)"
+        );
     }
 
     #[test]
@@ -947,8 +1344,18 @@ mod tests {
         assert!(last_message_at(&conn, "d-roles").unwrap().is_none());
         assert!(last_user_message_at(&conn, "d-roles").unwrap().is_none());
 
-        insert_message(&conn, "d-roles", &make_message("u1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-roles", &make_message("a1", MessageRole::Agent, Some(AgentType::Codex))).unwrap();
+        insert_message(
+            &conn,
+            "d-roles",
+            &make_message("u1", MessageRole::User, None),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-roles",
+            &make_message("a1", MessageRole::Agent, Some(AgentType::Codex)),
+        )
+        .unwrap();
         let user_received = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
         conn.execute(
             "UPDATE messages SET received_at = ?1 WHERE id = 'u1'",
@@ -961,7 +1368,10 @@ mod tests {
         let user_anchor = last_user_message_at(&conn, "d-roles").unwrap().unwrap();
         assert_eq!(user_anchor.to_rfc3339(), user_received);
         let any_anchor = last_message_at(&conn, "d-roles").unwrap().unwrap();
-        assert!(any_anchor > user_anchor, "any-role anchor follows the newest (Agent) row");
+        assert!(
+            any_anchor > user_anchor,
+            "any-role anchor follows the newest (Agent) row"
+        );
     }
 
     // ── reconcile_awaiting_agents (boot recovery of owed runs) ──
@@ -973,7 +1383,12 @@ mod tests {
         // appends an interrupted notice, clears the flag, returns the id.
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-owed")).unwrap();
-        insert_message(&conn, "d-owed", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-owed",
+            &make_message("u1", MessageRole::User, None),
+        )
+        .unwrap();
         set_awaiting_agent(&conn, "d-owed", true).unwrap();
 
         let marked = reconcile_awaiting_agents(&conn).unwrap();
@@ -997,12 +1412,25 @@ mod tests {
         // no notice, no re-flag, just housekeeping-clear the stale flag.
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-done")).unwrap();
-        insert_message(&conn, "d-done", &make_message("u1", MessageRole::User, None)).unwrap();
-        insert_message(&conn, "d-done", &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode))).unwrap();
+        insert_message(
+            &conn,
+            "d-done",
+            &make_message("u1", MessageRole::User, None),
+        )
+        .unwrap();
+        insert_message(
+            &conn,
+            "d-done",
+            &make_message("a1", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
         set_awaiting_agent(&conn, "d-done", true).unwrap();
 
         let marked = reconcile_awaiting_agents(&conn).unwrap();
-        assert!(marked.is_empty(), "an answered disc must not be marked interrupted");
+        assert!(
+            marked.is_empty(),
+            "an answered disc must not be marked interrupted"
+        );
         let disc = get_discussion(&conn, "d-done").unwrap().unwrap();
         assert_eq!(disc.messages.len(), 2, "no notice appended");
         // Stale flag cleared so it won't be re-scanned next boot.
@@ -1015,22 +1443,39 @@ mod tests {
         // (recover_partial_responses owns it). Flag + partial untouched here.
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-partial")).unwrap();
-        insert_message(&conn, "d-partial", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-partial",
+            &make_message("u1", MessageRole::User, None),
+        )
+        .unwrap();
         set_awaiting_agent(&conn, "d-partial", true).unwrap();
         set_partial_response(&conn, "d-partial", Some("half a reply")).unwrap();
 
         let marked = reconcile_awaiting_agents(&conn).unwrap();
-        assert!(marked.is_empty(), "a disc with a live partial is left to partial recovery");
+        assert!(
+            marked.is_empty(),
+            "a disc with a live partial is left to partial recovery"
+        );
         // The partial is still there for recover_partial_responses to convert.
         let disc = get_discussion(&conn, "d-partial").unwrap().unwrap();
-        assert_eq!(disc.messages.len(), 1, "no notice, no conversion — recovery owns it");
+        assert_eq!(
+            disc.messages.len(),
+            1,
+            "no notice, no conversion — recovery owns it"
+        );
     }
 
     #[test]
     fn reconcile_ignores_unflagged_discs() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d-plain")).unwrap();
-        insert_message(&conn, "d-plain", &make_message("u1", MessageRole::User, None)).unwrap();
+        insert_message(
+            &conn,
+            "d-plain",
+            &make_message("u1", MessageRole::User, None),
+        )
+        .unwrap();
         // No set_awaiting_agent → flag stays 0 (default).
         assert!(reconcile_awaiting_agents(&conn).unwrap().is_empty());
     }

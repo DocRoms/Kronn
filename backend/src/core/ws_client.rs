@@ -72,7 +72,10 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
     loop {
         let ws_url = format!(
             "{}/api/ws",
-            contact.kronn_url.replace("http://", "ws://").replace("https://", "wss://")
+            contact
+                .kronn_url
+                .replace("http://", "ws://")
+                .replace("https://", "wss://")
         );
 
         tracing::debug!("WS client: connecting to {} ({})", contact.pseudo, ws_url);
@@ -87,10 +90,12 @@ async fn connect_to_peer(state: AppState, contact: crate::models::Contact) {
         )
         .await
         .unwrap_or_else(|_| {
-            Err(tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "WS handshake timed out after 30s",
-            )))
+            Err(tokio_tungstenite::tungstenite::Error::Io(
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "WS handshake timed out after 30s",
+                ),
+            ))
         });
         match connect {
             Ok((ws_stream, _)) => {
@@ -200,7 +205,9 @@ async fn handle_peer_connection(
         online: true,
     };
     if let Ok(json) = serde_json::to_string(&presence_msg) {
-        let _ = ws_sender.send(tungstenite::Message::Text(json.into())).await;
+        let _ = ws_sender
+            .send(tungstenite::Message::Text(json.into()))
+            .await;
     }
 
     // F4 catch-up — on every (re)connect, ask this peer to re-send anything we
@@ -220,7 +227,9 @@ async fn handle_peer_connection(
             since_timestamp,
         };
         if let Ok(json) = serde_json::to_string(&req) {
-            let _ = ws_sender.send(tungstenite::Message::Text(json.into())).await;
+            let _ = ws_sender
+                .send(tungstenite::Message::Text(json.into()))
+                .await;
         }
     }
 
@@ -299,9 +308,9 @@ async fn handle_peer_connection(
     let mut recv_task = tokio::spawn(async move {
         loop {
             match tokio::time::timeout(WS_IDLE_TIMEOUT, ws_receiver.next()).await {
-                Err(_idle) => break,            // no traffic in the window → dead
-                Ok(None) => break,              // stream ended
-                Ok(Some(Err(_))) => break,      // transport error
+                Err(_idle) => break,       // no traffic in the window → dead
+                Ok(None) => break,         // stream ended
+                Ok(Some(Err(_))) => break, // transport error
                 Ok(Some(Ok(msg))) => match msg {
                     tungstenite::Message::Text(text) => {
                         if let Ok(ws_msg) = serde_json::from_str::<WsMessage>(&text) {
@@ -312,7 +321,10 @@ async fn handle_peer_connection(
                             };
                             if should_broadcast {
                                 if let Some(key) = ws_msg.relay_dedup_key() {
-                                    recv_guard.lock().unwrap_or_else(|e| e.into_inner()).record(key);
+                                    recv_guard
+                                        .lock()
+                                        .unwrap_or_else(|e| e.into_inner())
+                                        .record(key);
                                 }
                                 let _ = broadcast_tx.send(ws_msg);
                             }
@@ -386,7 +398,9 @@ mod tests {
         let kronn_url = "http://100.64.1.5:3456";
         let ws_url = format!(
             "{}/api/ws",
-            kronn_url.replace("http://", "ws://").replace("https://", "wss://")
+            kronn_url
+                .replace("http://", "ws://")
+                .replace("https://", "wss://")
         );
         assert_eq!(ws_url, "ws://100.64.1.5:3456/api/ws");
     }
@@ -396,7 +410,9 @@ mod tests {
         let kronn_url = "https://peer.example.com:3456";
         let ws_url = format!(
             "{}/api/ws",
-            kronn_url.replace("http://", "ws://").replace("https://", "wss://")
+            kronn_url
+                .replace("http://", "ws://")
+                .replace("https://", "wss://")
         );
         assert_eq!(ws_url, "wss://peer.example.com:3456/api/ws");
     }

@@ -2,65 +2,68 @@ use anyhow::Result;
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
-use crate::models::*;
 use crate::core::crypto;
+use crate::models::*;
 
 // ─── MCP Servers ─────────────────────────────────────────────────────────────
 
 pub fn list_servers(conn: &Connection) -> Result<Vec<McpServer>> {
     let mut stmt = conn.prepare(
         "SELECT id, name, description, transport, command, args_json, url, source, api_spec_json
-         FROM mcp_servers ORDER BY name"
+         FROM mcp_servers ORDER BY name",
     )?;
 
-    let servers = stmt.query_map([], |row| {
-        let transport_type: String = row.get(3)?;
-        let command: Option<String> = row.get(4)?;
-        let args_json: String = row.get(5)?;
-        let url: Option<String> = row.get(6)?;
-        let source_str: String = row.get(7)?;
-        let api_spec_json: Option<String> = row.get(8)?;
+    let servers = stmt
+        .query_map([], |row| {
+            let transport_type: String = row.get(3)?;
+            let command: Option<String> = row.get(4)?;
+            let args_json: String = row.get(5)?;
+            let url: Option<String> = row.get(6)?;
+            let source_str: String = row.get(7)?;
+            let api_spec_json: Option<String> = row.get(8)?;
 
-        let transport = match transport_type.as_str() {
-            "stdio" => McpTransport::Stdio {
-                command: command.unwrap_or_default(),
-                args: serde_json::from_str(&args_json).unwrap_or_default(),
-            },
-            "sse" => McpTransport::Sse {
-                url: url.unwrap_or_default(),
-            },
-            "streamable" => McpTransport::Streamable {
-                url: url.unwrap_or_default(),
-            },
-            "api_only" => McpTransport::ApiOnly,
-            _ => McpTransport::Stdio {
-                command: command.unwrap_or_default(),
-                args: serde_json::from_str(&args_json).unwrap_or_default(),
-            },
-        };
+            let transport = match transport_type.as_str() {
+                "stdio" => McpTransport::Stdio {
+                    command: command.unwrap_or_default(),
+                    args: serde_json::from_str(&args_json).unwrap_or_default(),
+                },
+                "sse" => McpTransport::Sse {
+                    url: url.unwrap_or_default(),
+                },
+                "streamable" => McpTransport::Streamable {
+                    url: url.unwrap_or_default(),
+                },
+                "api_only" => McpTransport::ApiOnly,
+                _ => McpTransport::Stdio {
+                    command: command.unwrap_or_default(),
+                    args: serde_json::from_str(&args_json).unwrap_or_default(),
+                },
+            };
 
-        let source = match source_str.as_str() {
-            "registry" => McpSource::Registry,
-            "manual" => McpSource::Manual,
-            "host_imported" => McpSource::HostImported,
-            _ => McpSource::Detected,
-        };
+            let source = match source_str.as_str() {
+                "registry" => McpSource::Registry,
+                "manual" => McpSource::Manual,
+                "host_imported" => McpSource::HostImported,
+                _ => McpSource::Detected,
+            };
 
-        // Parse api_spec_json — silent fallback to None on malformed JSON so
-        // one corrupt row doesn't break the whole plugin list load.
-        let api_spec = api_spec_json
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<crate::models::ApiSpec>(raw).ok());
+            // Parse api_spec_json — silent fallback to None on malformed JSON so
+            // one corrupt row doesn't break the whole plugin list load.
+            let api_spec = api_spec_json
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<crate::models::ApiSpec>(raw).ok());
 
-        Ok(McpServer {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            description: row.get(2)?,
-            transport,
-            source,
-            api_spec,
-        })
-    })?.filter_map(|r| r.ok()).collect();
+            Ok(McpServer {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                description: row.get(2)?,
+                transport,
+                source,
+                api_spec,
+            })
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
 
     Ok(servers)
 }
@@ -74,7 +77,9 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
             None,
         ),
         McpTransport::Sse { url } => ("sse", None, "[]".to_string(), Some(url.clone())),
-        McpTransport::Streamable { url } => ("streamable", None, "[]".to_string(), Some(url.clone())),
+        McpTransport::Streamable { url } => {
+            ("streamable", None, "[]".to_string(), Some(url.clone()))
+        }
         McpTransport::ApiOnly => ("api_only", None, "[]".to_string(), None),
     };
 
@@ -85,7 +90,9 @@ pub fn upsert_server(conn: &Connection, server: &McpServer) -> Result<()> {
         McpSource::HostImported => "host_imported",
     };
 
-    let api_spec_json = server.api_spec.as_ref()
+    let api_spec_json = server
+        .api_spec
+        .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
 
@@ -172,32 +179,38 @@ pub fn list_configs(conn: &Connection) -> Result<Vec<McpConfig>> {
          FROM mcp_configs ORDER BY label"
     )?;
 
-    let configs: Vec<McpConfig> = stmt.query_map([], |row| {
-        let id: String = row.get(0)?;
-        let env_keys_json: String = row.get(4)?;
-        let args_str: Option<String> = row.get(5)?;
-        let host_sync_str: String = row.get::<_, Option<String>>(9)?
-            .unwrap_or_else(|| "None".to_string());
+    let configs: Vec<McpConfig> = stmt
+        .query_map([], |row| {
+            let id: String = row.get(0)?;
+            let env_keys_json: String = row.get(4)?;
+            let args_str: Option<String> = row.get(5)?;
+            let host_sync_str: String = row
+                .get::<_, Option<String>>(9)?
+                .unwrap_or_else(|| "None".to_string());
 
-        Ok((id.clone(), McpConfig {
-            id,
-            server_id: row.get(1)?,
-            label: row.get(2)?,
-            env_keys: serde_json::from_str(&env_keys_json).unwrap_or_default(),
-            env_encrypted: row.get(3)?,
-            args_override: args_str.and_then(|s| serde_json::from_str(&s).ok()),
-            is_global: row.get::<_, i32>(6)? != 0,
-            config_hash: row.get(7)?,
-            include_general: row.get::<_, i32>(8).unwrap_or(1) != 0,
-            project_ids: vec![], // loaded below
-            host_sync: parse_host_sync(&host_sync_str),
-        }))
-    })?.filter_map(|r| r.ok())
-    .map(|(id, mut config)| {
-        config.project_ids = list_config_project_ids(conn, &id).unwrap_or_default();
-        config
-    })
-    .collect();
+            Ok((
+                id.clone(),
+                McpConfig {
+                    id,
+                    server_id: row.get(1)?,
+                    label: row.get(2)?,
+                    env_keys: serde_json::from_str(&env_keys_json).unwrap_or_default(),
+                    env_encrypted: row.get(3)?,
+                    args_override: args_str.and_then(|s| serde_json::from_str(&s).ok()),
+                    is_global: row.get::<_, i32>(6)? != 0,
+                    config_hash: row.get(7)?,
+                    include_general: row.get::<_, i32>(8).unwrap_or(1) != 0,
+                    project_ids: vec![], // loaded below
+                    host_sync: parse_host_sync(&host_sync_str),
+                },
+            ))
+        })?
+        .filter_map(|r| r.ok())
+        .map(|(id, mut config)| {
+            config.project_ids = list_config_project_ids(conn, &id).unwrap_or_default();
+            config
+        })
+        .collect();
 
     Ok(configs)
 }
@@ -214,7 +227,9 @@ pub fn find_config_by_hash(conn: &Connection, hash: &str) -> Result<Option<McpCo
 
 pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
     let env_keys_json = serde_json::to_string(&config.env_keys)?;
-    let args_json = config.args_override.as_ref()
+    let args_json = config
+        .args_override
+        .as_ref()
         .map(serde_json::to_string)
         .transpose()?;
 
@@ -244,7 +259,18 @@ pub fn insert_config(conn: &Connection, config: &McpConfig) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encrypted: Option<&str>, env_keys: Option<&[String]>, args_override: Option<&Vec<String>>, is_global: Option<bool>, config_hash: Option<&str>, include_general: Option<bool>, host_sync: Option<HostSyncMode>) -> Result<bool> {
+pub fn update_config(
+    conn: &Connection,
+    id: &str,
+    label: Option<&str>,
+    env_encrypted: Option<&str>,
+    env_keys: Option<&[String]>,
+    args_override: Option<&Vec<String>>,
+    is_global: Option<bool>,
+    config_hash: Option<&str>,
+    include_general: Option<bool>,
+    host_sync: Option<HostSyncMode>,
+) -> Result<bool> {
     // Load existing, apply changes, write back
     let existing = match get_config(conn, id)? {
         Some(c) => c,
@@ -253,7 +279,9 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
 
     let new_label = label.unwrap_or(&existing.label);
     let new_enc = env_encrypted.unwrap_or(&existing.env_encrypted);
-    let new_keys = env_keys.map(|k| k.to_vec()).unwrap_or(existing.env_keys.clone());
+    let new_keys = env_keys
+        .map(|k| k.to_vec())
+        .unwrap_or(existing.env_keys.clone());
     let new_args = args_override.cloned().or(existing.args_override.clone());
     let new_global = is_global.unwrap_or(existing.is_global);
     let new_include_general = include_general.unwrap_or(existing.include_general);
@@ -261,9 +289,7 @@ pub fn update_config(conn: &Connection, id: &str, label: Option<&str>, env_encry
     let new_host_sync = host_sync.unwrap_or(existing.host_sync.clone());
 
     let env_keys_json = serde_json::to_string(&new_keys)?;
-    let args_json = new_args.as_ref()
-        .map(serde_json::to_string)
-        .transpose()?;
+    let args_json = new_args.as_ref().map(serde_json::to_string).transpose()?;
 
     let affected = conn.execute(
         "UPDATE mcp_configs SET label = ?1, env_encrypted = ?2, env_keys_json = ?3, args_override = ?4, is_global = ?5, config_hash = ?6, include_general = ?7, host_sync = ?8 WHERE id = ?9",
@@ -302,10 +328,10 @@ pub fn delete_config(conn: &Connection, id: &str) -> Result<bool> {
 // ─── Config ↔ Project linkage ────────────────────────────────────────────────
 
 fn list_config_project_ids(conn: &Connection, config_id: &str) -> Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT project_id FROM mcp_config_projects WHERE config_id = ?1"
-    )?;
-    let ids = stmt.query_map(params![config_id], |row| row.get(0))?
+    let mut stmt =
+        conn.prepare("SELECT project_id FROM mcp_config_projects WHERE config_id = ?1")?;
+    let ids = stmt
+        .query_map(params![config_id], |row| row.get(0))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(ids)
@@ -328,7 +354,11 @@ pub fn unlink_config_project(conn: &Connection, config_id: &str, project_id: &st
     Ok(())
 }
 
-pub fn set_config_projects(conn: &Connection, config_id: &str, project_ids: &[String]) -> Result<()> {
+pub fn set_config_projects(
+    conn: &Connection,
+    config_id: &str,
+    project_ids: &[String],
+) -> Result<()> {
     conn.execute(
         "DELETE FROM mcp_config_projects WHERE config_id = ?1",
         params![config_id],
@@ -342,9 +372,10 @@ pub fn set_config_projects(conn: &Connection, config_id: &str, project_ids: &[St
 /// Get all configs linked to a specific project (including global ones)
 pub fn configs_for_project(conn: &Connection, project_id: &str) -> Result<Vec<McpConfig>> {
     let all = list_configs(conn)?;
-    Ok(all.into_iter().filter(|c| {
-        c.is_global || c.project_ids.contains(&project_id.to_string())
-    }).collect())
+    Ok(all
+        .into_iter()
+        .filter(|c| c.is_global || c.project_ids.contains(&project_id.to_string()))
+        .collect())
 }
 
 /// Pick THIS instance's config id for a given plugin/server, used when a
@@ -361,8 +392,9 @@ pub fn find_config_for_server(
 ) -> Result<Option<String>> {
     let all = list_configs(conn)?;
     if let Some(pid) = project_id {
-        if let Some(c) = all.iter().find(|c|
-            c.server_id == server_id && c.project_ids.iter().any(|p| p == pid))
+        if let Some(c) = all
+            .iter()
+            .find(|c| c.server_id == server_id && c.project_ids.iter().any(|p| p == pid))
         {
             return Ok(Some(c.id.clone()));
         }
@@ -370,73 +402,92 @@ pub fn find_config_for_server(
     if let Some(c) = all.iter().find(|c| c.server_id == server_id && c.is_global) {
         return Ok(Some(c.id.clone()));
     }
-    Ok(all.into_iter().find(|c| c.server_id == server_id).map(|c| c.id))
+    Ok(all
+        .into_iter()
+        .find(|c| c.server_id == server_id)
+        .map(|c| c.id))
 }
 
 // ─── Display helpers ─────────────────────────────────────────────────────────
 
 /// Build McpConfigDisplay list with masked secrets and server names.
 /// Pass `secret` to detect broken encryption (secrets_broken flag).
-pub fn list_configs_display(conn: &Connection, secret: Option<&str>) -> Result<Vec<McpConfigDisplay>> {
+pub fn list_configs_display(
+    conn: &Connection,
+    secret: Option<&str>,
+) -> Result<Vec<McpConfigDisplay>> {
     let configs = list_configs(conn)?;
     let servers = list_servers(conn)?;
 
     let projects = crate::db::projects::list_projects(conn)?;
-    let project_map: HashMap<String, String> = projects.into_iter()
+    let project_map: HashMap<String, String> = projects
+        .into_iter()
         .map(|p| (p.id.clone(), p.name.clone()))
         .collect();
 
-    let server_map: HashMap<String, String> = servers.iter()
+    let server_map: HashMap<String, String> = servers
+        .iter()
         .map(|s| (s.id.clone(), s.name.clone()))
         .collect();
 
-    Ok(configs.into_iter().map(|c| {
-        let env_masked: Vec<McpEnvEntry> = c.env_keys.iter()
-            .map(|k| McpEnvEntry {
-                key: k.clone(),
-                masked_value: "••••••".to_string(),
-            })
-            .collect();
+    Ok(configs
+        .into_iter()
+        .map(|c| {
+            let env_masked: Vec<McpEnvEntry> = c
+                .env_keys
+                .iter()
+                .map(|k| McpEnvEntry {
+                    key: k.clone(),
+                    masked_value: "••••••".to_string(),
+                })
+                .collect();
 
-        let project_names: Vec<String> = c.project_ids.iter()
-            .filter_map(|pid| project_map.get(pid).cloned())
-            .collect();
+            let project_names: Vec<String> = c
+                .project_ids
+                .iter()
+                .filter_map(|pid| project_map.get(pid).cloned())
+                .collect();
 
-        // Detect broken encryption: env_keys exist but decryption fails
-        let secrets_broken = if !c.env_keys.is_empty() && !c.env_encrypted.is_empty() {
-            if let Some(s) = secret {
-                decrypt_env(&c.env_encrypted, s).is_err()
+            // Detect broken encryption: env_keys exist but decryption fails
+            let secrets_broken = if !c.env_keys.is_empty() && !c.env_encrypted.is_empty() {
+                if let Some(s) = secret {
+                    decrypt_env(&c.env_encrypted, s).is_err()
+                } else {
+                    false
+                }
             } else {
                 false
-            }
-        } else {
-            false
-        };
+            };
 
-        McpConfigDisplay {
-            id: c.id,
-            server_id: c.server_id.clone(),
-            server_name: server_map.get(&c.server_id).cloned().unwrap_or_default(),
-            label: c.label,
-            env_keys: c.env_keys,
-            env_masked,
-            args_override: c.args_override,
-            is_global: c.is_global,
-            include_general: c.include_general,
-            config_hash: c.config_hash,
-            project_ids: c.project_ids,
-            project_names,
-            secrets_broken,
-            host_sync: c.host_sync,
-        }
-    }).collect())
+            McpConfigDisplay {
+                id: c.id,
+                server_id: c.server_id.clone(),
+                server_name: server_map.get(&c.server_id).cloned().unwrap_or_default(),
+                label: c.label,
+                env_keys: c.env_keys,
+                env_masked,
+                args_override: c.args_override,
+                is_global: c.is_global,
+                include_general: c.include_general,
+                config_hash: c.config_hash,
+                project_ids: c.project_ids,
+                project_names,
+                secrets_broken,
+                host_sync: c.host_sync,
+            }
+        })
+        .collect())
 }
 
 // ─── Config hash computation ─────────────────────────────────────────────────
 
 /// Compute a deduplication hash from the server command+args+env values.
 /// Two configs with the same hash are functionally identical.
-pub fn compute_config_hash(server: &McpServer, env: &HashMap<String, String>, args_override: Option<&Vec<String>>) -> String {
+pub fn compute_config_hash(
+    server: &McpServer,
+    env: &HashMap<String, String>,
+    args_override: Option<&Vec<String>>,
+) -> String {
     use std::collections::BTreeMap;
     let mut parts = vec![];
 
@@ -515,7 +566,10 @@ mod tests {
             id: id.into(),
             name: format!("Server-{id}"),
             description: "Test".into(),
-            transport: McpTransport::Stdio { command: "echo".into(), args: vec![] },
+            transport: McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
             source: McpSource::Registry,
             api_spec: None,
         }
@@ -612,10 +666,17 @@ mod tests {
         upsert_server(&conn, &mk_server("gh")).unwrap();
         upsert_server(&conn, &mk_server("jira")).unwrap();
         let mk = |id: &str, server: &str, global: bool| crate::models::McpConfig {
-            id: id.into(), server_id: server.into(), label: "L".into(),
-            env_keys: vec![], env_encrypted: "x".into(), args_override: None,
-            is_global: global, config_hash: id.into(), project_ids: vec![],
-            host_sync: HostSyncMode::GlobalOnly, include_general: true,
+            id: id.into(),
+            server_id: server.into(),
+            label: "L".into(),
+            env_keys: vec![],
+            env_encrypted: "x".into(),
+            args_override: None,
+            is_global: global,
+            config_hash: id.into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
         };
         conn.execute("INSERT INTO projects (id, name, path, created_at, updated_at) VALUES ('proj-1','Test','/tmp/proj1','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')", []).unwrap();
         insert_config(&conn, &mk("gh-global", "gh", true)).unwrap();
@@ -624,22 +685,55 @@ mod tests {
         insert_config(&conn, &mk("jira-1", "jira", true)).unwrap();
 
         // Project-scoped config wins for that project.
-        assert_eq!(find_config_for_server(&conn, "gh", Some("proj-1")).unwrap().as_deref(), Some("gh-proj"));
+        assert_eq!(
+            find_config_for_server(&conn, "gh", Some("proj-1"))
+                .unwrap()
+                .as_deref(),
+            Some("gh-proj")
+        );
         // No project → prefer the global config for the server.
-        assert_eq!(find_config_for_server(&conn, "gh", None).unwrap().as_deref(), Some("gh-global"));
+        assert_eq!(
+            find_config_for_server(&conn, "gh", None)
+                .unwrap()
+                .as_deref(),
+            Some("gh-global")
+        );
         // Unknown project → falls back to the global config.
-        assert_eq!(find_config_for_server(&conn, "gh", Some("other")).unwrap().as_deref(), Some("gh-global"));
+        assert_eq!(
+            find_config_for_server(&conn, "gh", Some("other"))
+                .unwrap()
+                .as_deref(),
+            Some("gh-global")
+        );
         // A different server resolves to its own config.
-        assert_eq!(find_config_for_server(&conn, "jira", None).unwrap().as_deref(), Some("jira-1"));
+        assert_eq!(
+            find_config_for_server(&conn, "jira", None)
+                .unwrap()
+                .as_deref(),
+            Some("jira-1")
+        );
         // No config for the plugin → None (caller leaves the step id untouched).
-        assert!(find_config_for_server(&conn, "slack", None).unwrap().is_none());
+        assert!(find_config_for_server(&conn, "slack", None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn update_config_unknown_id_returns_false() {
         let conn = test_conn();
-        let changed = update_config(&conn, "nope", Some("X"),
-            None, None, None, None, None, None, None).unwrap();
+        let changed = update_config(
+            &conn,
+            "nope",
+            Some("X"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(!changed);
     }
 
@@ -706,7 +800,10 @@ mod tests {
         // Wrong key → broken (locked): the row is present, ciphertext intact,
         // just not decryptable — exactly the recoverable-by-re-key state.
         let disp_wrong = list_configs_display(&conn, Some(&wrong)).unwrap();
-        assert!(disp_wrong[0].secrets_broken, "wrong key MUST flag broken/locked");
+        assert!(
+            disp_wrong[0].secrets_broken,
+            "wrong key MUST flag broken/locked"
+        );
     }
 
     #[test]
@@ -715,10 +812,17 @@ mod tests {
         upsert_server(&conn, &mk_server("srv")).unwrap();
         // A config with NO env_keys / empty ciphertext is never "broken".
         let cfg = crate::models::McpConfig {
-            id: "cfg-empty".into(), server_id: "srv".into(), label: "L".into(),
-            env_keys: vec![], env_encrypted: String::new(), args_override: None,
-            is_global: false, config_hash: "h".into(), project_ids: vec![],
-            host_sync: HostSyncMode::GlobalOnly, include_general: true,
+            id: "cfg-empty".into(),
+            server_id: "srv".into(),
+            label: "L".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            config_hash: "h".into(),
+            project_ids: vec![],
+            host_sync: HostSyncMode::GlobalOnly,
+            include_general: true,
         };
         insert_config(&conn, &cfg).unwrap();
         let disp = list_configs_display(&conn, Some(&crypto::generate_secret())).unwrap();
@@ -733,7 +837,10 @@ mod tests {
         let good = crypto::generate_secret();
         seed_encrypted_config(&conn, &good, "cfg-x");
         let disp = list_configs_display(&conn, None).unwrap();
-        assert!(!disp[0].secrets_broken, "no active key → do not false-flag broken");
+        assert!(
+            !disp[0].secrets_broken,
+            "no active key → do not false-flag broken"
+        );
     }
 
     #[test]

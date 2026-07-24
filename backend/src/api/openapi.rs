@@ -95,7 +95,6 @@ pub fn openapi_spec() -> utoipa::openapi::OpenApi {
     spec
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

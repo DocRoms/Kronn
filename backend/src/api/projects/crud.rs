@@ -25,7 +25,9 @@ pub async fn list(State(state): State<AppState>) -> Json<ApiResponse<Vec<Project
                     enrich_audit_status(p);
                 }
                 projects
-            }).await.unwrap_or_else(|e| {
+            })
+            .await
+            .unwrap_or_else(|e| {
                 tracing::error!("Failed to enrich audit status: {e}");
                 vec![]
             });
@@ -41,16 +43,18 @@ pub async fn get(
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Project>> {
     let pid = id.clone();
-    match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
-        Ok(Some(mut project)) => {
-            tokio::task::spawn_blocking(move || {
-                enrich_audit_status(&mut project);
-                project
-            })
-            .await
-            .map(|p| Json(ApiResponse::ok(p)))
-            .unwrap_or_else(|e| Json(ApiResponse::err(format!("Enrich failed: {e}"))))
-        }
+    match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+    {
+        Ok(Some(mut project)) => tokio::task::spawn_blocking(move || {
+            enrich_audit_status(&mut project);
+            project
+        })
+        .await
+        .map(|p| Json(ApiResponse::ok(p)))
+        .unwrap_or_else(|e| Json(ApiResponse::err(format!("Enrich failed: {e}")))),
         Ok(None) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -76,10 +80,7 @@ pub fn discover_wsl_homes() -> Vec<String> {
         const WSL_DISTRO_TIMEOUT: Duration = Duration::from_secs(5);
 
         /// Spawn a wsl.exe child, kill it if it overruns `timeout`, return its output.
-        fn run_with_timeout(
-            args: &[&str],
-            timeout: Duration,
-        ) -> Option<std::process::Output> {
+        fn run_with_timeout(args: &[&str], timeout: Duration) -> Option<std::process::Output> {
             let mut child = sync_cmd("wsl.exe")
                 .args(args)
                 .stdin(std::process::Stdio::null())
@@ -120,7 +121,8 @@ pub fn discover_wsl_homes() -> Vec<String> {
                 let stdout = String::from_utf8_lossy(&out.stdout)
                     .replace('\u{0}', "")
                     .replace('\r', "");
-                stdout.lines()
+                stdout
+                    .lines()
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty() && !s.contains("docker-desktop"))
                     .collect()
@@ -181,7 +183,9 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
             paths.push(host_home);
         }
         if paths.is_empty() {
-            if let Some(home) = directories::UserDirs::new().map(|d| d.home_dir().to_string_lossy().to_string()) {
+            if let Some(home) =
+                directories::UserDirs::new().map(|d| d.home_dir().to_string_lossy().to_string())
+            {
                 paths.push(home);
             }
         }
@@ -202,10 +206,14 @@ pub async fn scan(State(state): State<AppState>) -> Json<ApiResponse<Vec<Detecte
     let depth = config.scan.scan_depth;
     drop(config);
 
-    let existing_paths: Vec<String> = state.db.with_conn(|conn| {
-        let projects = crate::db::projects::list_projects(conn)?;
-        Ok(projects.into_iter().map(|p| p.path).collect())
-    }).await.unwrap_or_default();
+    let existing_paths: Vec<String> = state
+        .db
+        .with_conn(|conn| {
+            let projects = crate::db::projects::list_projects(conn)?;
+            Ok(projects.into_iter().map(|p| p.path).collect())
+        })
+        .await
+        .unwrap_or_default();
 
     match scanner::scan_paths_with_depth(&scan_paths, &ignore, depth).await {
         Ok(mut repos) => {
@@ -228,7 +236,9 @@ pub async fn create(
     // `..` component would let a remote caller (peer / future multi-user mode)
     // anchor reads outside the intended scan roots.
     if scanner::contains_parent_dir(&repo.path) {
-        return Json(ApiResponse::err("Project path may not contain '..' components"));
+        return Json(ApiResponse::err(
+            "Project path may not contain '..' components",
+        ));
     }
 
     let now = Utc::now();
@@ -245,7 +255,7 @@ pub async fn create(
         },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
-            tech_debt_count: 0,
+        tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
         default_skill_ids: vec![],
@@ -258,10 +268,14 @@ pub async fn create(
     enrich_audit_status(&mut project);
 
     let p = project.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::insert_project(conn, &p)?;
-        Ok(())
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &p)?;
+            Ok(())
+        })
+        .await
+    {
         Ok(()) => Json(ApiResponse::ok(project)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -289,7 +303,9 @@ pub async fn add_folder(
     Json(req): Json<AddFolderRequest>,
 ) -> Json<ApiResponse<Project>> {
     if scanner::contains_parent_dir(&req.path) {
-        return Json(ApiResponse::err("Project path may not contain '..' components"));
+        return Json(ApiResponse::err(
+            "Project path may not contain '..' components",
+        ));
     }
 
     let resolved = crate::core::scanner::resolve_host_path(&req.path);
@@ -301,10 +317,12 @@ pub async fn add_folder(
     }
 
     // Auto-detect name from last path component if not provided.
-    let name = req.name
+    let name = req
+        .name
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| {
-            resolved.file_name()
+            resolved
+                .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("project")
                 .to_string()
@@ -312,10 +330,14 @@ pub async fn add_folder(
 
     // Check for duplicate path.
     let path_check = req.path.clone();
-    let duplicate = state.db.with_conn(move |conn| {
-        let projects = crate::db::projects::list_projects(conn)?;
-        Ok(projects.iter().any(|p| p.path == path_check))
-    }).await.unwrap_or(false);
+    let duplicate = state
+        .db
+        .with_conn(move |conn| {
+            let projects = crate::db::projects::list_projects(conn)?;
+            Ok(projects.iter().any(|p| p.path == path_check))
+        })
+        .await
+        .unwrap_or(false);
     if duplicate {
         return Json(ApiResponse::err("A project with this path already exists"));
     }
@@ -330,19 +352,29 @@ pub async fn add_folder(
                 .current_dir(&path_for_git)
                 .output()
                 .ok()
-                .and_then(|o| if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else { None });
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                });
             let branch = sync_cmd("git")
                 .args(["branch", "--show-current"])
                 .current_dir(&path_for_git)
                 .output()
                 .ok()
-                .and_then(|o| if o.status.success() {
-                    Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
-                } else { None });
+                .and_then(|o| {
+                    if o.status.success() {
+                        Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
+                });
             (remote, branch.unwrap_or_else(|| "main".to_string()))
-        }).await.unwrap_or((None, "main".to_string()));
+        })
+        .await
+        .unwrap_or((None, "main".to_string()));
         detected
     } else {
         (None, String::new())
@@ -354,12 +386,24 @@ pub async fn add_folder(
     let ai_configs = {
         use crate::models::AiConfigType;
         let mut found = Vec::new();
-        if resolved.join("CLAUDE.md").exists() { found.push(AiConfigType::ClaudeMd); }
-        if resolved.join(".claude").is_dir() { found.push(AiConfigType::ClauseDir); }
-        if resolved.join(".ai").is_dir() { found.push(AiConfigType::AiDir); }
-        if resolved.join(".cursorrules").exists() { found.push(AiConfigType::CursorRules); }
-        if resolved.join(".continue").is_dir() { found.push(AiConfigType::ContinueDev); }
-        if resolved.join(".mcp.json").exists() { found.push(AiConfigType::McpJson); }
+        if resolved.join("CLAUDE.md").exists() {
+            found.push(AiConfigType::ClaudeMd);
+        }
+        if resolved.join(".claude").is_dir() {
+            found.push(AiConfigType::ClauseDir);
+        }
+        if resolved.join(".ai").is_dir() {
+            found.push(AiConfigType::AiDir);
+        }
+        if resolved.join(".cursorrules").exists() {
+            found.push(AiConfigType::CursorRules);
+        }
+        if resolved.join(".continue").is_dir() {
+            found.push(AiConfigType::ContinueDev);
+        }
+        if resolved.join(".mcp.json").exists() {
+            found.push(AiConfigType::McpJson);
+        }
         found
     };
 
@@ -376,7 +420,7 @@ pub async fn add_folder(
         },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
-            tech_debt_count: 0,
+        tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
         default_skill_ids: vec![],
@@ -389,12 +433,20 @@ pub async fn add_folder(
     enrich_audit_status(&mut project);
 
     let p = project.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::insert_project(conn, &p)?;
-        Ok(())
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::insert_project(conn, &p)?;
+            Ok(())
+        })
+        .await
+    {
         Ok(()) => {
-            tracing::info!("Project '{}' added from folder: {}", project.name, project.path);
+            tracing::info!(
+                "Project '{}' added from folder: {}",
+                project.name,
+                project.path
+            );
             Json(ApiResponse::ok(project))
         }
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -416,7 +468,11 @@ pub async fn delete(
     // Fetch project first (needed for hard delete path check)
     let project = if query.hard {
         let pid = id.clone();
-        match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+        match state
+            .db
+            .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+            .await
+        {
             Ok(Some(p)) => Some(p),
             Ok(None) => return Json(ApiResponse::err("Project not found")),
             Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -432,7 +488,9 @@ pub async fn delete(
         // Safety guards
         let path_str = path.to_string_lossy();
         if path_str == "/" || path_str == std::env::var("HOME").unwrap_or_default() {
-            return Json(ApiResponse::err("Refusing to delete root or home directory"));
+            return Json(ApiResponse::err(
+                "Refusing to delete root or home directory",
+            ));
         }
         if proj.path.contains("..") {
             return Json(ApiResponse::err("Path contains '..' — refusing to delete"));
@@ -442,19 +500,31 @@ pub async fn delete(
         let config = state.config.read().await;
         let scan_paths = config.scan.paths.clone();
         drop(config);
-        let existing = state.db.with_conn(crate::db::projects::list_projects).await.unwrap_or_default();
+        let existing = state
+            .db
+            .with_conn(crate::db::projects::list_projects)
+            .await
+            .unwrap_or_default();
         let common_parent = find_common_parent(&existing);
 
         let path_allowed = scan_paths.iter().any(|sp| proj.path.starts_with(sp))
-            || common_parent.as_ref().map(|cp| proj.path.starts_with(cp)).unwrap_or(false);
+            || common_parent
+                .as_ref()
+                .map(|cp| proj.path.starts_with(cp))
+                .unwrap_or(false);
 
         if !path_allowed {
-            return Json(ApiResponse::err("Project path is not under any scan path or common parent — refusing hard delete"));
+            return Json(ApiResponse::err(
+                "Project path is not under any scan path or common parent — refusing hard delete",
+            ));
         }
 
         if path.exists() {
             if let Err(e) = std::fs::remove_dir_all(&path) {
-                return Json(ApiResponse::err(format!("Failed to remove directory: {}", e)));
+                return Json(ApiResponse::err(format!(
+                    "Failed to remove directory: {}",
+                    e
+                )));
             }
         }
     }
@@ -462,13 +532,21 @@ pub async fn delete(
     // Delete discussions linked to this project
     if query.hard {
         let pid = id.clone();
-        if let Err(e) = state.db.with_conn(move |conn| crate::db::projects::delete_project_discussions(conn, &pid)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| crate::db::projects::delete_project_discussions(conn, &pid))
+            .await
+        {
             tracing::warn!("Failed to delete project discussions: {}", e);
         }
     }
 
     // Delete project from DB
-    match state.db.with_conn(move |conn| crate::db::projects::delete_project(conn, &id)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::projects::delete_project(conn, &id))
+        .await
+    {
         Ok(true) => Json(ApiResponse::ok(())),
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -483,22 +561,32 @@ pub async fn set_default_skills(
 ) -> Json<ApiResponse<bool>> {
     let pid = id.clone();
     let sids = skill_ids.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::update_project_default_skills(conn, &pid, &sids)
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_default_skills(conn, &pid, &sids)
+        })
+        .await
+    {
         Ok(true) => {
             // Sync native SKILL.md files to disk (full sync with cleanup)
             let sids2 = skill_ids;
             let pid2 = id;
-            let _ = state.db.with_conn(move |conn| {
-                if let Ok(Some(project)) = crate::db::projects::get_project(conn, &pid2) {
-                    let profile_ids: Vec<String> = project.default_profile_id.iter().cloned().collect();
-                    let _ = crate::core::native_files::sync_project_native_files_full(
-                        &project.path, &sids2, &profile_ids,
-                    );
-                }
-                Ok::<(), anyhow::Error>(())
-            }).await;
+            let _ = state
+                .db
+                .with_conn(move |conn| {
+                    if let Ok(Some(project)) = crate::db::projects::get_project(conn, &pid2) {
+                        let profile_ids: Vec<String> =
+                            project.default_profile_id.iter().cloned().collect();
+                        let _ = crate::core::native_files::sync_project_native_files_full(
+                            &project.path,
+                            &sids2,
+                            &profile_ids,
+                        );
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await;
             Json(ApiResponse::ok(true))
         }
         Ok(false) => Json(ApiResponse::err("Project not found")),
@@ -553,9 +641,11 @@ pub async fn set_linked_repos(
 
     let pid = id.clone();
     let list = payload.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::update_project_linked_repos(conn, &pid, &list)
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::projects::update_project_linked_repos(conn, &pid, &list))
+        .await
+    {
         Ok(true) => {
             // 0.8.4 (#295) — push→pull migration. Auto-write
             // `docs/linked-repos.md` from the canonical list so the
@@ -565,10 +655,13 @@ pub async fn set_linked_repos(
             // exist yet (project pre-bootstrap), `sync_linked_repos_doc`
             // is a no-op — the audit Phase 1 will recall it. Log on
             // failure; never block the CRUD response.
-            let project_for_doc = state.db.with_conn({
-                let pid2 = id.clone();
-                move |conn| crate::db::projects::get_project(conn, &pid2)
-            }).await;
+            let project_for_doc = state
+                .db
+                .with_conn({
+                    let pid2 = id.clone();
+                    move |conn| crate::db::projects::get_project(conn, &pid2)
+                })
+                .await;
             if let Ok(Some(project)) = project_for_doc {
                 let project_path = crate::core::scanner::resolve_host_path(&project.path);
                 if let Err(e) = super::sync_linked_repos_doc(&project_path, &payload) {
@@ -587,18 +680,25 @@ pub async fn set_linked_repos(
                 // re-sync on B's side.
                 let payload_clone = payload.clone();
                 let project_for_bidir = project.clone();
-                let bidir_result = state.db.with_conn(move |conn| {
-                    let all = crate::db::projects::list_projects(conn)?;
-                    let updates = compute_bidirectional_link_updates(
-                        &project_for_bidir, &payload_clone, &all,
-                    );
-                    for upd in &updates {
-                        crate::db::projects::update_project_linked_repos(
-                            conn, &upd.target_project_id, &upd.new_linked_repos,
-                        )?;
-                    }
-                    Ok::<_, anyhow::Error>(updates)
-                }).await;
+                let bidir_result = state
+                    .db
+                    .with_conn(move |conn| {
+                        let all = crate::db::projects::list_projects(conn)?;
+                        let updates = compute_bidirectional_link_updates(
+                            &project_for_bidir,
+                            &payload_clone,
+                            &all,
+                        );
+                        for upd in &updates {
+                            crate::db::projects::update_project_linked_repos(
+                                conn,
+                                &upd.target_project_id,
+                                &upd.new_linked_repos,
+                            )?;
+                        }
+                        Ok::<_, anyhow::Error>(updates)
+                    })
+                    .await;
                 if let Ok(updates) = bidir_result {
                     // Push→pull : also refresh docs/linked-repos.md on
                     // each touched reverse-target so the agent there
@@ -606,14 +706,17 @@ pub async fn set_linked_repos(
                     // next audit / disc.
                     for upd in &updates {
                         let target_id = upd.target_project_id.clone();
-                        let target_proj = state.db.with_conn(move |conn| {
-                            crate::db::projects::get_project(conn, &target_id)
-                        }).await;
+                        let target_proj = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::projects::get_project(conn, &target_id)
+                            })
+                            .await;
                         if let Ok(Some(target)) = target_proj {
                             let target_path = crate::core::scanner::resolve_host_path(&target.path);
-                            if let Err(e) = super::sync_linked_repos_doc(
-                                &target_path, &upd.new_linked_repos,
-                            ) {
+                            if let Err(e) =
+                                super::sync_linked_repos_doc(&target_path, &upd.new_linked_repos)
+                            {
                                 tracing::warn!(
                                     "Failed to sync docs/linked-repos.md on reverse target {} ({}): {}",
                                     target.name, upd.target_project_id, e,
@@ -705,25 +808,26 @@ pub fn compute_bidirectional_link_updates(
 
         // Already linked back ? Skip — avoids duplicates AND avoids
         // any chance of an infinite ping-pong on subsequent saves.
-        let already_linked = target.linked_repos.iter().any(|existing| {
-            source_locations.iter().any(|loc| loc == &existing.location)
-        });
+        let already_linked = target
+            .linked_repos
+            .iter()
+            .any(|existing| source_locations.iter().any(|loc| loc == &existing.location));
         if already_linked {
             continue;
         }
 
         // Build the reverse link.
         let reverse_location = source_locations[0].clone(); // path-first preference
-        // 0.8.6 phase 4 audit feedback (2026-05-22) : populate the
-        // reverse-link description with provenance so the user / agent
-        // on B's side can tell :
-        //   1. This link wasn't typed by hand (`↩ Auto-linked from`)
-        //   2. Where it came from (source project name)
-        //   3. What semantic role B plays in A's universe (source kind
-        //      — "api" / "iac" / "design" / etc.). B's user sees
-        //      "Backend is the api for Frontend" without ambiguity.
-        //   4. The original description if any (kept verbatim under
-        //      "Original:" so context isn't lost).
+                                                            // 0.8.6 phase 4 audit feedback (2026-05-22) : populate the
+                                                            // reverse-link description with provenance so the user / agent
+                                                            // on B's side can tell :
+                                                            //   1. This link wasn't typed by hand (`↩ Auto-linked from`)
+                                                            //   2. Where it came from (source project name)
+                                                            //   3. What semantic role B plays in A's universe (source kind
+                                                            //      — "api" / "iac" / "design" / etc.). B's user sees
+                                                            //      "Backend is the api for Frontend" without ambiguity.
+                                                            //   4. The original description if any (kept verbatim under
+                                                            //      "Original:" so context isn't lost).
         let mut description = format!(
             "↩ Auto-linked from {} (original kind: {})",
             source_project.name, link.kind,
@@ -744,9 +848,10 @@ pub fn compute_bidirectional_link_updates(
         // If we already accumulated an update for this same target
         // (e.g. A's payload referenced B twice via path AND repo_url),
         // we'd double-add. Avoid by merging.
-        if let Some(existing) = updates.iter_mut().find(
-            |u: &&mut BidirectionalLinkUpdate| u.target_project_id == target.id,
-        ) {
+        if let Some(existing) = updates
+            .iter_mut()
+            .find(|u: &&mut BidirectionalLinkUpdate| u.target_project_id == target.id)
+        {
             existing.new_linked_repos = new_list;
         } else {
             updates.push(BidirectionalLinkUpdate {
@@ -807,8 +912,8 @@ pub fn rank_linked_repos_candidates(
 
     candidates.sort_by(|a, b| {
         // bool < bool : false < true → "not same-parent" goes last.
-        let prox_order = (a.proximity_hint != "same-parent")
-            .cmp(&(b.proximity_hint != "same-parent"));
+        let prox_order =
+            (a.proximity_hint != "same-parent").cmp(&(b.proximity_hint != "same-parent"));
         prox_order.then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
     candidates
@@ -830,16 +935,17 @@ pub async fn linked_repos_candidates(
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<LinkedRepoCandidate>>> {
     let pid = id.clone();
-    let res = state.db.with_conn(move |conn| {
-        let all = crate::db::projects::list_projects(conn)?;
-        let current = all.iter().find(|p| p.id == pid).cloned();
-        let current_path = current.map(|p| p.path).unwrap_or_default();
-        let tuples: Vec<(String, String, String)> = all
-            .into_iter()
-            .map(|p| (p.id, p.name, p.path))
-            .collect();
-        Ok::<_, anyhow::Error>(rank_linked_repos_candidates(&tuples, &pid, &current_path))
-    }).await;
+    let res = state
+        .db
+        .with_conn(move |conn| {
+            let all = crate::db::projects::list_projects(conn)?;
+            let current = all.iter().find(|p| p.id == pid).cloned();
+            let current_path = current.map(|p| p.path).unwrap_or_default();
+            let tuples: Vec<(String, String, String)> =
+                all.into_iter().map(|p| (p.id, p.name, p.path)).collect();
+            Ok::<_, anyhow::Error>(rank_linked_repos_candidates(&tuples, &pid, &current_path))
+        })
+        .await;
 
     match res {
         Ok(list) => Json(ApiResponse::ok(list)),
@@ -853,23 +959,35 @@ pub async fn set_default_profile(
     Path(id): Path<String>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<ApiResponse<bool>> {
-    let profile_id = body.get("profile_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let profile_id = body
+        .get("profile_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
     let pid = id.clone();
     let prof = profile_id.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::update_project_default_profile(conn, &pid, prof.as_deref())
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_default_profile(conn, &pid, prof.as_deref())
+        })
+        .await
+    {
         Ok(true) => {
             // Sync native agent files to disk (full sync with cleanup)
-            let _ = state.db.with_conn(move |conn| {
-                if let Ok(Some(project)) = crate::db::projects::get_project(conn, &id) {
-                    let profile_ids: Vec<String> = profile_id.into_iter().collect();
-                    let _ = crate::core::native_files::sync_project_native_files_full(
-                        &project.path, &project.default_skill_ids, &profile_ids,
-                    );
-                }
-                Ok::<(), anyhow::Error>(())
-            }).await;
+            let _ = state
+                .db
+                .with_conn(move |conn| {
+                    if let Ok(Some(project)) = crate::db::projects::get_project(conn, &id) {
+                        let profile_ids: Vec<String> = profile_id.into_iter().collect();
+                        let _ = crate::core::native_files::sync_project_native_files_full(
+                            &project.path,
+                            &project.default_skill_ids,
+                            &profile_ids,
+                        );
+                    }
+                    Ok::<(), anyhow::Error>(())
+                })
+                .await;
             Json(ApiResponse::ok(true))
         }
         Ok(false) => Json(ApiResponse::err("Project not found")),
@@ -890,7 +1008,9 @@ pub async fn remap_path(
 
     // Reject traversal first — same reasoning as POST /api/projects.
     if scanner::contains_parent_dir(&new_path) {
-        return Json(ApiResponse::err("Path may not contain '..' components".to_string()));
+        return Json(ApiResponse::err(
+            "Path may not contain '..' components".to_string(),
+        ));
     }
 
     // Validate path exists
@@ -900,7 +1020,11 @@ pub async fn remap_path(
 
     let pid = id.clone();
     let np = new_path.clone();
-    match state.db.with_conn(move |conn| crate::db::projects::update_project_path(conn, &pid, &np)).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::projects::update_project_path(conn, &pid, &np))
+        .await
+    {
         Ok(true) => {
             // Re-sync the project's plugins (MCP configs) + native skill/profile
             // files to the new directory. Pre-fix, a remap only moved the DB
@@ -989,7 +1113,7 @@ mod linked_repos_candidates_tests {
 #[cfg(test)]
 mod bidirectional_link_tests {
     use super::*;
-    use crate::models::{AiConfigStatus, AiAuditStatus};
+    use crate::models::{AiAuditStatus, AiConfigStatus};
 
     fn make_project(id: &str, name: &str, path: &str, repo_url: Option<&str>) -> Project {
         Project {
@@ -998,7 +1122,10 @@ mod bidirectional_link_tests {
             path: path.into(),
             repo_url: repo_url.map(String::from),
             token_override: None,
-            ai_config: AiConfigStatus { detected: false, configs: vec![] },
+            ai_config: AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
             audit_status: AiAuditStatus::NoTemplate,
             ai_todo_count: 0,
             tech_debt_count: 0,
@@ -1028,7 +1155,11 @@ mod bidirectional_link_tests {
         // Linking to an external repo (Github URL, off-disk path) :
         // the helper finds no Kronn project to update → empty.
         let a = make_project("a", "Frontend", "/repos/frontend", None);
-        let payload = vec![make_link("Vendor API", "https://github.com/vendor/api", "api")];
+        let payload = vec![make_link(
+            "Vendor API",
+            "https://github.com/vendor/api",
+            "api",
+        )];
         let updates = compute_bidirectional_link_updates(&a, &payload, std::slice::from_ref(&a));
         assert_eq!(updates, vec![]);
     }
@@ -1052,8 +1183,10 @@ mod bidirectional_link_tests {
         // can tell it's auto-created + what role they play for A.
         assert!(reverse.description.contains("Auto-linked from"));
         assert!(reverse.description.contains("Frontend"));
-        assert!(reverse.description.contains("api"),
-            "reverse description must surface the original kind so B's user knows their role for A");
+        assert!(
+            reverse.description.contains("api"),
+            "reverse description must surface the original kind so B's user knows their role for A"
+        );
     }
 
     #[test]
@@ -1069,11 +1202,15 @@ mod bidirectional_link_tests {
         let payload = vec![link];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
         let reverse = &updates[0].new_linked_repos[0];
-        assert!(reverse.description.contains("GraphQL schema lives here"),
+        assert!(
+            reverse.description.contains("GraphQL schema lives here"),
             "original description must be preserved verbatim on the reverse, got: {}",
-            reverse.description);
-        assert!(reverse.description.contains("original note"),
-            "reverse description must call out the preserved note explicitly");
+            reverse.description
+        );
+        assert!(
+            reverse.description.contains("original note"),
+            "reverse description must call out the preserved note explicitly"
+        );
     }
 
     #[test]
@@ -1085,8 +1222,10 @@ mod bidirectional_link_tests {
         let payload = vec![make_link("Backend", "/repos/backend", "api")];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
         let reverse = &updates[0].new_linked_repos[0];
-        assert!(!reverse.description.contains("original note"),
-            "should not show empty 'original note' when source had no description");
+        assert!(
+            !reverse.description.contains("original note"),
+            "should not show empty 'original note' when source had no description"
+        );
     }
 
     #[test]
@@ -1095,9 +1234,18 @@ mod bidirectional_link_tests {
         // Kronn with that same repo_url. The helper matches and
         // creates the reverse.
         let a = make_project("a", "Frontend", "/repos/frontend", None);
-        let mut b = make_project("b", "Backend", "/repos/backend", Some("git@github.com:org/backend.git"));
-        b.path = "/different/path/backend".into();  // path doesn't match the link
-        let payload = vec![make_link("Backend", "git@github.com:org/backend.git", "api")];
+        let mut b = make_project(
+            "b",
+            "Backend",
+            "/repos/backend",
+            Some("git@github.com:org/backend.git"),
+        );
+        b.path = "/different/path/backend".into(); // path doesn't match the link
+        let payload = vec![make_link(
+            "Backend",
+            "git@github.com:org/backend.git",
+            "api",
+        )];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].target_project_id, "b");
@@ -1114,18 +1262,29 @@ mod bidirectional_link_tests {
         b.linked_repos = vec![make_link("Frontend", "/repos/frontend", "other")];
         let payload = vec![make_link("Backend", "/repos/backend", "api")];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
-        assert!(updates.is_empty(),
-            "MUST not duplicate when reverse already present — got: {:?}", updates);
+        assert!(
+            updates.is_empty(),
+            "MUST not duplicate when reverse already present — got: {:?}",
+            updates
+        );
     }
 
     #[test]
     fn idempotent_when_reverse_link_uses_repo_url_form() {
         // Variant of the above : B links back via A's repo_url
         // instead of path. Still no duplicate.
-        let a = make_project("a", "Frontend", "/repos/frontend",
-            Some("git@github.com:org/front.git"));
+        let a = make_project(
+            "a",
+            "Frontend",
+            "/repos/frontend",
+            Some("git@github.com:org/front.git"),
+        );
         let mut b = make_project("b", "Backend", "/repos/backend", None);
-        b.linked_repos = vec![make_link("Frontend", "git@github.com:org/front.git", "other")];
+        b.linked_repos = vec![make_link(
+            "Frontend",
+            "git@github.com:org/front.git",
+            "other",
+        )];
         let payload = vec![make_link("Backend", "/repos/backend", "api")];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
         assert!(updates.is_empty());
@@ -1153,11 +1312,13 @@ mod bidirectional_link_tests {
             make_link("Backend", "/repos/backend", "api"),
             make_link("Designs", "/repos/designs", "design"),
         ];
-        let updates = compute_bidirectional_link_updates(
-            &a, &payload, &[a.clone(), b.clone(), c.clone()],
-        );
+        let updates =
+            compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone(), c.clone()]);
         assert_eq!(updates.len(), 2);
-        let target_ids: Vec<&str> = updates.iter().map(|u| u.target_project_id.as_str()).collect();
+        let target_ids: Vec<&str> = updates
+            .iter()
+            .map(|u| u.target_project_id.as_str())
+            .collect();
         assert!(target_ids.contains(&"b"));
         assert!(target_ids.contains(&"c"));
     }
@@ -1166,14 +1327,20 @@ mod bidirectional_link_tests {
     fn source_path_preferred_over_repo_url_for_reverse_location() {
         // When A has both a path AND repo_url, the reverse link uses
         // the path (works for local + remote ; agents can `cd` to it).
-        let a = make_project("a", "Frontend", "/repos/frontend",
-            Some("git@github.com:org/front.git"));
+        let a = make_project(
+            "a",
+            "Frontend",
+            "/repos/frontend",
+            Some("git@github.com:org/front.git"),
+        );
         let b = make_project("b", "Backend", "/repos/backend", None);
         let payload = vec![make_link("Backend", "/repos/backend", "api")];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
         let reverse = &updates[0].new_linked_repos[0];
-        assert_eq!(reverse.location, "/repos/frontend",
-            "path-first preference broken — reverse link should use path when available");
+        assert_eq!(
+            reverse.location, "/repos/frontend",
+            "path-first preference broken — reverse link should use path when available"
+        );
     }
 
     #[test]
@@ -1187,8 +1354,10 @@ mod bidirectional_link_tests {
         let payload = vec![make_link("Backend", "/repos/backend", "api")];
         let updates = compute_bidirectional_link_updates(&a, &payload, &[a.clone(), b.clone()]);
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].new_linked_repos[0].location,
-            "git@github.com:org/cloud.git");
+        assert_eq!(
+            updates[0].new_linked_repos[0].location,
+            "git@github.com:org/cloud.git"
+        );
     }
 
     #[test]
@@ -1217,9 +1386,13 @@ mod bidirectional_link_tests {
         assert_eq!(updates.len(), 1);
         let new_list = &updates[0].new_linked_repos;
         assert_eq!(new_list.len(), 2);
-        assert!(new_list.iter().any(|l| l.location == "/repos/designs"),
-            "existing C link must be preserved");
-        assert!(new_list.iter().any(|l| l.location == "/repos/frontend"),
-            "new A link must be appended");
+        assert!(
+            new_list.iter().any(|l| l.location == "/repos/designs"),
+            "existing C link must be preserved"
+        );
+        assert!(
+            new_list.iter().any(|l| l.location == "/repos/frontend"),
+            "new A link must be appended"
+        );
     }
 }

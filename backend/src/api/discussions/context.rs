@@ -29,15 +29,31 @@ pub async fn upload_context_file(
                 Err(e) => return Json(ApiResponse::err(format!("Failed to read upload: {e}"))),
             }
         }
-        Ok(None) => return Json(ApiResponse::<crate::models::UploadContextFileResponse>::err("No file provided".to_string())),
-        Err(e) => return Json(ApiResponse::<crate::models::UploadContextFileResponse>::err(format!("Multipart error: {e}"))),
+        Ok(None) => {
+            return Json(
+                ApiResponse::<crate::models::UploadContextFileResponse>::err(
+                    "No file provided".to_string(),
+                ),
+            )
+        }
+        Err(e) => {
+            return Json(
+                ApiResponse::<crate::models::UploadContextFileResponse>::err(format!(
+                    "Multipart error: {e}"
+                )),
+            )
+        }
     };
 
     // Check file count limit
     let did = discussion_id.clone();
-    let count = state.db.with_conn(move |conn| {
-        crate::db::discussions::count_context_files(conn, &did).map_err(|e| anyhow::anyhow!(e))
-    }).await.unwrap_or(0);
+    let count = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::count_context_files(conn, &did).map_err(|e| anyhow::anyhow!(e))
+        })
+        .await
+        .unwrap_or(0);
 
     if count >= crate::core::context_files::MAX_FILES_PER_DISCUSSION {
         return Json(ApiResponse::err(format!(
@@ -59,29 +75,37 @@ pub async fn upload_context_file(
     // bytes vanish and the bubble thumbnail 404s. Fall back to the persistent
     // data dir (KRONN_DATA_DIR volume) instead, only dropping to temp if even
     // that can't be resolved.
-    let persistent_fallback = || crate::core::config::config_dir().unwrap_or_else(|_| std::env::temp_dir());
+    let persistent_fallback =
+        || crate::core::config::config_dir().unwrap_or_else(|_| std::env::temp_dir());
     let did_for_path = discussion_id.clone();
     let fallback = persistent_fallback();
-    let work_dir: std::path::PathBuf = state.db.with_conn(move |conn| {
-        let project_id: Option<String> = conn.query_row(
-            "SELECT project_id FROM discussions WHERE id = ?1",
-            rusqlite::params![did_for_path],
-            |row| row.get(0),
-        ).unwrap_or(None);
-        let path = if let Some(pid) = project_id {
-            conn.query_row(
-                "SELECT path FROM projects WHERE id = ?1",
-                rusqlite::params![pid],
-                |row| row.get::<_, String>(0),
-            ).ok()
-        } else {
-            None
-        };
-        Ok(match path {
-            Some(p) => std::path::PathBuf::from(p),
-            None => fallback,
+    let work_dir: std::path::PathBuf = state
+        .db
+        .with_conn(move |conn| {
+            let project_id: Option<String> = conn
+                .query_row(
+                    "SELECT project_id FROM discussions WHERE id = ?1",
+                    rusqlite::params![did_for_path],
+                    |row| row.get(0),
+                )
+                .unwrap_or(None);
+            let path = if let Some(pid) = project_id {
+                conn.query_row(
+                    "SELECT path FROM projects WHERE id = ?1",
+                    rusqlite::params![pid],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            } else {
+                None
+            };
+            Ok(match path {
+                Some(p) => std::path::PathBuf::from(p),
+                None => fallback,
+            })
         })
-    }).await.unwrap_or_else(|_: anyhow::Error| persistent_fallback());
+        .await
+        .unwrap_or_else(|_: anyhow::Error| persistent_fallback());
 
     let id = uuid::Uuid::new_v4().to_string();
     let mime = crate::core::context_files::mime_from_extension(&filename).to_string();
@@ -91,20 +115,37 @@ pub async fn upload_context_file(
     // Handle text vs image vs on-disk file
     let (extracted_text, disk_path) = match content {
         crate::core::context_files::ExtractedContent::Text(text) => (text, None),
-        crate::core::context_files::ExtractedContent::DiskFile { data: file_data, preview } => {
+        crate::core::context_files::ExtractedContent::DiskFile {
+            data: file_data,
+            preview,
+        } => {
             // Raw file saved to disk (worktree); only the preview lands in
             // context. The agent reads the full file by path. Falls back to the
             // persistent config dir if the project worktree write fails.
-            match crate::core::context_files::save_file_to_dir(&work_dir, &id, &filename, &file_data) {
+            match crate::core::context_files::save_file_to_dir(
+                &work_dir, &id, &filename, &file_data,
+            ) {
                 Ok(path) => (preview, Some(path)),
-                Err(e) => match crate::core::context_files::save_file_to_disk(&id, &filename, &file_data) {
-                    Ok(path) => (preview, Some(path)),
-                    Err(e2) => return Json(ApiResponse::err(format!("Failed to save file: {e} / fallback: {e2}"))),
-                },
+                Err(e) => {
+                    match crate::core::context_files::save_file_to_disk(&id, &filename, &file_data)
+                    {
+                        Ok(path) => (preview, Some(path)),
+                        Err(e2) => {
+                            return Json(ApiResponse::err(format!(
+                                "Failed to save file: {e} / fallback: {e2}"
+                            )))
+                        }
+                    }
+                }
             }
         }
-        crate::core::context_files::ExtractedContent::Image { data: img_data, ext } => {
-            match crate::core::context_files::save_image_to_dir(&work_dir, &id, &filename, &ext, &img_data) {
+        crate::core::context_files::ExtractedContent::Image {
+            data: img_data,
+            ext,
+        } => {
+            match crate::core::context_files::save_image_to_dir(
+                &work_dir, &id, &filename, &ext, &img_data,
+            ) {
                 Ok(path) => {
                     let label = format!("[Image: {}]", filename);
                     (label, Some(path))
@@ -116,7 +157,11 @@ pub async fn upload_context_file(
                             let label = format!("[Image: {}]", filename);
                             (label, Some(path))
                         }
-                        Err(e2) => return Json(ApiResponse::err(format!("Failed to save image: {e} / fallback: {e2}"))),
+                        Err(e2) => {
+                            return Json(ApiResponse::err(format!(
+                                "Failed to save image: {e} / fallback: {e2}"
+                            )))
+                        }
                     }
                 }
             }
@@ -131,11 +176,22 @@ pub async fn upload_context_file(
     let text = extracted_text.clone();
     let dp = disk_path.clone();
 
-    let insert_result = state.db.with_conn(move |conn| {
-        crate::db::discussions::insert_context_file(
-            conn, &file_id, &did, &fname, &mime_clone, original_size, &text, dp.as_deref(),
-        ).map_err(|e| anyhow::anyhow!(e))
-    }).await;
+    let insert_result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_context_file(
+                conn,
+                &file_id,
+                &did,
+                &fname,
+                &mime_clone,
+                original_size,
+                &text,
+                dp.as_deref(),
+            )
+            .map_err(|e| anyhow::anyhow!(e))
+        })
+        .await;
 
     match insert_result {
         Ok(()) => {
@@ -166,9 +222,14 @@ pub async fn list_context_files(
     State(state): State<AppState>,
     Path(discussion_id): Path<String>,
 ) -> Json<ApiResponse<Vec<crate::models::ContextFile>>> {
-    match state.db.with_conn(move |conn| {
-        crate::db::discussions::list_context_files(conn, &discussion_id).map_err(|e| anyhow::anyhow!(e))
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::list_context_files(conn, &discussion_id)
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+        .await
+    {
         Ok(files) => Json(ApiResponse::ok(files)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
@@ -195,10 +256,18 @@ pub async fn link_pending_context_files(
     Json(req): Json<LinkPendingRequest>,
 ) -> Json<ApiResponse<usize>> {
     let did = discussion_id.clone();
-    match state.db.with_conn(move |conn| {
-        crate::db::discussions::link_pending_context_files_to_message(conn, &did, &req.message_id)
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::link_pending_context_files_to_message(
+                conn,
+                &did,
+                &req.message_id,
+            )
             .map_err(|e| anyhow::anyhow!(e))
-    }).await {
+        })
+        .await
+    {
         Ok(n) => Json(ApiResponse::ok(n)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {e}"))),
     }
@@ -253,17 +322,24 @@ pub async fn get_context_file_content(
     };
     // Strip quotes AND control chars (CR/LF) so a crafted filename can't inject
     // headers into the Content-Disposition value.
-    let safe_name: String = filename.chars().filter(|c| *c != '"' && !c.is_control()).collect();
+    let safe_name: String = filename
+        .chars()
+        .filter(|c| *c != '"' && !c.is_control())
+        .collect();
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, content_type),
             // Inline so <img>/blob can render it; filename is best-effort.
-            (header::CONTENT_DISPOSITION, format!("inline; filename=\"{}\"", safe_name)),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("inline; filename=\"{}\"", safe_name),
+            ),
             (header::CACHE_CONTROL, "private, max-age=3600".to_string()),
         ],
         bytes,
-    ).into_response()
+    )
+        .into_response()
 }
 
 /// DELETE /api/discussions/:id/context-files/:file_id
@@ -274,17 +350,28 @@ pub async fn delete_context_file(
     // Get disk_path before deleting (to clean up image files)
     let fid = file_id.clone();
     let did = discussion_id.clone();
-    let disk_path: Option<String> = state.db.with_conn(move |conn| {
-        conn.query_row(
-            "SELECT disk_path FROM context_files WHERE id = ?1 AND discussion_id = ?2",
-            rusqlite::params![fid, did],
-            |row| row.get(0),
-        ).map_err(|e| anyhow::anyhow!(e))
-    }).await.ok().flatten();
+    let disk_path: Option<String> = state
+        .db
+        .with_conn(move |conn| {
+            conn.query_row(
+                "SELECT disk_path FROM context_files WHERE id = ?1 AND discussion_id = ?2",
+                rusqlite::params![fid, did],
+                |row| row.get(0),
+            )
+            .map_err(|e| anyhow::anyhow!(e))
+        })
+        .await
+        .ok()
+        .flatten();
 
-    match state.db.with_conn(move |conn| {
-        crate::db::discussions::delete_context_file(conn, &discussion_id, &file_id).map_err(|e| anyhow::anyhow!(e))
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::delete_context_file(conn, &discussion_id, &file_id)
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+        .await
+    {
         Ok(true) => {
             if let Some(path) = disk_path {
                 crate::core::context_files::delete_image_from_disk(&path);
@@ -295,4 +382,3 @@ pub async fn delete_context_file(
         Err(e) => Json(ApiResponse::<()>::err(format!("DB error: {e}"))),
     }
 }
-

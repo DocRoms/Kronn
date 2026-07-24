@@ -23,7 +23,9 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::models::{CreateQuickApiRequest, CreateQuickPromptRequest, CreateWorkflowRequest, CustomApiPayload};
+use crate::models::{
+    CreateQuickApiRequest, CreateQuickPromptRequest, CreateWorkflowRequest, CustomApiPayload,
+};
 
 /// One Quick Prompt declared inside a bundle. The `bundle_id` is the
 /// placeholder used by `@bundle:<id>` references in the workflow

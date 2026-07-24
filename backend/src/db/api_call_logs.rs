@@ -137,9 +137,11 @@ pub use crate::core::redact::redact_secrets;
 /// audit-trail failure cannot abort a successful API call.
 pub fn record(conn: &Connection, log: NewApiCallLog<'_>) -> rusqlite::Result<String> {
     let id = Uuid::new_v4().to_string();
-    let request_excerpt = log.request_excerpt
+    let request_excerpt = log
+        .request_excerpt
         .and_then(|s| truncate_excerpt(Some(&redact_secrets(s))));
-    let response_excerpt = log.response_excerpt
+    let response_excerpt = log
+        .response_excerpt
         .and_then(|s| truncate_excerpt(Some(&redact_secrets(s))));
     conn.execute(
         "INSERT INTO api_call_logs (
@@ -224,7 +226,9 @@ pub fn list(conn: &Connection, filter: ListFilter<'_>) -> rusqlite::Result<Vec<A
                 endpoint_path: row.get(8)?,
                 method: row.get(9)?,
                 http_status: row.get(10)?,
-                status: ApiCallStatus::from_db_str(&row.get::<_, String>(11)?).as_db_str().to_string(),
+                status: ApiCallStatus::from_db_str(&row.get::<_, String>(11)?)
+                    .as_db_str()
+                    .to_string(),
                 duration_ms: row.get(12)?,
                 request_excerpt: row.get(13)?,
                 response_excerpt: row.get(14)?,
@@ -325,7 +329,14 @@ mod tests {
         let conn = mkconn();
         record(&conn, sample("api-alpha")).unwrap();
         record(&conn, sample("api-bravo")).unwrap();
-        let rows = list(&conn, ListFilter { plugin_slug: Some("api-alpha"), ..Default::default() }).unwrap();
+        let rows = list(
+            &conn,
+            ListFilter {
+                plugin_slug: Some("api-alpha"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].plugin_slug, "api-alpha");
     }
@@ -338,7 +349,14 @@ mod tests {
         bad.status = ApiCallStatus::Error;
         bad.error_message = Some("boom");
         record(&conn, bad).unwrap();
-        let rows = list(&conn, ListFilter { status: Some(ApiCallStatus::Error), ..Default::default() }).unwrap();
+        let rows = list(
+            &conn,
+            ListFilter {
+                status: Some(ApiCallStatus::Error),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].error_message.as_deref(), Some("boom"));
     }
@@ -349,7 +367,14 @@ mod tests {
         for _ in 0..5 {
             record(&conn, sample("api-x")).unwrap();
         }
-        let rows = list(&conn, ListFilter { limit: Some(2), ..Default::default() }).unwrap();
+        let rows = list(
+            &conn,
+            ListFilter {
+                limit: Some(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(rows.len(), 2);
     }
 
@@ -405,7 +430,9 @@ mod tests {
             http_status: Some(200),
             status: ApiCallStatus::Ok,
             duration_ms: 50,
-            request_excerpt: Some("Authorization: Bearer sk-real-1234567890abcdefghijklmnopqrstuvw"),
+            request_excerpt: Some(
+                "Authorization: Bearer sk-real-1234567890abcdefghijklmnopqrstuvw",
+            ),
             response_excerpt: Some("ok"),
             error_message: None,
         };
@@ -424,7 +451,8 @@ mod tests {
         conn.execute(
             "UPDATE api_call_logs SET called_at = datetime('now', '-31 days')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let deleted = purge_older_than(&conn, 30).unwrap();
         assert_eq!(deleted, 1);
         let rows = list(&conn, ListFilter::default()).unwrap();

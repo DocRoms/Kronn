@@ -21,7 +21,12 @@ pub fn should_notify(status: &RunStatus) -> bool {
 
 /// Slack/Teams/generic-webhook compatible JSON body (`{"text": …}`). Takes the
 /// primitive fields (not the whole run) so it is trivially unit-testable.
-pub fn build_payload(workflow_name: &str, status: &RunStatus, run_id: &str, started_at_rfc3339: &str) -> String {
+pub fn build_payload(
+    workflow_name: &str,
+    status: &RunStatus,
+    run_id: &str,
+    started_at_rfc3339: &str,
+) -> String {
     let label = match status {
         RunStatus::Failed => "FAILED",
         RunStatus::Interrupted => "INTERRUPTED (backend restarted mid-run)",
@@ -43,9 +48,11 @@ fn resolve_url(cfg_url: Option<String>) -> Option<String> {
         let u = u.trim().to_string();
         (!u.is_empty()).then_some(u)
     };
-    cfg_url
-        .and_then(non_empty)
-        .or_else(|| std::env::var("KRONN_FAILURE_NOTIFY_URL").ok().and_then(non_empty))
+    cfg_url.and_then(non_empty).or_else(|| {
+        std::env::var("KRONN_FAILURE_NOTIFY_URL")
+            .ok()
+            .and_then(non_empty)
+    })
 }
 
 /// Fire the failure webhook if the run failed and a URL is configured.
@@ -53,7 +60,14 @@ pub async fn notify_if_failed(state: &AppState, workflow: &Workflow, run: &Workf
     if !should_notify(&run.status) {
         return;
     }
-    notify_terminal(state, &workflow.name, &run.status, &run.id, &run.started_at.to_rfc3339()).await;
+    notify_terminal(
+        state,
+        &workflow.name,
+        &run.status,
+        &run.id,
+        &run.started_at.to_rfc3339(),
+    )
+    .await;
 }
 
 /// Webhook the boot-reconciled Interrupted runs. The engine-spawn tail can
@@ -61,7 +75,14 @@ pub async fn notify_if_failed(state: &AppState, workflow: &Workflow, run: &Workf
 /// the only origin for an `Interrupted` alert ("cron died at 6am" case).
 pub async fn notify_boot_interrupted(state: &AppState) {
     for r in state.db.take_boot_interrupted() {
-        notify_terminal(state, &r.workflow_name, &RunStatus::Interrupted, &r.run_id, &r.started_at).await;
+        notify_terminal(
+            state,
+            &r.workflow_name,
+            &RunStatus::Interrupted,
+            &r.run_id,
+            &r.started_at,
+        )
+        .await;
     }
 }
 
@@ -97,7 +118,11 @@ pub async fn notify_terminal(
         .await;
     match send {
         Ok(r) if r.status().is_success() => {
-            tracing::info!("Failure notification sent for run {} ({:?})", run_id, status)
+            tracing::info!(
+                "Failure notification sent for run {} ({:?})",
+                run_id,
+                status
+            )
         }
         Ok(r) => tracing::warn!(
             "Failure notification returned {} for run {}",
@@ -126,7 +151,12 @@ mod tests {
 
     #[test]
     fn payload_is_slack_shaped_and_names_the_workflow_and_status() {
-        let body = build_payload("PR Review cron", &RunStatus::Failed, "run-1", "2026-07-07T06:00:00Z");
+        let body = build_payload(
+            "PR Review cron",
+            &RunStatus::Failed,
+            "run-1",
+            "2026-07-07T06:00:00Z",
+        );
         let v: serde_json::Value = serde_json::from_str(&body).unwrap();
         let text = v["text"].as_str().unwrap();
         assert!(text.contains("PR Review cron"));
@@ -139,17 +169,26 @@ mod tests {
     fn resolve_url_prefers_config_trims_and_rejects_empty() {
         // Env-free assertions first (this test is the only env manipulator).
         std::env::remove_var("KRONN_FAILURE_NOTIFY_URL");
-        assert_eq!(resolve_url(Some("  https://hook  ".into())).as_deref(), Some("https://hook"));
+        assert_eq!(
+            resolve_url(Some("  https://hook  ".into())).as_deref(),
+            Some("https://hook")
+        );
         assert_eq!(resolve_url(Some("   ".into())), None);
         // No config, no env → None.
         assert_eq!(resolve_url(None), None);
 
         // An empty/whitespace config value must NOT mask a valid env URL.
         std::env::set_var("KRONN_FAILURE_NOTIFY_URL", "  https://env-hook  ");
-        assert_eq!(resolve_url(Some("   ".into())).as_deref(), Some("https://env-hook"));
+        assert_eq!(
+            resolve_url(Some("   ".into())).as_deref(),
+            Some("https://env-hook")
+        );
         assert_eq!(resolve_url(None).as_deref(), Some("https://env-hook"));
         // A real config value still wins over env.
-        assert_eq!(resolve_url(Some("https://cfg-hook".into())).as_deref(), Some("https://cfg-hook"));
+        assert_eq!(
+            resolve_url(Some("https://cfg-hook".into())).as_deref(),
+            Some("https://cfg-hook")
+        );
         std::env::remove_var("KRONN_FAILURE_NOTIFY_URL");
     }
 }

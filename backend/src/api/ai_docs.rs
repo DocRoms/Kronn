@@ -66,7 +66,11 @@ pub async fn list_ai_files(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<AiFileNode>>> {
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -77,7 +81,9 @@ pub async fn list_ai_files(
     let result = tokio::task::spawn_blocking(move || {
         let project_path = scanner::resolve_host_path(&project_path_str);
         assemble_doc_nodes(&project_path)
-    }).await.unwrap_or_default();
+    })
+    .await
+    .unwrap_or_default();
 
     Json(ApiResponse::ok(result))
 }
@@ -98,18 +104,32 @@ fn assemble_doc_nodes(project_path: &std::path::Path) -> Vec<AiFileNode> {
     if docs_dir.is_dir() {
         // Use the actual folder name (`docs`, `doc` or `ai`) so the display
         // matches the on-disk reality.
-        let prefix = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs").to_string();
+        let prefix = docs_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("docs")
+            .to_string();
         let children = build_ai_file_tree(&docs_dir, &prefix);
         // Only surface the folder node when it actually has docs — an empty
         // `docs/` node would suppress the "run the audit" empty state that
         // un-audited projects rely on.
         if !children.is_empty() {
-            nodes.push(AiFileNode { path: prefix.clone(), name: prefix, is_dir: true, children });
+            nodes.push(AiFileNode {
+                path: prefix.clone(),
+                name: prefix,
+                is_dir: true,
+                children,
+            });
         }
     }
 
     if let Some(readme) = find_root_readme(project_path) {
-        nodes.push(AiFileNode { path: readme.clone(), name: readme, is_dir: false, children: vec![] });
+        nodes.push(AiFileNode {
+            path: readme.clone(),
+            name: readme,
+            is_dir: false,
+            children: vec![],
+        });
     }
 
     nodes
@@ -142,9 +162,8 @@ fn is_readable_doc_path(path: &str) -> bool {
     if path.contains("..") {
         return false;
     }
-    let in_docs_root = path.starts_with("docs/")
-        || path.starts_with("doc/")
-        || path.starts_with("ai/");
+    let in_docs_root =
+        path.starts_with("docs/") || path.starts_with("doc/") || path.starts_with("ai/");
     let is_root_readme = !path.contains('/') && {
         let l = path.to_ascii_lowercase();
         l.starts_with("readme") && (l.ends_with(".md") || l.ends_with(".markdown"))
@@ -175,14 +194,20 @@ fn build_ai_file_tree(dir: &std::path::Path, rel_prefix: &str) -> Vec<AiFileNode
             // Same kind → case-insensitive name compare so `architecture/`
             // and `Architecture/` cohabit predictably regardless of FS
             // case sensitivity.
-            _ => a.file_name().to_ascii_lowercase().cmp(&b.file_name().to_ascii_lowercase()),
+            _ => a
+                .file_name()
+                .to_ascii_lowercase()
+                .cmp(&b.file_name().to_ascii_lowercase()),
         }
     });
 
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         let path = format!("{}/{}", rel_prefix, name);
-        let file_type = match entry.file_type().or_else(|_| entry.metadata().map(|m| m.file_type())) {
+        let file_type = match entry
+            .file_type()
+            .or_else(|_| entry.metadata().map(|m| m.file_type()))
+        {
             Ok(ft) => ft,
             Err(_) => continue, // skip entries with unreadable metadata
         };
@@ -190,10 +215,20 @@ fn build_ai_file_tree(dir: &std::path::Path, rel_prefix: &str) -> Vec<AiFileNode
         if file_type.is_dir() {
             let children = build_ai_file_tree(&entry.path(), &path);
             if !children.is_empty() {
-                nodes.push(AiFileNode { path, name, is_dir: true, children });
+                nodes.push(AiFileNode {
+                    path,
+                    name,
+                    is_dir: true,
+                    children,
+                });
             }
         } else if name.ends_with(".md") {
-            nodes.push(AiFileNode { path, name, is_dir: false, children: vec![] });
+            nodes.push(AiFileNode {
+                path,
+                name,
+                is_dir: false,
+                children: vec![],
+            });
         }
     }
     nodes
@@ -221,7 +256,11 @@ pub async fn search_ai_files(
         return Json(ApiResponse::ok(vec![]));
     }
 
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -235,18 +274,28 @@ pub async fn search_ai_files(
         if !docs_dir.is_dir() {
             return vec![];
         }
-        let prefix = docs_dir.file_name().and_then(|n| n.to_str()).unwrap_or("docs");
+        let prefix = docs_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("docs");
         let mut results = Vec::new();
         search_ai_dir_recursive(&docs_dir, prefix, &q.to_lowercase(), &mut results);
         // Sort by match_count descending
         results.sort_by_key(|r| std::cmp::Reverse(r.match_count));
         results
-    }).await.unwrap_or_default();
+    })
+    .await
+    .unwrap_or_default();
 
     Json(ApiResponse::ok(result))
 }
 
-fn search_ai_dir_recursive(dir: &std::path::Path, rel_prefix: &str, query: &str, results: &mut Vec<AiSearchResult>) {
+fn search_ai_dir_recursive(
+    dir: &std::path::Path,
+    rel_prefix: &str,
+    query: &str,
+    results: &mut Vec<AiSearchResult>,
+) {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return,
@@ -270,7 +319,10 @@ fn search_ai_dir_recursive(dir: &std::path::Path, rel_prefix: &str, query: &str,
                     start += idx + query.len();
                 }
                 if count > 0 {
-                    results.push(AiSearchResult { path, match_count: count });
+                    results.push(AiSearchResult {
+                        path,
+                        match_count: count,
+                    });
                 }
             }
         }
@@ -288,10 +340,16 @@ pub async fn read_ai_file(
     // Path traversal protection — confined to a recognised docs root or the
     // project's root README, and never containing `..`.
     if !is_readable_doc_path(&query.path) {
-        return Json(ApiResponse::err("Invalid path: must be under docs/, doc/, ai/ or the root README, and not contain .."));
+        return Json(ApiResponse::err(
+            "Invalid path: must be under docs/, doc/, ai/ or the root README, and not contain ..",
+        ));
     }
 
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -304,10 +362,15 @@ pub async fn read_ai_file(
         let project_path = scanner::resolve_host_path(&project_path_str);
         let full_path = project_path.join(&file_path);
         match std::fs::read_to_string(&full_path) {
-            Ok(content) => Ok(AiFileContent { path: file_path, content }),
+            Ok(content) => Ok(AiFileContent {
+                path: file_path,
+                content,
+            }),
             Err(e) => Err(format!("Cannot read file: {}", e)),
         }
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(content) => Json(ApiResponse::ok(content)),
@@ -327,10 +390,18 @@ pub async fn read_doc_asset(
     Query(query): Query<AiFileQuery>,
 ) -> Response {
     if !is_servable_asset_path(&query.path) {
-        return (StatusCode::BAD_REQUEST, "Invalid asset path: relative image paths only").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "Invalid asset path: relative image paths only",
+        )
+            .into_response();
     }
 
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return (StatusCode::NOT_FOUND, "Project not found").into_response(),
         Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "DB error").into_response(),
@@ -377,7 +448,9 @@ mod tests {
     // `briefing.md`, `coding-rules.md`, `operations/`. Convention
     // file-explorer attendue : dossiers groupés en haut.
     fn touch(p: &std::path::Path) {
-        if let Some(parent) = p.parent() { std::fs::create_dir_all(parent).unwrap(); }
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
         std::fs::write(p, "x").unwrap();
     }
 
@@ -398,7 +471,13 @@ mod tests {
         // Expect: dirs A-Z first, then files A-Z (case-insensitive).
         assert_eq!(
             names,
-            vec!["architecture", "operations", "AGENTS.md", "briefing.md", "coding-rules.md"],
+            vec![
+                "architecture",
+                "operations",
+                "AGENTS.md",
+                "briefing.md",
+                "coding-rules.md"
+            ],
             "dirs must come before files; within each group sort case-insensitive A-Z"
         );
     }
@@ -487,7 +566,10 @@ mod tests {
     fn find_root_readme_case_insensitive_and_extensions() {
         let tmp = tempfile::TempDir::new().unwrap();
         touch(&tmp.path().join("ReAdMe.markdown"));
-        assert_eq!(find_root_readme(tmp.path()), Some("ReAdMe.markdown".to_string()));
+        assert_eq!(
+            find_root_readme(tmp.path()),
+            Some("ReAdMe.markdown".to_string())
+        );
     }
 
     #[test]
@@ -517,11 +599,27 @@ mod tests {
     // ── 0.8.6 — doc-asset image serving (relative <img> in README/docs) ───
     #[test]
     fn doc_asset_serves_image_extensions_only() {
-        for ok in ["docs/screenshots/foo.png", "logo.svg", "a/b/c.jpeg", "x.WEBP", "i.GIF"] {
+        for ok in [
+            "docs/screenshots/foo.png",
+            "logo.svg",
+            "a/b/c.jpeg",
+            "x.WEBP",
+            "i.GIF",
+        ] {
             assert!(is_servable_asset_path(ok), "{ok} should be servable");
         }
-        for bad in ["docs/notes.md", ".env", "Cargo.toml", "src/main.rs", "foo", "a/b.txt"] {
-            assert!(!is_servable_asset_path(bad), "{bad} must NOT be servable (non-image)");
+        for bad in [
+            "docs/notes.md",
+            ".env",
+            "Cargo.toml",
+            "src/main.rs",
+            "foo",
+            "a/b.txt",
+        ] {
+            assert!(
+                !is_servable_asset_path(bad),
+                "{bad} must NOT be servable (non-image)"
+            );
         }
     }
 

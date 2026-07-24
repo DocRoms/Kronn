@@ -225,7 +225,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let mut step = blank_step(None);
         let before = step.clone();
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.prompt_template, before.prompt_template);
         assert_eq!(step.skill_ids, before.skill_ids);
     }
@@ -246,7 +248,9 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         let qp_id = seed_qp(&db, make_qp("qp-1", "Audit le host {{host}}")).await;
         let mut step = blank_step(Some(qp_id));
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.prompt_template, "Audit le host {{host}}");
         assert_eq!(step.skill_ids, vec!["skill-a", "skill-b"]);
         // tier injecté dans agent_settings (créé par le helper)
@@ -265,11 +269,15 @@ mod tests {
         let mut qp = make_qp("qp-model", "Résume {{host}}");
         qp.agent_settings = Some(crate::models::AgentSettings {
             model: Some("qwen3:8b".to_string()),
-            tier: None, reasoning_effort: None, max_tokens: None,
+            tier: None,
+            reasoning_effort: None,
+            max_tokens: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(
             step.agent_settings.as_ref().and_then(|s| s.model.clone()),
             Some("qwen3:8b".to_string()),
@@ -283,15 +291,21 @@ mod tests {
         let mut qp = make_qp("qp-model2", "x");
         qp.agent_settings = Some(crate::models::AgentSettings {
             model: Some("qwen3:8b".to_string()),
-            tier: None, reasoning_effort: None, max_tokens: None,
+            tier: None,
+            reasoning_effort: None,
+            max_tokens: None,
         });
         let qp_id = seed_qp(&db, qp).await;
         let mut step = blank_step(Some(qp_id));
         step.agent_settings = Some(crate::models::AgentSettings {
             model: Some("llama3.3:70b".to_string()),
-            tier: None, reasoning_effort: None, max_tokens: None,
+            tier: None,
+            reasoning_effort: None,
+            max_tokens: None,
         });
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(
             step.agent_settings.as_ref().and_then(|s| s.model.clone()),
             Some("llama3.3:70b".to_string()),
@@ -306,7 +320,9 @@ mod tests {
         let mut step = blank_step(Some(qp_id));
         // L'utilisateur a écrit son propre prompt — il doit gagner.
         step.prompt_template = "Step override version".to_string();
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.prompt_template, "Step override version");
     }
 
@@ -316,7 +332,9 @@ mod tests {
         let qp_id = seed_qp(&db, make_qp("qp-3", "...")).await;
         let mut step = blank_step(Some(qp_id));
         step.skill_ids = vec!["step-skill".to_string()];
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.skill_ids, vec!["step-skill"]);
     }
 
@@ -328,7 +346,9 @@ mod tests {
         let qp_id = seed_qp(&db, make_qp("qp-bind", "...")).await;
         let mut step = blank_step(Some(qp_id));
         // step has empty profile_ids/directive_ids; hydrate should inherit.
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.profile_ids, vec!["coder"]);
         assert_eq!(step.directive_ids, vec!["concise"]);
     }
@@ -342,7 +362,9 @@ mod tests {
         let mut step = blank_step(Some(qp_id));
         step.profile_ids = vec!["step-profile".to_string()];
         step.directive_ids = vec!["step-directive".to_string()];
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.profile_ids, vec!["step-profile"]);
         assert_eq!(step.directive_ids, vec!["step-directive"]);
     }
@@ -355,7 +377,9 @@ mod tests {
         let qp_id = seed_qp(&db, make_qp("qp-ws", "Real QP prompt")).await;
         let mut step = blank_step(Some(qp_id));
         step.prompt_template = "   \n  ".to_string();
-        hydrate_step_from_quick_prompt(&mut step, &db).await.unwrap();
+        hydrate_step_from_quick_prompt(&mut step, &db)
+            .await
+            .unwrap();
         assert_eq!(step.prompt_template, "Real QP prompt");
     }
 }

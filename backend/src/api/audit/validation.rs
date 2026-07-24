@@ -77,7 +77,11 @@ pub fn normalized_content_hash(content: &str) -> String {
         hasher.update(line.trim_end().as_bytes());
         hasher.update(b"\n");
     }
-    hasher.finalize().iter().map(|b| format!("{:02x}", b)).collect()
+    hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 /// Outcome of a step-output validation.
@@ -218,7 +222,10 @@ pub fn validate_step_output(
                 return (
                     false,
                     Some(StepValidationWarning {
-                        reason: format!("dimension coverage incomplete in `{}`: {} (Step 8 will be re-run)", target_file, reason),
+                        reason: format!(
+                            "dimension coverage incomplete in `{}`: {} (Step 8 will be re-run)",
+                            target_file, reason
+                        ),
                         repaired: false,
                     }),
                 );
@@ -257,17 +264,18 @@ pub fn check_detector_disposition(
     // masking-by-history we're fighting (Codex 1b review 2026-06-04). We
     // gate the detail files through `parse_index_td_ids` so only the
     // current run's live findings contribute to disposition.
-    let index_content = std::fs::read_to_string(
-        project_path.join("docs/inconsistencies-tech-debt.md"),
-    )
-    .unwrap_or_default();
+    let index_content =
+        std::fs::read_to_string(project_path.join("docs/inconsistencies-tech-debt.md"))
+            .unwrap_or_default();
     let listed_ids = super::reconciliation::parse_index_td_ids(&index_content);
     let mut combined = index_content;
     let td_dir = project_path.join("docs/tech-debt");
     if let Ok(entries) = std::fs::read_dir(&td_dir) {
         for e in entries.flatten() {
             let p = e.path();
-            let Some(name) = p.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if !name.starts_with("TD-") || !name.ends_with(".md") {
                 continue;
             }
@@ -328,12 +336,16 @@ pub(crate) fn count_raw_placeholders(content: &str) -> usize {
     while let Some(start) = rest.find("{{") {
         let after_open = &rest[start + 2..];
         // Find closing `}}`
-        let Some(end) = after_open.find("}}") else { break };
+        let Some(end) = after_open.find("}}") else {
+            break;
+        };
         let inside = after_open[..end].trim();
         // Must be a single UPPERCASE_SNAKE token (letters / digits / _).
         // No spaces, no parens, no quotes. This excludes Twig.
         let is_placeholder = !inside.is_empty()
-            && inside.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+            && inside
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
             && inside.chars().any(|c| c.is_ascii_uppercase());
         if is_placeholder {
             count += 1;
@@ -345,8 +357,16 @@ pub(crate) fn count_raw_placeholders(content: &str) -> usize {
 
 /// The 10 dimensions Step 8 § B must account for in the coverage matrix.
 const COVERAGE_DIMENSIONS: &[&str] = &[
-    "Dependencies", "Security", "Code quality", "Scalability", "Maintainability",
-    "Accessibility", "Observability", "Compliance", "Performance", "Documentation drift",
+    "Dependencies",
+    "Security",
+    "Code quality",
+    "Scalability",
+    "Maintainability",
+    "Accessibility",
+    "Observability",
+    "Compliance",
+    "Performance",
+    "Documentation drift",
 ];
 
 /// Structural validation of the `## Dimension coverage` matrix in
@@ -364,7 +384,16 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
     let body = after.find("\n## ").map(|n| &after[..n]).unwrap_or(after);
 
     // N/A reasons we refuse when they stand alone (no verifiable content).
-    const TRIVIAL: &[&str] = &["not relevant", "pas pertinent", "n/a", "na", "unknown", "none", "-", ""];
+    const TRIVIAL: &[&str] = &[
+        "not relevant",
+        "pas pertinent",
+        "n/a",
+        "na",
+        "unknown",
+        "none",
+        "-",
+        "",
+    ];
 
     let mut missing: Vec<&str> = Vec::new();
     for dim in COVERAGE_DIMENSIONS {
@@ -376,19 +405,41 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
         // match stays unambiguous. (Fixes the 2026-06-03 self-inflicted
         // Step-8-red on DOCROMS_WEB: the agent wrote `Accessibility (a11y)`.)
         let dim_lc = dim.to_ascii_lowercase();
-        let rows: Vec<&str> = body.lines().filter(|l| {
-            let l = l.trim();
-            l.starts_with('|') && {
-                let first = l.trim_start_matches('|').split('|').next().unwrap_or("").trim();
-                first.to_ascii_lowercase().starts_with(&dim_lc)
-            }
-        }).collect();
+        let rows: Vec<&str> = body
+            .lines()
+            .filter(|l| {
+                let l = l.trim();
+                l.starts_with('|') && {
+                    let first = l
+                        .trim_start_matches('|')
+                        .split('|')
+                        .next()
+                        .unwrap_or("")
+                        .trim();
+                    first.to_ascii_lowercase().starts_with(&dim_lc)
+                }
+            })
+            .collect();
         let row = match rows.as_slice() {
-            [] => { missing.push(dim); continue; }
+            [] => {
+                missing.push(dim);
+                continue;
+            }
             [r] => *r,
-            _ => return Err(format!("dimension `{}` appears {} times — exactly one row per dimension", dim, rows.len())),
+            _ => {
+                return Err(format!(
+                    "dimension `{}` appears {} times — exactly one row per dimension",
+                    dim,
+                    rows.len()
+                ))
+            }
         };
-        let cells: Vec<&str> = row.trim().trim_matches('|').split('|').map(|c| c.trim()).collect();
+        let cells: Vec<&str> = row
+            .trim()
+            .trim_matches('|')
+            .split('|')
+            .map(|c| c.trim())
+            .collect();
         let outcome = cells.get(1).copied().unwrap_or("");
         let evidence = cells.get(2).copied().unwrap_or("");
         let o = outcome.to_ascii_lowercase();
@@ -405,18 +456,31 @@ fn validate_dimension_coverage(content: &str) -> Result<(), String> {
             ));
         }
         if evidence.is_empty() {
-            return Err(format!("dimension `{}`: evidence/reason cell is empty", dim));
+            return Err(format!(
+                "dimension `{}`: evidence/reason cell is empty",
+                dim
+            ));
         }
         if o.starts_with("n/a") {
             // Reason after `N/A:` (or, failing that, the evidence cell) must be non-trivial.
-            let reason = outcome.split_once(':').map(|(_, r)| r.trim()).filter(|s| !s.is_empty()).unwrap_or(evidence);
+            let reason = outcome
+                .split_once(':')
+                .map(|(_, r)| r.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or(evidence);
             if TRIVIAL.contains(&reason.to_ascii_lowercase().trim()) {
-                return Err(format!("dimension `{}`: N/A needs a human-verifiable reason, got `{}`", dim, reason));
+                return Err(format!(
+                    "dimension `{}`: N/A needs a human-verifiable reason, got `{}`",
+                    dim, reason
+                ));
             }
         }
     }
     if !missing.is_empty() {
-        return Err(format!("coverage matrix missing rows: {}", missing.join(", ")));
+        return Err(format!(
+            "coverage matrix missing rows: {}",
+            missing.join(", ")
+        ));
     }
     Ok(())
 }
@@ -435,7 +499,11 @@ fn template_source_for(target_file: &str) -> Option<PathBuf> {
         return None;
     }
     let candidate = template_dir.join(target_file);
-    if candidate.exists() { Some(candidate) } else { None }
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -453,7 +521,11 @@ mod tests {
     /// Build a fake project root with `target_file` written at the
     /// requested size, paired with a fake `templates/` directory
     /// containing a template of the requested size.
-    fn fixture(target_file: &str, dst_bytes: usize, template_bytes: usize) -> (tempfile::TempDir, PathBuf) {
+    fn fixture(
+        target_file: &str,
+        dst_bytes: usize,
+        template_bytes: usize,
+    ) -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::TempDir::new().unwrap();
         let project = tmp.path().join("project");
         let templates = tmp.path().join("templates");
@@ -461,13 +533,17 @@ mod tests {
         std::fs::create_dir_all(&templates).unwrap();
 
         let dst = project.join(target_file);
-        if let Some(p) = dst.parent() { std::fs::create_dir_all(p).unwrap(); }
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
         let mut f = std::fs::File::create(&dst).unwrap();
         if dst_bytes > 0 {
             f.write_all(&vec![b'x'; dst_bytes]).unwrap();
         }
         let tsrc = templates.join(target_file);
-        if let Some(p) = tsrc.parent() { std::fs::create_dir_all(p).unwrap(); }
+        if let Some(p) = tsrc.parent() {
+            std::fs::create_dir_all(p).unwrap();
+        }
         let mut t = std::fs::File::create(&tsrc).unwrap();
         if template_bytes > 0 {
             t.write_all(&vec![b'y'; template_bytes]).unwrap();
@@ -515,25 +591,34 @@ mod tests {
     #[serial(kronn_templates_env)]
     fn healthy_dest_passes_through() {
         let (_tmp, project) = fixture("docs/foo.md", 1000, 1000);
-        let (success, warn) =
-            validate_step_output(true, &project, "docs/foo.md");
+        let (success, warn) = validate_step_output(true, &project, "docs/foo.md");
         assert!(success);
         assert!(warn.is_none());
     }
 
     // ── Dimension coverage matrix (Codex review) ──────────────────────────
     fn valid_coverage_matrix() -> String {
-        let mut s = String::from("## Dimension coverage\n\n| Dimension | Outcome | Evidence / reason |\n|---|---|---|\n");
+        let mut s = String::from(
+            "## Dimension coverage\n\n| Dimension | Outcome | Evidence / reason |\n|---|---|---|\n",
+        );
         for (dim, outcome, ev) in [
             ("Dependencies", "findings", "TD-x"),
             ("Security", "findings", "TD-y"),
-            ("Code quality", "scanned — nothing substantiable", "read src/, clean"),
+            (
+                "Code quality",
+                "scanned — nothing substantiable",
+                "read src/, clean",
+            ),
             ("Scalability", "N/A: no DB/ORM layer", "grep: no ORM import"),
             ("Maintainability", "scanned — nothing substantiable", "ok"),
             ("Accessibility", "N/A: no web surface", "CLI binary only"),
             ("Observability", "findings", "TD-z"),
             ("Compliance", "scanned — nothing substantiable", "MIT only"),
-            ("Performance", "N/A: not perf-sensitive per README", "README says batch tool"),
+            (
+                "Performance",
+                "N/A: not perf-sensitive per README",
+                "README says batch tool",
+            ),
             ("Documentation drift", "findings", "TD-w"),
         ] {
             s.push_str(&format!("| {} | {} | {} |\n", dim, outcome, ev));
@@ -573,13 +658,25 @@ mod tests {
         .unwrap();
         let signals = vec![
             mk_signal("csp-unsafe", "src/Headers.php:87", "CSP unsafe-eval"),
-            mk_signal("blank-noopener", "templates/pages/projets.html.twig:12", "_blank w/o noopener"),
+            mk_signal(
+                "blank-noopener",
+                "templates/pages/projets.html.twig:12",
+                "_blank w/o noopener",
+            ),
         ];
         let w = check_detector_disposition(tmp.path(), &signals)
             .expect("an unaddressed signal must produce a blocking warning");
         assert!(!w.repaired);
-        assert!(w.reason.contains("projets.html.twig"), "warning names the undisposed file: {}", w.reason);
-        assert!(!w.reason.contains("Headers.php"), "the cited file must NOT be flagged: {}", w.reason);
+        assert!(
+            w.reason.contains("projets.html.twig"),
+            "warning names the undisposed file: {}",
+            w.reason
+        );
+        assert!(
+            !w.reason.contains("Headers.php"),
+            "the cited file must NOT be flagged: {}",
+            w.reason
+        );
     }
 
     #[test]
@@ -592,14 +689,19 @@ mod tests {
         std::fs::write(
             docs.join("inconsistencies-tech-debt.md"),
             "## Current list\n- TD-20260603-blank — see detail\n",
-        ).unwrap();
+        )
+        .unwrap();
         // The TD detail file addresses the _blank template (combined surface).
         std::fs::write(
             docs.join("tech-debt/TD-20260603-blank.md"),
             "Tabnabbing in templates/pages/projets.html.twig — add rel=noopener.\n",
         )
         .unwrap();
-        let signals = vec![mk_signal("blank-noopener", "templates/pages/projets.html.twig:12", "x")];
+        let signals = vec![mk_signal(
+            "blank-noopener",
+            "templates/pages/projets.html.twig:12",
+            "x",
+        )];
         assert!(
             check_detector_disposition(tmp.path(), &signals).is_none(),
             "signal addressed in a TD detail file (listed in the index) must pass the gate"
@@ -619,13 +721,18 @@ mod tests {
         std::fs::write(
             docs.join("inconsistencies-tech-debt.md"),
             "## Current list\nsee detail files\n", // no TD id referenced
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(
             docs.join("tech-debt/TD-20260603-blank.md"),
             "Tabnabbing in templates/pages/projets.html.twig — add rel=noopener.\n",
         )
         .unwrap();
-        let signals = vec![mk_signal("blank-noopener", "templates/pages/projets.html.twig:12", "x")];
+        let signals = vec![mk_signal(
+            "blank-noopener",
+            "templates/pages/projets.html.twig:12",
+            "x",
+        )];
         let w = check_detector_disposition(tmp.path(), &signals)
             .expect("orphan TD not in the index must NOT dispose the signal");
         assert!(w.reason.contains("projets.html.twig"), "got: {}", w.reason);
@@ -646,7 +753,10 @@ mod tests {
         let m = valid_coverage_matrix()
             .replace("| Accessibility |", "| Accessibility (a11y) |")
             .replace("| Documentation drift |", "| Documentation drift / docs |");
-        assert!(validate_dimension_coverage(&m).is_ok(), "embellished labels must still match");
+        assert!(
+            validate_dimension_coverage(&m).is_ok(),
+            "embellished labels must still match"
+        );
     }
 
     #[test]
@@ -658,21 +768,32 @@ mod tests {
     #[test]
     fn coverage_matrix_missing_a_dimension_fails() {
         // Drop the "Performance" row.
-        let m = valid_coverage_matrix().replace("| Performance | N/A: not perf-sensitive per README | README says batch tool |\n", "");
+        let m = valid_coverage_matrix().replace(
+            "| Performance | N/A: not perf-sensitive per README | README says batch tool |\n",
+            "",
+        );
         let err = validate_dimension_coverage(&m).unwrap_err();
         assert!(err.contains("Performance"), "{err}");
     }
 
     #[test]
     fn coverage_matrix_trivial_na_reason_fails() {
-        let m = valid_coverage_matrix().replace("N/A: no web surface", "N/A: pas pertinent").replace("CLI binary only", "");
+        let m = valid_coverage_matrix()
+            .replace("N/A: no web surface", "N/A: pas pertinent")
+            .replace("CLI binary only", "");
         let err = validate_dimension_coverage(&m).unwrap_err();
-        assert!(err.to_lowercase().contains("verifiable") || err.contains("Accessibility"), "{err}");
+        assert!(
+            err.to_lowercase().contains("verifiable") || err.contains("Accessibility"),
+            "{err}"
+        );
     }
 
     #[test]
     fn coverage_matrix_bad_outcome_prefix_fails() {
-        let m = valid_coverage_matrix().replace("| Security | findings | TD-y |", "| Security | maybe later | TD-y |");
+        let m = valid_coverage_matrix().replace(
+            "| Security | findings | TD-y |",
+            "| Security | maybe later | TD-y |",
+        );
         let err = validate_dimension_coverage(&m).unwrap_err();
         assert!(err.contains("Security"), "{err}");
     }
@@ -702,11 +823,8 @@ mod tests {
         // 0 B vs 1000 B template — must flag, and (Codex r8) NEVER write
         // in place: the file may not belong to this run.
         let (_tmp, project) = fixture("docs/inconsistencies-tech-debt.md", 0, 1000);
-        let (success, warn) = validate_step_output(
-            true,
-            &project,
-            "docs/inconsistencies-tech-debt.md",
-        );
+        let (success, warn) =
+            validate_step_output(true, &project, "docs/inconsistencies-tech-debt.md");
         assert!(!success, "empty dest must be reported as failure");
         let w = warn.expect("a warning must be emitted for empty output");
         assert!(!w.repaired, "no in-place repair, ever");
@@ -721,11 +839,7 @@ mod tests {
     fn truncated_dest_flagged_and_preserved() {
         // 100 B vs 1000 B = 10 % → below 25 % threshold: flagged, intact.
         let (_tmp, project) = fixture("docs/architecture/overview.md", 100, 1000);
-        let (success, warn) = validate_step_output(
-            true,
-            &project,
-            "docs/architecture/overview.md",
-        );
+        let (success, warn) = validate_step_output(true, &project, "docs/architecture/overview.md");
         assert!(!success);
         let w = warn.unwrap();
         assert!(!w.repaired, "no in-place repair, ever");
@@ -741,12 +855,14 @@ mod tests {
         // flag or touch the user's content.
         let (_tmp, project) = fixture("docs/foo.md", 300, 1000);
         let before = std::fs::read(project.join("docs/foo.md")).unwrap();
-        let (success, warn) =
-            validate_step_output(true, &project, "docs/foo.md");
+        let (success, warn) = validate_step_output(true, &project, "docs/foo.md");
         assert!(success);
         assert!(warn.is_none());
         let after = std::fs::read(project.join("docs/foo.md")).unwrap();
-        assert_eq!(before, after, "user content must be untouched above threshold");
+        assert_eq!(
+            before, after,
+            "user content must be untouched above threshold"
+        );
     }
 
     #[test]
@@ -758,27 +874,43 @@ mod tests {
         // continued to Step 9 producing nothing → marked Audited
         // wrongly. The new placeholder check rejects the step even
         // though the size is right.
-        let template_body =
-            "# Decisions\n\n## Real content the agent should fill\n\n\
+        let template_body = "# Decisions\n\n## Real content the agent should fill\n\n\
              | {{DECISION_1}} | {{REASON}} | {{ANTI_PATTERN}} | {{FILE_OR_USER}} |\n\
              | {{DECISION_2}} | {{REASON}} | {{ANTI_PATTERN}} | {{FILE_OR_USER}} |\n\n\
              Lots of useful prose to push template size above 200 B and \
-             enough body to satisfy the 25% size ratio. ".repeat(2);
-        let (_tmp, project) = fixture("docs/decisions.md", template_body.len(), template_body.len());
+             enough body to satisfy the 25% size ratio. "
+            .repeat(2);
+        let (_tmp, project) = fixture(
+            "docs/decisions.md",
+            template_body.len(),
+            template_body.len(),
+        );
         // Overwrite both with the identical placeholder-laden content so
         // the size ratio is 100% but the placeholders remain.
         std::fs::write(project.join("docs/decisions.md"), &template_body).unwrap();
         // Also overwrite the template (the fixture wrote `y`-bytes).
         let tpl_dir = std::env::var("KRONN_TEMPLATES_DIR").unwrap();
-        std::fs::write(std::path::PathBuf::from(tpl_dir).join("docs/decisions.md"), &template_body).unwrap();
+        std::fs::write(
+            std::path::PathBuf::from(tpl_dir).join("docs/decisions.md"),
+            &template_body,
+        )
+        .unwrap();
 
         let (success, warn) = validate_step_output(true, &project, "docs/decisions.md");
-        assert!(!success, "step with leaked placeholders must fail validation");
+        assert!(
+            !success,
+            "step with leaked placeholders must fail validation"
+        );
         let w = warn.expect("a warning must be emitted");
-        assert!(w.reason.contains("placeholders remain"),
-            "warning must call out the placeholder leakage explicitly (got: {})", w.reason);
-        assert!(!w.repaired,
-            "no auto-repair when the file IS the template (re-running the step is the only path)");
+        assert!(
+            w.reason.contains("placeholders remain"),
+            "warning must call out the placeholder leakage explicitly (got: {})",
+            w.reason
+        );
+        assert!(
+            !w.repaired,
+            "no auto-repair when the file IS the template (re-running the step is the only path)"
+        );
     }
 
     #[test]
@@ -805,7 +937,10 @@ mod tests {
         // describing a redirector stub — a 43-TD file read as "still the
         // template" and failed step 8. Documenting a placeholder in code
         // is content, not an unfilled slot.
-        assert_eq!(count_raw_placeholders("mentions `{{DO_NOT_1}}` in prose"), 0);
+        assert_eq!(
+            count_raw_placeholders("mentions `{{DO_NOT_1}}` in prose"),
+            0
+        );
         assert_eq!(
             count_raw_placeholders("it carries `{{DO_NOT_1}}`/`{{DO_NOT_2}}` placeholders"),
             0
@@ -834,10 +969,7 @@ mod tests {
         );
         // A backtick inside the info string is NOT a valid opener — the
         // slot after it stays visible.
-        assert_eq!(
-            count_raw_placeholders("```lang`oops\n| {{ID}} |\n```"),
-            1
-        );
+        assert_eq!(count_raw_placeholders("```lang`oops\n| {{ID}} |\n```"), 1);
         // A REAL unfilled slot outside code still counts — including next
         // to documented ones.
         assert_eq!(count_raw_placeholders("| {{ID}} |"), 1);
@@ -867,7 +999,10 @@ mod tests {
     #[test]
     fn target_snapshot_is_explicit_missing_or_present() {
         let tmp = tempfile::TempDir::new().unwrap();
-        assert_eq!(target_snapshot(tmp.path(), "docs/nope.md").unwrap(), TargetSnapshot::Missing);
+        assert_eq!(
+            target_snapshot(tmp.path(), "docs/nope.md").unwrap(),
+            TargetSnapshot::Missing
+        );
         std::fs::create_dir_all(tmp.path().join("docs")).unwrap();
         std::fs::write(tmp.path().join("docs/a.md"), "content").unwrap();
         let s1 = target_snapshot(tmp.path(), "docs/a.md").unwrap();
@@ -891,11 +1026,8 @@ mod tests {
         std::fs::write(project.join("docs/inconsistencies-security.md"), "").unwrap();
         // Force resolver away from real templates dir.
         std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
-        let (success, warn) = validate_step_output(
-            true,
-            &project,
-            "docs/inconsistencies-security.md",
-        );
+        let (success, warn) =
+            validate_step_output(true, &project, "docs/inconsistencies-security.md");
         assert!(!success);
         let w = warn.unwrap();
         assert!(!w.repaired, "no template to repair from");
@@ -915,17 +1047,15 @@ mod tests {
         std::fs::write(
             templates.join("inconsistencies-security.md"),
             "x".repeat(1000), // big template → 1% ratio below threshold
-        ).unwrap();
+        )
+        .unwrap();
         let project = tmp.path().join("project");
         std::fs::create_dir_all(project.join("docs")).unwrap();
         let dest = project.join("docs/inconsistencies-security.md");
         std::fs::write(&dest, "partial agent output").unwrap();
         std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("templates"));
-        let (success, warn) = validate_step_output(
-            true,
-            &project,
-            "docs/inconsistencies-security.md",
-        );
+        let (success, warn) =
+            validate_step_output(true, &project, "docs/inconsistencies-security.md");
         assert!(!success);
         assert!(!warn.unwrap().repaired, "no in-place repair, ever");
         assert_eq!(
@@ -933,7 +1063,11 @@ mod tests {
             "partial agent output",
             "the file must stay byte-intact at its own path"
         );
-        assert!(!project.join("docs/inconsistencies-security.partial.bak").exists(),
-            "no sidecar noise either");
+        assert!(
+            !project
+                .join("docs/inconsistencies-security.partial.bak")
+                .exists(),
+            "no sidecar noise either"
+        );
     }
 }

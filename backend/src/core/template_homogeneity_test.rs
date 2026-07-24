@@ -256,13 +256,22 @@ mod tests {
                 failures.push(format!("{}: missing <!-- KRONN:FACTS block", relative_path));
             }
             if !content.contains("<!-- END KRONN:FACTS -->") {
-                failures.push(format!("{}: missing <!-- END KRONN:FACTS --> closing", relative_path));
+                failures.push(format!(
+                    "{}: missing <!-- END KRONN:FACTS --> closing",
+                    relative_path
+                ));
             }
             if !content.contains("{{TEST_CMD}}") {
-                failures.push(format!("{}: missing {{{{TEST_CMD}}}} placeholder", relative_path));
+                failures.push(format!(
+                    "{}: missing {{{{TEST_CMD}}}} placeholder",
+                    relative_path
+                ));
             }
             if !content.contains("{{LINT_CMD}}") {
-                failures.push(format!("{}: missing {{{{LINT_CMD}}}} placeholder", relative_path));
+                failures.push(format!(
+                    "{}: missing {{{{LINT_CMD}}}} placeholder",
+                    relative_path
+                ));
             }
         }
 
@@ -282,7 +291,13 @@ mod tests {
         let path = base.join("docs/decisions.md");
         assert!(path.exists(), "templates/docs/decisions.md must exist");
         let content = std::fs::read_to_string(&path).unwrap();
-        assert!(content.contains("Architecture decisions"), "decisions.md must have 'Architecture decisions' header");
-        assert!(content.contains("What NOT to do"), "decisions.md must have 'What NOT to do' column");
+        assert!(
+            content.contains("Architecture decisions"),
+            "decisions.md must have 'Architecture decisions' header"
+        );
+        assert!(
+            content.contains("What NOT to do"),
+            "decisions.md must have 'What NOT to do' column"
+        );
     }
 }

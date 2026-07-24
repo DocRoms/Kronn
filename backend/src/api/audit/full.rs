@@ -21,8 +21,9 @@ use crate::models::*;
 use crate::AppState;
 
 use super::helpers::{
-    check_ai_dir_permissions, compute_audit_info_sync, detect_issue_tracker_mcp,
-    detect_project_skills, build_validation_prompt, build_sub_audit_validation_prompt, remove_bootstrap_block,
+    build_sub_audit_validation_prompt, build_validation_prompt, check_ai_dir_permissions,
+    compute_audit_info_sync, detect_issue_tracker_mcp, detect_project_skills,
+    remove_bootstrap_block,
 };
 use super::{SseStream, PROMPT_PREAMBLE};
 
@@ -70,7 +71,15 @@ impl AuditDropGuard {
         } else {
             None
         };
-        Self { armed: true, db, tracker, run_id, project_id, caffeinate, leased: false }
+        Self {
+            armed: true,
+            db,
+            tracker,
+            run_id,
+            project_id,
+            caffeinate,
+            leased: false,
+        }
     }
 
     /// Declare that this guard owns the project's audit lease — Drop will
@@ -110,7 +119,8 @@ impl Drop for AuditDropGuard {
         if self.armed {
             tracing::warn!(
                 "Audit for {} dropped mid-flight (SSE consumer vanished) — cleaning up (run: {:?})",
-                self.project_id, self.run_id
+                self.project_id,
+                self.run_id
             );
             if let Ok(mut t) = self.tracker.lock() {
                 t.clear_progress(&self.project_id);
@@ -208,9 +218,9 @@ fn sse_error(msg: impl Into<String>) -> Sse<SseStream> {
     let msg = msg.into();
     let stream: SseStream = Box::pin(futures::stream::once(async move {
         Ok::<_, Infallible>(
-            Event::default().event("error").data(
-                serde_json::json!({ "error": msg }).to_string(),
-            ),
+            Event::default()
+                .event("error")
+                .data(serde_json::json!({ "error": msg }).to_string()),
         )
     }));
     Sse::new(stream)
@@ -222,10 +232,15 @@ pub async fn full_audit(
     Json(req): Json<LaunchAuditRequest>,
 ) -> Sse<SseStream> {
     // Look up project
-    let project = state.db.with_conn({
-        let id = id.clone();
-        move |conn| crate::db::projects::get_project(conn, &id)
-    }).await.ok().flatten();
+    let project = state
+        .db
+        .with_conn({
+            let id = id.clone();
+            move |conn| crate::db::projects::get_project(conn, &id)
+        })
+        .await
+        .ok()
+        .flatten();
 
     if project.is_none() {
         return sse_error("Project not found");
@@ -237,24 +252,29 @@ pub async fn full_audit(
     let project_path_str = project.path.clone();
     let project_path = scanner::resolve_host_path(&project.path);
     let project_default_skill_ids = project.default_skill_ids.clone();
-    let briefing_notes = crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
-    let linked_repos_block = crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
+    let briefing_notes =
+        crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
+    let linked_repos_block =
+        crate::api::projects::format_linked_repos_for_prompt(&project.linked_repos);
     // 0.8.3 — candidate pool for companion-repo detection. The agent
     // only suggests links from this finite list (typically 5-20),
     // not "every repo I see on disk" — keeps suggestions scalable
     // for users with hundreds of repos.
     let pid_for_universe = project_id.clone();
-    let kronn_projects_universe_block = match state
-        .db
-        .with_conn(crate::db::projects::list_projects)
-        .await
-    {
-        Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(&all, &pid_for_universe),
-        Err(e) => {
-            tracing::warn!("Failed to load Kronn projects for companion-detection block: {}", e);
-            None
-        }
-    };
+    let kronn_projects_universe_block =
+        match state.db.with_conn(crate::db::projects::list_projects).await {
+            Ok(all) => crate::api::projects::format_kronn_projects_universe_for_prompt(
+                &all,
+                &pid_for_universe,
+            ),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load Kronn projects for companion-detection block: {}",
+                    e
+                );
+                None
+            }
+        };
     let agent_type = req.agent;
     if !super::agent_can_audit(&agent_type) {
         return sse_error(format!(
@@ -2069,10 +2089,13 @@ pub(crate) fn resolve_resume_row(
 ) -> Result<(crate::models::AuditKind, u32), String> {
     match row {
         None => Err(format!("resume_run_id {run_id} not found")),
-        Some(r) if r.project_id != project_id =>
-            Err(format!("resume_run_id {run_id} belongs to another project")),
-        Some(r) if r.status != "Interrupted" =>
-            Err(format!("resume_run_id {run_id} is not resumable (status: {})", r.status)),
+        Some(r) if r.project_id != project_id => {
+            Err(format!("resume_run_id {run_id} belongs to another project"))
+        }
+        Some(r) if r.status != "Interrupted" => Err(format!(
+            "resume_run_id {run_id} is not resumable (status: {})",
+            r.status
+        )),
         Some(r) => crate::models::AuditKind::from_label(&r.kind)
             .map(|k| (k, r.last_completed_step))
             .ok_or_else(|| format!("resume_run_id {run_id}: unknown kind {:?}", r.kind)),
@@ -2123,8 +2146,14 @@ pub fn classify_docs_dir_for_cancel(
     // audit means the directory holds legitimate user-visible content
     // and the wipe is hostile.
     let prior_state = crate::core::kronn_state::read(project_path);
-    if prior_state.as_ref().map(|s| s.has_any_audit()).unwrap_or(false) {
-        return DocsCancelAction::Preserve { reason: "prior audit recorded in .kronn.json" };
+    if prior_state
+        .as_ref()
+        .map(|s| s.has_any_audit())
+        .unwrap_or(false)
+    {
+        return DocsCancelAction::Preserve {
+            reason: "prior audit recorded in .kronn.json",
+        };
     }
 
     // Signal 2 — any non-state-file entry in the directory. Hand-written
@@ -2133,14 +2162,18 @@ pub fn classify_docs_dir_for_cancel(
     // We tolerate a lonely `.kronn.json` (it's a Kronn-management
     // artifact, not user content) ; everything else stops the wipe.
     let has_user_content = std::fs::read_dir(dir)
-        .map(|entries| entries.filter_map(|e| e.ok()).any(|e| {
-            let name = e.file_name();
-            let name_str = name.to_string_lossy();
-            name_str != crate::core::kronn_state::KRONN_STATE_FILENAME
-        }))
+        .map(|entries| {
+            entries.filter_map(|e| e.ok()).any(|e| {
+                let name = e.file_name();
+                let name_str = name.to_string_lossy();
+                name_str != crate::core::kronn_state::KRONN_STATE_FILENAME
+            })
+        })
         .unwrap_or(false);
     if has_user_content {
-        return DocsCancelAction::Preserve { reason: "user content present (non-state file in dir)" };
+        return DocsCancelAction::Preserve {
+            reason: "user content present (non-state file in dir)",
+        };
     }
 
     DocsCancelAction::Wipe
@@ -2166,7 +2199,10 @@ pub fn classify_docs_dir_for_cancel(
 /// report. Tests use this directly with a `tempdir` root.
 pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String> {
     if !project_path.exists() {
-        return Err(format!("Project path not found: {}", project_path.display()));
+        return Err(format!(
+            "Project path not found: {}",
+            project_path.display()
+        ));
     }
 
     // Check each candidate docs folder. Skip the wipe when ANY of :
@@ -2185,7 +2221,8 @@ pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String>
             DocsCancelAction::Preserve { reason } => {
                 tracing::warn!(
                     "Audit cancel : SKIPPING wipe of {}/ — {} — preserving existing content",
-                    folder, reason,
+                    folder,
+                    reason,
                 );
             }
             DocsCancelAction::Wipe => {
@@ -2193,7 +2230,8 @@ pub fn cleanup_audit_files(project_path: &std::path::Path) -> Result<(), String>
                     .map_err(|e| format!("Failed to remove {}/: {}", folder, e))?;
                 tracing::info!(
                     "Removed {}/ directory (was empty / no audit history) from {}",
-                    folder, project_path.display(),
+                    folder,
+                    project_path.display(),
                 );
             }
         }
@@ -2237,10 +2275,14 @@ pub async fn cancel_audit(
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AiAuditStatus>> {
     // Look up project
-    let project = match state.db.with_conn({
-        let id = id.clone();
-        move |conn| crate::db::projects::get_project(conn, &id)
-    }).await {
+    let project = match state
+        .db
+        .with_conn({
+            let id = id.clone();
+            move |conn| crate::db::projects::get_project(conn, &id)
+        })
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -2257,11 +2299,17 @@ pub async fn cancel_audit(
     //    (Codex #10).
     {
         let Ok(mut tracker) = state.audit_tracker.lock() else {
-            return Json(ApiResponse::err("Internal error: audit tracker lock poisoned"));
+            return Json(ApiResponse::err(
+                "Internal error: audit tracker lock poisoned",
+            ));
         };
         tracker.cancelled.insert(project_id.clone());
         if let Some(pid) = tracker.running_pids.remove(&project_id) {
-            tracing::info!("Killing audit agent process (PID {}) for project {}", pid, project_id);
+            tracing::info!(
+                "Killing audit agent process (PID {}) for project {}",
+                pid,
+                project_id
+            );
             // Kill the process tree: first try killing the process group, then the process itself
             let _ = sync_cmd("kill")
                 .args(["-9", &format!("-{}", pid)]) // negative PID = process group
@@ -2287,8 +2335,11 @@ pub async fn cancel_audit(
     // leaves a stale flag that the next launch clears), and the caller can
     // retry the cancel.
     let acked = wait_for_cancel_ack(
-        &state.audit_tracker, &project_id, std::time::Duration::from_secs(15),
-    ).await;
+        &state.audit_tracker,
+        &project_id,
+        std::time::Duration::from_secs(15),
+    )
+    .await;
     if !acked {
         return Json(ApiResponse::err(
             "Cancel requested but not acknowledged by the audit worker yet \
@@ -2329,7 +2380,9 @@ pub async fn cancel_audit(
     let cleanup_result = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let project_path = scanner::resolve_host_path(&project_path_str);
         cleanup_audit_files(&project_path)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     if let Err(e) = cleanup_result {
         // Clear cancellation flag before returning error
@@ -2341,17 +2394,25 @@ pub async fn cancel_audit(
 
     // 3. Delete any validation discussion for this project
     let pid = project_id.clone();
-    if let Err(e) = state.db.with_conn(move |conn| {
-        // Find and delete validation discussions for this project
-        let discussions = crate::db::discussions::list_discussions(conn)?;
-        for disc in discussions {
-            if disc.project_id.as_deref() == Some(&pid) && disc.title == "Validation audit AI" {
-                crate::db::discussions::delete_discussion(conn, &disc.id)?;
-                tracing::info!("Deleted validation discussion {} for project {}", disc.id, pid);
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            // Find and delete validation discussions for this project
+            let discussions = crate::db::discussions::list_discussions(conn)?;
+            for disc in discussions {
+                if disc.project_id.as_deref() == Some(&pid) && disc.title == "Validation audit AI" {
+                    crate::db::discussions::delete_discussion(conn, &disc.id)?;
+                    tracing::info!(
+                        "Deleted validation discussion {} for project {}",
+                        disc.id,
+                        pid
+                    );
+                }
             }
-        }
-        Ok(())
-    }).await {
+            Ok(())
+        })
+        .await
+    {
         tracing::error!("Failed to delete validation discussions for project: {e}");
     }
 
@@ -2388,10 +2449,14 @@ pub(crate) struct SeverityCounts {
 /// count. Better to under-count than mis-categorize.
 pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
     let mut counts = SeverityCounts::default();
-    let Ok(entries) = std::fs::read_dir(td_dir) else { return counts };
+    let Ok(entries) = std::fs::read_dir(td_dir) else {
+        return counts;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         // Skip scaffolding + reconciliation reports — same filter as
         // `count_tech_debt` in scanner.rs to stay consistent.
         if !name.ends_with(".md")
@@ -2400,13 +2465,17 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
         {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
         // Pick the FIRST Severity line — multiple lines in the same
         // file would be a malformed TD anyway.
         let Some(sev_line) = content.lines().find(|l| {
             let lc = l.to_ascii_lowercase();
             lc.contains("**severity**:") || lc.starts_with("severity:")
-        }) else { continue };
+        }) else {
+            continue;
+        };
         let sev = sev_line
             .split(':')
             .nth(1)
@@ -2414,9 +2483,9 @@ pub(crate) fn count_td_severities(td_dir: &std::path::Path) -> SeverityCounts {
             .unwrap_or_default();
         match sev.as_str() {
             s if s.starts_with("critical") => counts.critical += 1,
-            s if s.starts_with("high")     => counts.high     += 1,
-            s if s.starts_with("medium")   => counts.medium   += 1,
-            s if s.starts_with("low")      => counts.low      += 1,
+            s if s.starts_with("high") => counts.high += 1,
+            s if s.starts_with("medium") => counts.medium += 1,
+            s if s.starts_with("low") => counts.low += 1,
             _ => {} // unknown — skip silently
         }
     }
@@ -2443,7 +2512,9 @@ pub(crate) fn compute_reconciliation_counts(
     if let Ok(entries) = std::fs::read_dir(td_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
             if !name.ends_with(".md")
                 || name.starts_with('_')
                 || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
@@ -2485,13 +2556,13 @@ pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static
         if let Some(rest) = trimmed.strip_prefix("**category**:") {
             let cat = rest.trim().to_string();
             return match cat.as_str() {
-                "docker"        => Some("Docker"),
-                "security"      => Some("Security"),
-                "performance"   => Some("Performance"),
+                "docker" => Some("Docker"),
+                "security" => Some("Security"),
+                "performance" => Some("Performance"),
                 "accessibility" => Some("Accessibility"),
-                "database"      => Some("Database"),
-                "api"           => Some("ApiDesign"),
-                _               => None,
+                "database" => Some("Database"),
+                "api" => Some("ApiDesign"),
+                _ => None,
             };
         }
     }
@@ -2510,24 +2581,61 @@ pub(crate) fn classify_td_cluster(filename: &str, body: &str) -> Option<&'static
     if m(&["composer-install", "supply-chain", "unverified-download"]) {
         return Some("Security");
     }
-    if m(&["secret", "credential", "auth", "csrf", "xss", "sql-injection",
-           "cors", "csp", "jwt", "rce", "host-key", "strict-host",
-           "apikey", "api-key", "hardcoded-key", "leaked-key"]) {
+    if m(&[
+        "secret",
+        "credential",
+        "auth",
+        "csrf",
+        "xss",
+        "sql-injection",
+        "cors",
+        "csp",
+        "jwt",
+        "rce",
+        "host-key",
+        "strict-host",
+        "apikey",
+        "api-key",
+        "hardcoded-key",
+        "leaked-key",
+    ]) {
         return Some("Security");
     }
-    if m(&["perf", "n-plus-one", "n+1", "missing-index", "cache-",
-           "bundle-size", "slow-query", "memory-leak"]) {
+    if m(&[
+        "perf",
+        "n-plus-one",
+        "n+1",
+        "missing-index",
+        "cache-",
+        "bundle-size",
+        "slow-query",
+        "memory-leak",
+    ]) {
         return Some("Performance");
     }
-    if m(&["a11y", "accessibility", "aria", "contrast",
-           "keyboard", "alt-attr", "missing-alt", "wcag"]) {
+    if m(&[
+        "a11y",
+        "accessibility",
+        "aria",
+        "contrast",
+        "keyboard",
+        "alt-attr",
+        "missing-alt",
+        "wcag",
+    ]) {
         return Some("Accessibility");
     }
     if m(&["migration", "schema", "orm", "foreign-key", "missing-fk"]) {
         return Some("Database");
     }
-    if m(&["api-design", "openapi", "swagger", "endpoint-shape",
-           "rest-", "pagination"]) {
+    if m(&[
+        "api-design",
+        "openapi",
+        "swagger",
+        "endpoint-shape",
+        "rest-",
+        "pagination",
+    ]) {
         return Some("ApiDesign");
     }
     None
@@ -2543,13 +2651,19 @@ pub(crate) const CLUSTER_RECOMMENDATION_THRESHOLD: u32 = 3;
 /// Scan the TD directory and return per-kind cluster recommendations
 /// for the audit_runs row. The JSON shape is `[{\"kind\":..., \"reason\":..., \"cluster_size\":N}]`
 /// matching the `AuditRecommendation` struct in `models/projects.rs`.
-pub(crate) fn compute_cluster_recommendations(td_dir: &std::path::Path) -> Vec<crate::models::AuditRecommendation> {
+pub(crate) fn compute_cluster_recommendations(
+    td_dir: &std::path::Path,
+) -> Vec<crate::models::AuditRecommendation> {
     use std::collections::HashMap;
     let mut counts: HashMap<&'static str, u32> = HashMap::new();
-    let Ok(entries) = std::fs::read_dir(td_dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(td_dir) else {
+        return Vec::new();
+    };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
         if !name.ends_with(".md")
             || name.starts_with('_')
             || matches!(name, "README.md" | "TEMPLATE.md" | "_template.md")
@@ -2576,7 +2690,11 @@ pub(crate) fn compute_cluster_recommendations(td_dir: &std::path::Path) -> Vec<c
         .collect();
     // Stable order: largest cluster first so the UI surfaces the most
     // impactful recommendation at the top of the card.
-    recs.sort_by(|a, b| b.cluster_size.cmp(&a.cluster_size).then_with(|| a.kind.cmp(&b.kind)));
+    recs.sort_by(|a, b| {
+        b.cluster_size
+            .cmp(&a.cluster_size)
+            .then_with(|| a.kind.cmp(&b.kind))
+    });
     recs
 }
 
@@ -2600,9 +2718,16 @@ mod drop_guard_tests {
                     rusqlite::params![now],
                 )?;
                 crate::db::audit_runs::insert_running(
-                    conn, "r-drop", "p1", "Full", "ClaudeCode", chrono::Utc::now(),
+                    conn,
+                    "r-drop",
+                    "p1",
+                    "Full",
+                    "ClaudeCode",
+                    chrono::Utc::now(),
                 )
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         }
         let tracker = std::sync::Arc::new(std::sync::Mutex::new(crate::AuditTracker::default()));
         if let Ok(mut t) = tracker.lock() {
@@ -2610,21 +2735,38 @@ mod drop_guard_tests {
         }
 
         {
-            let _guard = AuditDropGuard::new(db.clone(), tracker.clone(), Some("r-drop".into()), "p1".into());
+            let _guard = AuditDropGuard::new(
+                db.clone(),
+                tracker.clone(),
+                Some("r-drop".into()),
+                "p1".into(),
+            );
             // dropped ARMED — simulates the generator being cancelled
         }
         let rows = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
-                let rows = db.with_conn(|conn| crate::db::audit_runs::list_recent(conn, "p1", 1)).await.unwrap();
+                let rows = db
+                    .with_conn(|conn| crate::db::audit_runs::list_recent(conn, "p1", 1))
+                    .await
+                    .unwrap();
                 if rows.first().map(|r| r.status.as_str()) == Some("Interrupted") {
                     break rows;
                 }
                 tokio::task::yield_now().await;
             }
-        }).await.expect("drop-guard finalize timed out");
+        })
+        .await
+        .expect("drop-guard finalize timed out");
         assert_eq!(rows[0].status, "Interrupted");
-        assert!(rows[0].report_path.as_deref().unwrap_or("").contains("sse consumer dropped"));
-        assert!(tracker.lock().unwrap().progress.is_empty(), "tracker entry must be cleared");
+        assert!(rows[0]
+            .report_path
+            .as_deref()
+            .unwrap_or("")
+            .contains("sse consumer dropped"));
+        assert!(
+            tracker.lock().unwrap().progress.is_empty(),
+            "tracker entry must be cleared"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2640,18 +2782,36 @@ mod drop_guard_tests {
                     rusqlite::params![now],
                 )?;
                 crate::db::audit_runs::insert_running(
-                    conn, "r-ok", "p1", "Full", "ClaudeCode", chrono::Utc::now(),
+                    conn,
+                    "r-ok",
+                    "p1",
+                    "Full",
+                    "ClaudeCode",
+                    chrono::Utc::now(),
                 )
-            }).await.unwrap();
+            })
+            .await
+            .unwrap();
         }
         let tracker = std::sync::Arc::new(std::sync::Mutex::new(crate::AuditTracker::default()));
         {
-            let mut guard = AuditDropGuard::new(db.clone(), tracker.clone(), Some("r-ok".into()), "p1".into());
+            let mut guard = AuditDropGuard::new(
+                db.clone(),
+                tracker.clone(),
+                Some("r-ok".into()),
+                "p1".into(),
+            );
             guard.disarm();
         }
         // No async work is spawned when the guard is disarmed; no waiting needed.
-        let rows = db.with_conn(|conn| crate::db::audit_runs::list_recent(conn, "p1", 1)).await.unwrap();
-        assert_eq!(rows[0].status, "Running", "a disarmed guard must not finalize anything");
+        let rows = db
+            .with_conn(|conn| crate::db::audit_runs::list_recent(conn, "p1", 1))
+            .await
+            .unwrap();
+        assert_eq!(
+            rows[0].status, "Running",
+            "a disarmed guard must not finalize anything"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2667,8 +2827,10 @@ mod drop_guard_tests {
             guard.hold_lease();
             guard.disarm(); // normal ending
         }
-        assert!(!tracker.lock().unwrap().leased.contains("p1"),
-            "lease must be released on drop after a normal (disarmed) end");
+        assert!(
+            !tracker.lock().unwrap().leased.contains("p1"),
+            "lease must be released on drop after a normal (disarmed) end"
+        );
         // And the project is immediately re-acquirable.
         assert!(tracker.lock().unwrap().try_acquire_lease("p1"));
     }
@@ -2684,8 +2846,10 @@ mod drop_guard_tests {
             let mut guard = AuditDropGuard::new(db.clone(), tracker.clone(), None, "p1".into());
             guard.disarm(); // never called hold_lease
         }
-        assert!(tracker.lock().unwrap().leased.contains("p1"),
-            "a guard that doesn't own the lease must not release it");
+        assert!(
+            tracker.lock().unwrap().leased.contains("p1"),
+            "a guard that doesn't own the lease must not release it"
+        );
     }
 }
 
@@ -2716,14 +2880,24 @@ mod finalization_decision_tests {
             tx.commit()?;
             Ok(())
         }).await;
-        assert!(outcome.is_err(), "complete on a missing row must fail the tx");
-        let orphan = db.with_conn(|conn| {
-            Ok(conn.query_row(
-                "SELECT COUNT(*) FROM discussions WHERE id = 'd-atomic'",
-                [], |r| r.get::<_, i64>(0),
-            )?)
-        }).await.unwrap();
-        assert_eq!(orphan, 0, "the discussion must roll back with the failed terminal write");
+        assert!(
+            outcome.is_err(),
+            "complete on a missing row must fail the tx"
+        );
+        let orphan = db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM discussions WHERE id = 'd-atomic'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            orphan, 0,
+            "the discussion must roll back with the failed terminal write"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2755,12 +2929,16 @@ mod finalization_decision_tests {
             tx.commit()?;
             Ok(())
         }).await.unwrap();
-        let run = db.with_conn(|conn| {
-            Ok(crate::db::audit_runs::get_by_id(conn, "run-tx")?.unwrap())
-        }).await.unwrap();
+        let run = db
+            .with_conn(|conn| Ok(crate::db::audit_runs::get_by_id(conn, "run-tx")?.unwrap()))
+            .await
+            .unwrap();
         assert_eq!(run.status, "Completed");
-        assert_eq!(run.validation_discussion_id.as_deref(), Some("d-tx"),
-            "the durable link must land in the same commit as Completed");
+        assert_eq!(
+            run.validation_discussion_id.as_deref(),
+            Some("d-tx"),
+            "the durable link must land in the same commit as Completed"
+        );
     }
 
     #[test]
@@ -2769,12 +2947,21 @@ mod finalization_decision_tests {
         // foundation-doc checksums (false-freshness). Only Full does.
         assert!(should_write_full_baseline(AuditKind::Full));
         for k in [
-            AuditKind::Security, AuditKind::Docker, AuditKind::Performance,
-            AuditKind::Accessibility, AuditKind::Rgaa, AuditKind::Database,
-            AuditKind::ApiDesign, AuditKind::CodeQuality, AuditKind::Drift,
+            AuditKind::Security,
+            AuditKind::Docker,
+            AuditKind::Performance,
+            AuditKind::Accessibility,
+            AuditKind::Rgaa,
+            AuditKind::Database,
+            AuditKind::ApiDesign,
+            AuditKind::CodeQuality,
+            AuditKind::Drift,
             AuditKind::Custom,
         ] {
-            assert!(!should_write_full_baseline(k), "{k:?} must not touch the Full baseline");
+            assert!(
+                !should_write_full_baseline(k),
+                "{k:?} must not touch the Full baseline"
+            );
         }
     }
 }
@@ -2811,8 +2998,10 @@ mod cancel_ack_tests {
         tracker.lock().unwrap().cancelled.insert("p1".into());
         let acked = wait_for_cancel_ack(&tracker, "p1", Duration::from_millis(150)).await;
         assert!(!acked, "must time out when nothing acknowledges");
-        assert!(tracker.lock().unwrap().cancelled.contains("p1"),
-            "wait must not remove the flag itself — the caller refuses, never cleans up");
+        assert!(
+            tracker.lock().unwrap().cancelled.contains("p1"),
+            "wait must not remove the flag itself — the caller refuses, never cleans up"
+        );
     }
 }
 
@@ -2826,16 +3015,23 @@ mod resume_resolution_tests {
             "id": "r1", "project_id": project_id, "kind": kind,
             "agent_type": "ClaudeCode", "started_at": "2026-07-20T00:00:00Z",
             "status": status, "last_completed_step": step,
-        })).unwrap()
+        }))
+        .unwrap()
     }
 
     #[test]
     fn interrupted_row_yields_its_own_kind_and_checkpoint() {
         // #1/#3 — kind + checkpoint come from the row, never the client.
         let r = run("Full", "Interrupted", "p1", 12);
-        assert_eq!(resolve_resume_row("r1", Some(&r), "p1"), Ok((AuditKind::Full, 12)));
+        assert_eq!(
+            resolve_resume_row("r1", Some(&r), "p1"),
+            Ok((AuditKind::Full, 12))
+        );
         let r = run("Security", "Interrupted", "p1", 0);
-        assert_eq!(resolve_resume_row("r1", Some(&r), "p1"), Ok((AuditKind::Security, 0)));
+        assert_eq!(
+            resolve_resume_row("r1", Some(&r), "p1"),
+            Ok((AuditKind::Security, 0))
+        );
     }
 
     #[test]
@@ -2891,10 +3087,22 @@ mod cluster_tests {
 
     #[test]
     fn classify_falls_back_to_slug_when_no_category_line() {
-        assert_eq!(classify_td_cluster("TD-20260512-docker-no-user.md", ""), Some("Docker"));
-        assert_eq!(classify_td_cluster("TD-20260512-cors-wildcard.md", ""), Some("Security"));
-        assert_eq!(classify_td_cluster("TD-20260512-n-plus-one-orders.md", ""), Some("Performance"));
-        assert_eq!(classify_td_cluster("TD-20260512-missing-alt-attr.md", ""), Some("Accessibility"));
+        assert_eq!(
+            classify_td_cluster("TD-20260512-docker-no-user.md", ""),
+            Some("Docker")
+        );
+        assert_eq!(
+            classify_td_cluster("TD-20260512-cors-wildcard.md", ""),
+            Some("Security")
+        );
+        assert_eq!(
+            classify_td_cluster("TD-20260512-n-plus-one-orders.md", ""),
+            Some("Performance")
+        );
+        assert_eq!(
+            classify_td_cluster("TD-20260512-missing-alt-attr.md", ""),
+            Some("Accessibility")
+        );
     }
 
     #[test]
@@ -2932,7 +3140,10 @@ mod cluster_tests {
     #[test]
     fn classify_returns_none_for_unmatched() {
         assert_eq!(classify_td_cluster("TD-20260512-misc-bug.md", ""), None);
-        assert_eq!(classify_td_cluster("TD-20260512-spelling-mistake.md", ""), None);
+        assert_eq!(
+            classify_td_cluster("TD-20260512-spelling-mistake.md", ""),
+            None
+        );
     }
 
     #[test]
@@ -3093,7 +3304,8 @@ mod cluster_tests {
         fs::write(
             project.join("CLAUDE.md"),
             "# My personal Claude context\nHand-written rules, do not delete",
-        ).unwrap();
+        )
+        .unwrap();
         fs::write(project.join("AGENTS.md"), "# Vendor-neutral agent context").unwrap();
         fs::write(project.join(".cursorrules"), "personal cursor config").unwrap();
         fs::write(project.join(".windsurfrules"), "windsurf config").unwrap();
@@ -3103,7 +3315,13 @@ mod cluster_tests {
         cleanup_audit_files(project).expect("cleanup succeeded on empty project");
 
         // Every root file MUST still exist. Failure = data loss.
-        for filename in ["CLAUDE.md", "AGENTS.md", ".cursorrules", ".windsurfrules", ".clinerules"] {
+        for filename in [
+            "CLAUDE.md",
+            "AGENTS.md",
+            ".cursorrules",
+            ".windsurfrules",
+            ".clinerules",
+        ] {
             let file = project.join(filename);
             assert!(
                 file.exists(),
@@ -3155,7 +3373,10 @@ mod cluster_tests {
 
         cleanup_audit_files(project).unwrap();
 
-        assert!(!project.join("docs").exists(), "Empty docs/ should be removed on cancel");
+        assert!(
+            !project.join("docs").exists(),
+            "Empty docs/ should be removed on cancel"
+        );
     }
 
     #[test]
@@ -3202,14 +3423,21 @@ mod cluster_tests {
     fn multiple_clusters_sorted_by_size_descending() {
         let dir = tempdir().unwrap();
         // 5 security, 3 docker, 1 perf
-        for i in 0..5 { fs::write(dir.path().join(format!("TD-20260512-jwt-{i}.md")), "x").unwrap(); }
-        for i in 0..3 { fs::write(dir.path().join(format!("TD-20260512-docker-{i}.md")), "x").unwrap(); }
+        for i in 0..5 {
+            fs::write(dir.path().join(format!("TD-20260512-jwt-{i}.md")), "x").unwrap();
+        }
+        for i in 0..3 {
+            fs::write(dir.path().join(format!("TD-20260512-docker-{i}.md")), "x").unwrap();
+        }
         fs::write(dir.path().join("TD-20260512-perf-single.md"), "x").unwrap();
 
         let recs = compute_cluster_recommendations(dir.path());
         let kinds: Vec<&str> = recs.iter().map(|r| r.kind.as_str()).collect();
-        assert_eq!(kinds, vec!["Security", "Docker"],
-            "perf cluster of 1 is below threshold; security (5) should outrank docker (3)");
+        assert_eq!(
+            kinds,
+            vec!["Security", "Docker"],
+            "perf cluster of 1 is below threshold; security (5) should outrank docker (3)"
+        );
     }
 
     #[test]
@@ -3220,8 +3448,10 @@ mod cluster_tests {
         fs::write(dir.path().join("TEMPLATE.md"), "x").unwrap();
         fs::write(dir.path().join("TD-20260512-docker-1.md"), "x").unwrap();
         let recs = compute_cluster_recommendations(dir.path());
-        assert!(recs.is_empty(),
-            "only 1 real docker TD after filter, below threshold");
+        assert!(
+            recs.is_empty(),
+            "only 1 real docker TD after filter, below threshold"
+        );
     }
 
     // ── Extra coverage on category-line + slug classification ──────────
@@ -3266,8 +3496,11 @@ mod cluster_tests {
             "TD-20260528-missing-fk-cascade.md",
             "TD-20260528-foreign-key-stale.md",
         ] {
-            assert_eq!(classify_td_cluster(slug, ""), Some("Database"),
-                "slug {slug} should be Database");
+            assert_eq!(
+                classify_td_cluster(slug, ""),
+                Some("Database"),
+                "slug {slug} should be Database"
+            );
         }
     }
 
@@ -3280,8 +3513,11 @@ mod cluster_tests {
             "TD-X-rest-handler-untyped.md",
             "TD-X-pagination-leak.md",
         ] {
-            assert_eq!(classify_td_cluster(slug, ""), Some("ApiDesign"),
-                "slug {slug} should be ApiDesign");
+            assert_eq!(
+                classify_td_cluster(slug, ""),
+                Some("ApiDesign"),
+                "slug {slug} should be ApiDesign"
+            );
         }
     }
 
@@ -3304,8 +3540,11 @@ mod cluster_tests {
             "TD-X-hardcoded-key-prod.md",
             "TD-X-leaked-key-git.md",
         ] {
-            assert_eq!(classify_td_cluster(slug, ""), Some("Security"),
-                "slug {slug} should be Security");
+            assert_eq!(
+                classify_td_cluster(slug, ""),
+                Some("Security"),
+                "slug {slug} should be Security"
+            );
         }
     }
 
@@ -3319,8 +3558,11 @@ mod cluster_tests {
             "TD-X-slow-query-orders.md",
             "TD-X-memory-leak-loop.md",
         ] {
-            assert_eq!(classify_td_cluster(slug, ""), Some("Performance"),
-                "slug {slug} should be Performance");
+            assert_eq!(
+                classify_td_cluster(slug, ""),
+                Some("Performance"),
+                "slug {slug} should be Performance"
+            );
         }
     }
 
@@ -3334,8 +3576,11 @@ mod cluster_tests {
             "TD-X-missing-alt.md",
             "TD-X-wcag-violation.md",
         ] {
-            assert_eq!(classify_td_cluster(slug, ""), Some("Accessibility"),
-                "slug {slug} should be Accessibility");
+            assert_eq!(
+                classify_td_cluster(slug, ""),
+                Some("Accessibility"),
+                "slug {slug} should be Accessibility"
+            );
         }
     }
 
@@ -3343,7 +3588,10 @@ mod cluster_tests {
     fn classify_explicit_category_overrides_slug() {
         // Slug says docker but explicit Category says security → security wins.
         let body = "- **Category**: security\n";
-        assert_eq!(classify_td_cluster("TD-20260528-docker-image-no-scan.md", body), Some("Security"));
+        assert_eq!(
+            classify_td_cluster("TD-20260528-docker-image-no-scan.md", body),
+            Some("Security")
+        );
     }
 
     #[test]
@@ -3360,7 +3608,10 @@ mod cluster_tests {
             fs::write(dir.path().join(format!("_internal-{i}.md")), "").unwrap();
         }
         let recs = compute_cluster_recommendations(dir.path());
-        assert!(recs.is_empty(), "underscore-prefixed files must all be skipped");
+        assert!(
+            recs.is_empty(),
+            "underscore-prefixed files must all be skipped"
+        );
     }
 
     #[test]
@@ -3423,30 +3674,20 @@ mod severity_tests {
         let tmp = std::env::temp_dir().join("kronn-test-sev-count");
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        std::fs::write(
-            tmp.join("TD-001.md"),
-            "# X\n- **Severity**: Critical\n",
-        ).unwrap();
-        std::fs::write(
-            tmp.join("TD-002.md"),
-            "# Y\n- **Severity**: High\n",
-        ).unwrap();
+        std::fs::write(tmp.join("TD-001.md"), "# X\n- **Severity**: Critical\n").unwrap();
+        std::fs::write(tmp.join("TD-002.md"), "# Y\n- **Severity**: High\n").unwrap();
         std::fs::write(
             tmp.join("TD-003.md"),
             "# Z\n- **Severity**: high\n", // lowercase still counts
-        ).unwrap();
-        std::fs::write(
-            tmp.join("TD-004.md"),
-            "# W\n- **Severity**:    Medium\n",
-        ).unwrap();
-        std::fs::write(
-            tmp.join("TD-005.md"),
-            "# V\n- **Severity**: Low\n",
-        ).unwrap();
+        )
+        .unwrap();
+        std::fs::write(tmp.join("TD-004.md"), "# W\n- **Severity**:    Medium\n").unwrap();
+        std::fs::write(tmp.join("TD-005.md"), "# V\n- **Severity**: Low\n").unwrap();
         std::fs::write(
             tmp.join("TD-bad.md"),
             "# Bad\n- **Severity**: Severe\n", // unknown — must NOT count
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(tmp.join("README.md"), "scaffolding").unwrap();
         std::fs::write(tmp.join("_reconciliation-2026-01-01.md"), "skip me").unwrap();
 
@@ -3478,9 +3719,24 @@ mod severity_tests {
 
         // Pre-audit snapshot: 3 TDs (A, B, C).
         let snapshot = vec![
-            TdSnapshot { path: PathBuf::from("/x/TD-A.md"), id: "TD-A".into(), content_hash: "h".into(), mtime: chrono::Utc::now() },
-            TdSnapshot { path: PathBuf::from("/x/TD-B.md"), id: "TD-B".into(), content_hash: "h".into(), mtime: chrono::Utc::now() },
-            TdSnapshot { path: PathBuf::from("/x/TD-C.md"), id: "TD-C".into(), content_hash: "h".into(), mtime: chrono::Utc::now() },
+            TdSnapshot {
+                path: PathBuf::from("/x/TD-A.md"),
+                id: "TD-A".into(),
+                content_hash: "h".into(),
+                mtime: chrono::Utc::now(),
+            },
+            TdSnapshot {
+                path: PathBuf::from("/x/TD-B.md"),
+                id: "TD-B".into(),
+                content_hash: "h".into(),
+                mtime: chrono::Utc::now(),
+            },
+            TdSnapshot {
+                path: PathBuf::from("/x/TD-C.md"),
+                id: "TD-C".into(),
+                content_hash: "h".into(),
+                mtime: chrono::Utc::now(),
+            },
         ];
         // Post-audit state: A is gone (resolved), B is kept (carried),
         // C is kept (carried), D is brand new (new), E too (new).

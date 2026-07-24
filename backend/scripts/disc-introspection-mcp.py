@@ -29,9 +29,11 @@ agent CLIs all run with system Python by virtue of vibe-runner.py
 already requiring it.
 """
 
+import contextlib
 import hashlib
 import json
 import os
+import secrets
 import subprocess
 import sys
 import threading
@@ -2185,15 +2187,84 @@ def _cli_ancestor_identity():
     return outermost
 
 
-def _identity_key_from(ancestor):
+def _platform_session_identity():
+    """Return the strongest Claude-provided session scope available.
+
+    On desktop terminals Claude's foreground process and daemon ``bg-spare``
+    inherit the same terminal id and project directory even though they have
+    different process trees *and* conversation UUIDs.  That pair is the right
+    continuity boundary: it survives ``/clear`` and daemon dispatch, while a
+    second terminal/project remains isolated.  A tmux pane further scopes a
+    terminal id shared by sibling panes.
+
+    When no complete terminal scope is available, Claude Code's logical
+    ``CLAUDE_CODE_SESSION_ID`` is still stronger than a daemon PID.  Treat all
+    values as best-effort platform hints and fall back to the process tree if
+    Claude removes or changes them.
+    """
+    # Environment variables are inherited.  A different CLI launched from a
+    # Claude shell must not accidentally reuse Claude's binding credential.
+    client_agent = _infer_agent_type_from_client_name(_CLIENT_INFO.get("name"))
+    if client_agent == "Unknown":
+        client_agent = _infer_agent_type_from_client_name(_parent_process_cmdline())
+    if client_agent != "ClaudeCode":
+        return None
+
+    def safe_part(name, max_length):
+        value = os.environ.get(name)
+        if not value or len(value) > max_length or value.strip() != value:
+            return None
+        if not value.isprintable():
+            return None
+        return value
+
+    project = safe_part("CLAUDE_PROJECT_DIR", 4096)
+    terminal_kind = None
+    terminal_id = None
+    for candidate in ("TERM_SESSION_ID", "WT_SESSION"):
+        value = safe_part(candidate, 512)
+        if value:
+            terminal_kind, terminal_id = candidate, value
+            break
+    if terminal_id and project:
+        pane = safe_part("TMUX_PANE", 128) or ""
+        return ("claude-terminal", terminal_kind, terminal_id, pane, project)
+
+    raw = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if not raw:
+        return None
+    try:
+        canonical = str(uuid.UUID(raw))
+    except (AttributeError, ValueError):
+        return None
+    if raw.lower() != canonical:
+        return None
+    return ("claude-session", canonical)
+
+
+def _binding_identity():
+    """Best available identity for this logical CLI session.
+
+    Prefer a platform session id because daemon/spare process topology is not
+    a logical-session boundary.  Other clients retain the proven outermost-CLI
+    fallback, so existing Codex and generic CLI binding keys do not rotate.
+    """
+    return _platform_session_identity() or _cli_ancestor_identity()
+
+
+def _identity_key_from(identity):
     """Hash a stable CLI identity into a short filesystem-safe binding key.
     `None` in → `None` out (fail-closed: no durable identity ⇒ no persisted
     resume). Pure (no I/O) so the stable/distinct invariants are unit-testable:
-    a given ancestor always maps to the same key, distinct ancestors to
-    distinct keys."""
-    if ancestor is None:
+    a given identity always maps to the same key, distinct identities to
+    distinct keys.  Preserve the historical process-key encoding so clients
+    without a platform session id keep finding their existing binding file."""
+    if identity is None:
         return None
-    raw = f"pid:{ancestor[0]}:{ancestor[1]}"
+    if identity[0] in ("claude-terminal", "claude-session"):
+        raw = json.dumps(identity, separators=(",", ":"), ensure_ascii=False)
+    else:
+        raw = f"pid:{identity[0]}:{identity[1]}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
@@ -2309,19 +2380,20 @@ def _set_current_disc_id(disc_id):
 # in-memory `_CURRENT_DISC_ID` AND rotating the fallback session_id — the
 # human then had to paste a fresh kr-join token every time. Instead, at join
 # we stash `{disc_id, resume_token}` in a 0600 file keyed by the STABLE CLI
-# identity (`_cli_ancestor_identity`); on the next tool call after a reload,
+# identity (`_binding_identity`); on the next tool call after a reload,
 # `_disc_id()` re-attaches to the same server row via `/peer-resume` — no
 # token, and the backend rebinds the row in place (no ghost participant).
 # The resume_token is a CREDENTIAL: 0600, never logged, never shown to the model.
 _BINDING_DIR = os.path.expanduser("~/.config/kronn")
 _BINDING_PATH_CACHE = {"computed": False, "path": None}
+_BINDING_THREAD_LOCK = threading.Lock()
 
 
 def _binding_path():
     """Absolute path of this session's binding file, or `None` when no durable
     CLI identity resolved (fail-closed — persisted resume is then disabled)."""
     if not _BINDING_PATH_CACHE["computed"]:
-        key = _identity_key_from(_cli_ancestor_identity())
+        key = _identity_key_from(_binding_identity())
         _BINDING_PATH_CACHE["path"] = (
             os.path.join(_BINDING_DIR, f"disc-binding-{key}.json") if key else None
         )
@@ -2329,15 +2401,21 @@ def _binding_path():
     return _BINDING_PATH_CACHE["path"]
 
 
-def _write_binding(disc_id, resume_token):
+def _write_binding(
+    disc_id,
+    resume_token,
+    agent_type=None,
+    pending_resume_token=None,
+):
     """Persist the reload credential atomically, mode 0600. No-op when there is
-    no durable identity (fail-closed). Best-effort otherwise: a failure just
-    means the next reload needs a manual disc_join."""
+    no durable identity (fail-closed). `pending_resume_token` is written before
+    the server mutates its hash, so a lost response or failed promotion can
+    replay the exact same rotation. Returns whether the state reached disk."""
     if not disc_id or not resume_token:
-        return
+        return False
     path = _binding_path()
     if not path:
-        return
+        return False
     import tempfile
     try:
         os.makedirs(_BINDING_DIR, exist_ok=True)
@@ -2348,17 +2426,113 @@ def _write_binding(disc_id, resume_token):
         fd, tmp = tempfile.mkstemp(prefix=".disc-binding-", suffix=".tmp", dir=_BINDING_DIR)
         try:
             with os.fdopen(fd, "w") as f:
-                json.dump({"disc_id": disc_id, "resume_token": resume_token}, f)
+                state = {"disc_id": disc_id, "resume_token": resume_token}
+                if agent_type:
+                    state["agent_type"] = agent_type
+                if pending_resume_token:
+                    state["pending_resume_token"] = pending_resume_token
+                json.dump(state, f)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, path)  # atomic; renames over any symlink at `path`
+            # File fsync persists bytes; directory fsync persists the rename.
+            # Windows does not support opening directories this way, while its
+            # replace durability is handled by the platform API.
+            if os.name != "nt":
+                dir_fd = os.open(_BINDING_DIR, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
         except Exception:
             try:
                 os.unlink(tmp)
             except OSError:
                 pass
             raise
+        return True
     except Exception as e:
         # Never surface the token in the error; just note we couldn't persist.
         print(f"kronn-internal: could not persist resume binding ({e})", file=sys.stderr)
+        return False
+
+
+def _open_binding_lock():
+    """Open and exclusively lock a per-binding sidecar lock file.
+
+    Returns `(fd, platform)` or `None`. Thread + OS locks cover concurrent tool
+    calls in this process and overlapping sidecars after a reload. The lock is
+    held across prepare → HTTP CAS → promotion, preventing two divergent
+    pending successors from overwriting one another.
+    """
+    import stat as _stat
+    path = _binding_path()
+    if not path:
+        return None
+    lock_path = f"{path}.lock"
+    try:
+        os.makedirs(_BINDING_DIR, exist_ok=True)
+        fd = os.open(
+            lock_path,
+            os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        lst = os.lstat(lock_path)
+        st = os.fstat(fd)
+        if not _stat.S_ISREG(lst.st_mode) or not _stat.S_ISREG(st.st_mode):
+            raise RuntimeError("binding lock is not a regular file")
+        if (lst.st_dev, lst.st_ino) != (st.st_dev, st.st_ino):
+            raise RuntimeError("binding lock path changed while opening")
+        if hasattr(os, "getuid") and st.st_uid != os.getuid():
+            raise RuntimeError("binding lock is not owned by this user")
+        if st.st_mode & 0o077:
+            raise RuntimeError("binding lock is group/world accessible")
+
+        if os.name == "nt":
+            import msvcrt
+            if st.st_size == 0:
+                os.write(fd, b"\0")
+                os.fsync(fd)
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            return fd, "windows"
+
+        import fcntl
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        return fd, "unix"
+    except Exception as e:
+        try:
+            os.close(fd)
+        except (OSError, UnboundLocalError):
+            pass
+        print(f"kronn-internal: could not lock resume binding ({e})", file=sys.stderr)
+        return None
+
+
+def _close_binding_lock(lock):
+    if not lock:
+        return
+    fd, platform = lock
+    try:
+        if platform == "windows":
+            import msvcrt
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def _binding_transaction_lock():
+    with _BINDING_THREAD_LOCK:
+        lock = _open_binding_lock()
+        try:
+            yield lock is not None
+        finally:
+            _close_binding_lock(lock)
 
 
 def _read_binding():
@@ -2427,28 +2601,51 @@ def _attempt_resume():
     credential, or backend unreachable — in which case the agent falls back
     to a manual disc_join). The binding is kept on failure: a transient
     backend outage (e.g. a rebuild) must not cost the reload capability."""
-    b = _read_binding()
-    if not b:
-        return None
-    body = {
-        "agent_type": _agent_type_for_session(),
-        "session_id": _session_id_for_caller(),
-        "resume_token": b["resume_token"],
-    }
-    try:
-        result = _unwrap(_http("POST", "/api/discussions/peer-resume", body))
-    except Exception:
-        return None
-    if not isinstance(result, dict):
-        return None
-    disc_id = result.get("disc_id")
-    new_token = result.get("resume_token")
-    if not disc_id:
-        return None
-    _set_current_disc_id(disc_id)
-    if new_token:
-        _write_binding(disc_id, new_token)
-    return disc_id
+    with _binding_transaction_lock() as locked:
+        if not locked:
+            return None
+        b = _read_binding()
+        if not b:
+            return None
+        disc_id_before = b["disc_id"]
+        old_token = b["resume_token"]
+        stored_agent_type = b.get("agent_type")
+        agent_type = stored_agent_type or _agent_type_for_session()
+        next_token = b.get("pending_resume_token")
+        if not next_token:
+            next_token = f"kr-resume-{secrets.token_hex(16)}"
+            if not _write_binding(
+                disc_id_before,
+                old_token,
+                # Old binding files have no agent_type. Do not fossilize an
+                # unverified reload-time inference: persist it only after the
+                # backend accepted it, so a transient `Unknown` can self-heal.
+                agent_type=stored_agent_type,
+                pending_resume_token=next_token,
+            ):
+                return None  # never mutate the server before pending is durable
+
+        body = {
+            "agent_type": agent_type,
+            "session_id": _session_id_for_caller(),
+            "resume_token": old_token,
+            "next_resume_token": next_token,
+        }
+        try:
+            result = _unwrap(_http("POST", "/api/discussions/peer-resume", body))
+        except Exception:
+            return None  # pending stays durable for the exact retry
+        if not isinstance(result, dict):
+            return None
+        disc_id = result.get("disc_id")
+        acknowledged_token = result.get("resume_token")
+        if disc_id != disc_id_before or acknowledged_token != next_token:
+            return None  # fail closed on a mismatched ack; keep pending
+        _set_current_disc_id(disc_id)
+        # Promotion failure is recoverable: the pending file still contains
+        # `(old,next)` and the backend accepts that exact replay.
+        _write_binding(disc_id, next_token, agent_type=agent_type)
+        return disc_id
 
 
 def _disc_id():
@@ -2846,7 +3043,7 @@ def call_disc_join(args):
         # re-attach to THIS disc via `/peer-resume` without a fresh token.
         resume_token = result.get("resume_token") if isinstance(result, dict) else None
         if resume_token:
-            _write_binding(disc_id, resume_token)
+            _write_binding(disc_id, resume_token, agent_type=agent_type)
 
     # The resume credential is a secret persisted 0600 — it must NEVER reach
     # the model's context. Strip it from the value handed back to the agent.

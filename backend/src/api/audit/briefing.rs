@@ -22,9 +22,11 @@ pub async fn get_briefing(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Option<String>>> {
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::get_project_briefing_notes(conn, &id)
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project_briefing_notes(conn, &id))
+        .await
+    {
         Ok(notes) => Json(ApiResponse::ok(notes)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
     }
@@ -38,9 +40,13 @@ pub async fn set_briefing(
     Json(req): Json<SetBriefingRequest>,
 ) -> Json<ApiResponse<bool>> {
     let notes = req.notes;
-    match state.db.with_conn(move |conn| {
-        crate::db::projects::update_project_briefing_notes(conn, &id, notes.as_deref())
-    }).await {
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, &id, notes.as_deref())
+        })
+        .await
+    {
         Ok(true) => Json(ApiResponse::ok(true)),
         Ok(false) => Json(ApiResponse::err("Project not found")),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -56,9 +62,12 @@ pub async fn start_briefing(
 ) -> Json<ApiResponse<StartBriefingResponse>> {
     // 1. Look up the project
     let pid = id.clone();
-    let project = state.db.with_conn(move |conn| {
-        crate::db::projects::get_project(conn, &pid)
-    }).await.ok().flatten();
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+        .ok()
+        .flatten();
 
     let Some(project) = project else {
         return Json(ApiResponse::err("Project not found"));
@@ -77,10 +86,8 @@ pub async fn start_briefing(
     //    finalizes. Without this guard the agent re-asks the 6 questions
     //    the user just answered (the original UX confusion).
     let project_path = crate::core::scanner::resolve_host_path(&project.path);
-    let prefilled = crate::api::projects::resolve_briefing_notes(
-        &project_path,
-        &project.briefing_notes,
-    );
+    let prefilled =
+        crate::api::projects::resolve_briefing_notes(&project_path, &project.briefing_notes);
     let briefing_prompt = build_briefing_prompt(&language, prefilled.as_deref());
 
     // 4. Create discussion
@@ -98,7 +105,12 @@ pub async fn start_briefing(
         timestamp: now,
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
     };
 
     let title = match language.as_str() {
@@ -116,12 +128,13 @@ pub async fn start_briefing(
         language: language.clone(),
         participants: vec![agent_type],
         messages: vec![initial_message.clone()],
-        message_count: 1, non_system_message_count: 1,
+        message_count: 1,
+        non_system_message_count: 1,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
         archived: false,
-            pinned: false,
+        pinned: false,
         workspace_mode: "Direct".into(),
         workspace_path: None,
         tier: crate::models::ModelTier::Default,
@@ -143,12 +156,19 @@ pub async fn start_briefing(
 
     let disc = discussion.clone();
     let msg = initial_message;
-    if let Err(e) = state.db.with_conn(move |conn| {
-        crate::db::discussions::insert_discussion(conn, &disc)?;
-        crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
-        Ok(())
-    }).await {
-        return Json(ApiResponse::err(format!("Failed to create discussion: {}", e)));
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_discussion(conn, &disc)?;
+            crate::db::discussions::insert_message(conn, &disc.id, &msg)?;
+            Ok(())
+        })
+        .await
+    {
+        return Json(ApiResponse::err(format!(
+            "Failed to create discussion: {}",
+            e
+        )));
     }
 
     Json(ApiResponse::ok(StartBriefingResponse { discussion_id }))
@@ -248,7 +268,9 @@ pub async fn save_briefing_form(
         let notes = body.clone();
         match state
             .db
-            .with_conn(move |conn| crate::db::projects::update_project_briefing_notes(conn, &id, Some(&notes)))
+            .with_conn(move |conn| {
+                crate::db::projects::update_project_briefing_notes(conn, &id, Some(&notes))
+            })
             .await
         {
             Ok(true) => return Json(ApiResponse::ok(true)),
@@ -258,12 +280,18 @@ pub async fn save_briefing_form(
     }
     let target = docs_dir.join("briefing.md");
     if let Err(e) = std::fs::write(&target, &body) {
-        return Json(ApiResponse::err(format!("Failed to write {}: {}", target.display(), e)));
+        return Json(ApiResponse::err(format!(
+            "Failed to write {}: {}",
+            target.display(),
+            e
+        )));
     }
     let notes = body.clone();
     match state
         .db
-        .with_conn(move |conn| crate::db::projects::update_project_briefing_notes(conn, &id, Some(&notes)))
+        .with_conn(move |conn| {
+            crate::db::projects::update_project_briefing_notes(conn, &id, Some(&notes))
+        })
         .await
     {
         Ok(true) => Json(ApiResponse::ok(true)),

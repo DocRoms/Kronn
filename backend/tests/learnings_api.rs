@@ -36,7 +36,11 @@ fn app_with(enabled: bool) -> Router {
     let mut cfg = kronn::core::config::default_config();
     cfg.server.auth_token = None;
     cfg.server.continual_learning_enabled = enabled;
-    let state = AppState::new_defaults(Arc::new(RwLock::new(cfg)), db, DEFAULT_MAX_CONCURRENT_AGENTS);
+    let state = AppState::new_defaults(
+        Arc::new(RwLock::new(cfg)),
+        db,
+        DEFAULT_MAX_CONCURRENT_AGENTS,
+    );
     build_router_with_auth(state, false)
 }
 
@@ -83,7 +87,11 @@ async fn propose_blocked_when_feature_off() {
     .await;
     assert_eq!(st, StatusCode::OK);
     assert_eq!(j["data"]["accepted"], false);
-    assert!(j["data"]["reason"].as_str().unwrap().to_lowercase().contains("désactivé"));
+    assert!(j["data"]["reason"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("désactivé"));
     // nothing captured
     let (_st, jc) = get(app, "/api/learnings/pending").await;
     assert_eq!(jc["data"]["count"], 0);
@@ -120,7 +128,11 @@ async fn propose_rejects_secret_in_claim() {
     )
     .await;
     assert_eq!(j["data"]["accepted"], false);
-    assert!(j["data"]["reason"].as_str().unwrap().to_lowercase().contains("secret"));
+    assert!(j["data"]["reason"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("secret"));
 }
 
 #[tokio::test]
@@ -165,7 +177,9 @@ async fn propose_warns_on_overgeneralization_but_still_accepts() {
     assert_eq!(j["data"]["accepted"], true);
     let warnings = j["data"]["warnings"].as_array().unwrap();
     assert!(
-        warnings.iter().any(|w| w.as_str().unwrap().contains("généralisation")),
+        warnings
+            .iter()
+            .any(|w| w.as_str().unwrap().contains("généralisation")),
         "expected over-generalization warning, got {warnings:?}"
     );
 }
@@ -198,12 +212,23 @@ async fn negative_learning_auto_refuses_after_three_rejects() {
     });
     for _ in 0..3 {
         let (_s, j) = post(app.clone(), "/api/learnings/propose", body.clone()).await;
-        assert_eq!(j["data"]["accepted"], true, "re-proposal after reject must be allowed: {j}");
+        assert_eq!(
+            j["data"]["accepted"], true,
+            "re-proposal after reject must be allowed: {j}"
+        );
         let id = j["data"]["learning"]["id"].as_str().unwrap().to_string();
-        let (_r, _jr) = post(app.clone(), &format!("/api/learnings/{id}/reject"), json!({})).await;
+        let (_r, _jr) = post(
+            app.clone(),
+            &format!("/api/learnings/{id}/reject"),
+            json!({}),
+        )
+        .await;
     }
     let (_s, j4) = post(app, "/api/learnings/propose", body).await;
-    assert_eq!(j4["data"]["accepted"], false, "4th must be auto-refused: {j4}");
+    assert_eq!(
+        j4["data"]["accepted"], false,
+        "4th must be auto-refused: {j4}"
+    );
     let reason = j4["data"]["reason"].as_str().unwrap().to_lowercase();
     assert!(
         reason.contains("rejeté") || reason.contains("auto-refus"),
@@ -226,11 +251,21 @@ async fn validate_refuses_preference_without_dated_user_evidence() {
         }),
     )
     .await;
-    assert_eq!(j["data"]["accepted"], true, "propose accepts (no date check at propose): {j}");
+    assert_eq!(
+        j["data"]["accepted"], true,
+        "propose accepts (no date check at propose): {j}"
+    );
     let id = j["data"]["learning"]["id"].as_str().unwrap().to_string();
     let (_s2, jv) = post(app, &format!("/api/learnings/{id}/validate"), json!({})).await;
-    assert_eq!(jv["success"], false, "undated preference must be refused at validate: {jv}");
-    assert!(jv["error"].as_str().unwrap().to_lowercase().contains("user"));
+    assert_eq!(
+        jv["success"], false,
+        "undated preference must be refused at validate: {jv}"
+    );
+    assert!(jv["error"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("user"));
 }
 
 #[tokio::test]
@@ -255,7 +290,10 @@ async fn validate_accepts_inference_with_single_human_validation() {
     assert_eq!(j["data"]["accepted"], true);
     let id = j["data"]["learning"]["id"].as_str().unwrap().to_string();
     let (_s2, jv) = post(app, &format!("/api/learnings/{id}/validate"), json!({})).await;
-    assert_eq!(jv["success"], true, "inference promotes on single validation in 0.9.0: {jv}");
+    assert_eq!(
+        jv["success"], true,
+        "inference promotes on single validation in 0.9.0: {jv}"
+    );
     assert_eq!(jv["data"]["status"], "promoted");
     std::env::remove_var("KRONN_USER_CONTEXT_DIR");
     std::fs::remove_dir_all(&tmp).ok();
@@ -279,8 +317,15 @@ async fn validate_refuses_fact_without_verified_evidence() {
     assert_eq!(j["data"]["accepted"], true, "propose only warns: {j}");
     let id = j["data"]["learning"]["id"].as_str().unwrap().to_string();
     let (_s2, jv) = post(app, &format!("/api/learnings/{id}/validate"), json!({})).await;
-    assert_eq!(jv["success"], false, "fact w/o verified evidence must be refused: {jv}");
-    assert!(jv["error"].as_str().unwrap().to_lowercase().contains("fact"));
+    assert_eq!(
+        jv["success"], false,
+        "fact w/o verified evidence must be refused: {jv}"
+    );
+    assert!(jv["error"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("fact"));
 }
 
 #[tokio::test]
@@ -302,12 +347,24 @@ async fn reject_after_promote_is_refused() {
     )
     .await;
     let id = j["data"]["learning"]["id"].as_str().unwrap().to_string();
-    let (_s2, jv) = post(app.clone(), &format!("/api/learnings/{id}/validate"), json!({})).await;
+    let (_s2, jv) = post(
+        app.clone(),
+        &format!("/api/learnings/{id}/validate"),
+        json!({}),
+    )
+    .await;
     assert_eq!(jv["data"]["status"], "promoted", "promoted first: {jv}");
     // now reject the promoted row → must be refused
     let (_s3, jr) = post(app, &format!("/api/learnings/{id}/reject"), json!({})).await;
-    assert_eq!(jr["success"], false, "reject-after-promote must be refused: {jr}");
-    assert!(jr["error"].as_str().unwrap().to_lowercase().contains("pending"));
+    assert_eq!(
+        jr["success"], false,
+        "reject-after-promote must be refused: {jr}"
+    );
+    assert!(jr["error"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("pending"));
     std::env::remove_var("KRONN_USER_CONTEXT_DIR");
     std::fs::remove_dir_all(&tmp).ok();
 }
@@ -327,10 +384,22 @@ async fn validate_refuses_non_pending() {
     )
     .await;
     let id = j["data"]["learning"]["id"].as_str().unwrap().to_string();
-    let (_s2, _jr) = post(app.clone(), &format!("/api/learnings/{id}/reject"), json!({})).await;
+    let (_s2, _jr) = post(
+        app.clone(),
+        &format!("/api/learnings/{id}/reject"),
+        json!({}),
+    )
+    .await;
     let (_s3, jv) = post(app, &format!("/api/learnings/{id}/validate"), json!({})).await;
-    assert_eq!(jv["success"], false, "validating a rejected row must fail: {jv}");
-    assert!(jv["error"].as_str().unwrap().to_lowercase().contains("pending"));
+    assert_eq!(
+        jv["success"], false,
+        "validating a rejected row must fail: {jv}"
+    );
+    assert!(jv["error"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("pending"));
 }
 
 #[tokio::test]

@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 use crate::models::McpTransport;
 
@@ -8,10 +8,14 @@ const MCP_OWNERSHIP_STATE: &str = ".kronn/mcp-managed.json";
 static MCP_PROJECT_CONFIG_SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_project_config_sync() -> std::sync::MutexGuard<'static, ()> {
-    MCP_PROJECT_CONFIG_SYNC_LOCK.lock().unwrap_or_else(|poisoned| {
-        tracing::error!("MCP project config sync lock was poisoned; recovering serialized access");
-        poisoned.into_inner()
-    })
+    MCP_PROJECT_CONFIG_SYNC_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| {
+            tracing::error!(
+                "MCP project config sync lock was poisoned; recovering serialized access"
+            );
+            poisoned.into_inner()
+        })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,7 +27,10 @@ struct McpOwnershipState {
 
 impl Default for McpOwnershipState {
     fn default() -> Self {
-        Self { version: 1, files: BTreeMap::new() }
+        Self {
+            version: 1,
+            files: BTreeMap::new(),
+        }
     }
 }
 
@@ -32,16 +39,28 @@ fn refuse_symlink(path: &Path, label: &str) -> Result<(), String> {
         .map(|meta| meta.file_type().is_symlink())
         .unwrap_or(false)
     {
-        return Err(format!("{label} {} is a symlink; refusing mutation", path.display()));
+        return Err(format!(
+            "{label} {} is a symlink; refusing mutation",
+            path.display()
+        ));
     }
     Ok(())
 }
 
-fn refuse_project_symlink_chain(project_path: &str, target: &Path, label: &str) -> Result<(), String> {
+fn refuse_project_symlink_chain(
+    project_path: &str,
+    target: &Path,
+    label: &str,
+) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
     let root = Path::new(&resolved);
-    let relative = target.strip_prefix(root)
-        .map_err(|_| format!("{label} {} escapes project root {}; refusing mutation", target.display(), root.display()))?;
+    let relative = target.strip_prefix(root).map_err(|_| {
+        format!(
+            "{label} {} escapes project root {}; refusing mutation",
+            target.display(),
+            root.display()
+        )
+    })?;
     let mut current = root.to_path_buf();
     for component in relative.components() {
         current.push(component);
@@ -55,8 +74,12 @@ fn ensure_safe_kronn_state_dir(project_path: &str) -> Result<PathBuf, String> {
     let root = Path::new(&resolved);
     let state_dir = root.join(".kronn");
     refuse_symlink(&state_dir, "Kronn state directory")?;
-    std::fs::create_dir_all(&state_dir)
-        .map_err(|e| format!("Failed to create Kronn state dir {}: {e}", state_dir.display()))?;
+    std::fs::create_dir_all(&state_dir).map_err(|e| {
+        format!(
+            "Failed to create Kronn state dir {}: {e}",
+            state_dir.display()
+        )
+    })?;
     Ok(state_dir)
 }
 
@@ -78,10 +101,16 @@ struct CodexMcpEntry {
     startup_timeout_sec: u32,
 }
 
-pub(crate) fn default_startup_timeout() -> u32 { 30 }
+pub(crate) fn default_startup_timeout() -> u32 {
+    30
+}
 
-fn default_true() -> bool { true }
-fn is_true(v: &bool) -> bool { *v }
+fn default_true() -> bool {
+    true
+}
+fn is_true(v: &bool) -> bool {
+    *v
+}
 
 // ─── Vibe config.toml format ─────────────────────────────────────────────────
 
@@ -203,13 +232,16 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
             return false;
         }
     };
-    entries.insert("kronn-internal".into(), CodexMcpEntry {
-        command: "python3".into(),
-        args: vec![script],
-        env: HashMap::new(),
-        enabled: true,
-        startup_timeout_sec: default_startup_timeout(),
-    });
+    entries.insert(
+        "kronn-internal".into(),
+        CodexMcpEntry {
+            command: "python3".into(),
+            args: vec![script],
+            env: HashMap::new(),
+            enabled: true,
+            startup_timeout_sec: default_startup_timeout(),
+        },
+    );
     true
 }
 
@@ -225,7 +257,9 @@ fn inject_kronn_internal_codex(entries: &mut HashMap<String, CodexMcpEntry>) -> 
 /// [`disc_introspection_mcp_path_for_shared_config`]); the caller then removes
 /// any stale files instead.
 pub(crate) fn write_kronn_internal_only(project_path: &str) -> Result<bool, String> {
-    let mut only_internal = McpJsonFile { mcp_servers: HashMap::new() };
+    let mut only_internal = McpJsonFile {
+        mcp_servers: HashMap::new(),
+    };
     if !inject_kronn_internal(&mut only_internal) {
         return Ok(false);
     }
@@ -268,8 +302,13 @@ fn backup_before_refusal(project_path: &str, file: &Path) -> Result<(), String> 
         return Ok(());
     }
     ensure_gitignore(project_path, ".kronn/");
-    std::fs::copy(file, &backup)
-        .map_err(|e| format!("Failed to back up {} to {}: {e}", file.display(), backup.display()))?;
+    std::fs::copy(file, &backup).map_err(|e| {
+        format!(
+            "Failed to back up {} to {}: {e}",
+            file.display(),
+            backup.display()
+        )
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -306,11 +345,18 @@ fn load_mcp_ownership(project_path: &str) -> Result<McpOwnershipState, String> {
         Ok(state) if state.version == 1 => Ok(state),
         Ok(state) => {
             backup_before_refusal(project_path, &path)?;
-            Err(format!("Unsupported MCP ownership state version {} in {}; refusing config mutation", state.version, path.display()))
+            Err(format!(
+                "Unsupported MCP ownership state version {} in {}; refusing config mutation",
+                state.version,
+                path.display()
+            ))
         }
         Err(e) => {
             backup_before_refusal(project_path, &path)?;
-            Err(format!("Invalid MCP ownership state {}: {e}; refusing config mutation", path.display()))
+            Err(format!(
+                "Invalid MCP ownership state {}: {e}; refusing config mutation",
+                path.display()
+            ))
         }
     }
 }
@@ -321,8 +367,12 @@ fn save_mcp_ownership(project_path: &str, state: &McpOwnershipState) -> Result<(
     refuse_project_symlink_chain(project_path, &path, "MCP ownership state")?;
     ensure_gitignore(project_path, ".kronn/");
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create MCP ownership dir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            format!(
+                "Failed to create MCP ownership dir {}: {e}",
+                parent.display()
+            )
+        })?;
     }
     let content = serde_json::to_string_pretty(state)
         .map_err(|e| format!("Failed to serialize MCP ownership state: {e}"))?;
@@ -350,11 +400,17 @@ fn merge_mcp_json_file(
             Ok(serde_json::Value::Object(object)) => object,
             Ok(_) => {
                 backup_before_refusal(project_path, file)?;
-                return Err(format!("Existing config {} is not a JSON object; refusing overwrite", file.display()));
+                return Err(format!(
+                    "Existing config {} is not a JSON object; refusing overwrite",
+                    file.display()
+                ));
             }
             Err(e) => {
                 backup_before_refusal(project_path, file)?;
-                return Err(format!("Invalid existing JSON config {}: {e}; refusing overwrite", file.display()));
+                return Err(format!(
+                    "Invalid existing JSON config {}: {e}; refusing overwrite",
+                    file.display()
+                ));
             }
         }
     } else {
@@ -367,10 +423,15 @@ fn merge_mcp_json_file(
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let serde_json::Value::Object(existing) = servers else {
         backup_before_refusal(project_path, file)?;
-        return Err(format!("Existing config {} has a non-object mcpServers field; refusing overwrite", file.display()));
+        return Err(format!(
+            "Existing config {} has a non-object mcpServers field; refusing overwrite",
+            file.display()
+        ));
     };
 
-    let desired: BTreeMap<String, serde_json::Value> = data.mcp_servers.iter()
+    let desired: BTreeMap<String, serde_json::Value> = data
+        .mcp_servers
+        .iter()
         .map(|(name, entry)| {
             serde_json::to_value(entry)
                 .map(|value| (name.clone(), value))
@@ -394,7 +455,8 @@ fn merge_mcp_json_file(
             Some(_) => {
                 tracing::warn!(
                     "MCP config collision in {} for '{}': preserving user-owned entry",
-                    file.display(), name
+                    file.display(),
+                    name
                 );
             }
             None => {
@@ -416,7 +478,11 @@ fn merge_mcp_json_file(
 
 /// Merge an MCP section into an arbitrary project-local JSON config. Existing
 /// top-level settings and colliding user-owned MCP entries are preserved.
-pub fn write_mcp_json_to_subpath(project_path: &str, subpath: &str, data: &McpJsonFile) -> Result<(), String> {
+pub fn write_mcp_json_to_subpath(
+    project_path: &str,
+    subpath: &str,
+    data: &McpJsonFile,
+) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
     let file = Path::new(&resolved).join(subpath);
     // Validate the complete chain before creating a missing nested parent.
@@ -482,12 +548,16 @@ fn write_atomic_temp(target: &Path, content: &[u8]) -> Result<PathBuf, String> {
 }
 
 fn commit_atomic_temp(tmp: &Path, target: &Path) -> Result<(), String> {
-    std::fs::rename(tmp, target)
-        .map_err(|e| {
-            // Clean up temp file on rename failure
-            let _ = std::fs::remove_file(tmp);
-            format!("Failed to rename {} → {}: {}", tmp.display(), target.display(), e)
-        })
+    std::fs::rename(tmp, target).map_err(|e| {
+        // Clean up temp file on rename failure
+        let _ = std::fs::remove_file(tmp);
+        format!(
+            "Failed to rename {} → {}: {}",
+            tmp.display(),
+            target.display(),
+            e
+        )
+    })
 }
 
 pub(crate) fn atomic_write(target: &Path, content: &str) -> Result<(), String> {
@@ -536,8 +606,12 @@ pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
     content: &str,
     observed: &[u8],
 ) -> Result<(), String> {
-    let metadata = std::fs::symlink_metadata(target)
-        .map_err(|e| format!("Failed to stat {} before atomic write: {e}", target.display()))?;
+    let metadata = std::fs::symlink_metadata(target).map_err(|e| {
+        format!(
+            "Failed to stat {} before atomic write: {e}",
+            target.display()
+        )
+    })?;
     if metadata.file_type().is_symlink() {
         return Err(format!(
             "{} is a symlink; refusing atomic permission-preserving write",
@@ -584,7 +658,9 @@ pub(crate) fn atomic_write_if_unchanged_preserving_permissions(
 /// for a first-time sync) — `None` means "no prior version to defend
 /// against", and `atomic_write_checked` will not abort on absent files.
 pub(crate) fn read_target_mtime(target: &Path) -> Option<std::time::SystemTime> {
-    std::fs::metadata(target).ok().and_then(|m| m.modified().ok())
+    std::fs::metadata(target)
+        .ok()
+        .and_then(|m| m.modified().ok())
 }
 
 /// Why an `atomic_write_checked` call failed.
@@ -665,11 +741,7 @@ pub(crate) trait HostMcpSync: Sync {
     ///
     /// Impls log their own warn / error lines for parsing / serialisation
     /// failures — the driver doesn't try to second-guess them.
-    fn prepare(
-        &self,
-        conn: &rusqlite::Connection,
-        secret: &str,
-    ) -> Option<HostSyncPlan>;
+    fn prepare(&self, conn: &rusqlite::Connection, secret: &str) -> Option<HostSyncPlan>;
 
     /// Hook to run after a successful atomic write (e.g. `chmod 0600`).
     /// Default: no-op.
@@ -685,11 +757,7 @@ pub(crate) trait HostMcpSync: Sync {
 /// The workflow-run gate (TD-host-sync-workflow-race) is handled at
 /// `sync_affected_projects` entry, OUT of this loop, so all four CLIs
 /// back off in lockstep.
-pub(crate) fn run_host_sync(
-    t: &dyn HostMcpSync,
-    conn: &rusqlite::Connection,
-    secret: &str,
-) {
+pub(crate) fn run_host_sync(t: &dyn HostMcpSync, conn: &rusqlite::Connection, secret: &str) {
     let label = t.label();
     let plan = match t.prepare(conn, secret) {
         Some(p) => p,
@@ -823,7 +891,10 @@ pub(crate) fn atomic_write_checked(
 /// Old stale entries (from renamed MCPs, deleted configs, etc.) are removed.
 /// Claude Code only loads MCPs that are BOTH in `.mcp.json` AND whitelisted,
 /// so the whitelist must be a superset of `.mcp.json` keys.
-pub(crate) fn sync_claude_enabled_servers(project_path: &str, mcp_servers: &HashMap<String, McpServerEntry>) {
+pub(crate) fn sync_claude_enabled_servers(
+    project_path: &str,
+    mcp_servers: &HashMap<String, McpServerEntry>,
+) {
     let resolved = resolve_host_path(project_path);
     let settings_dir = Path::new(&resolved).join(".claude");
     let settings_file = settings_dir.join("settings.local.json");
@@ -843,19 +914,28 @@ pub(crate) fn sync_claude_enabled_servers(project_path: &str, mcp_servers: &Hash
     };
 
     // Only act if enabledMcpjsonServers exists (don't create it if absent)
-    if settings.get("enabledMcpjsonServers").and_then(|v| v.as_array()).is_none() {
+    if settings
+        .get("enabledMcpjsonServers")
+        .and_then(|v| v.as_array())
+        .is_none()
+    {
         return;
     }
 
     // Build the new whitelist: exactly the keys from the current .mcp.json.
     // This removes stale entries from renamed/deleted MCPs and adds new ones.
-    let new_enabled: Vec<serde_json::Value> = mcp_servers.keys()
+    let new_enabled: Vec<serde_json::Value> = mcp_servers
+        .keys()
         .map(|k| serde_json::Value::String(k.clone()))
         .collect();
 
     let old_enabled: Vec<String> = settings["enabledMcpjsonServers"]
         .as_array()
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     settings["enabledMcpjsonServers"] = serde_json::Value::Array(new_enabled);
@@ -953,8 +1033,8 @@ pub fn write_general_mcp_json(
     // agent had no path to disc_meta / disc_get_message / disc_summarize.
 
     let servers = db::mcps::list_servers(conn).map_err(|e| e.to_string())?;
-    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s)).collect();
+    let server_map: HashMap<String, &crate::models::McpServer> =
+        servers.iter().map(|s| (s.id.clone(), s)).collect();
 
     let mut mcp_servers = HashMap::new();
     for config in &general_configs {
@@ -966,13 +1046,23 @@ pub fn write_general_mcp_json(
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
-                if !is_command_available(command) { continue; }
+                if !is_command_available(command) {
+                    continue;
+                }
                 let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
-                McpServerEntry { command: Some(command.clone()), args: Some(final_args), url: None, env }
+                McpServerEntry {
+                    command: Some(command.clone()),
+                    args: Some(final_args),
+                    url: None,
+                    env,
+                }
             }
-            McpTransport::Sse { url } | McpTransport::Streamable { url } => {
-                McpServerEntry { command: None, args: None, url: Some(url.clone()), env }
-            }
+            McpTransport::Sse { url } | McpTransport::Streamable { url } => McpServerEntry {
+                command: None,
+                args: None,
+                url: Some(url.clone()),
+                env,
+            },
             // API-only plugins never get written to .mcp.json — their
             // capability is surfaced to the agent via prompt injection in
             // `build_api_context_block` (see api_context.rs). Skip silently.
@@ -988,11 +1078,14 @@ pub fn write_general_mcp_json(
     // disc_meta / disc_get_message / disc_summarize.
     {
         // ── Claude Code: .mcp.json (stdio only) ──
-        let stdio_only: HashMap<String, McpServerEntry> = mcp_servers.iter()
+        let stdio_only: HashMap<String, McpServerEntry> = mcp_servers
+            .iter()
             .filter(|(_, e)| e.command.is_some())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let mut data = McpJsonFile { mcp_servers: stdio_only };
+        let mut data = McpJsonFile {
+            mcp_servers: stdio_only,
+        };
         // Inject the kronn-internal server alongside the user's MCPs.
         // The disc id is forwarded via the agent process env, so a
         // single .mcp.json works for every discussion sharing this
@@ -1006,29 +1099,43 @@ pub fn write_general_mcp_json(
         }
 
         // ── Kiro: .kiro/settings/mcp.json + .ai/mcp/mcp.json (filter incompatible) ──
-        let kiro_servers: HashMap<String, McpServerEntry> = mcp_servers.iter()
+        let kiro_servers: HashMap<String, McpServerEntry> = mcp_servers
+            .iter()
             .filter(|(key, _)| {
                 !general_configs.iter().any(|cfg| {
                     if let Some(srv) = server_map.get(&cfg.server_id) {
-                            cfg.label.as_str() == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
-                    } else { false }
+                        cfg.label.as_str() == key.as_str()
+                            && check_incompatibility(srv, &AgentType::Kiro).is_some()
+                    } else {
+                        false
+                    }
                 })
             })
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let mut kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        let mut kiro_data = McpJsonFile {
+            mcp_servers: kiro_servers,
+        };
         inject_kronn_internal(&mut kiro_data);
         write_owned_mcp_json_to_subpath(target_dir, ".kiro/settings/mcp.json", &kiro_data)?;
         write_owned_mcp_json_to_subpath(target_dir, ".ai/mcp/mcp.json", &kiro_data)?;
 
         // ── Gemini: .gemini/settings.json (full, no localhost filter for desktop) ──
-        let mut full_data = McpJsonFile { mcp_servers: mcp_servers.clone() };
+        let mut full_data = McpJsonFile {
+            mcp_servers: mcp_servers.clone(),
+        };
         inject_kronn_internal(&mut full_data);
         write_owned_mcp_json_to_subpath(target_dir, ".gemini/settings.json", &full_data)?;
 
         // ── Vibe: .vibe/config.toml ──
         let server_map_owned: HashMap<String, &crate::models::McpServer> = server_map;
-        sync_vibe_project_config(target_dir, &general_configs, &server_map_owned, secret, true)?;
+        sync_vibe_project_config(
+            target_dir,
+            &general_configs,
+            &server_map_owned,
+            secret,
+            true,
+        )?;
     }
     Ok(())
 }
@@ -1054,15 +1161,12 @@ pub fn sync_project_mcps_to_disk(
         .ok_or_else(|| format!("Project {} not found", project_id))?;
 
     // Get all configs for this project (direct + global)
-    let configs = db::mcps::configs_for_project(conn, project_id)
-        .map_err(|e| e.to_string())?;
+    let configs = db::mcps::configs_for_project(conn, project_id).map_err(|e| e.to_string())?;
 
     // Get all servers
-    let servers = db::mcps::list_servers(conn)
-        .map_err(|e| e.to_string())?;
-    let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-        .map(|s| (s.id.clone(), s))
-        .collect();
+    let servers = db::mcps::list_servers(conn).map_err(|e| e.to_string())?;
+    let server_map: HashMap<String, &crate::models::McpServer> =
+        servers.iter().map(|s| (s.id.clone(), s)).collect();
 
     // Count configs per server to decide naming strategy:
     // - Single config for a server → use server.name (clean technical name)
@@ -1106,12 +1210,12 @@ pub fn sync_project_mcps_to_disk(
                 if !is_command_available(command) {
                     tracing::warn!(
                         "MCP server '{}' command '{}' not found in PATH — skipping",
-                        server.name, command
+                        server.name,
+                        command
                     );
                     continue;
                 }
-                let final_args = config.args_override.clone()
-                    .unwrap_or_else(|| args.clone());
+                let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
                 McpServerEntry {
                     command: Some(command.clone()),
                     args: Some(final_args),
@@ -1119,14 +1223,12 @@ pub fn sync_project_mcps_to_disk(
                     env,
                 }
             }
-            McpTransport::Sse { url } | McpTransport::Streamable { url } => {
-                McpServerEntry {
-                    command: None,
-                    args: None,
-                    url: Some(url.clone()),
-                    env,
-                }
-            }
+            McpTransport::Sse { url } | McpTransport::Streamable { url } => McpServerEntry {
+                command: None,
+                args: None,
+                url: Some(url.clone()),
+                env,
+            },
             // API-only plugins are not written to `.mcp.json` — their
             // capability is surfaced to agents via prompt injection. Skip
             // silently so the rest of the sync (other MCPs on the same
@@ -1150,12 +1252,22 @@ pub fn sync_project_mcps_to_disk(
         // bridge is present"). Without this, a project with no other MCPs lost
         // kronn-internal entirely (the file was deleted) — reported 2026-06-26.
         if write_kronn_internal_only(&project.path)? {
-            tracing::info!("Synced kronn-internal-only MCP configs for {} (no user MCPs)", project.path);
+            tracing::info!(
+                "Synced kronn-internal-only MCP configs for {} (no user MCPs)",
+                project.path
+            );
         } else {
             // Bridge path unresolved: remove only entries whose ownership was
             // previously recorded by Kronn. User settings and manual MCPs stay.
-            let empty = McpJsonFile { mcp_servers: HashMap::new() };
-            for filename in &[".mcp.json", ".kiro/settings/mcp.json", ".gemini/settings.json", ".ai/mcp/mcp.json"] {
+            let empty = McpJsonFile {
+                mcp_servers: HashMap::new(),
+            };
+            for filename in &[
+                ".mcp.json",
+                ".kiro/settings/mcp.json",
+                ".gemini/settings.json",
+                ".ai/mcp/mcp.json",
+            ] {
                 write_owned_mcp_json_to_subpath(&project.path, filename, &empty)?;
             }
         }
@@ -1166,34 +1278,46 @@ pub fn sync_project_mcps_to_disk(
         // Claude Code only supports stdio servers in .mcp.json.
         // SSE/Streamable entries (with only "url", no "command") break the schema
         // validation and cause Claude Code to reject the ENTIRE file → no MCPs at all.
-        let stdio_only: HashMap<String, McpServerEntry> = mcp_servers.iter()
+        let stdio_only: HashMap<String, McpServerEntry> = mcp_servers
+            .iter()
             .filter(|(_, entry)| entry.command.is_some())
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
-        let mut claude_data = McpJsonFile { mcp_servers: stdio_only };
+        let mut claude_data = McpJsonFile {
+            mcp_servers: stdio_only,
+        };
         // Inject kronn-internal so introspection tools are available
         // for project-bound discussions too. Disc id is forwarded via
         // the agent process env (KRONN_DISCUSSION_ID) — see runner.rs.
         inject_kronn_internal(&mut claude_data);
         write_owned_mcp_json_to_subpath(&project.path, ".mcp.json", &claude_data)?;
         ensure_gitignore(&project.path, ".mcp.json");
-        tracing::info!("Synced .mcp.json for {} ({} stdio MCPs)", project.path, claude_data.mcp_servers.len());
+        tracing::info!(
+            "Synced .mcp.json for {} ({} stdio MCPs)",
+            project.path,
+            claude_data.mcp_servers.len()
+        );
 
         // ── Claude Code settings.local.json: keep enabledMcpjsonServers in sync ──
         let merged_claude = read_mcp_json(&project.path).unwrap_or_else(|| claude_data.clone());
         sync_claude_enabled_servers(&project.path, &merged_claude.mcp_servers);
 
         // Full data — but filter out localhost SSE/Streamable (unreachable in Docker)
-        let docker_safe: HashMap<String, McpServerEntry> = mcp_servers.into_iter()
+        let docker_safe: HashMap<String, McpServerEntry> = mcp_servers
+            .into_iter()
             .filter(|(_, entry)| {
                 if let Some(ref url) = entry.url {
-                    !(url.contains("localhost") || url.contains("127.0.0.1") || url.contains("[::1]"))
+                    !(url.contains("localhost")
+                        || url.contains("127.0.0.1")
+                        || url.contains("[::1]"))
                 } else {
                     true
                 }
             })
             .collect();
-        let data = McpJsonFile { mcp_servers: docker_safe };
+        let data = McpJsonFile {
+            mcp_servers: docker_safe,
+        };
 
         // ── Vibe: .vibe/config.toml ──
         sync_vibe_project_config(&project.path, &configs, &server_map, secret, true)?;
@@ -1201,12 +1325,14 @@ pub fn sync_project_mcps_to_disk(
         // ── Kiro: filter out incompatible servers ──
         let kiro_servers: HashMap<String, McpServerEntry> = {
             let mut filtered = data.mcp_servers.clone();
-            let to_remove: Vec<String> = filtered.keys()
+            let to_remove: Vec<String> = filtered
+                .keys()
                 .filter(|key| {
                     // Find matching server in server_map by checking config labels/names
                     configs.iter().any(|cfg| {
                         if let Some(srv) = server_map.get(&cfg.server_id) {
-                            cfg.label.as_str() == key.as_str() && check_incompatibility(srv, &AgentType::Kiro).is_some()
+                            cfg.label.as_str() == key.as_str()
+                                && check_incompatibility(srv, &AgentType::Kiro).is_some()
                         } else {
                             false
                         }
@@ -1220,7 +1346,9 @@ pub fn sync_project_mcps_to_disk(
             }
             filtered
         };
-        let mut kiro_data = McpJsonFile { mcp_servers: kiro_servers };
+        let mut kiro_data = McpJsonFile {
+            mcp_servers: kiro_servers,
+        };
         // Inject the introspection bridge so Kiro and the .ai/mcp variant
         // get the same kronn-internal entry as Claude Code's .mcp.json.
         let kiro_excluded_count = data.mcp_servers.len() - kiro_data.mcp_servers.len();
@@ -1229,8 +1357,12 @@ pub fn sync_project_mcps_to_disk(
         // ── Kiro: .kiro/settings/mcp.json ──
         write_owned_mcp_json_to_subpath(&project.path, ".kiro/settings/mcp.json", &kiro_data)?;
         ensure_gitignore(&project.path, ".kiro/settings/");
-        tracing::info!("Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
-            project.path, kiro_data.mcp_servers.len(), kiro_excluded_count);
+        tracing::info!(
+            "Synced .kiro/settings/mcp.json for {} ({} servers, {} excluded)",
+            project.path,
+            kiro_data.mcp_servers.len(),
+            kiro_excluded_count
+        );
 
         // ── Gemini CLI: .gemini/settings.json (same JSON format as Claude) ──
         let mut gemini_data = data.clone();
@@ -1260,7 +1392,9 @@ pub fn sync_project_mcps_to_disk(
     {
         let profile_ids: Vec<String> = project.default_profile_id.iter().cloned().collect();
         if let Err(e) = crate::core::native_files::sync_project_native_files_full(
-            &project.path, &project.default_skill_ids, &profile_ids,
+            &project.path,
+            &project.default_skill_ids,
+            &profile_ids,
         ) {
             tracing::warn!("Failed to sync native files for {}: {}", project.path, e);
         }
@@ -1302,8 +1436,12 @@ fn ensure_redirectors(project_path: &str) {
 
     // Simple redirector files (flat)
     let redirectors = [
-        "CLAUDE.md", "GEMINI.md", "AGENTS.md",
-        ".cursorrules", ".windsurfrules", ".clinerules",
+        "CLAUDE.md",
+        "GEMINI.md",
+        "AGENTS.md",
+        ".cursorrules",
+        ".windsurfrules",
+        ".clinerules",
     ];
 
     for filename in &redirectors {
@@ -1347,14 +1485,21 @@ pub(crate) fn merge_vibe_config(
     }
     let observed_content;
     let mut root = if existed {
-        let raw = std::fs::read_to_string(file)
-            .map_err(|e| format!("Failed to read existing Vibe config {}: {e}", file.display()))?;
+        let raw = std::fs::read_to_string(file).map_err(|e| {
+            format!(
+                "Failed to read existing Vibe config {}: {e}",
+                file.display()
+            )
+        })?;
         observed_content = Some(raw.as_bytes().to_vec());
         match toml::from_str::<toml::Table>(&raw) {
             Ok(table) => table,
             Err(e) => {
                 backup_before_refusal(project_path, file)?;
-                return Err(format!("Invalid existing Vibe config {}: {e}; refusing overwrite", file.display()));
+                return Err(format!(
+                    "Invalid existing Vibe config {}: {e}; refusing overwrite",
+                    file.display()
+                ));
             }
         }
     } else {
@@ -1362,15 +1507,19 @@ pub(crate) fn merge_vibe_config(
         toml::Table::new()
     };
 
-    let rendered = toml::Value::try_from(VibeConfig { mcp_servers: entries.to_vec() })
-        .map_err(|e| format!("Failed to serialize Vibe MCP entries: {e}"))?;
+    let rendered = toml::Value::try_from(VibeConfig {
+        mcp_servers: entries.to_vec(),
+    })
+    .map_err(|e| format!("Failed to serialize Vibe MCP entries: {e}"))?;
     let desired: BTreeMap<String, toml::Value> = rendered
         .get("mcp_servers")
         .and_then(toml::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|value| {
-            value.get("name").and_then(toml::Value::as_str)
+            value
+                .get("name")
+                .and_then(toml::Value::as_str)
                 .map(|name| (name.to_string(), value.clone()))
         })
         .collect();
@@ -1380,11 +1529,16 @@ pub(crate) fn merge_vibe_config(
         .or_insert_with(|| toml::Value::Array(Vec::new()));
     let Some(existing) = servers.as_array_mut() else {
         backup_before_refusal(project_path, file)?;
-        return Err(format!("Existing Vibe config {} has a non-array mcp_servers field; refusing overwrite", file.display()));
+        return Err(format!(
+            "Existing Vibe config {} has a non-array mcp_servers field; refusing overwrite",
+            file.display()
+        ));
     };
 
     existing.retain(|value| {
-        value.get("name").and_then(toml::Value::as_str)
+        value
+            .get("name")
+            .and_then(toml::Value::as_str)
             .map(|name| !previously_owned.contains(name) || desired.contains_key(name))
             .unwrap_or(true)
     });
@@ -1402,7 +1556,8 @@ pub(crate) fn merge_vibe_config(
             Some(_) => {
                 tracing::warn!(
                     "Vibe MCP config collision in {} for '{}': preserving user-owned entry",
-                    file.display(), name
+                    file.display(),
+                    name
                 );
             }
             None => {
@@ -1417,9 +1572,14 @@ pub(crate) fn merge_vibe_config(
         // exact first pre-merge file in ignored, mode-0600 Kronn state.
         backup_before_refusal(project_path, file)?;
     }
-    let content = toml::to_string_pretty(&toml::Value::Table(root))
-        .map_err(|e| format!("Failed to serialize merged Vibe config {}: {e}", file.display()))?;
-    let header = "# MCP section managed by Kronn; unrelated settings and manual MCPs are preserved.\n\n";
+    let content = toml::to_string_pretty(&toml::Value::Table(root)).map_err(|e| {
+        format!(
+            "Failed to serialize merged Vibe config {}: {e}",
+            file.display()
+        )
+    })?;
+    let header =
+        "# MCP section managed by Kronn; unrelated settings and manual MCPs are preserved.\n\n";
     atomic_write_if_unchanged(
         file,
         &format!("{header}{content}"),
@@ -1452,8 +1612,7 @@ fn sync_vibe_project_config(
 
         let entry = match &server.transport {
             McpTransport::Stdio { command, args } => {
-                let final_args = config.args_override.clone()
-                    .unwrap_or_else(|| args.clone());
+                let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
                 VibeMcpEntry {
                     name,
                     transport: "stdio".into(),
@@ -1495,7 +1654,11 @@ fn sync_vibe_project_config(
     } else {
         McpOwnershipState::default()
     };
-    let previous = state.files.get(".vibe/config.toml").cloned().unwrap_or_default();
+    let previous = state
+        .files
+        .get(".vibe/config.toml")
+        .cloned()
+        .unwrap_or_default();
     if entries.is_empty() && !vibe_config.exists() && previous.is_empty() {
         return Ok(());
     }
@@ -1507,7 +1670,9 @@ fn sync_vibe_project_config(
         if now_owned.is_empty() {
             state.files.remove(".vibe/config.toml");
         } else {
-            state.files.insert(".vibe/config.toml".to_string(), now_owned);
+            state
+                .files
+                .insert(".vibe/config.toml".to_string(), now_owned);
         }
         save_mcp_ownership(project_path, &state)?;
     }
@@ -1631,43 +1796,50 @@ pub(crate) fn load_codex_config_for_merge(codex_config: &Path) -> CodexLoadOutco
 pub(crate) struct CodexSync;
 
 impl HostMcpSync for CodexSync {
-    fn label(&self) -> &'static str { "Codex" }
+    fn label(&self) -> &'static str {
+        "Codex"
+    }
 
-    fn prepare(
-        &self,
-        conn: &rusqlite::Connection,
-        secret: &str,
-    ) -> Option<HostSyncPlan> {
+    fn prepare(&self, conn: &rusqlite::Connection, secret: &str) -> Option<HostSyncPlan> {
         use crate::db;
 
         let all_configs = match db::mcps::list_configs(conn) {
             Ok(c) => c,
-            Err(e) => { tracing::warn!("Failed to list configs for Codex sync: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Failed to list configs for Codex sync: {}", e);
+                return None;
+            }
         };
         let servers = match db::mcps::list_servers(conn) {
             Ok(s) => s,
-            Err(e) => { tracing::warn!("Failed to list servers for Codex sync: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Failed to list servers for Codex sync: {}", e);
+                return None;
+            }
         };
-        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-            .map(|s| (s.id.clone(), s))
-            .collect();
+        let server_map: HashMap<String, &crate::models::McpServer> =
+            servers.iter().map(|s| (s.id.clone(), s)).collect();
 
         // Build MCP entries (Codex only supports stdio transport)
         let mut mcp_entries: HashMap<String, CodexMcpEntry> = HashMap::new();
         for config in &all_configs {
-            if !should_host_sync(config) { continue; }
+            if !should_host_sync(config) {
+                continue;
+            }
             let server = match server_map.get(&config.server_id) {
                 Some(s) => s,
                 None => continue,
             };
             let (command, args) = match &server.transport {
                 McpTransport::Stdio { command, args } => {
-                    let final_args = config.args_override.clone()
-                        .unwrap_or_else(|| args.clone());
+                    let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
                     (command.clone(), final_args)
                 }
                 _ => {
-                    tracing::debug!("Skipping non-stdio MCP '{}' for Codex (unsupported)", server.name);
+                    tracing::debug!(
+                        "Skipping non-stdio MCP '{}' for Codex (unsupported)",
+                        server.name
+                    );
                     continue;
                 }
             };
@@ -1690,14 +1862,21 @@ impl HostMcpSync for CodexSync {
             let raw_key = config.label.clone();
             let key = slugify_label(&raw_key);
             // npx/uvx MCPs need longer timeout for initial package download (cold start)
-            let timeout = if command == "npx" || command == "uvx" { 60 } else { 30 };
-            mcp_entries.insert(key, CodexMcpEntry {
-                command,
-                args,
-                env,
-                enabled: true,
-                startup_timeout_sec: timeout,
-            });
+            let timeout = if command == "npx" || command == "uvx" {
+                60
+            } else {
+                30
+            };
+            mcp_entries.insert(
+                key,
+                CodexMcpEntry {
+                    command,
+                    args,
+                    env,
+                    enabled: true,
+                    startup_timeout_sec: timeout,
+                },
+            );
         }
 
         // Inject the kronn-internal introspection bridge into Codex's
@@ -1751,14 +1930,21 @@ impl HostMcpSync for CodexSync {
             let mut mcp_table = toml::value::Table::new();
             for (key, entry) in &mcp_entries {
                 match toml::Value::try_from(entry) {
-                    Ok(v) => { mcp_table.insert(key.clone(), v); }
-                    Err(e) => tracing::warn!("Failed to serialize Codex MCP entry '{}': {}", key, e),
+                    Ok(v) => {
+                        mcp_table.insert(key.clone(), v);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to serialize Codex MCP entry '{}': {}", key, e)
+                    }
                 }
             }
             doc.insert("mcp_servers".into(), toml::Value::Table(mcp_table));
         }
 
-        let summary = format!("Synced Codex global config ({} MCP servers)", mcp_entries.len());
+        let summary = format!(
+            "Synced Codex global config ({} MCP servers)",
+            mcp_entries.len()
+        );
         let content = match toml::to_string_pretty(&doc) {
             Ok(c) => c,
             Err(e) => {
@@ -1766,7 +1952,12 @@ impl HostMcpSync for CodexSync {
                 return None;
             }
         };
-        Some(HostSyncPlan { path: codex_config, content, summary, pre_mtime })
+        Some(HostSyncPlan {
+            path: codex_config,
+            content,
+            summary,
+            pre_mtime,
+        })
     }
 }
 
@@ -1776,32 +1967,37 @@ impl HostMcpSync for CodexSync {
 pub(crate) struct CopilotSync;
 
 impl HostMcpSync for CopilotSync {
-    fn label(&self) -> &'static str { "Copilot" }
+    fn label(&self) -> &'static str {
+        "Copilot"
+    }
 
-    fn prepare(
-        &self,
-        conn: &rusqlite::Connection,
-        secret: &str,
-    ) -> Option<HostSyncPlan> {
+    fn prepare(&self, conn: &rusqlite::Connection, secret: &str) -> Option<HostSyncPlan> {
         use crate::db;
 
         let all_configs = match db::mcps::list_configs(conn) {
             Ok(c) => c,
-            Err(e) => { tracing::warn!("Failed to list configs for Copilot sync: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Failed to list configs for Copilot sync: {}", e);
+                return None;
+            }
         };
         let servers = match db::mcps::list_servers(conn) {
             Ok(s) => s,
-            Err(e) => { tracing::warn!("Failed to list servers for Copilot sync: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Failed to list servers for Copilot sync: {}", e);
+                return None;
+            }
         };
-        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-            .map(|s| (s.id.clone(), s))
-            .collect();
+        let server_map: HashMap<String, &crate::models::McpServer> =
+            servers.iter().map(|s| (s.id.clone(), s)).collect();
 
         // Build mcpServers entries (stdio only — Copilot CLI doesn't support SSE)
         let mut mcp_servers: HashMap<String, McpServerEntry> = HashMap::new();
         for config in &all_configs {
             // Phase-3 host_sync filter (same as Codex above).
-            if !should_host_sync(config) { continue; }
+            if !should_host_sync(config) {
+                continue;
+            }
             let server = match server_map.get(&config.server_id) {
                 Some(s) => s,
                 None => continue,
@@ -1809,12 +2005,14 @@ impl HostMcpSync for CopilotSync {
 
             let (command, args) = match &server.transport {
                 McpTransport::Stdio { command, args } => {
-                    let final_args = config.args_override.clone()
-                        .unwrap_or_else(|| args.clone());
+                    let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
                     (command.clone(), final_args)
                 }
                 _ => {
-                    tracing::debug!("Skipping non-stdio MCP '{}' for Copilot (unsupported)", server.name);
+                    tracing::debug!(
+                        "Skipping non-stdio MCP '{}' for Copilot (unsupported)",
+                        server.name
+                    );
                     continue;
                 }
             };
@@ -1834,12 +2032,15 @@ impl HostMcpSync for CopilotSync {
             };
 
             let key = config.label.clone();
-            mcp_servers.insert(key, McpServerEntry {
-                command: Some(command),
-                args: Some(args),
-                url: None,
-                env,
-            });
+            mcp_servers.insert(
+                key,
+                McpServerEntry {
+                    command: Some(command),
+                    args: Some(args),
+                    url: None,
+                    env,
+                },
+            );
         }
 
         // Inject the kronn-internal introspection bridge into Copilot's
@@ -1892,7 +2093,12 @@ impl HostMcpSync for CopilotSync {
                 return None;
             }
         };
-        Some(HostSyncPlan { path: config_path, content, summary, pre_mtime })
+        Some(HostSyncPlan {
+            path: config_path,
+            content,
+            summary,
+            pre_mtime,
+        })
     }
 }
 
@@ -1912,11 +2118,7 @@ impl HostMcpSync for CopilotSync {
 /// plus a tempdir HOME and a `workflow_runs` row, roughly 30 lines for
 /// one branch of behaviour. Skipped intentionally; code review owns the
 /// wiring.
-pub fn sync_affected_projects(
-    conn: &rusqlite::Connection,
-    project_ids: &[String],
-    secret: &str,
-) {
+pub fn sync_affected_projects(conn: &rusqlite::Connection, project_ids: &[String], secret: &str) {
     if let Ok(true) = crate::db::workflows::has_running_run(conn) {
         tracing::warn!(
             "MCP host sync deferred: a workflow run is currently active. \
@@ -1968,13 +2170,10 @@ fn warn_missing_host_binaries(conn: &rusqlite::Connection) {
         Ok(s) => s,
         Err(_) => return,
     };
-    let server_map: HashMap<String, &crate::models::McpServer> = servers
-        .iter()
-        .map(|s| (s.id.clone(), s))
-        .collect();
+    let server_map: HashMap<String, &crate::models::McpServer> =
+        servers.iter().map(|s| (s.id.clone(), s)).collect();
 
-    let mut commands_seen: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut commands_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for config in &configs {
         if !should_host_sync(config) {
             continue;
@@ -2015,7 +2214,10 @@ fn warn_missing_host_binaries(conn: &rusqlite::Connection) {
 /// `None` means Kronn should write it to the relevant CLI config file.
 pub(crate) fn should_host_sync(config: &crate::models::McpConfig) -> bool {
     use crate::models::HostSyncMode;
-    matches!(config.host_sync, HostSyncMode::GlobalOnly | HostSyncMode::MirrorAll)
+    matches!(
+        config.host_sync,
+        HostSyncMode::GlobalOnly | HostSyncMode::MirrorAll
+    )
 }
 
 /// Best-effort `chmod 0600` on Unix. Silent no-op on Windows.
@@ -2043,12 +2245,14 @@ fn resolve_home_subpath(subpath: &str) -> PathBuf {
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(|h| PathBuf::from(format!("{}/{}", h, subpath)))
-        .unwrap_or_else(|_| directories::BaseDirs::new()
-            .map(|d| d.home_dir().join(subpath))
-            .unwrap_or_else(|| {
-                tracing::warn!("Cannot determine home directory — using /tmp/{}", subpath);
-                PathBuf::from(format!("/tmp/{}", subpath))
-            }))
+        .unwrap_or_else(|_| {
+            directories::BaseDirs::new()
+                .map(|d| d.home_dir().join(subpath))
+                .unwrap_or_else(|| {
+                    tracing::warn!("Cannot determine home directory — using /tmp/{}", subpath);
+                    PathBuf::from(format!("/tmp/{}", subpath))
+                })
+        })
 }
 
 /// Build a JSON entry for a config + decrypted env, with the `_kronn`
@@ -2069,11 +2273,18 @@ fn build_kronn_managed_json_entry(
         McpTransport::Stdio { command, args } => {
             let final_args = config.args_override.clone().unwrap_or_else(|| args.clone());
             obj.insert("command".into(), serde_json::Value::String(command.clone()));
-            obj.insert("args".into(), serde_json::Value::Array(
-                final_args.into_iter().map(serde_json::Value::String).collect()
-            ));
+            obj.insert(
+                "args".into(),
+                serde_json::Value::Array(
+                    final_args
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
             if !env.is_empty() {
-                let env_obj: serde_json::Map<String, serde_json::Value> = env.into_iter()
+                let env_obj: serde_json::Map<String, serde_json::Value> = env
+                    .into_iter()
                     .map(|(k, v)| (k, serde_json::Value::String(v)))
                     .collect();
                 obj.insert("env".into(), serde_json::Value::Object(env_obj));
@@ -2098,7 +2309,10 @@ fn build_kronn_managed_json_entry(
 
     let mut marker = serde_json::Map::new();
     marker.insert("managed".into(), serde_json::Value::Bool(true));
-    marker.insert("config_id".into(), serde_json::Value::String(config.id.clone()));
+    marker.insert(
+        "config_id".into(),
+        serde_json::Value::String(config.id.clone()),
+    );
     obj.insert("_kronn".into(), serde_json::Value::Object(marker));
 
     Ok(Some(serde_json::Value::Object(obj)))
@@ -2135,8 +2349,12 @@ fn load_json_config_for_merge(path: &Path) -> JsonLoadOutcome {
             let backup = rotate_backup(path, BACKUP_ROTATION_SLOTS);
             tracing::error!(
                 "Failed to parse {} ({}). Backed up to {} and aborting sync to preserve user data.",
-                path.display(), e,
-                backup.as_ref().map(|p| p.display().to_string()).unwrap_or_else(|| "<no-backup>".to_string())
+                path.display(),
+                e,
+                backup
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "<no-backup>".to_string())
             );
             JsonLoadOutcome::Aborted
         }
@@ -2167,7 +2385,8 @@ pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
     // Build the suffix carrying the original extension so the backups are
     // self-documenting (e.g. `.claude.json.kronn-backup.1`, not
     // `.claude.kronn-backup.1`).
-    let ext_with_suffix = path.extension()
+    let ext_with_suffix = path
+        .extension()
         .and_then(|s| s.to_str())
         .map(|s| format!("{}.kronn-backup", s))
         .unwrap_or_else(|| "kronn-backup".to_string());
@@ -2192,7 +2411,9 @@ pub(crate) fn rotate_backup(path: &Path, max_n: usize) -> Option<PathBuf> {
         Err(e) => {
             tracing::error!(
                 "Failed to back up corrupt config {} → {}: {}",
-                path.display(), dest.display(), e
+                path.display(),
+                dest.display(),
+                e
             );
             None
         }
@@ -2218,7 +2439,8 @@ fn merge_kronn_entries(
     };
 
     // Get or create the mcpServers section
-    let servers = root.entry("mcpServers")
+    let servers = root
+        .entry("mcpServers")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let servers_obj = match servers.as_object_mut() {
         Some(o) => o,
@@ -2230,9 +2452,11 @@ fn merge_kronn_entries(
     };
 
     // Walk existing entries, keep user ones, drop orphan Kronn ones
-    let to_remove: Vec<String> = servers_obj.iter()
+    let to_remove: Vec<String> = servers_obj
+        .iter()
         .filter_map(|(name, value)| {
-            value.as_object()
+            value
+                .as_object()
                 .and_then(|o| o.get("_kronn"))
                 .and_then(|m| m.as_object())
                 .and_then(|m| m.get("config_id"))
@@ -2261,41 +2485,59 @@ fn merge_kronn_entries(
 pub(crate) struct ClaudeSync;
 
 impl HostMcpSync for ClaudeSync {
-    fn label(&self) -> &'static str { "Claude" }
+    fn label(&self) -> &'static str {
+        "Claude"
+    }
 
-    fn prepare(
-        &self,
-        conn: &rusqlite::Connection,
-        secret: &str,
-    ) -> Option<HostSyncPlan> {
+    fn prepare(&self, conn: &rusqlite::Connection, secret: &str) -> Option<HostSyncPlan> {
         use crate::db;
 
         let all_configs = match db::mcps::list_configs(conn) {
             Ok(c) => c,
-            Err(e) => { tracing::warn!("Claude sync: list_configs failed: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Claude sync: list_configs failed: {}", e);
+                return None;
+            }
         };
         let servers = match db::mcps::list_servers(conn) {
             Ok(s) => s,
-            Err(e) => { tracing::warn!("Claude sync: list_servers failed: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Claude sync: list_servers failed: {}", e);
+                return None;
+            }
         };
-        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-            .map(|s| (s.id.clone(), s)).collect();
+        let server_map: HashMap<String, &crate::models::McpServer> =
+            servers.iter().map(|s| (s.id.clone(), s)).collect();
 
         let projects = match db::projects::list_projects(conn) {
             Ok(p) => p,
-            Err(e) => { tracing::warn!("Claude sync: list_projects failed: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Claude sync: list_projects failed: {}", e);
+                return None;
+            }
         };
-        let project_path_by_id: HashMap<String, String> = projects.iter()
-            .map(|p| (p.id.clone(), p.path.clone())).collect();
+        let project_path_by_id: HashMap<String, String> = projects
+            .iter()
+            .map(|p| (p.id.clone(), p.path.clone()))
+            .collect();
 
         // Bucket Kronn-managed entries by their target scope.
         let mut top_level: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut by_project: HashMap<String /* abs project path */, HashMap<String, serde_json::Value>> = HashMap::new();
-        let mut all_managed_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut by_project: HashMap<
+            String, /* abs project path */
+            HashMap<String, serde_json::Value>,
+        > = HashMap::new();
+        let mut all_managed_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for config in &all_configs {
-            if !should_host_sync(config) { continue; }
-            let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
+            if !should_host_sync(config) {
+                continue;
+            }
+            let server = match server_map.get(&config.server_id) {
+                Some(s) => s,
+                None => continue,
+            };
             let entry = match build_kronn_managed_json_entry(config, server, secret, false) {
                 Ok(Some(e)) => e,
                 Ok(None) => continue, // ApiOnly skipped
@@ -2311,7 +2553,8 @@ impl HostMcpSync for ClaudeSync {
             } else {
                 for pid in &config.project_ids {
                     if let Some(path) = project_path_by_id.get(pid) {
-                        by_project.entry(path.clone())
+                        by_project
+                            .entry(path.clone())
                             .or_default()
                             .insert(config.label.clone(), entry.clone());
                     }
@@ -2337,7 +2580,10 @@ impl HostMcpSync for ClaudeSync {
         };
 
         if !existing.is_object() {
-            tracing::error!("Claude config at {} is not a JSON object — aborting sync", path.display());
+            tracing::error!(
+                "Claude config at {} is not a JSON object — aborting sync",
+                path.display()
+            );
             return None;
         }
 
@@ -2351,7 +2597,12 @@ impl HostMcpSync for ClaudeSync {
 
         // Re-insert at the correct scope.
         if !top_level.is_empty() {
-            merge_into_mcp_servers(&mut existing, top_level, &all_managed_ids, /*track_scope=*/None);
+            merge_into_mcp_servers(
+                &mut existing,
+                top_level,
+                &all_managed_ids,
+                /*track_scope=*/ None,
+            );
         }
         for (project_path, entries) in by_project {
             merge_into_project_mcp_servers(&mut existing, &project_path, entries, &all_managed_ids);
@@ -2375,7 +2626,12 @@ impl HostMcpSync for ClaudeSync {
                 return None;
             }
         };
-        Some(HostSyncPlan { path, content, summary, pre_mtime })
+        Some(HostSyncPlan {
+            path,
+            content,
+            summary,
+            pre_mtime,
+        })
     }
 
     fn post_write(&self, path: &Path) {
@@ -2395,22 +2651,31 @@ fn drop_all_kronn_entries(existing: &mut serde_json::Value) {
 
     // Top-level mcpServers
     if let Some(map) = root.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
-        let drop_keys: Vec<String> = map.iter()
+        let drop_keys: Vec<String> = map
+            .iter()
             .filter(|(_, v)| is_kronn_managed(v))
             .map(|(k, _)| k.clone())
             .collect();
-        for k in drop_keys { map.remove(&k); }
+        for k in drop_keys {
+            map.remove(&k);
+        }
     }
 
     // projects[*].mcpServers
     if let Some(projects) = root.get_mut("projects").and_then(|v| v.as_object_mut()) {
         for (_path, project_obj) in projects.iter_mut() {
-            if let Some(map) = project_obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
-                let drop_keys: Vec<String> = map.iter()
+            if let Some(map) = project_obj
+                .get_mut("mcpServers")
+                .and_then(|v| v.as_object_mut())
+            {
+                let drop_keys: Vec<String> = map
+                    .iter()
                     .filter(|(_, v)| is_kronn_managed(v))
                     .map(|(k, _)| k.clone())
                     .collect();
-                for k in drop_keys { map.remove(&k); }
+                for k in drop_keys {
+                    map.remove(&k);
+                }
             }
         }
     }
@@ -2418,7 +2683,8 @@ fn drop_all_kronn_entries(existing: &mut serde_json::Value) {
 
 /// True iff the value is a JSON object with `_kronn.managed = true`.
 fn is_kronn_managed(value: &serde_json::Value) -> bool {
-    value.as_object()
+    value
+        .as_object()
         .and_then(|o| o.get("_kronn"))
         .and_then(|m| m.as_object())
         .and_then(|m| m.get("managed"))
@@ -2439,7 +2705,8 @@ fn merge_into_mcp_servers(
         Some(o) => o,
         None => return,
     };
-    let servers = root.entry("mcpServers")
+    let servers = root
+        .entry("mcpServers")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let map = match servers.as_object_mut() {
         Some(m) => m,
@@ -2448,7 +2715,9 @@ fn merge_into_mcp_servers(
             servers.as_object_mut().unwrap()
         }
     };
-    for (k, v) in kronn_entries { map.insert(k, v); }
+    for (k, v) in kronn_entries {
+        map.insert(k, v);
+    }
 }
 
 /// Insert/replace Kronn-managed entries into `projects[<project_path>].mcpServers`.
@@ -2463,7 +2732,8 @@ fn merge_into_project_mcp_servers(
         Some(o) => o,
         None => return,
     };
-    let projects = root.entry("projects")
+    let projects = root
+        .entry("projects")
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let projects_map = match projects.as_object_mut() {
         Some(m) => m,
@@ -2472,7 +2742,8 @@ fn merge_into_project_mcp_servers(
             projects.as_object_mut().unwrap()
         }
     };
-    let project = projects_map.entry(project_path.to_string())
+    let project = projects_map
+        .entry(project_path.to_string())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let project_obj = match project.as_object_mut() {
         Some(o) => o,
@@ -2481,7 +2752,8 @@ fn merge_into_project_mcp_servers(
             project.as_object_mut().unwrap()
         }
     };
-    let servers = project_obj.entry("mcpServers".to_string())
+    let servers = project_obj
+        .entry("mcpServers".to_string())
         .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
     let map = match servers.as_object_mut() {
         Some(m) => m,
@@ -2490,7 +2762,9 @@ fn merge_into_project_mcp_servers(
             servers.as_object_mut().unwrap()
         }
     };
-    for (k, v) in kronn_entries { map.insert(k, v); }
+    for (k, v) in kronn_entries {
+        map.insert(k, v);
+    }
 }
 
 /// Remove `mcpServers` keys that became empty after Kronn cleanup, so the
@@ -2503,7 +2777,8 @@ fn prune_empty_mcp_servers(existing: &mut serde_json::Value) {
     };
 
     // Top-level
-    let top_level_empty = root.get("mcpServers")
+    let top_level_empty = root
+        .get("mcpServers")
         .and_then(|v| v.as_object())
         .map(|m| m.is_empty())
         .unwrap_or(false);
@@ -2515,7 +2790,8 @@ fn prune_empty_mcp_servers(existing: &mut serde_json::Value) {
     if let Some(projects) = root.get_mut("projects").and_then(|v| v.as_object_mut()) {
         for (_path, proj) in projects.iter_mut() {
             if let Some(proj_obj) = proj.as_object_mut() {
-                let empty = proj_obj.get("mcpServers")
+                let empty = proj_obj
+                    .get("mcpServers")
                     .and_then(|v| v.as_object())
                     .map(|m| m.is_empty())
                     .unwrap_or(false);
@@ -2543,18 +2819,28 @@ fn count_kronn_entries_recursive(existing: &serde_json::Value) -> usize {
 }
 
 fn count_at_top_level(existing: &serde_json::Value) -> usize {
-    existing.get("mcpServers").and_then(|v| v.as_object())
+    existing
+        .get("mcpServers")
+        .and_then(|v| v.as_object())
         .map(|m| m.values().filter(|v| is_kronn_managed(v)).count())
         .unwrap_or(0)
 }
 
 fn count_project_scopes(existing: &serde_json::Value) -> usize {
-    existing.get("projects").and_then(|v| v.as_object())
-        .map(|projects| projects.values()
-            .filter(|p| p.get("mcpServers").and_then(|v| v.as_object())
-                .map(|m| m.values().any(is_kronn_managed))
-                .unwrap_or(false))
-            .count())
+    existing
+        .get("projects")
+        .and_then(|v| v.as_object())
+        .map(|projects| {
+            projects
+                .values()
+                .filter(|p| {
+                    p.get("mcpServers")
+                        .and_then(|v| v.as_object())
+                        .map(|m| m.values().any(is_kronn_managed))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 
@@ -2564,32 +2850,42 @@ fn count_project_scopes(existing: &serde_json::Value) -> usize {
 pub(crate) struct GeminiSync;
 
 impl HostMcpSync for GeminiSync {
-    fn label(&self) -> &'static str { "Gemini" }
+    fn label(&self) -> &'static str {
+        "Gemini"
+    }
 
-    fn prepare(
-        &self,
-        conn: &rusqlite::Connection,
-        secret: &str,
-    ) -> Option<HostSyncPlan> {
+    fn prepare(&self, conn: &rusqlite::Connection, secret: &str) -> Option<HostSyncPlan> {
         use crate::db;
 
         let all_configs = match db::mcps::list_configs(conn) {
             Ok(c) => c,
-            Err(e) => { tracing::warn!("Gemini sync: list_configs failed: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Gemini sync: list_configs failed: {}", e);
+                return None;
+            }
         };
         let servers = match db::mcps::list_servers(conn) {
             Ok(s) => s,
-            Err(e) => { tracing::warn!("Gemini sync: list_servers failed: {}", e); return None; }
+            Err(e) => {
+                tracing::warn!("Gemini sync: list_servers failed: {}", e);
+                return None;
+            }
         };
-        let server_map: HashMap<String, &crate::models::McpServer> = servers.iter()
-            .map(|s| (s.id.clone(), s)).collect();
+        let server_map: HashMap<String, &crate::models::McpServer> =
+            servers.iter().map(|s| (s.id.clone(), s)).collect();
 
         // Build Kronn-managed entries (filtered by host_sync ≠ None, ApiOnly skipped)
         let mut kronn_entries: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut kronn_config_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut kronn_config_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for config in &all_configs {
-            if !should_host_sync(config) { continue; }
-            let server = match server_map.get(&config.server_id) { Some(s) => s, None => continue };
+            if !should_host_sync(config) {
+                continue;
+            }
+            let server = match server_map.get(&config.server_id) {
+                Some(s) => s,
+                None => continue,
+            };
             // Gemini: use `httpUrl` for Streamable HTTP.
             match build_kronn_managed_json_entry(config, server, secret, true) {
                 Ok(Some(entry)) => {
@@ -2621,7 +2917,10 @@ impl HostMcpSync for GeminiSync {
         };
 
         if !existing.is_object() {
-            tracing::error!("Gemini config at {} is not a JSON object — aborting sync", path.display());
+            tracing::error!(
+                "Gemini config at {} is not a JSON object — aborting sync",
+                path.display()
+            );
             return None;
         }
 
@@ -2640,7 +2939,12 @@ impl HostMcpSync for GeminiSync {
                 return None;
             }
         };
-        Some(HostSyncPlan { path, content, summary, pre_mtime })
+        Some(HostSyncPlan {
+            path,
+            content,
+            summary,
+            pre_mtime,
+        })
     }
 
     fn post_write(&self, path: &Path) {
@@ -2650,24 +2954,26 @@ impl HostMcpSync for GeminiSync {
 
 /// Count entries that carry a `_kronn.managed = true` marker.
 fn count_kronn_entries(value: &serde_json::Value) -> usize {
-    value.get("mcpServers")
+    value
+        .get("mcpServers")
         .and_then(|v| v.as_object())
-        .map(|o| o.values()
-            .filter(|v| v.as_object()
-                .and_then(|e| e.get("_kronn"))
-                .and_then(|m| m.as_object())
-                .and_then(|m| m.get("managed"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false))
-            .count())
+        .map(|o| {
+            o.values()
+                .filter(|v| {
+                    v.as_object()
+                        .and_then(|e| e.get("_kronn"))
+                        .and_then(|m| m.as_object())
+                        .and_then(|m| m.get("managed"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                })
+                .count()
+        })
         .unwrap_or(0)
 }
 
 /// Sync ALL projects (used when global flag changes)
-pub fn sync_all_projects(
-    conn: &rusqlite::Connection,
-    secret: &str,
-) {
+pub fn sync_all_projects(conn: &rusqlite::Connection, secret: &str) {
     match crate::db::projects::list_projects(conn) {
         Ok(projects) => {
             let ids: Vec<String> = projects.iter().map(|p| p.id.clone()).collect();
@@ -2693,8 +2999,14 @@ fn ensure_gitignore(project_path: &str, pattern: &str) {
 
     // no-follow (Codex A2): a symlinked .gitignore — dangling included —
     // would route the create+append OUTSIDE the project. Leave it intact.
-    if std::fs::symlink_metadata(&gitignore).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
-        tracing::warn!("{} is a symlink — skipping gitignore update", gitignore.display());
+    if std::fs::symlink_metadata(&gitignore)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            "{} is a symlink — skipping gitignore update",
+            gitignore.display()
+        );
         return;
     }
 
@@ -2718,7 +3030,11 @@ fn ensure_gitignore(project_path: &str, pattern: &str) {
         .open(&gitignore)
         .and_then(|mut f| std::io::Write::write_all(&mut f, addition.as_bytes()))
     {
-        tracing::warn!("Failed to update .gitignore at {}: {}", gitignore.display(), e);
+        tracing::warn!(
+            "Failed to update .gitignore at {}: {}",
+            gitignore.display(),
+            e
+        );
     } else {
         tracing::info!("Added '{}' to {}", pattern, gitignore.display());
     }
@@ -2838,9 +3154,15 @@ pub fn read_all_mcp_contexts(project_path: &str) -> String {
 
     // Always list available MCP servers so the agent knows what tools it has
     if !server_names.is_empty() {
-        result.push_str("You have access to external tools via MCP (Model Context Protocol) servers.\n");
-        result.push_str("Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n");
-        result.push_str("Use these tools instead of Bash workarounds when a matching tool exists.\n\n");
+        result.push_str(
+            "You have access to external tools via MCP (Model Context Protocol) servers.\n",
+        );
+        result.push_str(
+            "Each server exposes tools with the naming convention `mcp__<server>__<tool>`.\n",
+        );
+        result.push_str(
+            "Use these tools instead of Bash workarounds when a matching tool exists.\n\n",
+        );
         result.push_str("Available servers:\n");
         for name in &server_names {
             result.push_str(&format!("- **{}** — tools: `mcp__{}__*`\n", name, name));
@@ -2867,7 +3189,10 @@ pub fn read_all_mcp_contexts(project_path: &str) -> String {
 ///
 /// Missing keys render as `<NOT_CONFIGURED>` so the agent sees the gap
 /// rather than sending a half-composed URL.
-fn interpolate_env_template(template: &str, env: &std::collections::HashMap<String, String>) -> String {
+fn interpolate_env_template(
+    template: &str,
+    env: &std::collections::HashMap<String, String>,
+) -> String {
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
     while let Some(start) = rest.find('{') {
@@ -2906,18 +3231,20 @@ fn interpolate_env_template(template: &str, env: &std::collections::HashMap<Stri
 /// `plugins_with_env` is decrypted by the caller so declared non-secret
 /// config can be interpolated. Auth values may be present in that map but
 /// this pure renderer must never read or emit them.
-pub fn build_api_context_block(
-    plugins_with_env: &[ActiveApiPlugin],
-) -> String {
+pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
     use crate::models::{ApiAuthKind, ApiSpec};
 
     // Filter to plugins that actually have an ApiSpec — a hybrid plugin's
     // MCP side stays in .mcp.json (handled elsewhere), but its API side
     // surfaces here. Pure MCP plugins (api_spec = None) get skipped.
-    let api_plugins: Vec<(&crate::models::McpServer, &std::collections::HashMap<String, String>, &ApiSpec)> =
-        plugins_with_env.iter()
-            .filter_map(|(s, _config_id, env)| s.api_spec.as_ref().map(|spec| (s, env, spec)))
-            .collect();
+    let api_plugins: Vec<(
+        &crate::models::McpServer,
+        &std::collections::HashMap<String, String>,
+        &ApiSpec,
+    )> = plugins_with_env
+        .iter()
+        .filter_map(|(s, _config_id, env)| s.api_spec.as_ref().map(|spec| (s, env, spec)))
+        .collect();
 
     if api_plugins.is_empty() {
         return String::new();
@@ -2943,7 +3270,10 @@ pub fn build_api_context_block(
             | ApiAuthKind::BasicApiKey { env_key } => {
                 auth_env_keys.insert(env_key.as_str());
             }
-            ApiAuthKind::Basic { user_env, password_env } => {
+            ApiAuthKind::Basic {
+                user_env,
+                password_env,
+            } => {
                 auth_env_keys.insert(user_env.as_str());
                 auth_env_keys.insert(password_env.as_str());
             }
@@ -2960,9 +3290,14 @@ pub fn build_api_context_block(
             }
             ApiAuthKind::None => {}
         }
-        let public_env: std::collections::HashMap<String, String> = spec.config_keys.iter()
+        let public_env: std::collections::HashMap<String, String> = spec
+            .config_keys
+            .iter()
             .filter(|key| !auth_env_keys.contains(key.env_key.as_str()))
-            .filter_map(|key| env.get(&key.env_key).map(|value| (key.env_key.clone(), value.clone())))
+            .filter_map(|key| {
+                env.get(&key.env_key)
+                    .map(|value| (key.env_key.clone(), value.clone()))
+            })
             .collect();
         let resolved_base = interpolate_env_template(&spec.base_url, &public_env);
         out.push_str(&format!("Base URL: `{}`\n", resolved_base));
@@ -2972,10 +3307,14 @@ pub fn build_api_context_block(
         // broker boundary into model context (or its command-line argv).
         match &spec.auth {
             ApiAuthKind::ApiKeyQuery { param_name, .. } => {
-                out.push_str(&format!("Auth: injected server-side by `api_call` as query parameter `{param_name}`.\n"));
+                out.push_str(&format!(
+                    "Auth: injected server-side by `api_call` as query parameter `{param_name}`.\n"
+                ));
             }
             ApiAuthKind::ApiKeyHeader { header_name, .. } => {
-                out.push_str(&format!("Auth: injected server-side by `api_call` as header `{header_name}`.\n"));
+                out.push_str(&format!(
+                    "Auth: injected server-side by `api_call` as header `{header_name}`.\n"
+                ));
             }
             ApiAuthKind::Bearer { .. } => {
                 out.push_str("Auth: Bearer token injected server-side by `api_call`.\n");
@@ -2987,19 +3326,33 @@ pub fn build_api_context_block(
                 out.push_str("Auth: Basic API key injected server-side by `api_call`.\n");
             }
             ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
-                out.push_str("Auth: OAuth2 token injected and refreshed server-side by `api_call`.\n");
+                out.push_str(
+                    "Auth: OAuth2 token injected and refreshed server-side by `api_call`.\n",
+                );
                 if !extra_headers.is_empty() {
-                    let names = extra_headers.iter().map(|h| format!("`{}`", h.name)).collect::<Vec<_>>().join(", ");
-                    out.push_str(&format!("Additional auth headers injected server-side: {names}.\n"));
+                    let names = extra_headers
+                        .iter()
+                        .map(|h| format!("`{}`", h.name))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&format!(
+                        "Additional auth headers injected server-side: {names}.\n"
+                    ));
                 }
             }
             ApiAuthKind::TokenExchange { inject, .. } => {
                 let location = match inject {
                     crate::models::TokenInjection::BearerHeader => "Bearer header".to_string(),
-                    crate::models::TokenInjection::CustomHeader { name } => format!("header `{name}`"),
-                    crate::models::TokenInjection::QueryParam { name } => format!("query parameter `{name}`"),
+                    crate::models::TokenInjection::CustomHeader { name } => {
+                        format!("header `{name}`")
+                    }
+                    crate::models::TokenInjection::QueryParam { name } => {
+                        format!("query parameter `{name}`")
+                    }
                 };
-                out.push_str(&format!("Auth: exchanged token injected server-side by `api_call` as {location}.\n"));
+                out.push_str(&format!(
+                    "Auth: exchanged token injected server-side by `api_call` as {location}.\n"
+                ));
             }
             ApiAuthKind::None => {
                 out.push_str("Auth: none (public endpoints).\n");
@@ -3019,7 +3372,10 @@ pub fn build_api_context_block(
                 out.push_str("Config (pass as query params):\n");
             }
             for k in &spec.config_keys {
-                out.push_str(&format!("- `${{ENV.{}}}`  ({})\n", k.env_key, k.description));
+                out.push_str(&format!(
+                    "- `${{ENV.{}}}`  ({})\n",
+                    k.env_key, k.description
+                ));
             }
         }
 
@@ -3039,7 +3395,10 @@ pub fn build_api_context_block(
             if n == 1 { "" } else { "s" },
         ));
         if let Some(ep) = spec.endpoints.first() {
-            out.push_str(&format!("e.g. `{} {}` — {}\n", ep.method, ep.path, ep.description));
+            out.push_str(&format!(
+                "e.g. `{} {}` — {}\n",
+                ep.method, ep.path, ep.description
+            ));
         }
         // The listed endpoints are INDICATIVE, not an allow-list: the broker
         // forwards ANY path on this API (auth injected), so other endpoints
@@ -3080,7 +3439,11 @@ pub fn build_api_context_block(
 /// dropped, and both the ApiCall executor (`matches_config` stub `true`)
 /// and the streaming OAuth2 cache-key re-derive silently picked the FIRST
 /// matching config — i.e. potentially the wrong credential.
-pub type ActiveApiPlugin = (crate::models::McpServer, String, std::collections::HashMap<String, String>);
+pub type ActiveApiPlugin = (
+    crate::models::McpServer,
+    String,
+    std::collections::HashMap<String, String>,
+);
 
 pub fn collect_active_api_plugins(
     conn: &rusqlite::Connection,
@@ -3092,19 +3455,26 @@ pub fn collect_active_api_plugins(
     let server_map: std::collections::HashMap<&str, &crate::models::McpServer> =
         servers.iter().map(|s| (s.id.as_str(), s)).collect();
 
-    let mut out: Vec<ActiveApiPlugin> =
-        Vec::new();
+    let mut out: Vec<ActiveApiPlugin> = Vec::new();
     for config in &configs {
         let on_project = config.is_global || config.project_ids.iter().any(|pid| pid == project_id);
-        if !on_project { continue; }
-        let Some(server) = server_map.get(config.server_id.as_str()) else { continue };
-        if server.api_spec.is_none() { continue; }
+        if !on_project {
+            continue;
+        }
+        let Some(server) = server_map.get(config.server_id.as_str()) else {
+            continue;
+        };
+        if server.api_spec.is_none() {
+            continue;
+        }
         let env = match crate::db::mcps::decrypt_env(&config.env_encrypted, secret) {
             Ok(e) => e,
             Err(e) => {
                 tracing::warn!(
                     "API plugin '{}' config {} decrypt failed ({}), skipping",
-                    server.name, config.id, e
+                    server.name,
+                    config.id,
+                    e
                 );
                 continue;
             }
@@ -3125,11 +3495,9 @@ pub fn read_mcp_context(project_path: &str, slug: &str) -> Option<String> {
 pub fn write_mcp_context(project_path: &str, slug: &str, content: &str) -> Result<(), String> {
     let resolved = resolve_host_path(project_path);
     let ctx_dir = mcp_context_dir(&resolved);
-    std::fs::create_dir_all(&ctx_dir)
-        .map_err(|e| format!("Failed to create dir: {}", e))?;
+    std::fs::create_dir_all(&ctx_dir).map_err(|e| format!("Failed to create dir: {}", e))?;
     let file = ctx_dir.join(format!("{}.md", slug));
-    std::fs::write(&file, content)
-        .map_err(|e| format!("Failed to write {}: {}", file.display(), e))
+    std::fs::write(&file, content).map_err(|e| format!("Failed to write {}: {}", file.display(), e))
 }
 
 /// List available MCP context files for a project.
@@ -3174,7 +3542,10 @@ const KNOWN_INCOMPATIBILITIES: &[(&str, AgentType, &str)] = &[
 
 /// Check if a server is incompatible with a specific agent.
 /// Returns the reason string if incompatible, None otherwise.
-fn check_incompatibility(server: &crate::models::McpServer, agent: &AgentType) -> Option<&'static str> {
+fn check_incompatibility(
+    server: &crate::models::McpServer,
+    agent: &AgentType,
+) -> Option<&'static str> {
     // Localhost SSE/Streamable servers are unreachable inside Docker → exclude from all agents
     if is_localhost_remote(server) {
         return Some("Localhost SSE/Streamable server — unreachable inside Docker");
@@ -3226,7 +3597,8 @@ pub fn find_incomplete_configs(
         if config.env_keys.is_empty() {
             continue;
         }
-        let server_name = servers.get(&config.server_id)
+        let server_name = servers
+            .get(&config.server_id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "(unknown server)".to_string());
 
@@ -3247,8 +3619,14 @@ pub fn find_incomplete_configs(
                 continue;
             }
         };
-        let missing: Vec<String> = config.env_keys.iter()
-            .filter(|k| env.get(k.as_str()).map(|v| v.trim().is_empty()).unwrap_or(true))
+        let missing: Vec<String> = config
+            .env_keys
+            .iter()
+            .filter(|k| {
+                env.get(k.as_str())
+                    .map(|v| v.trim().is_empty())
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect();
         if !missing.is_empty() {
@@ -3256,7 +3634,10 @@ pub fn find_incomplete_configs(
                 config_id: config.id.clone(),
                 label: config.label.clone(),
                 server_name,
-                reason: format!("{} clé(s) requise(s) manquante(s) ou vide(s)", missing.len()),
+                reason: format!(
+                    "{} clé(s) requise(s) manquante(s) ou vide(s)",
+                    missing.len()
+                ),
                 missing_keys: missing,
             });
         }
@@ -3317,7 +3698,9 @@ pub(crate) fn is_command_available(command: &str) -> bool {
 
 /// Re-export from scanner — single source of truth for host path resolution.
 fn resolve_host_path(path: &str) -> String {
-    crate::core::scanner::resolve_host_path(path).to_string_lossy().to_string()
+    crate::core::scanner::resolve_host_path(path)
+        .to_string_lossy()
+        .to_string()
 }
 
 // ─── Tests for Phase-3 host_sync (merge logic) ───────────────────────────────
@@ -3329,15 +3712,27 @@ mod inject_context_tests {
     #[test]
     fn scaffolding_and_unfilled_templates_are_never_injected() {
         // The scaffolding file itself, whatever the casing.
-        assert!(!should_inject_mcp_context("TEMPLATE.md", "# Real content, no placeholder"));
+        assert!(!should_inject_mcp_context(
+            "TEMPLATE.md",
+            "# Real content, no placeholder"
+        ));
         assert!(!should_inject_mcp_context("template.md", "# Real content"));
         // Unfilled placeholders — `# {{MCP_NAME}} — Context` reached live
         // audit prompts verbatim.
-        assert!(!should_inject_mcp_context("github.md", "# {{MCP_NAME}} — Context\n{{TOOL_1}}"));
+        assert!(!should_inject_mcp_context(
+            "github.md",
+            "# {{MCP_NAME}} — Context\n{{TOOL_1}}"
+        ));
         // Legacy default boilerplate.
-        assert!(!should_inject_mcp_context("jira.md", "<!-- Examples: -->\n# Title\n> quote"));
+        assert!(!should_inject_mcp_context(
+            "jira.md",
+            "<!-- Examples: -->\n# Title\n> quote"
+        ));
         // Real user-written guidance passes.
-        assert!(should_inject_mcp_context("github.md", "# GitHub — Context\nUse repo DocRoms/Kronn."));
+        assert!(should_inject_mcp_context(
+            "github.md",
+            "# GitHub — Context\nUse repo DocRoms/Kronn."
+        ));
     }
 }
 
@@ -3374,7 +3769,10 @@ mod host_sync_tests {
         let servers = existing.get("mcpServers").unwrap().as_object().unwrap();
         assert!(servers.contains_key("user-fav"), "user entry preserved");
         assert!(servers.contains_key("kronn-one"), "kronn entry added");
-        assert_eq!(existing.get("otherKey").unwrap().as_str(), Some("preserved"));
+        assert_eq!(
+            existing.get("otherKey").unwrap().as_str(),
+            Some("preserved")
+        );
     }
 
     #[test]
@@ -3396,8 +3794,11 @@ mod host_sync_tests {
         merge_kronn_entries(&mut existing, kronn, &ids);
 
         let entry = existing.get("mcpServers").unwrap().get("linear").unwrap();
-        assert_eq!(entry.get("command").unwrap().as_str(), Some("new-cmd"),
-            "Kronn entry replaced with current data");
+        assert_eq!(
+            entry.get("command").unwrap().as_str(),
+            Some("new-cmd"),
+            "Kronn entry replaced with current data"
+        );
     }
 
     #[test]
@@ -3424,8 +3825,14 @@ mod host_sync_tests {
         merge_kronn_entries(&mut existing, kronn, &ids);
 
         let servers = existing.get("mcpServers").unwrap().as_object().unwrap();
-        assert!(!servers.contains_key("deleted-from-kronn"), "orphan removed");
-        assert!(servers.contains_key("still-managed"), "current Kronn entry kept");
+        assert!(
+            !servers.contains_key("deleted-from-kronn"),
+            "orphan removed"
+        );
+        assert!(
+            servers.contains_key("still-managed"),
+            "current Kronn entry kept"
+        );
     }
 
     #[test]
@@ -3483,8 +3890,11 @@ mod host_sync_tests {
         }
         // Backup file should now exist at slot .1 (rotation N=5).
         let backup = tmp.path().with_extension(
-            tmp.path().extension().and_then(|s| s.to_str()).map(|s| format!("{}.kronn-backup.1", s))
-                .unwrap_or_else(|| "kronn-backup.1".to_string())
+            tmp.path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| format!("{}.kronn-backup.1", s))
+                .unwrap_or_else(|| "kronn-backup.1".to_string()),
         );
         assert!(backup.exists(), "backup created at {}", backup.display());
         let _ = std::fs::remove_file(&backup); // cleanup
@@ -3558,19 +3968,31 @@ mod host_sync_tests {
     fn build_entry_skips_api_only() {
         use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
         let config = McpConfig {
-            id: "u1".into(), server_id: "s1".into(), label: "test".into(),
-            env_keys: vec![], env_encrypted: String::new(),
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            id: "u1".into(),
+            server_id: "s1".into(),
+            label: "test".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::GlobalOnly,
         };
         let server = McpServer {
-            id: "s1".into(), name: "S".into(), description: String::new(),
+            id: "s1".into(),
+            name: "S".into(),
+            description: String::new(),
             transport: McpTransport::ApiOnly,
             source: McpSource::Registry,
             api_spec: None,
         };
-        assert!(build_kronn_managed_json_entry(&config, &server, "secret-not-used", false).unwrap().is_none());
+        assert!(
+            build_kronn_managed_json_entry(&config, &server, "secret-not-used", false)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3580,48 +4002,83 @@ mod host_sync_tests {
         // its file write instead of clobbering on-disk secrets (2026-06-30
         // incident class — the old code wrote env:{} silently).
         let mut config = McpConfig {
-            id: "u1".into(), server_id: "s1".into(), label: "linear".into(),
+            id: "u1".into(),
+            server_id: "s1".into(),
+            label: "linear".into(),
             env_keys: vec!["API_TOKEN".into()],
             env_encrypted: "not-base64-not-ciphertext".into(),
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::GlobalOnly,
         };
         assert!(decrypt_env_strict(&config, "0123456789abcdef0123456789abcdef").is_err());
         // No expected keys → same garbage degrades to an empty map (nothing to lose).
         config.env_keys = vec![];
-        assert_eq!(decrypt_env_strict(&config, "0123456789abcdef0123456789abcdef").unwrap(), HashMap::new());
+        assert_eq!(
+            decrypt_env_strict(&config, "0123456789abcdef0123456789abcdef").unwrap(),
+            HashMap::new()
+        );
         // And the builder propagates the abort signal.
         config.env_keys = vec!["API_TOKEN".into()];
         let server = crate::models::McpServer {
-            id: "s1".into(), name: "Linear".into(), description: String::new(),
-            transport: crate::models::McpTransport::Stdio { command: "npx".into(), args: vec![] },
+            id: "s1".into(),
+            name: "Linear".into(),
+            description: String::new(),
+            transport: crate::models::McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec![],
+            },
             source: crate::models::McpSource::Registry,
             api_spec: None,
         };
-        assert!(build_kronn_managed_json_entry(&config, &server, "0123456789abcdef0123456789abcdef", false).is_err());
+        assert!(build_kronn_managed_json_entry(
+            &config,
+            &server,
+            "0123456789abcdef0123456789abcdef",
+            false
+        )
+        .is_err());
     }
 
     #[test]
     fn build_entry_marks_kronn_with_config_id() {
         use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
         let config = McpConfig {
-            id: "uuid-marker".into(), server_id: "s1".into(), label: "linear".into(),
-            env_keys: vec![], env_encrypted: String::new(),
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            id: "uuid-marker".into(),
+            server_id: "s1".into(),
+            label: "linear".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::GlobalOnly,
         };
         let server = McpServer {
-            id: "s1".into(), name: "Linear".into(), description: String::new(),
-            transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
+            id: "s1".into(),
+            name: "Linear".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec![],
+            },
             source: McpSource::Registry,
             api_spec: None,
         };
-        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false).unwrap().unwrap();
+        let entry = build_kronn_managed_json_entry(&config, &server, "secret", false)
+            .unwrap()
+            .unwrap();
         let marker = entry.get("_kronn").unwrap();
         assert_eq!(marker.get("managed").unwrap().as_bool(), Some(true));
-        assert_eq!(marker.get("config_id").unwrap().as_str(), Some("uuid-marker"));
+        assert_eq!(
+            marker.get("config_id").unwrap().as_str(),
+            Some("uuid-marker")
+        );
     }
 
     // ─── Phase-3 refactor: Claude scope-aware writes ────────────────────────
@@ -3646,7 +4103,11 @@ mod host_sync_tests {
         let top = v.get("mcpServers").unwrap().as_object().unwrap();
         assert!(!top.contains_key("k1"));
         assert!(top.contains_key("user-a"));
-        let p1 = v.pointer("/projects/~1p1/mcpServers").unwrap().as_object().unwrap();
+        let p1 = v
+            .pointer("/projects/~1p1/mcpServers")
+            .unwrap()
+            .as_object()
+            .unwrap();
         assert!(!p1.contains_key("k2"));
         assert!(p1.contains_key("user-b"));
     }
@@ -3658,7 +4119,9 @@ mod host_sync_tests {
         entries.insert("linear".to_string(), serde_json::json!({"command": "x"}));
         let ids: HashSet<String> = ["u1".to_string()].into_iter().collect();
         merge_into_project_mcp_servers(&mut v, "/repo/abc", entries, &ids);
-        let entry = v.pointer("/projects/~1repo~1abc/mcpServers/linear").unwrap();
+        let entry = v
+            .pointer("/projects/~1repo~1abc/mcpServers/linear")
+            .unwrap();
         assert_eq!(entry.get("command").unwrap().as_str(), Some("x"));
     }
 
@@ -3698,9 +4161,19 @@ mod host_sync_tests {
         });
         prune_empty_mcp_servers(&mut v);
         assert!(v.get("mcpServers").is_none(), "top-level pruned");
-        assert!(v.pointer("/projects/~1p1/mcpServers").is_none(), "p1 pruned");
-        assert!(v.pointer("/projects/~1p2/mcpServers/kept").is_some(), "p2 kept");
-        assert_eq!(v.get("theme").unwrap().as_str(), Some("dark"), "non-mcp keys preserved");
+        assert!(
+            v.pointer("/projects/~1p1/mcpServers").is_none(),
+            "p1 pruned"
+        );
+        assert!(
+            v.pointer("/projects/~1p2/mcpServers/kept").is_some(),
+            "p2 kept"
+        );
+        assert_eq!(
+            v.get("theme").unwrap().as_str(),
+            Some("dark"),
+            "non-mcp keys preserved"
+        );
     }
 
     #[test]
@@ -3758,14 +4231,22 @@ mod host_sync_tests {
         unsafe {
             std::env::set_var("KRONN_INTROSPECTION_PUBLIC_PATH", &tmp);
         }
-        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
+        let mut file = McpJsonFile {
+            mcp_servers: HashMap::new(),
+        };
         let injected = inject_kronn_internal(&mut file);
         unsafe {
             std::env::remove_var("KRONN_INTROSPECTION_PUBLIC_PATH");
         }
         let _ = std::fs::remove_file(&tmp);
-        assert!(injected, "injection must succeed when public env path exists");
-        let entry = file.mcp_servers.get("kronn-internal").expect("entry written");
+        assert!(
+            injected,
+            "injection must succeed when public env path exists"
+        );
+        let entry = file
+            .mcp_servers
+            .get("kronn-internal")
+            .expect("entry written");
         let path = entry.args.as_ref().unwrap().first().unwrap();
         assert_eq!(path, &tmp.to_string_lossy().to_string());
 
@@ -3775,26 +4256,41 @@ mod host_sync_tests {
         // `CARGO_MANIFEST_DIR/scripts/...` path — which IS valid on this fs
         // since cargo runs the suite from the source tree. Injection should
         // succeed; the path must point at an existing file.
-        let mut file = McpJsonFile { mcp_servers: HashMap::new() };
-        file.mcp_servers.insert("kronn-internal".into(), McpServerEntry {
-            command: Some("python3".into()),
-            args: Some(vec!["/app/scripts/disc-introspection-mcp.py".into()]),
-            url: None,
-            env: HashMap::new(),
-        });
+        let mut file = McpJsonFile {
+            mcp_servers: HashMap::new(),
+        };
+        file.mcp_servers.insert(
+            "kronn-internal".into(),
+            McpServerEntry {
+                command: Some("python3".into()),
+                args: Some(vec!["/app/scripts/disc-introspection-mcp.py".into()]),
+                url: None,
+                env: HashMap::new(),
+            },
+        );
         let injected = inject_kronn_internal(&mut file);
         if injected {
             // Native Kronn — script reachable on the host, entry rewritten.
-            let entry = file.mcp_servers.get("kronn-internal").expect("entry written");
+            let entry = file
+                .mcp_servers
+                .get("kronn-internal")
+                .expect("entry written");
             let path = entry.args.as_ref().unwrap().first().expect("path arg");
-            assert!(std::path::Path::new(path).exists(), "written path must exist on this fs");
-            assert_ne!(path, "/app/scripts/disc-introspection-mcp.py",
-                "stale Docker-only path should have been replaced with a host-valid path");
+            assert!(
+                std::path::Path::new(path).exists(),
+                "written path must exist on this fs"
+            );
+            assert_ne!(
+                path, "/app/scripts/disc-introspection-mcp.py",
+                "stale Docker-only path should have been replaced with a host-valid path"
+            );
         } else {
             // Docker-only Kronn (the user's bug case) — injection skipped,
             // stale entry pruned so host CLIs stop choking on it.
-            assert!(!file.mcp_servers.contains_key("kronn-internal"),
-                "stale `kronn-internal` entry should be removed when no shared path resolves");
+            assert!(
+                !file.mcp_servers.contains_key("kronn-internal"),
+                "stale `kronn-internal` entry should be removed when no shared path resolves"
+            );
         }
     }
 
@@ -3806,7 +4302,7 @@ mod host_sync_tests {
         // surface a warning. Without this, every Kronn-spawned agent
         // tries to handshake with the broken MCP at boot, which slows
         // down the whole startup (Connection closed, OAuth invalid_client).
-        use crate::models::{McpConfig, McpServer, McpSource, McpTransport, HostSyncMode};
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
         // 32 bytes hex-encoded (64 hex chars) — what `crypto::parse_secret` expects.
         let secret = &"a".repeat(64);
         // Config A: declares one env key, value provided → complete.
@@ -3814,11 +4310,16 @@ mod host_sync_tests {
         env_a.insert("FOO_TOKEN".to_string(), "real-value".to_string());
         let env_a_enc = crate::db::mcps::encrypt_env(&env_a, secret).unwrap();
         let cfg_a = McpConfig {
-            id: "cfg-a".into(), server_id: "srv".into(), label: "Complete".into(),
+            id: "cfg-a".into(),
+            server_id: "srv".into(),
+            label: "Complete".into(),
             env_keys: vec!["FOO_TOKEN".into()],
             env_encrypted: env_a_enc,
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::None,
         };
         // Config B: declares one env key, value EMPTY → incomplete.
@@ -3826,11 +4327,16 @@ mod host_sync_tests {
         env_b.insert("BAR_TOKEN".to_string(), "".to_string());
         let env_b_enc = crate::db::mcps::encrypt_env(&env_b, secret).unwrap();
         let cfg_b = McpConfig {
-            id: "cfg-b".into(), server_id: "srv".into(), label: "Empty value".into(),
+            id: "cfg-b".into(),
+            server_id: "srv".into(),
+            label: "Empty value".into(),
             env_keys: vec!["BAR_TOKEN".into()],
             env_encrypted: env_b_enc,
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::None,
         };
         // Config C: declares two keys, only ONE provided → incomplete (1 missing).
@@ -3838,26 +4344,42 @@ mod host_sync_tests {
         env_c.insert("KEY1".to_string(), "val".to_string());
         let env_c_enc = crate::db::mcps::encrypt_env(&env_c, secret).unwrap();
         let cfg_c = McpConfig {
-            id: "cfg-c".into(), server_id: "srv".into(), label: "Half".into(),
+            id: "cfg-c".into(),
+            server_id: "srv".into(),
+            label: "Half".into(),
             env_keys: vec!["KEY1".into(), "KEY2".into()],
             env_encrypted: env_c_enc,
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::None,
         };
         // Config D: no env_keys declared → never incomplete.
         let cfg_d = McpConfig {
-            id: "cfg-d".into(), server_id: "srv".into(), label: "Open".into(),
+            id: "cfg-d".into(),
+            server_id: "srv".into(),
+            label: "Open".into(),
             env_keys: vec![],
             env_encrypted: String::new(),
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::None,
         };
         let server = McpServer {
-            id: "srv".into(), name: "TestServer".into(), description: String::new(),
-            transport: McpTransport::Stdio { command: "echo".into(), args: vec![] },
-            source: McpSource::Registry, api_spec: None,
+            id: "srv".into(),
+            name: "TestServer".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
+            source: McpSource::Registry,
+            api_spec: None,
         };
         let mut server_map: HashMap<String, &McpServer> = HashMap::new();
         server_map.insert("srv".into(), &server);
@@ -3866,8 +4388,12 @@ mod host_sync_tests {
         let incomplete = find_incomplete_configs(&configs, &server_map, secret);
 
         // Only cfg-b and cfg-c should be flagged.
-        assert_eq!(incomplete.len(), 2, "expected 2 incomplete configs, got: {:?}",
-            incomplete.iter().map(|i| &i.config_id).collect::<Vec<_>>());
+        assert_eq!(
+            incomplete.len(),
+            2,
+            "expected 2 incomplete configs, got: {:?}",
+            incomplete.iter().map(|i| &i.config_id).collect::<Vec<_>>()
+        );
         let ids: HashSet<_> = incomplete.iter().map(|i| i.config_id.clone()).collect();
         assert!(ids.contains("cfg-b"));
         assert!(ids.contains("cfg-c"));
@@ -3882,54 +4408,88 @@ mod host_sync_tests {
         // Cipher unreadable (e.g. after key rotation) → flagged with
         // empty missing_keys + a "secrets unreadable" reason. The UI
         // should suggest re-entering values rather than guessing keys.
-        use crate::models::{McpConfig, McpServer, McpSource, McpTransport, HostSyncMode};
+        use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
         let cfg = McpConfig {
-            id: "broken".into(), server_id: "srv".into(), label: "Broken".into(),
+            id: "broken".into(),
+            server_id: "srv".into(),
+            label: "Broken".into(),
             env_keys: vec!["TOKEN".into()],
             env_encrypted: "definitely-not-valid-base64-or-cipher".into(),
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::None,
         };
         let server = McpServer {
-            id: "srv".into(), name: "S".into(), description: String::new(),
-            transport: McpTransport::Stdio { command: "echo".into(), args: vec![] },
-            source: McpSource::Registry, api_spec: None,
+            id: "srv".into(),
+            name: "S".into(),
+            description: String::new(),
+            transport: McpTransport::Stdio {
+                command: "echo".into(),
+                args: vec![],
+            },
+            source: McpSource::Registry,
+            api_spec: None,
         };
         let mut server_map: HashMap<String, &McpServer> = HashMap::new();
         server_map.insert("srv".into(), &server);
         let incomplete = find_incomplete_configs(&[cfg], &server_map, "any-secret");
         assert_eq!(incomplete.len(), 1);
         assert!(incomplete[0].missing_keys.is_empty());
-        assert!(incomplete[0].reason.starts_with("Secrets unreadable"),
-            "got: {}", incomplete[0].reason);
+        assert!(
+            incomplete[0].reason.starts_with("Secrets unreadable"),
+            "got: {}",
+            incomplete[0].reason
+        );
     }
 
     #[test]
     fn build_entry_streamable_uses_httpurl_for_gemini() {
         use crate::models::{HostSyncMode, McpConfig, McpServer, McpSource, McpTransport};
         let config = McpConfig {
-            id: "u1".into(), server_id: "s1".into(), label: "remote".into(),
-            env_keys: vec![], env_encrypted: String::new(),
-            args_override: None, is_global: false, include_general: true,
-            config_hash: String::new(), project_ids: vec![],
+            id: "u1".into(),
+            server_id: "s1".into(),
+            label: "remote".into(),
+            env_keys: vec![],
+            env_encrypted: String::new(),
+            args_override: None,
+            is_global: false,
+            include_general: true,
+            config_hash: String::new(),
+            project_ids: vec![],
             host_sync: HostSyncMode::GlobalOnly,
         };
         let server = McpServer {
-            id: "s1".into(), name: "Remote".into(), description: String::new(),
-            transport: McpTransport::Streamable { url: "https://example.com/mcp".into() },
+            id: "s1".into(),
+            name: "Remote".into(),
+            description: String::new(),
+            transport: McpTransport::Streamable {
+                url: "https://example.com/mcp".into(),
+            },
             source: McpSource::Registry,
             api_spec: None,
         };
         // Gemini convention
-        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true).unwrap().unwrap();
-        assert_eq!(gemini_entry.get("httpUrl").unwrap().as_str(), Some("https://example.com/mcp"));
+        let gemini_entry = build_kronn_managed_json_entry(&config, &server, "s", true)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            gemini_entry.get("httpUrl").unwrap().as_str(),
+            Some("https://example.com/mcp")
+        );
         assert!(gemini_entry.get("type").is_none());
 
         // Claude convention (type:"http" + url)
-        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false).unwrap().unwrap();
+        let claude_entry = build_kronn_managed_json_entry(&config, &server, "s", false)
+            .unwrap()
+            .unwrap();
         assert_eq!(claude_entry.get("type").unwrap().as_str(), Some("http"));
-        assert_eq!(claude_entry.get("url").unwrap().as_str(), Some("https://example.com/mcp"));
+        assert_eq!(
+            claude_entry.get("url").unwrap().as_str(),
+            Some("https://example.com/mcp")
+        );
     }
 
     #[test]
@@ -4004,8 +4564,10 @@ Always send emails from contact@example.com
 - Always use sender address: contact@example.com
 -->
 "#;
-        assert!(!is_default_mcp_context(edited),
-            "rule line outside the examples block must flip result");
+        assert!(
+            !is_default_mcp_context(edited),
+            "rule line outside the examples block must flip result"
+        );
     }
 
     #[test]
@@ -4025,7 +4587,9 @@ Always send emails from contact@example.com
 - bullet two
 -->
 "#;
-        assert!(is_default_mcp_context(bullet_only),
-            "bare bullets inside Examples block are template structure");
+        assert!(
+            is_default_mcp_context(bullet_only),
+            "bare bullets inside Examples block are template structure"
+        );
     }
 }

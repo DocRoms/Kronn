@@ -57,7 +57,8 @@ impl LearningSweep {
         let n = self
             .db
             .with_conn(move |conn| {
-                crate::db::learnings::mark_stale_before(conn, &cutoff).map_err(|e| anyhow::anyhow!("{e}"))
+                crate::db::learnings::mark_stale_before(conn, &cutoff)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
             })
             .await?;
         if n > 0 {
@@ -77,7 +78,11 @@ mod tests {
         Learning {
             id: id.into(),
             claim: format!("claim {id}"),
-            evidence: vec![Evidence { kind: "user".into(), reference: "user:2000-01-01".into(), quote: None }],
+            evidence: vec![Evidence {
+                kind: "user".into(),
+                reference: "user:2000-01-01".into(),
+                quote: None,
+            }],
             kind: LearningKind::Preference,
             status: LearningStatus::Pending,
             scope: None,

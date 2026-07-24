@@ -20,8 +20,8 @@
 //! deliberately NOT decided here: `snapshot()` exposes every tier so the
 //! DB-aware reconciler can pick the key whose KID matches the stored ciphertext.
 
-use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 
 /// Env var an operator can set to pin the key (highest priority). Read-only.
 pub const ENV_KEK: &str = "KRONN_ENCRYPTION_KEK";
@@ -51,7 +51,10 @@ pub struct OsKeychain {
 
 impl OsKeychain {
     pub fn kronn() -> Self {
-        Self { service: KEYCHAIN_SERVICE.into(), account: KEYCHAIN_ACCOUNT.into() }
+        Self {
+            service: KEYCHAIN_SERVICE.into(),
+            account: KEYCHAIN_ACCOUNT.into(),
+        }
     }
     fn entry(&self) -> Result<keyring::Entry> {
         keyring::Entry::new(&self.service, &self.account)
@@ -60,24 +63,34 @@ impl OsKeychain {
 }
 
 impl KeyVault for OsKeychain {
-    fn name(&self) -> &'static str { "keychain" }
+    fn name(&self) -> &'static str {
+        "keychain"
+    }
 
     fn retrieve(&self) -> Result<Option<String>> {
         let entry = match self.entry() {
             Ok(e) => e,
             // No keychain backend (WSL/Docker/headless) — degrade, don't fail.
-            Err(e) => { tracing::warn!("keychain unavailable ({e}); falling through the ladder"); return Ok(None); }
+            Err(e) => {
+                tracing::warn!("keychain unavailable ({e}); falling through the ladder");
+                return Ok(None);
+            }
         };
         match entry.get_password() {
             Ok(s) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
             Ok(_) => Ok(None),
             Err(keyring::Error::NoEntry) => Ok(None),
-            Err(e) => { tracing::warn!("keychain read failed ({e}); falling through the ladder"); Ok(None) }
+            Err(e) => {
+                tracing::warn!("keychain read failed ({e}); falling through the ladder");
+                Ok(None)
+            }
         }
     }
 
     fn store(&self, secret: &str) -> Result<()> {
-        self.entry()?.set_password(secret).context("write key to OS keychain")
+        self.entry()?
+            .set_password(secret)
+            .context("write key to OS keychain")
     }
 }
 
@@ -89,27 +102,43 @@ pub struct SidecarFile {
 
 impl SidecarFile {
     pub fn in_dir(dir: &Path) -> Self {
-        Self { path: dir.join(SIDECAR_FILENAME) }
+        Self {
+            path: dir.join(SIDECAR_FILENAME),
+        }
     }
-    pub fn path(&self) -> &Path { &self.path }
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
 }
 
 impl KeyVault for SidecarFile {
-    fn name(&self) -> &'static str { "sidecar" }
+    fn name(&self) -> &'static str {
+        "sidecar"
+    }
 
     fn retrieve(&self) -> Result<Option<String>> {
         match std::fs::read_to_string(&self.path) {
             Ok(s) => {
                 let t = s.trim();
-                Ok(if t.is_empty() { None } else { Some(t.to_string()) })
+                Ok(if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => { tracing::warn!("sidecar read failed ({e}); falling through the ladder"); Ok(None) }
+            Err(e) => {
+                tracing::warn!("sidecar read failed ({e}); falling through the ladder");
+                Ok(None)
+            }
         }
     }
 
     fn store(&self, secret: &str) -> Result<()> {
-        let dir = self.path.parent().context("sidecar path has no parent dir")?;
+        let dir = self
+            .path
+            .parent()
+            .context("sidecar path has no parent dir")?;
         std::fs::create_dir_all(dir).context("create data dir for sidecar")?;
         // Temp in the SAME dir so the rename stays on one filesystem (atomic).
         let tmp = dir.join(format!(".{}.tmp", SIDECAR_FILENAME));
@@ -166,7 +195,10 @@ impl KeyStore {
 
     /// The env override, if set and non-empty. Read-only, highest priority.
     pub fn env_override() -> Option<String> {
-        std::env::var(ENV_KEK).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+        std::env::var(ENV_KEK)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
     }
 
     /// Highest-priority key currently present: env → vaults in order.
@@ -232,17 +264,28 @@ mod tests {
     }
     impl MockVault {
         fn with_value(name: &'static str, v: &str) -> Self {
-            Self { name, state: Mutex::new(MockState::Value(v.into())) }
+            Self {
+                name,
+                state: Mutex::new(MockState::Value(v.into())),
+            }
         }
         fn empty(name: &'static str) -> Self {
-            Self { name, state: Mutex::new(MockState::Empty) }
+            Self {
+                name,
+                state: Mutex::new(MockState::Empty),
+            }
         }
         fn unavailable(name: &'static str) -> Self {
-            Self { name, state: Mutex::new(MockState::Unavailable) }
+            Self {
+                name,
+                state: Mutex::new(MockState::Unavailable),
+            }
         }
     }
     impl KeyVault for MockVault {
-        fn name(&self) -> &'static str { self.name }
+        fn name(&self) -> &'static str {
+            self.name
+        }
         fn retrieve(&self) -> Result<Option<String>> {
             match &*self.state.lock().unwrap() {
                 MockState::Value(v) => Ok(Some(v.clone())),
@@ -259,7 +302,9 @@ mod tests {
             Ok(())
         }
     }
-    fn boxed(v: MockVault) -> Box<dyn KeyVault> { Box::new(v) }
+    fn boxed(v: MockVault) -> Box<dyn KeyVault> {
+        Box::new(v)
+    }
 
     #[test]
     fn mock_store_then_retrieve_roundtrips() {
@@ -277,11 +322,27 @@ mod tests {
     }
 
     #[test]
+    fn os_keychain_constructor_exposes_stable_vault_name() {
+        let vault = OsKeychain::kronn();
+        assert_eq!(vault.name(), "keychain");
+        assert_eq!(vault.service, KEYCHAIN_SERVICE);
+        assert_eq!(vault.account, KEYCHAIN_ACCOUNT);
+    }
+
+    #[test]
     #[serial]
     fn primary_prefers_env_over_vaults() {
-        std::env::set_var(ENV_KEK, "envkey");
+        std::env::set_var(ENV_KEK, "  envkey \n");
         let ks = KeyStore::from_vaults(vec![boxed(MockVault::with_value("keychain", "otherkey"))]);
         assert_eq!(ks.primary(), Some(("envkey".to_string(), "env")));
+        std::env::remove_var(ENV_KEK);
+    }
+
+    #[test]
+    #[serial]
+    fn env_override_ignores_whitespace_only_value() {
+        std::env::set_var(ENV_KEK, " \n\t ");
+        assert_eq!(KeyStore::env_override(), None);
         std::env::remove_var(ENV_KEK);
     }
 
@@ -326,6 +387,14 @@ mod tests {
 
     #[test]
     #[serial]
+    fn snapshot_degrades_unavailable_vault_to_none() {
+        std::env::remove_var(ENV_KEK);
+        let ks = KeyStore::from_vaults(vec![boxed(MockVault::unavailable("keychain"))]);
+        assert_eq!(ks.snapshot(), vec![("env", None), ("keychain", None)]);
+    }
+
+    #[test]
+    #[serial]
     fn mirror_writes_missing_and_skips_present() {
         std::env::remove_var(ENV_KEK);
         let ks = KeyStore::from_vaults(vec![
@@ -347,8 +416,14 @@ mod tests {
             boxed(MockVault::empty("sidecar")),
         ]);
         let results = ks.mirror("KEY");
-        assert!(results[0].1.is_err(), "unavailable vault store must surface an error");
-        assert!(results[1].1.is_ok(), "the writable vault must still receive the key");
+        assert!(
+            results[0].1.is_err(),
+            "unavailable vault store must surface an error"
+        );
+        assert!(
+            results[1].1.is_ok(),
+            "the writable vault must still receive the key"
+        );
     }
 
     #[test]
@@ -375,7 +450,10 @@ mod tests {
         std::env::remove_var("KRONN_USE_KEYCHAIN");
         // Tests compile with debug_assertions → default is OFF (no macOS
         // password prompt on every cargo rebuild).
-        assert!(!use_os_keychain(), "debug builds must skip the keychain by default");
+        assert!(
+            !use_os_keychain(),
+            "debug builds must skip the keychain by default"
+        );
         std::env::set_var("KRONN_USE_KEYCHAIN", "1");
         assert!(use_os_keychain(), "explicit opt-in must win");
         std::env::set_var("KRONN_USE_KEYCHAIN", "0");
@@ -402,5 +480,50 @@ mod tests {
         let sc = SidecarFile::in_dir(dir.path());
         std::fs::write(sc.path(), "   \n").unwrap();
         assert_eq!(sc.retrieve().unwrap(), None);
+    }
+
+    #[test]
+    fn sidecar_read_error_degrades_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let sc = SidecarFile::in_dir(dir.path());
+        std::fs::create_dir(sc.path()).unwrap();
+        assert_eq!(sc.retrieve().unwrap(), None);
+    }
+
+    #[test]
+    fn sidecar_store_reports_missing_parent() {
+        let sc = SidecarFile {
+            path: PathBuf::new(),
+        };
+        assert!(sc
+            .store("cafebabe")
+            .unwrap_err()
+            .to_string()
+            .contains("sidecar path has no parent dir"));
+    }
+
+    #[test]
+    fn sidecar_store_reports_blocked_parent_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        let sc = SidecarFile::in_dir(&blocker.join("nested"));
+        assert!(sc
+            .store("cafebabe")
+            .unwrap_err()
+            .to_string()
+            .contains("create data dir for sidecar"));
+    }
+
+    #[test]
+    fn sidecar_store_reports_temp_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(format!(".{}.tmp", SIDECAR_FILENAME))).unwrap();
+        let sc = SidecarFile::in_dir(dir.path());
+        assert!(sc
+            .store("cafebabe")
+            .unwrap_err()
+            .to_string()
+            .contains("write sidecar temp"));
     }
 }

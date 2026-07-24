@@ -7,12 +7,14 @@
 //! Ollama runs on the HOST machine (not in the Docker container).
 //! In Docker, we reach it via `host.docker.internal:11434`.
 
-use axum::{extract::State, Json};
 use crate::models::*;
 use crate::AppState;
+use axum::{extract::State, Json};
 
 /// Public accessor for the runner's HTTP execution path.
-pub fn ollama_base_url_pub() -> String { ollama_base_url() }
+pub fn ollama_base_url_pub() -> String {
+    ollama_base_url()
+}
 
 /// Resolve the Ollama API base URL.
 /// Priority: OLLAMA_HOST env var > Docker heuristic > localhost.
@@ -50,9 +52,7 @@ fn detect_context() -> &'static str {
 /// Probe Ollama availability with contextual error messages.
 /// The `hint` field provides a user-friendly explanation adapted to the
 /// detected environment (native, Docker on WSL, Docker on macOS, etc.).
-pub async fn health(
-    State(_state): State<AppState>,
-) -> Json<ApiResponse<OllamaHealthResponse>> {
+pub async fn health(State(_state): State<AppState>) -> Json<ApiResponse<OllamaHealthResponse>> {
     let base = ollama_base_url();
     let context = detect_context();
     let client = reqwest::Client::builder()
@@ -64,7 +64,10 @@ pub async fn health(
     match client.get(format!("{}/api/tags", base)).send().await {
         Ok(resp) if resp.status().is_success() => {
             let body: serde_json::Value = resp.json().await.unwrap_or_default();
-            let models_count = body["models"].as_array().map(|a| a.len() as u32).unwrap_or(0);
+            let models_count = body["models"]
+                .as_array()
+                .map(|a| a.len() as u32)
+                .unwrap_or(0);
 
             let hint = if models_count == 0 {
                 Some("Ollama est en ligne mais aucun modèle n'est installé. Exécutez : ollama pull qwen3:8b".into())
@@ -132,9 +135,7 @@ pub async fn health(
 ///
 /// List locally installed Ollama models. Uses the HTTP API at
 /// `OLLAMA_HOST/api/tags`. Returns an empty list if Ollama is unreachable.
-pub async fn models(
-    State(_state): State<AppState>,
-) -> Json<ApiResponse<OllamaModelsResponse>> {
+pub async fn models(State(_state): State<AppState>) -> Json<ApiResponse<OllamaModelsResponse>> {
     let base = ollama_base_url();
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
@@ -160,9 +161,7 @@ pub async fn models(
                 .unwrap_or_default();
             Json(ApiResponse::ok(OllamaModelsResponse { models }))
         }
-        _ => {
-            Json(ApiResponse::ok(OllamaModelsResponse { models: vec![] }))
-        }
+        _ => Json(ApiResponse::ok(OllamaModelsResponse { models: vec![] })),
     }
 }
 

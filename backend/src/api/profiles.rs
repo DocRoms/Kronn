@@ -56,12 +56,10 @@ pub async fn create(
         default_engine: req.default_engine.as_deref(),
     };
     match profiles::save_custom_profile(&data) {
-        Ok(id) => {
-            match profiles::get_profile(&id) {
-                Some(profile) => Json(ApiResponse::ok(profile)),
-                None => Json(ApiResponse::err("Profile created but could not be loaded")),
-            }
-        }
+        Ok(id) => match profiles::get_profile(&id) {
+            Some(profile) => Json(ApiResponse::ok(profile)),
+            None => Json(ApiResponse::err("Profile created but could not be loaded")),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -89,12 +87,10 @@ pub async fn update(
         default_engine: req.default_engine.as_deref(),
     };
     match profiles::save_custom_profile(&data) {
-        Ok(new_id) => {
-            match profiles::get_profile(&new_id) {
-                Some(profile) => Json(ApiResponse::ok(profile)),
-                None => Json(ApiResponse::err("Profile updated but could not be loaded")),
-            }
-        }
+        Ok(new_id) => match profiles::get_profile(&new_id) {
+            Some(profile) => Json(ApiResponse::ok(profile)),
+            None => Json(ApiResponse::err("Profile updated but could not be loaded")),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
@@ -105,26 +101,22 @@ pub async fn update_persona_name(
     _state: State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> Json<ApiResponse<AgentProfile>> {
-    let persona_name = body.get("persona_name")
+    let persona_name = body
+        .get("persona_name")
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
     match profiles::save_persona_override(&id, persona_name) {
-        Ok(()) => {
-            match profiles::get_profile(&id) {
-                Some(profile) => Json(ApiResponse::ok(profile)),
-                None => Json(ApiResponse::err("Profile not found")),
-            }
-        }
+        Ok(()) => match profiles::get_profile(&id) {
+            Some(profile) => Json(ApiResponse::ok(profile)),
+            None => Json(ApiResponse::err("Profile not found")),
+        },
         Err(e) => Json(ApiResponse::err(e)),
     }
 }
 
 /// DELETE /api/profiles/:id — delete a custom profile
-pub async fn delete(
-    Path(id): Path<String>,
-    _state: State<AppState>,
-) -> Json<ApiResponse<bool>> {
+pub async fn delete(Path(id): Path<String>, _state: State<AppState>) -> Json<ApiResponse<bool>> {
     match profiles::delete_custom_profile(&id) {
         Ok(deleted) => Json(ApiResponse::ok(deleted)),
         Err(e) => Json(ApiResponse::err(e)),

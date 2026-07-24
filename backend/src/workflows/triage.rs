@@ -28,9 +28,7 @@
 //! the code line up with manifest entries deterministically.
 
 use crate::models::{
-    agent_decisions::{
-        CATEGORY_BLOCKED, CATEGORY_DECIDED, CATEGORY_MOCKED, STATUS_PENDING,
-    },
+    agent_decisions::{CATEGORY_BLOCKED, CATEGORY_DECIDED, CATEGORY_MOCKED, STATUS_PENDING},
     AgentDecision, OnInvalid, StepOutputFormat,
 };
 use chrono::Utc;
@@ -170,10 +168,8 @@ pub fn is_triage_step(step_description: Option<&str>, output_format: &StepOutput
     }
     if let StepOutputFormat::TypedSchema { schema, .. } = output_format {
         if let Some(required) = schema.get("required").and_then(|v| v.as_array()) {
-            let names: std::collections::HashSet<&str> = required
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect();
+            let names: std::collections::HashSet<&str> =
+                required.iter().filter_map(|v| v.as_str()).collect();
             let expected: std::collections::HashSet<&str> =
                 ["clear", "decided", "mocked", "blocked", "files_touched"]
                     .iter()
@@ -212,7 +208,13 @@ pub fn triage_output_format() -> StepOutputFormat {
 /// Pure → unit-testable. The agent keeps writing only the human-readable
 /// `.kronn/triage-manifest.md`.
 pub fn derive_machine_files(manifest: &serde_json::Value) -> Vec<(String, String)> {
-    let cat = |k: &str| manifest.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let cat = |k: &str| {
+        manifest
+            .get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
     let (clear, decided, mocked) = (cat("clear"), cat("decided"), cat("mocked"));
 
     // tasks.json — implementable items, topo-sorted by depends_on.
@@ -220,7 +222,12 @@ pub fn derive_machine_files(manifest: &serde_json::Value) -> Vec<(String, String
     items.extend(clear.iter().cloned());
     items.extend(decided.iter().cloned());
     items.extend(mocked.iter().cloned());
-    let id_of = |v: &serde_json::Value| v.get("id").and_then(|i| i.as_str()).unwrap_or("").to_string();
+    let id_of = |v: &serde_json::Value| {
+        v.get("id")
+            .and_then(|i| i.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
     let known: std::collections::HashSet<String> = items.iter().map(&id_of).collect();
     // Kahn's algorithm, stable: repeatedly take the first item whose deps
     // (restricted to known ids) are all already emitted. Cycles/unknown
@@ -229,45 +236,74 @@ pub fn derive_machine_files(manifest: &serde_json::Value) -> Vec<(String, String
     let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut remaining = items;
     while !remaining.is_empty() {
-        let pos = remaining.iter().position(|it| {
-            it.get("depends_on").and_then(|d| d.as_array()).map(|deps| {
-                deps.iter().all(|d| {
-                    let ds = d.as_str().unwrap_or("");
-                    !known.contains(ds) || emitted.contains(ds)
-                })
-            }).unwrap_or(true)
-        }).unwrap_or(0); // cycle → take first (input order)
+        let pos = remaining
+            .iter()
+            .position(|it| {
+                it.get("depends_on")
+                    .and_then(|d| d.as_array())
+                    .map(|deps| {
+                        deps.iter().all(|d| {
+                            let ds = d.as_str().unwrap_or("");
+                            !known.contains(ds) || emitted.contains(ds)
+                        })
+                    })
+                    .unwrap_or(true)
+            })
+            .unwrap_or(0); // cycle → take first (input order)
         let it = remaining.remove(pos);
         emitted.insert(id_of(&it));
         ordered.push(it);
     }
-    let tasks_json = serde_json::to_string_pretty(&serde_json::Value::Array(ordered)).unwrap_or_else(|_| "[]".into());
+    let tasks_json = serde_json::to_string_pretty(&serde_json::Value::Array(ordered))
+        .unwrap_or_else(|_| "[]".into());
 
     // decision_ids.txt — decided + mocked only (blocked items have no
     // reliable code location for a marker; run-3 live finding).
     let mut ids: Vec<String> = Vec::new();
     for it in decided.iter().chain(mocked.iter()) {
         let id = id_of(it);
-        if !id.is_empty() && !ids.contains(&id) { ids.push(id); }
+        if !id.is_empty() && !ids.contains(&id) {
+            ids.push(id);
+        }
     }
-    let ids_txt = if ids.is_empty() { String::new() } else { ids.join("\n") + "\n" };
+    let ids_txt = if ids.is_empty() {
+        String::new()
+    } else {
+        ids.join("\n") + "\n"
+    };
 
     // files_touched.txt — union of every item's scope + top-level list.
     let mut files: Vec<String> = Vec::new();
     let mut push_file = |f: &str| {
         let f = f.trim();
-        if !f.is_empty() && !files.iter().any(|x| x == f) { files.push(f.to_string()); }
+        if !f.is_empty() && !files.iter().any(|x| x == f) {
+            files.push(f.to_string());
+        }
     };
     for it in clear.iter().chain(decided.iter()).chain(mocked.iter()) {
         if let Some(scope) = it.get("scope").and_then(|s| s.as_array()) {
-            for f in scope { if let Some(fs) = f.as_str() { push_file(fs); } }
+            for f in scope {
+                if let Some(fs) = f.as_str() {
+                    push_file(fs);
+                }
+            }
         }
-        if let Some(w) = it.get("where").and_then(|w| w.as_str()) { push_file(w); }
+        if let Some(w) = it.get("where").and_then(|w| w.as_str()) {
+            push_file(w);
+        }
     }
     if let Some(ft) = manifest.get("files_touched").and_then(|v| v.as_array()) {
-        for f in ft { if let Some(fs) = f.as_str() { push_file(fs); } }
+        for f in ft {
+            if let Some(fs) = f.as_str() {
+                push_file(fs);
+            }
+        }
     }
-    let files_txt = if files.is_empty() { String::new() } else { files.join("\n") + "\n" };
+    let files_txt = if files.is_empty() {
+        String::new()
+    } else {
+        files.join("\n") + "\n"
+    };
 
     vec![
         (".kronn/tasks.json".into(), tasks_json),
@@ -276,8 +312,10 @@ pub fn derive_machine_files(manifest: &serde_json::Value) -> Vec<(String, String
         (".kronn/plan_lint.txt".into(), lint_manifest(manifest)),
         // Full (merged) manifest — the hydration base for the next
         // incremental re-triage round (see `merge_unchanged_items`).
-        (".kronn/manifest.json".into(),
-         serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".into())),
+        (
+            ".kronn/manifest.json".into(),
+            serde_json::to_string_pretty(manifest).unwrap_or_else(|_| "{}".into()),
+        ),
     ]
 }
 
@@ -309,7 +347,11 @@ pub fn merge_unchanged_items(
     let ids: Vec<String> = manifest
         .get("unchanged")
         .and_then(|u| u.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let mut merged = manifest.clone();
     if let Some(obj) = merged.as_object_mut() {
@@ -412,13 +454,34 @@ pub fn rewrite_envelope_data(output: &str, merged: &serde_json::Value) -> String
 /// machine files, surfaced to the `plan_lint` Exec step (cat) so the plan
 /// reviewer AND the human gate see the plan's shape at a glance. Pure.
 pub fn lint_manifest(manifest: &serde_json::Value) -> String {
-    let cat = |k: &str| manifest.get(k).and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let (clear, decided, mocked, blocked) = (cat("clear"), cat("decided"), cat("mocked"), cat("blocked"));
-    let items: Vec<&serde_json::Value> = clear.iter().chain(decided.iter()).chain(mocked.iter()).collect();
-    fn id_of(v: &serde_json::Value) -> &str { v.get("id").and_then(|i| i.as_str()).unwrap_or("") }
+    let cat = |k: &str| {
+        manifest
+            .get(k)
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+    };
+    let (clear, decided, mocked, blocked) =
+        (cat("clear"), cat("decided"), cat("mocked"), cat("blocked"));
+    let items: Vec<&serde_json::Value> = clear
+        .iter()
+        .chain(decided.iter())
+        .chain(mocked.iter())
+        .collect();
+    fn id_of(v: &serde_json::Value) -> &str {
+        v.get("id").and_then(|i| i.as_str()).unwrap_or("")
+    }
 
-    let mech = items.iter().filter(|i| i.get("mechanical").and_then(|m| m.as_bool()) == Some(true)).count();
-    let cx = |lvl: &str| items.iter().filter(|i| i.get("complexity").and_then(|c| c.as_str()) == Some(lvl)).count();
+    let mech = items
+        .iter()
+        .filter(|i| i.get("mechanical").and_then(|m| m.as_bool()) == Some(true))
+        .count();
+    let cx = |lvl: &str| {
+        items
+            .iter()
+            .filter(|i| i.get("complexity").and_then(|c| c.as_str()) == Some(lvl))
+            .count()
+    };
     let (low, med, high) = (cx("low"), cx("med"), cx("high"));
 
     let mut warnings: Vec<String> = Vec::new();
@@ -426,20 +489,36 @@ pub fn lint_manifest(manifest: &serde_json::Value) -> String {
     // concerns → the expensive runaway children of run 7 (45k tokens).
     const SCOPE_CAP: usize = 4;
     for it in &items {
-        let n = it.get("scope").and_then(|s| s.as_array()).map(|a| a.len()).unwrap_or(0);
+        let n = it
+            .get("scope")
+            .and_then(|s| s.as_array())
+            .map(|a| a.len())
+            .unwrap_or(0);
         if n > SCOPE_CAP {
-            warnings.push(format!("item `{}` scope has {n} files (> {SCOPE_CAP} — consider splitting)", id_of(it)));
+            warnings.push(format!(
+                "item `{}` scope has {n} files (> {SCOPE_CAP} — consider splitting)",
+                id_of(it)
+            ));
         }
     }
     // Scope overlaps between items → serialization / conflict risk.
     for (a_idx, a) in items.iter().enumerate() {
-        let sa: std::collections::HashSet<&str> = a.get("scope").and_then(|s| s.as_array())
-            .map(|x| x.iter().filter_map(|f| f.as_str()).collect()).unwrap_or_default();
+        let sa: std::collections::HashSet<&str> = a
+            .get("scope")
+            .and_then(|s| s.as_array())
+            .map(|x| x.iter().filter_map(|f| f.as_str()).collect())
+            .unwrap_or_default();
         for b in items.iter().skip(a_idx + 1) {
-            let hit = b.get("scope").and_then(|s| s.as_array())
+            let hit = b
+                .get("scope")
+                .and_then(|s| s.as_array())
                 .and_then(|x| x.iter().filter_map(|f| f.as_str()).find(|f| sa.contains(f)));
             if let Some(f) = hit {
-                warnings.push(format!("items `{}` and `{}` share scope file `{f}`", id_of(a), id_of(b)));
+                warnings.push(format!(
+                    "items `{}` and `{}` share scope file `{f}`",
+                    id_of(a),
+                    id_of(b)
+                ));
             }
         }
     }
@@ -450,7 +529,10 @@ pub fn lint_manifest(manifest: &serde_json::Value) -> String {
         if let Some(deps) = it.get("depends_on").and_then(|d| d.as_array()) {
             for d in deps.iter().filter_map(|d| d.as_str()) {
                 if !known.contains(d) {
-                    warnings.push(format!("item `{}` depends_on unknown/non-implementable id `{d}`", id_of(it)));
+                    warnings.push(format!(
+                        "item `{}` depends_on unknown/non-implementable id `{d}`",
+                        id_of(it)
+                    ));
                 }
             }
         }
@@ -465,7 +547,9 @@ pub fn lint_manifest(manifest: &serde_json::Value) -> String {
         out.push_str("no warnings — plan shape looks sane\n");
     } else {
         out.push_str(&format!("⚠ {} WARNING(S):\n", warnings.len()));
-        for w in &warnings { out.push_str(&format!("- {w}\n")); }
+        for w in &warnings {
+            out.push_str(&format!("- {w}\n"));
+        }
     }
     out
 }
@@ -503,14 +587,24 @@ pub fn manifest_to_decisions(
     if let Some(arr) = manifest.get("decided").and_then(|v| v.as_array()) {
         for entry in arr {
             let dec_id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            if dec_id.is_empty() { continue; }
-            let what = entry.get("what").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let chosen = entry.get("chosen").and_then(|v| v.as_str()).map(String::from);
+            if dec_id.is_empty() {
+                continue;
+            }
+            let what = entry
+                .get("what")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let chosen = entry
+                .get("chosen")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             let why = entry.get("why").and_then(|v| v.as_str()).map(String::from);
             // `options_considered` is a JSON array. We store it as a
             // serialized string in `options_json` so the DB layer
             // doesn't need its own schema.
-            let options_json = entry.get("options_considered")
+            let options_json = entry
+                .get("options_considered")
                 .map(|v| serde_json::to_string(v).unwrap_or_else(|_| "[]".into()));
             out.push(AgentDecision {
                 id: common_id(dec_id),
@@ -543,11 +637,26 @@ pub fn manifest_to_decisions(
     if let Some(arr) = manifest.get("mocked").and_then(|v| v.as_array()) {
         for entry in arr {
             let dec_id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            if dec_id.is_empty() { continue; }
-            let what = entry.get("what").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let placeholder = entry.get("placeholder").and_then(|v| v.as_str()).map(String::from);
-            let strategy = entry.get("strategy").and_then(|v| v.as_str()).map(String::from);
-            let revisit_when = entry.get("revisit_when").and_then(|v| v.as_str()).map(String::from);
+            if dec_id.is_empty() {
+                continue;
+            }
+            let what = entry
+                .get("what")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let placeholder = entry
+                .get("placeholder")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let strategy = entry
+                .get("strategy")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let revisit_when = entry
+                .get("revisit_when")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             out.push(AgentDecision {
                 id: common_id(dec_id),
                 run_id: run_id.into(),
@@ -579,11 +688,23 @@ pub fn manifest_to_decisions(
     if let Some(arr) = manifest.get("blocked").and_then(|v| v.as_array()) {
         for entry in arr {
             let dec_id = entry.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            if dec_id.is_empty() { continue; }
-            let what = entry.get("what").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if dec_id.is_empty() {
+                continue;
+            }
+            let what = entry
+                .get("what")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let why = entry.get("why").and_then(|v| v.as_str()).map(String::from);
-            let needed_from = entry.get("needed_from").and_then(|v| v.as_str()).map(String::from);
-            let workaround = entry.get("workaround").and_then(|v| v.as_str()).map(String::from);
+            let needed_from = entry
+                .get("needed_from")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            let workaround = entry
+                .get("workaround")
+                .and_then(|v| v.as_str())
+                .map(String::from);
             out.push(AgentDecision {
                 id: common_id(dec_id),
                 run_id: run_id.into(),
@@ -648,7 +769,10 @@ mod tests {
         let schema = triage_manifest_schema();
         let json_str = serde_json::to_string(&manifest).unwrap();
         let result = template::validate_envelope_against_schema(&json_str, &schema);
-        assert!(result.is_ok(), "valid manifest should pass, got: {result:?}");
+        assert!(
+            result.is_ok(),
+            "valid manifest should pass, got: {result:?}"
+        );
     }
 
     #[test]
@@ -703,7 +827,10 @@ mod tests {
         let schema = triage_manifest_schema();
         let json_str = serde_json::to_string(&manifest).unwrap();
         let result = template::validate_envelope_against_schema(&json_str, &schema);
-        assert!(result.is_err(), "blocked entry without 'needed_from' must fail");
+        assert!(
+            result.is_err(),
+            "blocked entry without 'needed_from' must fail"
+        );
     }
 
     #[test]
@@ -794,8 +921,12 @@ mod tests {
         });
 
         let rows = manifest_to_decisions(
-            &manifest, "run_a", "wf_test", "triage",
-            Some("proj_test"), Some("EW-7247"),
+            &manifest,
+            "run_a",
+            "wf_test",
+            "triage",
+            Some("proj_test"),
+            Some("EW-7247"),
         );
         // 3 rows (decided + mocked + blocked), clear skipped.
         assert_eq!(rows.len(), 3, "rows: {rows:?}");
@@ -815,7 +946,11 @@ mod tests {
         // decided row has options_json populated as a JSON array string.
         let decided = rows.iter().find(|r| r.category == "decided").unwrap();
         assert_eq!(decided.chosen.as_deref(), Some("EventListener"));
-        assert!(decided.options_json.as_deref().unwrap().contains("Compiler Pass"));
+        assert!(decided
+            .options_json
+            .as_deref()
+            .unwrap()
+            .contains("Compiler Pass"));
     }
 
     #[test]
@@ -830,9 +965,7 @@ mod tests {
             ],
             "files_touched": []
         });
-        let rows = manifest_to_decisions(
-            &manifest, "run_a", "wf", "triage", None, None,
-        );
+        let rows = manifest_to_decisions(&manifest, "run_a", "wf", "triage", None, None);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].decision_id, "ok");
     }
@@ -861,16 +994,28 @@ mod tests {
             "files_touched": ["src/a.php", "extra/file.yaml"]
         });
         let files = super::derive_machine_files(&manifest);
-        let get = |n: &str| files.iter().find(|(p, _)| p.ends_with(n)).map(|(_, c)| c.clone()).unwrap();
+        let get = |n: &str| {
+            files
+                .iter()
+                .find(|(p, _)| p.ends_with(n))
+                .map(|(_, c)| c.clone())
+                .unwrap()
+        };
         // tasks.json: blocked excluded; topo order puts a before b before c.
         let tasks: Vec<serde_json::Value> = serde_json::from_str(&get("tasks.json")).unwrap();
         let ids: Vec<&str> = tasks.iter().map(|t| t["id"].as_str().unwrap()).collect();
         assert!(!ids.contains(&"z"), "blocked items are not implementable");
         let pos = |i: &str| ids.iter().position(|x| *x == i).unwrap();
-        assert!(pos("a") < pos("b") && pos("b") < pos("c"), "depends_on topo order: got {ids:?}");
+        assert!(
+            pos("a") < pos("b") && pos("b") < pos("c"),
+            "depends_on topo order: got {ids:?}"
+        );
         // decision_ids: decided+mocked only.
         let ids_txt = get("decision_ids.txt");
-        assert_eq!(ids_txt.trim().split('\n').collect::<Vec<_>>(), vec!["c", "d"]);
+        assert_eq!(
+            ids_txt.trim().split('\n').collect::<Vec<_>>(),
+            vec!["c", "d"]
+        );
         // files_touched: deduped union of scopes + top-level.
         let ft = get("files_touched.txt");
         assert_eq!(ft.matches("src/b.php").count(), 1, "dedup");
@@ -908,7 +1053,10 @@ mod tests {
         assert!(out.contains("mechanical (engine-appliable): 1"));
         assert!(out.contains("scope has 5 files"), "anti-outlier warning");
         assert!(out.contains("share scope file `f1`"), "overlap warning");
-        assert!(out.contains("unknown/non-implementable id `ghost`"), "dangling deps warning");
+        assert!(
+            out.contains("unknown/non-implementable id `ghost`"),
+            "dangling deps warning"
+        );
     }
 
     #[test]
@@ -918,9 +1066,15 @@ mod tests {
             "decided": [], "mocked": [], "blocked": [], "files_touched": []
         });
         let files = super::derive_machine_files(&manifest);
-        let (_, raw) = files.iter().find(|(p, _)| p.ends_with("manifest.json")).expect("manifest.json derived");
+        let (_, raw) = files
+            .iter()
+            .find(|(p, _)| p.ends_with("manifest.json"))
+            .expect("manifest.json derived");
         let back: serde_json::Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(back, manifest, "manifest.json is the verbatim merged manifest");
+        assert_eq!(
+            back, manifest,
+            "manifest.json is the verbatim merged manifest"
+        );
     }
 
     #[test]
@@ -952,7 +1106,12 @@ mod tests {
         assert_eq!(decided.len(), 1);
         assert_eq!(decided[0]["what"], "B v2");
         // files_touched = union previous ∪ new
-        let ft: Vec<&str> = merged["files_touched"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+        let ft: Vec<&str> = merged["files_touched"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f.as_str().unwrap())
+            .collect();
         assert_eq!(ft, vec!["src/a.php", "src/b.php", "src/new.php"]);
     }
 

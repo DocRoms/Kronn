@@ -30,8 +30,8 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use ts_rs::TS;
 
-use crate::AppState;
 use crate::models::ApiResponse;
+use crate::AppState;
 
 const CHECK_INTERVAL: Duration = Duration::from_secs(6 * 3600); // 6 h
 const REPO: &str = "DocRoms/Kronn";
@@ -74,7 +74,9 @@ fn normalize_tag(tag: &str) -> &str {
 fn is_up_to_date(current: &str, latest: &str) -> bool {
     let parse = |s: &str| -> Option<(u64, u64, u64)> {
         let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() < 3 { return None; }
+        if parts.len() < 3 {
+            return None;
+        }
         Some((
             parts[0].parse().ok()?,
             parts[1].parse().ok()?,
@@ -100,16 +102,16 @@ async fn fetch_latest() -> Option<(String, String)> {
         .build()
         .ok()?;
     let resp = client.get(&url).send().await.ok()?;
-    if !resp.status().is_success() { return None; }
+    if !resp.status().is_success() {
+        return None;
+    }
     let release: GitHubRelease = resp.json().await.ok()?;
     Some((release.tag_name, release.html_url))
 }
 
 /// `GET /api/version/check` — returns the current+latest version pair,
 /// using a 6h in-memory cache to bound the GitHub API rate burn.
-pub async fn check(
-    State(_state): State<AppState>,
-) -> Json<ApiResponse<VersionCheck>> {
+pub async fn check(State(_state): State<AppState>) -> Json<ApiResponse<VersionCheck>> {
     let current = env!("CARGO_PKG_VERSION").to_string();
 
     let mut cache_guard = cache().lock().await;

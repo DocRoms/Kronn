@@ -54,7 +54,10 @@ pub struct ReconciledRun {
     pub started_at: String,
 }
 
-pub fn reconcile_stale_runs(conn: &Connection, stale_after_secs: i64) -> Result<Vec<ReconciledRun>> {
+pub fn reconcile_stale_runs(
+    conn: &Connection,
+    stale_after_secs: i64,
+) -> Result<Vec<ReconciledRun>> {
     let cutoff = (Utc::now() - chrono::Duration::seconds(stale_after_secs)).to_rfc3339();
     let now_rfc = Utc::now().to_rfc3339();
     // Select-then-update is race-free here: the caller holds the single
@@ -102,13 +105,13 @@ pub fn list_workflows(conn: &Connection) -> Result<Vec<Workflow>> {
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
                 pinned
-         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC"
+         FROM workflows WHERE id NOT LIKE 'qp:%' ORDER BY updated_at DESC",
     )?;
 
-    let workflows = stmt.query_map([], |row| {
-        Ok(row_to_workflow(row))
-    })?.filter_map(|r| r.ok())
-    .collect();
+    let workflows = stmt
+        .query_map([], |row| Ok(row_to_workflow(row)))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     Ok(workflows)
 }
@@ -119,12 +122,12 @@ pub fn get_workflow(conn: &Connection, id: &str) -> Result<Option<Workflow>> {
                 safety_json, workspace_config_json, concurrency_limit, enabled,
                 created_at, updated_at, guards, artifacts, on_failure, exec_allowlist, variables,
                 pinned
-         FROM workflows WHERE id = ?1"
+         FROM workflows WHERE id = ?1",
     )?;
 
-    let wf = stmt.query_row(params![id], |row| {
-        Ok(row_to_workflow(row))
-    }).ok();
+    let wf = stmt
+        .query_row(params![id], |row| Ok(row_to_workflow(row)))
+        .ok();
 
     Ok(wf)
 }
@@ -207,7 +210,8 @@ pub fn list_batch_run_summaries(conn: &Connection) -> Result<Vec<BatchRunSummary
                         Err(e) => {
                             tracing::warn!(
                                 "list_batch_run_summaries: failed to load QP {}: {}",
-                                qp_id, e
+                                qp_id,
+                                e
                             );
                             None
                         }
@@ -225,38 +229,44 @@ pub fn list_batch_run_summaries(conn: &Connection) -> Result<Vec<BatchRunSummary
             }
         };
 
-        let (parent_workflow_id, parent_workflow_name, parent_run_sequence) =
-            if let Some(ref parent_id) = br.parent_run_id {
-                match get_run(conn, parent_id)? {
-                    Some(parent_run) => {
-                        let wf_id = parent_run.workflow_id.clone();
-                        let entry = if let Some(cached) = workflow_cache.get(&wf_id) {
-                            cached.clone()
-                        } else {
-                            let wf = get_workflow(conn, &wf_id)?;
-                            // Run ordering for sequence numbers: ascending by started_at
-                            // so run #1 is the oldest. That matches how users think
-                            // about "the 3rd run of my cron today".
-                            let mut stmt2 = conn.prepare(
+        let (parent_workflow_id, parent_workflow_name, parent_run_sequence) = if let Some(
+            ref parent_id,
+        ) =
+            br.parent_run_id
+        {
+            match get_run(conn, parent_id)? {
+                Some(parent_run) => {
+                    let wf_id = parent_run.workflow_id.clone();
+                    let entry = if let Some(cached) = workflow_cache.get(&wf_id) {
+                        cached.clone()
+                    } else {
+                        let wf = get_workflow(conn, &wf_id)?;
+                        // Run ordering for sequence numbers: ascending by started_at
+                        // so run #1 is the oldest. That matches how users think
+                        // about "the 3rd run of my cron today".
+                        let mut stmt2 = conn.prepare(
                                 "SELECT id FROM workflow_runs WHERE workflow_id = ?1 ORDER BY started_at ASC"
                             )?;
-                            let rows = stmt2.query_map(params![wf_id], |row| row.get::<_, String>(0))?;
-                            let run_ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
-                            drop(stmt2); // release borrow on `conn` before further queries
-                            let cached = (wf.map(|w| w.name), run_ids);
-                            workflow_cache.insert(wf_id.clone(), cached.clone());
-                            cached
-                        };
-                        let (name, run_ids) = entry;
-                        let seq = run_ids.iter().position(|id| id == parent_id)
-                            .map(|i| (i + 1) as u32);
-                        (Some(wf_id), name, seq)
-                    }
-                    None => (None, None, None),
+                        let rows =
+                            stmt2.query_map(params![wf_id], |row| row.get::<_, String>(0))?;
+                        let run_ids: Vec<String> = rows.filter_map(|r| r.ok()).collect();
+                        drop(stmt2); // release borrow on `conn` before further queries
+                        let cached = (wf.map(|w| w.name), run_ids);
+                        workflow_cache.insert(wf_id.clone(), cached.clone());
+                        cached
+                    };
+                    let (name, run_ids) = entry;
+                    let seq = run_ids
+                        .iter()
+                        .position(|id| id == parent_id)
+                        .map(|i| (i + 1) as u32);
+                    (Some(wf_id), name, seq)
                 }
-            } else {
-                (None, None, None)
-            };
+                None => (None, None, None),
+            }
+        } else {
+            (None, None, None)
+        };
 
         out.push(BatchRunSummary {
             run_id: br.id,
@@ -303,13 +313,14 @@ pub fn delete_batch_run_with_discussions(
     run_id: &str,
 ) -> Result<DeletedBatchSummary> {
     // Validate that the target is a batch run, not a linear one.
-    let run = get_run(conn, run_id)?
-        .ok_or_else(|| anyhow::anyhow!("Batch run not found: {}", run_id))?;
+    let run =
+        get_run(conn, run_id)?.ok_or_else(|| anyhow::anyhow!("Batch run not found: {}", run_id))?;
     if run.run_type != "batch" {
         anyhow::bail!(
             "Refusing to delete: run {} is type '{}', not 'batch'. \
              Use the workflow run delete endpoint for linear runs.",
-            run_id, run.run_type
+            run_id,
+            run.run_type
         );
     }
 
@@ -319,10 +330,7 @@ pub fn delete_batch_run_with_discussions(
             "DELETE FROM discussions WHERE workflow_run_id = ?1",
             params![run_id],
         )?;
-        conn.execute(
-            "DELETE FROM workflow_runs WHERE id = ?1",
-            params![run_id],
-        )?;
+        conn.execute("DELETE FROM workflow_runs WHERE id = ?1", params![run_id])?;
         Ok(n_discs)
     })();
 
@@ -445,7 +453,11 @@ pub fn create_batch_run(
         parent_run_started_at: None,
     };
 
-    let lang = if input.language.is_empty() { "fr".to_string() } else { input.language };
+    let lang = if input.language.is_empty() {
+        "fr".to_string()
+    } else {
+        input.language
+    };
     // Request's project_id overrides QP's default when set.
     let effective_project_id = input.project_id.clone().or_else(|| qp.project_id.clone());
     let workspace_mode = if input.workspace_mode.is_empty() {
@@ -454,69 +466,78 @@ pub fn create_batch_run(
         input.workspace_mode
     };
 
-    let discussions: Vec<(Discussion, DiscussionMessage)> = input.items.iter().map(|item| {
-        let disc_id = Uuid::new_v4().to_string();
-        let initial_message = DiscussionMessage {
-            model: None,
-            lint_report: None,
-            id: Uuid::new_v4().to_string(),
-            role: MessageRole::User,
-            content: item.prompt.clone(),
-            agent_type: None,
-            timestamp: now,
-            tokens_used: 0,
-            auth_mode: None,
-            model_tier: None,
-            cost_usd: None,
-            author_pseudo: input.author_pseudo.clone(),
-            author_avatar_email: input.author_avatar_email.clone(),
-            source_msg_id: None, duration_ms: None,
-        };
-        // Per-item agent override (Compare-agents mode) falls back
-        // to the QP's default agent when None.
-        let effective_agent = item.agent_override.clone().unwrap_or_else(|| qp.agent.clone());
-        let discussion = Discussion {
-            awaiting_agent: false,
-            id: disc_id,
-            project_id: effective_project_id.clone(),
-            title: item.title.clone(),
-            agent: effective_agent.clone(),
-            language: lang.clone(),
-            participants: vec![effective_agent],
-            messages: vec![initial_message.clone()],
-            message_count: 1, non_system_message_count: 1,
-            skill_ids: qp.skill_ids.clone(),
-            // 0.8.5 — QP bindings now flow into the child discussion so
-            // a "compare agents", "batch run", or QP-chain spawn inherits
-            // the persona + directives picked at the QP level. Pre-0.8.5
-            // these were always empty.
-            profile_ids: qp.profile_ids.clone(),
-            directive_ids: qp.directive_ids.clone(),
-            archived: false,
-            pinned: false,
-            workspace_mode: workspace_mode.clone(),
-            workspace_path: None,
-            worktree_branch: None,
-            tier: qp.tier,
-            // 0.8.10 — a QP-launched batch discussion inherits the QP's explicit
-            // model (consumed via disc.model → model_override once the batch
-            // agent-run path reads it in 2b-2).
-            model: qp.agent_settings.as_ref().and_then(|s| s.model.clone()),
-            pin_first_message: false,
-            summary_cache: None,
-            summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto,
-            introspection_call_count: 0,
-            shared_id: None,
-            shared_with: vec![],
-            workflow_run_id: Some(run_id.clone()),
-            test_mode_restore_branch: None,
-            test_mode_stash_ref: None,
-            created_at: now,
-            updated_at: now,
-        };
-        (discussion, initial_message)
-    }).collect();
+    let discussions: Vec<(Discussion, DiscussionMessage)> = input
+        .items
+        .iter()
+        .map(|item| {
+            let disc_id = Uuid::new_v4().to_string();
+            let initial_message = DiscussionMessage {
+                model: None,
+                lint_report: None,
+                id: Uuid::new_v4().to_string(),
+                role: MessageRole::User,
+                content: item.prompt.clone(),
+                agent_type: None,
+                timestamp: now,
+                tokens_used: 0,
+                auth_mode: None,
+                model_tier: None,
+                cost_usd: None,
+                author_pseudo: input.author_pseudo.clone(),
+                author_avatar_email: input.author_avatar_email.clone(),
+                source_msg_id: None,
+                duration_ms: None,
+            };
+            // Per-item agent override (Compare-agents mode) falls back
+            // to the QP's default agent when None.
+            let effective_agent = item
+                .agent_override
+                .clone()
+                .unwrap_or_else(|| qp.agent.clone());
+            let discussion = Discussion {
+                awaiting_agent: false,
+                id: disc_id,
+                project_id: effective_project_id.clone(),
+                title: item.title.clone(),
+                agent: effective_agent.clone(),
+                language: lang.clone(),
+                participants: vec![effective_agent],
+                messages: vec![initial_message.clone()],
+                message_count: 1,
+                non_system_message_count: 1,
+                skill_ids: qp.skill_ids.clone(),
+                // 0.8.5 — QP bindings now flow into the child discussion so
+                // a "compare agents", "batch run", or QP-chain spawn inherits
+                // the persona + directives picked at the QP level. Pre-0.8.5
+                // these were always empty.
+                profile_ids: qp.profile_ids.clone(),
+                directive_ids: qp.directive_ids.clone(),
+                archived: false,
+                pinned: false,
+                workspace_mode: workspace_mode.clone(),
+                workspace_path: None,
+                worktree_branch: None,
+                tier: qp.tier,
+                // 0.8.10 — a QP-launched batch discussion inherits the QP's explicit
+                // model (consumed via disc.model → model_override once the batch
+                // agent-run path reads it in 2b-2).
+                model: qp.agent_settings.as_ref().and_then(|s| s.model.clone()),
+                pin_first_message: false,
+                summary_cache: None,
+                summary_up_to_msg_idx: None,
+                summary_strategy: crate::models::SummaryStrategy::Auto,
+                introspection_call_count: 0,
+                shared_id: None,
+                shared_with: vec![],
+                workflow_run_id: Some(run_id.clone()),
+                test_mode_restore_branch: None,
+                test_mode_stash_ref: None,
+                created_at: now,
+                updated_at: now,
+            };
+            (discussion, initial_message)
+        })
+        .collect();
 
     let discussion_ids: Vec<String> = discussions.iter().map(|(d, _)| d.id.clone()).collect();
 
@@ -615,15 +636,34 @@ pub fn update_workflow(conn: &Connection, wf: &Workflow) -> Result<bool> {
             serde_json::to_string(&wf.steps)?,
             serde_json::to_string(&wf.actions)?,
             serde_json::to_string(&wf.safety)?,
-            wf.workspace_config.as_ref().map(serde_json::to_string).transpose()?,
+            wf.workspace_config
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
             wf.concurrency_limit,
             wf.enabled as i32,
             wf.updated_at.to_rfc3339(),
             wf.guards.as_ref().map(serde_json::to_string).transpose()?,
-            if wf.artifacts.is_empty() { None } else { Some(serde_json::to_string(&wf.artifacts)?) },
-            if wf.on_failure.is_empty() { None } else { Some(serde_json::to_string(&wf.on_failure)?) },
-            if wf.exec_allowlist.is_empty() { None } else { Some(serde_json::to_string(&wf.exec_allowlist)?) },
-            if wf.variables.is_empty() { None } else { Some(serde_json::to_string(&wf.variables)?) },
+            if wf.artifacts.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&wf.artifacts)?)
+            },
+            if wf.on_failure.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&wf.on_failure)?)
+            },
+            if wf.exec_allowlist.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&wf.exec_allowlist)?)
+            },
+            if wf.variables.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&wf.variables)?)
+            },
             wf.pinned as i32,
         ],
     )?;
@@ -640,7 +680,8 @@ pub fn delete_workflow(conn: &Connection, id: &str) -> Result<()> {
 pub fn count_runs(conn: &Connection, workflow_id: &str) -> Result<u32> {
     let count: u32 = conn.query_row(
         "SELECT COUNT(*) FROM workflow_runs WHERE workflow_id = ?1",
-        params![workflow_id], |row| row.get(0),
+        params![workflow_id],
+        |row| row.get(0),
     )?;
     Ok(count)
 }
@@ -691,7 +732,12 @@ pub fn has_running_run(conn: &Connection) -> Result<bool> {
     Ok(count > 0)
 }
 
-pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u32>, offset: Option<u32>) -> Result<Vec<WorkflowRun>> {
+pub fn list_runs_paginated(
+    conn: &Connection,
+    workflow_id: &str,
+    limit: Option<u32>,
+    offset: Option<u32>,
+) -> Result<Vec<WorkflowRun>> {
     let sql = format!(
         "SELECT {} FROM workflow_runs WHERE workflow_id = ?1
          ORDER BY started_at DESC{}",
@@ -704,10 +750,10 @@ pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u
     );
     let mut stmt = conn.prepare(&sql)?;
 
-    let mut runs: Vec<WorkflowRun> = stmt.query_map(params![workflow_id], |row| {
-        Ok(row_to_run(row))
-    })?.filter_map(|r| r.ok())
-    .collect();
+    let mut runs: Vec<WorkflowRun> = stmt
+        .query_map(params![workflow_id], |row| Ok(row_to_run(row)))?
+        .filter_map(|r| r.ok())
+        .collect();
 
     enrich_parent_provenance(conn, &mut runs)?;
     Ok(runs)
@@ -720,7 +766,8 @@ pub fn list_runs_paginated(conn: &Connection, workflow_id: &str, limit: Option<u
 pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRun]) -> Result<()> {
     use std::collections::HashMap;
     // Distinct, non-empty parent ids present in this batch.
-    let mut ids: Vec<String> = runs.iter()
+    let mut ids: Vec<String> = runs
+        .iter()
         .filter_map(|r| r.parent_run_id.clone())
         .filter(|s| !s.is_empty())
         .collect();
@@ -738,7 +785,8 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
          WHERE pr.id IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let params_ref: Vec<&dyn rusqlite::ToSql> = ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
+    let params_ref: Vec<&dyn rusqlite::ToSql> =
+        ids.iter().map(|s| s as &dyn rusqlite::ToSql).collect();
     let mut map: HashMap<String, (String, String, DateTime<Utc>)> = HashMap::new();
     let rows = stmt.query_map(params_ref.as_slice(), |row| {
         Ok((
@@ -773,7 +821,10 @@ pub(crate) fn enrich_parent_provenance(conn: &Connection, runs: &mut [WorkflowRu
 /// step. Idempotent — items the writer already stamped (new runs) keep their
 /// authoritative value and are left untouched.
 fn backfill_foreach_child_metrics(conn: &Connection, run: &mut WorkflowRun) -> Result<()> {
-    let has_foreach = run.step_results.iter().any(|s| s.output.contains("\"mode\":\"foreach\""));
+    let has_foreach = run
+        .step_results
+        .iter()
+        .any(|s| s.output.contains("\"mode\":\"foreach\""));
     if !has_foreach {
         return Ok(());
     }
@@ -816,8 +867,11 @@ fn child_run_metrics(
     let mut map: HashMap<String, (u64, Option<u64>)> = HashMap::new();
     for r in rows.filter_map(|r| r.ok()) {
         let (id, tokens, started, finished) = r;
-        let duration_ms = finished
-            .map(|f| (parse_dt(f) - parse_dt(started.clone())).num_milliseconds().max(0) as u64);
+        let duration_ms = finished.map(|f| {
+            (parse_dt(f) - parse_dt(started.clone()))
+                .num_milliseconds()
+                .max(0) as u64
+        });
         map.insert(id, (tokens, duration_ms));
     }
     Ok(map)
@@ -894,12 +948,15 @@ pub(crate) fn backfill_foreach_output(
 }
 
 pub fn get_run(conn: &Connection, run_id: &str) -> Result<Option<WorkflowRun>> {
-    let sql = format!("SELECT {} FROM workflow_runs WHERE id = ?1", WORKFLOW_RUN_COLS);
+    let sql = format!(
+        "SELECT {} FROM workflow_runs WHERE id = ?1",
+        WORKFLOW_RUN_COLS
+    );
     let mut stmt = conn.prepare(&sql)?;
 
-    let run = stmt.query_row(params![run_id], |row| {
-        Ok(row_to_run(row))
-    }).ok();
+    let run = stmt
+        .query_row(params![run_id], |row| Ok(row_to_run(row)))
+        .ok();
 
     // Enrich provenance so a single run detail also shows "↳ depuis <parent>".
     let mut run = run;
@@ -923,7 +980,10 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.id,
             run.workflow_id,
             run_status_str(&run.status),
-            run.trigger_context.as_ref().map(serde_json::to_string).transpose()?,
+            run.trigger_context
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
             serde_json::to_string(&run.step_results)?,
             run.tokens_used as i64,
             run.workspace_path,
@@ -937,8 +997,16 @@ pub fn insert_run(conn: &Connection, run: &WorkflowRun) -> Result<()> {
             run.parent_run_id,
             // Empty map → NULL (lets a `WHERE state IS NOT NULL` query
             // surface only runs that actually carried state).
-            if run.state.is_empty() { None } else { Some(serde_json::to_string(&run.state)?) },
-            if run.produced_branches.is_empty() { None } else { Some(serde_json::to_string(&run.produced_branches)?) },
+            if run.state.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&run.state)?)
+            },
+            if run.produced_branches.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&run.produced_branches)?)
+            },
         ],
     )?;
     Ok(())
@@ -953,7 +1021,11 @@ pub fn increment_batch_progress(
     run_id: &str,
     child_succeeded: bool,
 ) -> Result<Option<WorkflowRun>> {
-    let column = if child_succeeded { "batch_completed" } else { "batch_failed" };
+    let column = if child_succeeded {
+        "batch_completed"
+    } else {
+        "batch_failed"
+    };
     // Counters are part of the terminal state (waiters/UI read them): a late
     // child must not advance a batch already Cancelled/Interrupted.
     let bumped = conn.execute(
@@ -975,15 +1047,23 @@ pub fn increment_batch_progress(
     }
 
     // Re-read the run to check if we've reached batch_total.
-    let Some(mut run) = get_run(conn, run_id)? else { return Ok(None); };
-    if run.run_type != "batch" { return Ok(None); }
+    let Some(mut run) = get_run(conn, run_id)? else {
+        return Ok(None);
+    };
+    if run.run_type != "batch" {
+        return Ok(None);
+    }
 
     let done = run.batch_completed + run.batch_failed;
     if done >= run.batch_total && run.status == RunStatus::Running {
         // All children done — mark the run final. Success if at least one
         // succeeded, Failed if ALL failed. This matches user intuition:
         // "the batch did something useful" vs "the batch accomplished nothing".
-        let final_status = if run.batch_completed > 0 { RunStatus::Success } else { RunStatus::Failed };
+        let final_status = if run.batch_completed > 0 {
+            RunStatus::Success
+        } else {
+            RunStatus::Failed
+        };
         let finished = chrono::Utc::now();
         conn.execute(
             "UPDATE workflow_runs SET status = ?2, finished_at = ?3              WHERE id = ?1 AND status = 'Running'",
@@ -1026,7 +1106,9 @@ pub fn set_run_state_key(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let Some((state_json, status_s)) = row else { return Ok(false) };
+    let Some((state_json, status_s)) = row else {
+        return Ok(false);
+    };
     let status = parse_run_status(&status_s);
     if !allowed.contains(&status) {
         return Ok(false);
@@ -1060,7 +1142,9 @@ pub fn append_foreach_done(
             |r| r.get(0),
         )
         .optional()?;
-    let Some(state_json) = cur else { return Ok(false) };
+    let Some(state_json) = cur else {
+        return Ok(false);
+    };
     let map: std::collections::HashMap<String, String> = state_json
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
@@ -1093,7 +1177,11 @@ pub fn successful_child_item_ids(
         if let Some(id) = row?
             .as_deref()
             .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
-            .and_then(|v| v.get("__subwf_item_id__").and_then(|i| i.as_str()).map(String::from))
+            .and_then(|v| {
+                v.get("__subwf_item_id__")
+                    .and_then(|i| i.as_str())
+                    .map(String::from)
+            })
             .filter(|i| !i.is_empty())
         {
             ids.insert(id);
@@ -1110,7 +1198,11 @@ pub fn claim_run_status(
 ) -> Result<bool> {
     let n = conn.execute(
         "UPDATE workflow_runs SET status = ?3 WHERE id = ?1 AND status = ?2",
-        params![run_id, run_status_str(from_status), run_status_str(new_status)],
+        params![
+            run_id,
+            run_status_str(from_status),
+            run_status_str(new_status)
+        ],
     )?;
     Ok(n == 1)
 }
@@ -1182,8 +1274,16 @@ pub fn update_run_progress(conn: &Connection, snap: RunProgressSnapshot) -> Resu
             snap.tokens_used as i64,
             snap.workspace_path,
             snap.finished_at.map(|d| d.to_rfc3339()),
-            if snap.state.is_empty() { None } else { Some(serde_json::to_string(&snap.state)?) },
-            if snap.produced_branches.is_empty() { None } else { Some(serde_json::to_string(&snap.produced_branches)?) },
+            if snap.state.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&snap.state)?)
+            },
+            if snap.produced_branches.is_empty() {
+                None
+            } else {
+                Some(serde_json::to_string(&snap.produced_branches)?)
+            },
         ],
     )?;
     if affected == 0 {
@@ -1221,13 +1321,18 @@ pub fn delete_run(conn: &Connection, run_id: &str) -> Result<()> {
 
 /// Delete all runs for a workflow.
 pub fn delete_all_runs(conn: &Connection, workflow_id: &str) -> Result<()> {
-    conn.execute("DELETE FROM workflow_runs WHERE workflow_id = ?1", params![workflow_id])?;
+    conn.execute(
+        "DELETE FROM workflow_runs WHERE workflow_id = ?1",
+        params![workflow_id],
+    )?;
     Ok(())
 }
 
 /// Get the last run for a workflow (for summaries).
 /// Batch-load the last run for every workflow in one query (avoids N+1).
-pub fn get_last_runs_all(conn: &Connection) -> Result<std::collections::HashMap<String, WorkflowRun>> {
+pub fn get_last_runs_all(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<String, WorkflowRun>> {
     // Must alias columns with wr. prefix since we join to `latest` — can't
     // reuse the WORKFLOW_RUN_COLS constant directly. Keep the list in sync.
     let mut stmt = conn.prepare(
@@ -1239,13 +1344,11 @@ pub fn get_last_runs_all(conn: &Connection) -> Result<std::collections::HashMap<
          INNER JOIN (
              SELECT workflow_id, MAX(started_at) AS max_started
              FROM workflow_runs GROUP BY workflow_id
-         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started"
+         ) latest ON wr.workflow_id = latest.workflow_id AND wr.started_at = latest.max_started",
     )?;
 
     let mut map = std::collections::HashMap::new();
-    let rows = stmt.query_map([], |row| {
-        Ok(row_to_run(row))
-    })?;
+    let rows = stmt.query_map([], |row| Ok(row_to_run(row)))?;
     for row in rows.filter_map(|r| r.ok()) {
         map.insert(row.workflow_id.clone(), row);
     }
@@ -1259,9 +1362,9 @@ pub fn get_last_run(conn: &Connection, workflow_id: &str) -> Result<Option<Workf
     );
     let mut stmt = conn.prepare(&sql)?;
 
-    let run = stmt.query_row(params![workflow_id], |row| {
-        Ok(row_to_run(row))
-    }).ok();
+    let run = stmt
+        .query_row(params![workflow_id], |row| Ok(row_to_run(row)))
+        .ok();
 
     Ok(run)
 }
@@ -1341,7 +1444,10 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         steps,
         actions: serde_json::from_str(&actions_str).unwrap_or_default(),
         safety: serde_json::from_str(&safety_str).unwrap_or(WorkflowSafety {
-            sandbox: false, max_files: None, max_lines: None, require_approval: false,
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
         }),
         workspace_config: ws_config_str.and_then(|s| serde_json::from_str(&s).ok()),
         concurrency_limit: concurrency,
@@ -1350,29 +1456,37 @@ fn row_to_workflow(row: &rusqlite::Row) -> Workflow {
         // (= backend defaults applied) so the runner still kills runaway
         // runs. Logging would be nice to add when we wire structured
         // tracing for the workflow engine.
-        guards: guards_str.as_deref().and_then(|s| serde_json::from_str::<WorkflowGuards>(s).ok()),
+        guards: guards_str
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<WorkflowGuards>(s).ok()),
         // Same defensive pattern: corrupt artifacts JSON falls back to
         // empty (workflow runs without artifact persistence) instead of
         // failing the whole load. The user sees missing artifacts in
         // the UI rather than a workflow that won't list at all.
-        artifacts: artifacts_str.as_deref()
-            .and_then(|s| serde_json::from_str::<::std::collections::HashMap<String, ArtifactSpec>>(s).ok())
+        artifacts: artifacts_str
+            .as_deref()
+            .and_then(|s| {
+                serde_json::from_str::<::std::collections::HashMap<String, ArtifactSpec>>(s).ok()
+            })
             .unwrap_or_default(),
         // Same defensive pattern as artifacts: corrupt JSON or missing
         // column → empty rollback chain. The main pipeline still runs;
         // only the safety net is silently skipped.
-        on_failure: on_failure_str.as_deref()
+        on_failure: on_failure_str
+            .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<WorkflowStep>>(s).ok())
             .unwrap_or_default(),
         // 0.7.0 Phase 5 — defensive parse; corrupt allowlist JSON →
         // empty (Exec disabled). Failing closed is the right default
         // for a security-sensitive feature.
-        exec_allowlist: exec_allowlist_str.as_deref()
+        exec_allowlist: exec_allowlist_str
+            .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<String>>(s).ok())
             .unwrap_or_default(),
         // 0.6.0 UX pass — defensive parse; corrupt JSON / missing
         // column → empty (legacy workflows without manual variables).
-        variables: variables_str.as_deref()
+        variables: variables_str
+            .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<PromptVariable>>(s).ok())
             .unwrap_or_default(),
         enabled: row.get::<_, i32>(9).unwrap_or(1) != 0,
@@ -1412,17 +1526,24 @@ fn row_to_run(row: &rusqlite::Row) -> WorkflowRun {
         tokens_used: row.get::<_, i64>(5).unwrap_or(0) as u64,
         workspace_path: row.get(6).unwrap_or(None),
         started_at: parse_dt(row.get::<_, String>(7).unwrap_or_default()),
-        finished_at: row.get::<_, Option<String>>(8).unwrap_or(None).map(parse_dt),
+        finished_at: row
+            .get::<_, Option<String>>(8)
+            .unwrap_or(None)
+            .map(parse_dt),
         run_type,
         batch_total: batch_total as u32,
         batch_completed: batch_completed as u32,
         batch_failed: batch_failed as u32,
         batch_name,
         parent_run_id,
-        state: state_str.as_deref()
-            .and_then(|s| serde_json::from_str::<::std::collections::HashMap<String, String>>(s).ok())
+        state: state_str
+            .as_deref()
+            .and_then(|s| {
+                serde_json::from_str::<::std::collections::HashMap<String, String>>(s).ok()
+            })
             .unwrap_or_default(),
-        produced_branches: produced_branches_str.as_deref()
+        produced_branches: produced_branches_str
+            .as_deref()
             .and_then(|s| serde_json::from_str::<Vec<crate::models::ProducedBranch>>(s).ok())
             .unwrap_or_default(),
         // Derived, filled by enrich_parent_provenance (never from a column).

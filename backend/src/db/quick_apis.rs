@@ -20,7 +20,8 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 /// and SQL NULLs both resolve to `None` so the model surfaces a clean
 /// `Option::None` to API consumers.
 fn parse_json_opt<T: serde::de::DeserializeOwned>(s: Option<String>) -> Option<T> {
-    s.filter(|v| !v.is_empty()).and_then(|v| serde_json::from_str(&v).ok())
+    s.filter(|v| !v.is_empty())
+        .and_then(|v| serde_json::from_str(&v).ok())
 }
 
 fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
@@ -33,7 +34,10 @@ fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
         api_plugin_slug: row.get(5).unwrap_or_default(),
         api_config_id: row.get(6).unwrap_or_default(),
         api_endpoint_path: row.get(7).unwrap_or_default(),
-        api_method: row.get::<_, Option<String>>(8).unwrap_or(None).filter(|s| !s.is_empty()),
+        api_method: row
+            .get::<_, Option<String>>(8)
+            .unwrap_or(None)
+            .filter(|s| !s.is_empty()),
         api_query: parse_json_opt::<HashMap<String, String>>(row.get(9).unwrap_or(None)),
         api_path_params: parse_json_opt::<HashMap<String, String>>(row.get(10).unwrap_or(None)),
         api_headers: parse_json_opt::<HashMap<String, String>>(row.get(11).unwrap_or(None)),
@@ -42,20 +46,24 @@ fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
         api_extract: parse_json_opt::<ExtractSpec>(row.get(13).unwrap_or(None)),
         api_pagination: parse_json_opt::<PaginationSpec>(row.get(14).unwrap_or(None)),
         // rusqlite 0.39 dropped u64; SQLite stores as i64, cast back at the boundary.
-        api_timeout_ms: row.get::<_, Option<i64>>(15).unwrap_or(None).map(|n| n as u64),
+        api_timeout_ms: row
+            .get::<_, Option<i64>>(15)
+            .unwrap_or(None)
+            .map(|n| n as u64),
         api_max_retries: row.get::<_, Option<u8>>(16).unwrap_or(None),
         variables: parse_json_opt(row.get(17).unwrap_or(None)).unwrap_or_default(),
         created_at: parse_dt(&row.get::<_, String>(18).unwrap_or_default()),
         updated_at: parse_dt(&row.get::<_, String>(19).unwrap_or_default()),
         // 0.8.5 — columns 20/21 added by migration 056. Pre-056 rows get
         // backfilled to '[]' by the ALTER; the unwrap_or here is defensive.
-        profile_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(20).ok()).unwrap_or_default(),
-        directive_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(21).ok()).unwrap_or_default(),
+        profile_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(20).ok())
+            .unwrap_or_default(),
+        directive_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(21).ok())
+            .unwrap_or_default(),
     }
 }
 
-const COLUMNS: &str =
-    "id, name, description, icon, project_id, \
+const COLUMNS: &str = "id, name, description, icon, project_id, \
      api_plugin_slug, api_config_id, api_endpoint_path, api_method, \
      api_query_json, api_path_params_json, api_headers_json, api_body, \
      api_extract_json, api_pagination_json, api_timeout_ms, api_max_retries, \
@@ -65,7 +73,8 @@ const COLUMNS: &str =
 pub fn list_quick_apis(conn: &Connection) -> Result<Vec<QuickApi>> {
     let sql = format!("SELECT {COLUMNS} FROM quick_apis ORDER BY updated_at DESC");
     let mut stmt = conn.prepare(&sql)?;
-    let items = stmt.query_map([], |row| Ok(row_to_quick_api(row)))?
+    let items = stmt
+        .query_map([], |row| Ok(row_to_quick_api(row)))?
         .filter_map(|r| r.ok())
         .collect();
     Ok(items)
@@ -74,20 +83,38 @@ pub fn list_quick_apis(conn: &Connection) -> Result<Vec<QuickApi>> {
 pub fn get_quick_api(conn: &Connection, id: &str) -> Result<Option<QuickApi>> {
     let sql = format!("SELECT {COLUMNS} FROM quick_apis WHERE id = ?1");
     let mut stmt = conn.prepare(&sql)?;
-    let item = stmt.query_row(params![id], |row| Ok(row_to_quick_api(row))).ok();
+    let item = stmt
+        .query_row(params![id], |row| Ok(row_to_quick_api(row)))
+        .ok();
     Ok(item)
 }
 
 pub fn insert_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
-    let api_query_json = qa.api_query.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_path_params_json = qa.api_path_params.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_headers_json = qa.api_headers.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_extract_json = qa.api_extract.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_pagination_json = qa.api_pagination.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_query_json = qa
+        .api_query
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_path_params_json = qa
+        .api_path_params
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_headers_json = qa
+        .api_headers
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_extract_json = qa
+        .api_extract
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_pagination_json = qa
+        .api_pagination
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
     let variables_json = serde_json::to_string(&qa.variables).unwrap_or_else(|_| "[]".into());
 
     let profile_ids_json = serde_json::to_string(&qa.profile_ids).unwrap_or_else(|_| "[]".into());
-    let directive_ids_json = serde_json::to_string(&qa.directive_ids).unwrap_or_else(|_| "[]".into());
+    let directive_ids_json =
+        serde_json::to_string(&qa.directive_ids).unwrap_or_else(|_| "[]".into());
 
     conn.execute(
         "INSERT INTO quick_apis (
@@ -127,15 +154,31 @@ pub fn insert_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
 }
 
 pub fn update_quick_api(conn: &Connection, qa: &QuickApi) -> Result<()> {
-    let api_query_json = qa.api_query.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_path_params_json = qa.api_path_params.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_headers_json = qa.api_headers.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_extract_json = qa.api_extract.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
-    let api_pagination_json = qa.api_pagination.as_ref().map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_query_json = qa
+        .api_query
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_path_params_json = qa
+        .api_path_params
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_headers_json = qa
+        .api_headers
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_extract_json = qa
+        .api_extract
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
+    let api_pagination_json = qa
+        .api_pagination
+        .as_ref()
+        .map(|v| serde_json::to_string(v).unwrap_or_default());
     let variables_json = serde_json::to_string(&qa.variables).unwrap_or_else(|_| "[]".into());
 
     let profile_ids_json = serde_json::to_string(&qa.profile_ids).unwrap_or_else(|_| "[]".into());
-    let directive_ids_json = serde_json::to_string(&qa.directive_ids).unwrap_or_else(|_| "[]".into());
+    let directive_ids_json =
+        serde_json::to_string(&qa.directive_ids).unwrap_or_else(|_| "[]".into());
 
     conn.execute(
         "UPDATE quick_apis SET
@@ -278,12 +321,17 @@ mod tests {
             "INSERT INTO projects (id, name, path, created_at, updated_at)
              VALUES ('p1', 'Test', '/tmp/qa-test-fk', '2026-01-01', '2026-01-01')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         let mut qa = mk_quick_api();
         qa.project_id = Some("p1".into());
         insert_quick_api(&conn, &qa).unwrap();
-        conn.execute("DELETE FROM projects WHERE id = 'p1'", []).unwrap();
+        conn.execute("DELETE FROM projects WHERE id = 'p1'", [])
+            .unwrap();
         let fetched = get_quick_api(&conn, &qa.id).unwrap().unwrap();
-        assert!(fetched.project_id.is_none(), "project_id should be NULL after parent deletion");
+        assert!(
+            fetched.project_id.is_none(),
+            "project_id should be NULL after parent deletion"
+        );
     }
 }

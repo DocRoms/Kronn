@@ -56,7 +56,11 @@ pub fn verify_evidence(evidence: &[Evidence], roots: &[&Path]) -> EvidenceReport
             }),
         }
     }
-    EvidenceReport { checks, any_fabricated, verified_count }
+    EvidenceReport {
+        checks,
+        any_fabricated,
+        verified_count,
+    }
 }
 
 /// Safeguard #2 — anti-generalization. An absolute quantifier
@@ -65,10 +69,18 @@ pub fn verify_evidence(evidence: &[Evidence], roots: &[&Path]) -> EvidenceReport
 /// padded so "jamais" doesn't fire inside another token.
 pub fn is_overgeneralized(claim: &str) -> bool {
     let padded = format!(" {} ", claim.to_ascii_lowercase());
-    const ABSOLUTES: &[&str] =
-        &[" toujours ", " jamais ", " partout ", " always ", " never ", " everywhere "];
-    const SCOPES: &[&str] =
-        &["dans ", "pour ", "sur ", " in ", " for ", " when ", "quand ", "lorsqu", "module", "fichier", "projet"];
+    const ABSOLUTES: &[&str] = &[
+        " toujours ",
+        " jamais ",
+        " partout ",
+        " always ",
+        " never ",
+        " everywhere ",
+    ];
+    const SCOPES: &[&str] = &[
+        "dans ", "pour ", "sur ", " in ", " for ", " when ", "quand ", "lorsqu", "module",
+        "fichier", "projet",
+    ];
     ABSOLUTES.iter().any(|a| padded.contains(a)) && !SCOPES.iter().any(|s| padded.contains(s))
 }
 
@@ -86,14 +98,18 @@ pub fn is_dated_user_ref(s: &str) -> bool {
     let d = |c: u8| c.is_ascii_digit();
     (0..b.len().saturating_sub(9)).any(|i| {
         let w = &b[i..i + 10];
-        d(w[0]) && d(w[1]) && d(w[2]) && d(w[3])
-            && w[4] == b'-' && d(w[5]) && d(w[6])
-            && w[7] == b'-' && d(w[8]) && d(w[9])
-            && chrono::NaiveDate::parse_from_str(
-                std::str::from_utf8(w).unwrap_or(""),
-                "%Y-%m-%d",
-            )
-            .is_ok()
+        d(w[0])
+            && d(w[1])
+            && d(w[2])
+            && d(w[3])
+            && w[4] == b'-'
+            && d(w[5])
+            && d(w[6])
+            && w[7] == b'-'
+            && d(w[8])
+            && d(w[9])
+            && chrono::NaiveDate::parse_from_str(std::str::from_utf8(w).unwrap_or(""), "%Y-%m-%d")
+                .is_ok()
     })
 }
 
@@ -115,7 +131,13 @@ pub fn claim_hash(kind: &str, scope: Option<&str>, claim: &str) -> String {
     let mut h = DefaultHasher::new();
     kind.hash(&mut h);
     scope.unwrap_or("").hash(&mut h);
-    claim.trim().to_ascii_lowercase().split_whitespace().collect::<Vec<_>>().join(" ").hash(&mut h);
+    claim
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .hash(&mut h);
     format!("{:016x}", h.finish())
 }
 
@@ -134,7 +156,11 @@ mod tests {
     }
 
     fn ev(kind: &str, reference: &str) -> Evidence {
-        Evidence { kind: kind.into(), reference: reference.into(), quote: None }
+        Evidence {
+            kind: kind.into(),
+            reference: reference.into(),
+            quote: None,
+        }
     }
 
     #[test]
@@ -144,7 +170,11 @@ mod tests {
             &[ev("file", "src/foo.rs:2"), ev("file", "src/ghost.rs:9")],
             &[root.as_path()],
         );
-        assert_eq!(report.verified_count, 1, "real file verifies: {:?}", report.checks);
+        assert_eq!(
+            report.verified_count, 1,
+            "real file verifies: {:?}",
+            report.checks
+        );
         assert!(report.any_fabricated, "missing file is fabricated");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -165,7 +195,9 @@ mod tests {
         assert!(is_overgeneralized("Toujours utiliser pnpm"));
         assert!(is_overgeneralized("never use var"));
         // scoped → fine
-        assert!(!is_overgeneralized("Dans ce projet, toujours utiliser pnpm"));
+        assert!(!is_overgeneralized(
+            "Dans ce projet, toujours utiliser pnpm"
+        ));
         assert!(!is_overgeneralized("Use tabs for indentation")); // no absolute
     }
 
@@ -182,7 +214,7 @@ mod tests {
         assert!(is_dated_user_ref("disc-42 confirmed 2026-01-15"));
         assert!(!is_dated_user_ref("user:no-date-here"));
         assert!(!is_dated_user_ref("2026-6-1")); // not zero-padded → not 10-char window
-        // shape-valid but NOT a real calendar date → rejected (chrono check)
+                                                 // shape-valid but NOT a real calendar date → rejected (chrono check)
         assert!(!is_dated_user_ref("user:2099-99-99"));
         assert!(!is_dated_user_ref("user:0000-13-45"));
     }

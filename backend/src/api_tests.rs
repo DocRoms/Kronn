@@ -5,21 +5,19 @@
 /// responses — exactly the same way Axum's own examples do it.
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use http_body_util::BodyExt;
     use serde_json::Value;
+    use std::sync::Arc;
     use tokio::sync::RwLock;
     use tower::ServiceExt; // for `oneshot`
 
-    use serial_test::serial;
     use crate::{
-        build_router_with_auth,
-        core::config::default_config,
-        db::Database,
-        AppState, DEFAULT_MAX_CONCURRENT_AGENTS,
+        build_router_with_auth, core::config::default_config, db::Database, AppState,
+        DEFAULT_MAX_CONCURRENT_AGENTS,
     };
+    use serial_test::serial;
 
     // ─── Helper: build a test AppState with an in-memory DB ──────────────────
 
@@ -56,15 +54,16 @@ mod tests {
     }
 
     /// Send a request and collect the response body as parsed JSON.
-    async fn send(
-        state: AppState,
-        enable_auth: bool,
-        req: Request<Body>,
-    ) -> (StatusCode, Value) {
+    async fn send(state: AppState, enable_auth: bool, req: Request<Body>) -> (StatusCode, Value) {
         let app = build_router_with_auth(state, enable_auth);
         let resp = app.oneshot(req).await.expect("oneshot failed");
         let status = resp.status();
-        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collect")
+            .to_bytes();
         let json: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         (status, json)
     }
@@ -79,26 +78,41 @@ mod tests {
     #[tokio::test]
     async fn running_discussions_reflects_registry_and_clears_on_drop() {
         let state = test_state();
-        let get = || Request::builder()
-            .uri("/api/discussions/running")
-            .body(Body::empty())
-            .unwrap();
+        let get = || {
+            Request::builder()
+                .uri("/api/discussions/running")
+                .body(Body::empty())
+                .unwrap()
+        };
 
         let (status, json) = send(state.clone(), false, get()).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json["success"], true);
-        assert_eq!(json["data"].as_array().unwrap().len(), 0, "nothing running initially");
+        assert_eq!(
+            json["data"].as_array().unwrap().len(),
+            0,
+            "nothing running initially"
+        );
 
         {
-            let _g = crate::CancelGuard::insert(&state.cancel_registry, "disc-running-1".to_string());
+            let _g =
+                crate::CancelGuard::insert(&state.cancel_registry, "disc-running-1".to_string());
             let (_s, json) = send(state.clone(), false, get()).await;
-            let ids: Vec<&str> = json["data"].as_array().unwrap()
-                .iter().map(|v| v.as_str().unwrap()).collect();
+            let ids: Vec<&str> = json["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect();
             assert_eq!(ids, vec!["disc-running-1"], "in-flight run must be listed");
         } // CancelGuard dropped here → registry entry removed
 
         let (_s, json) = send(state.clone(), false, get()).await;
-        assert_eq!(json["data"].as_array().unwrap().len(), 0, "CancelGuard Drop must clear the running entry");
+        assert_eq!(
+            json["data"].as_array().unwrap().len(),
+            0,
+            "CancelGuard Drop must clear the running entry"
+        );
     }
 
     // ─── Q1: Workflow execution integration test ──────────────────────────────
@@ -144,9 +158,15 @@ mod tests {
 
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "create workflow: {body}");
-        assert!(body["success"].as_bool().unwrap_or(false), "create workflow ok: {body}");
+        assert!(
+            body["success"].as_bool().unwrap_or(false),
+            "create workflow ok: {body}"
+        );
 
-        let workflow_id = body["data"]["id"].as_str().expect("workflow id").to_string();
+        let workflow_id = body["data"]["id"]
+            .as_str()
+            .expect("workflow id")
+            .to_string();
         assert!(!workflow_id.is_empty(), "workflow id should not be empty");
 
         // 2. Trigger the workflow via POST /api/workflows/{id}/trigger
@@ -162,7 +182,11 @@ mod tests {
         let app = build_router_with_auth(state.clone(), false);
         let trigger_resp = app.oneshot(trigger_req).await.expect("trigger oneshot");
         // SSE always returns 200, even if execution later fails
-        assert_eq!(trigger_resp.status(), StatusCode::OK, "trigger should return 200 (SSE)");
+        assert_eq!(
+            trigger_resp.status(),
+            StatusCode::OK,
+            "trigger should return 200 (SSE)"
+        );
 
         // Consume the SSE body so the background task completes
         let _ = trigger_resp.into_body().collect().await;
@@ -179,10 +203,16 @@ mod tests {
 
         let (status, runs_body) = send(state.clone(), false, list_req).await;
         assert_eq!(status, StatusCode::OK, "list runs: {runs_body}");
-        assert!(runs_body["success"].as_bool().unwrap_or(false), "list runs ok: {runs_body}");
+        assert!(
+            runs_body["success"].as_bool().unwrap_or(false),
+            "list runs ok: {runs_body}"
+        );
 
         let runs = runs_body["data"].as_array().expect("runs array");
-        assert!(!runs.is_empty(), "at least one run should exist after trigger");
+        assert!(
+            !runs.is_empty(),
+            "at least one run should exist after trigger"
+        );
 
         // 4. The run status must be Pending, Failed, or Success.
         //    (No real agent binary is available in tests; the runner may fast-fail
@@ -208,7 +238,11 @@ mod tests {
             .unwrap();
 
         let (status, _) = send(state, true, req).await;
-        assert_eq!(status, StatusCode::OK, "GET /api/health should return 200 even with auth enabled");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "GET /api/health should return 200 even with auth enabled"
+        );
     }
 
     /// `/api/health` exposes `in_docker` (a bool) so the UI can gate the
@@ -224,8 +258,12 @@ mod tests {
             .unwrap();
         let (status, body) = send(state, true, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.get("in_docker").map(|v| v.is_boolean()).unwrap_or(false),
-            "health must expose a boolean `in_docker`, got: {body}");
+        assert!(
+            body.get("in_docker")
+                .map(|v| v.is_boolean())
+                .unwrap_or(false),
+            "health must expose a boolean `in_docker`, got: {body}"
+        );
     }
 
     /// A request without an Authorization header returns 401 when auth is enabled.
@@ -240,7 +278,11 @@ mod tests {
             .unwrap();
 
         let (status, _) = send(state, true, req).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "missing auth header should return 401");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "missing auth header should return 401"
+        );
     }
 
     /// A request with the correct Bearer token returns 200.
@@ -257,7 +299,11 @@ mod tests {
             .unwrap();
 
         let (status, body) = send(state, true, req).await;
-        assert_eq!(status, StatusCode::OK, "valid token should return 200: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "valid token should return 200: {body}"
+        );
     }
 
     /// Master switch: when `auth_enabled = false`, auth is skipped even if a
@@ -302,7 +348,11 @@ mod tests {
             .unwrap();
 
         let (status, _) = send(state, true, req).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "wrong token should return 401");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "wrong token should return 401"
+        );
     }
 
     /// WS endpoint skips auth — authentication is handled via invite code in ws.rs.
@@ -318,7 +368,11 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let (status, _) = send(state, true, req).await;
-        assert_ne!(status, StatusCode::UNAUTHORIZED, "WS should skip auth middleware — invite code verified in ws.rs");
+        assert_ne!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "WS should skip auth middleware — invite code verified in ws.rs"
+        );
     }
 
     // ─── Q3: Projects API integration tests ───────────────────────────────────
@@ -327,8 +381,10 @@ mod tests {
     async fn projects_list_empty() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/projects")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -340,35 +396,44 @@ mod tests {
         let state = test_state();
 
         // Create a project directly in DB (projects are created via scan, not POST)
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let project = crate::models::Project {
-                id: "test-proj".into(),
-                name: "Test Project".into(),
-                path: "/tmp/test-project".into(),
-                repo_url: Some("https://github.com/test/repo".into()),
-                token_override: None,
-                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
-                audit_status: crate::models::AiAuditStatus::NoTemplate,
-                ai_todo_count: 0,
-            tech_debt_count: 0,
-                needs_docs_migration: false,
-                path_exists: true,
-                default_skill_ids: vec![],
-                default_profile_id: None,
-                briefing_notes: None,
-            linked_repos: vec![],
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "test-proj".into(),
+                    name: "Test Project".into(),
+                    path: "/tmp/test-project".into(),
+                    repo_url: Some("https://github.com/test/repo".into()),
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // GET /api/projects — should list it
         let req = Request::builder()
-            .method("GET").uri("/api/projects")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         let projects = body["data"].as_array().unwrap();
@@ -377,24 +442,30 @@ mod tests {
 
         // GET /api/projects/:id — should return it
         let req = Request::builder()
-            .method("GET").uri("/api/projects/test-proj")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/test-proj")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["id"].as_str().unwrap(), "test-proj");
 
         // DELETE /api/projects/:id
         let req = Request::builder()
-            .method("DELETE").uri("/api/projects/test-proj")
-            .body(Body::empty()).unwrap();
+            .method("DELETE")
+            .uri("/api/projects/test-proj")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
 
         // GET /api/projects — should be empty now
         let req = Request::builder()
-            .method("GET").uri("/api/projects")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"].as_array().unwrap().len(), 0);
@@ -404,8 +475,10 @@ mod tests {
     async fn projects_get_nonexistent_returns_error() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/projects/nonexistent-id")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/nonexistent-id")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK); // API returns 200 with success=false
         assert!(!body["success"].as_bool().unwrap_or(true));
@@ -417,8 +490,10 @@ mod tests {
     async fn config_language_get_default() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/config/language")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/language")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -435,16 +510,20 @@ mod tests {
 
         // Set language to "en"
         let req = Request::builder()
-            .method("POST").uri("/api/config/language")
+            .method("POST")
+            .uri("/api/config/language")
             .header("Content-Type", "application/json")
-            .body(Body::from("\"en\"")).unwrap();
+            .body(Body::from("\"en\""))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "set language: {body}");
 
         // Get language — should be "en"
         let req = Request::builder()
-            .method("GET").uri("/api/config/language")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/language")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"].as_str().unwrap(), "en");
@@ -456,29 +535,46 @@ mod tests {
     async fn mcps_overview_returns_servers_and_configs() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/mcps")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/mcps")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
         // Overview should have servers and configs arrays
-        assert!(body["data"]["servers"].is_array(), "Overview should include servers");
-        assert!(body["data"]["configs"].is_array(), "Overview should include configs");
+        assert!(
+            body["data"]["servers"].is_array(),
+            "Overview should include servers"
+        );
+        assert!(
+            body["data"]["configs"].is_array(),
+            "Overview should include configs"
+        );
         let servers = body["data"]["servers"].as_array().unwrap();
-        assert!(servers.is_empty(), "No servers in DB initially (registry is not auto-imported)");
+        assert!(
+            servers.is_empty(),
+            "No servers in DB initially (registry is not auto-imported)"
+        );
     }
 
     #[tokio::test]
     async fn mcps_registry_lists_builtin_servers() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/mcps/registry")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/mcps/registry")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
         let registry = body["data"].as_array().unwrap();
-        assert!(registry.len() >= 30, "Registry should have at least 30 entries, got {}", registry.len());
+        assert!(
+            registry.len() >= 30,
+            "Registry should have at least 30 entries, got {}",
+            registry.len()
+        );
     }
 
     // ─── Q6: Setup API integration tests ──────────────────────────────────────
@@ -487,12 +583,17 @@ mod tests {
     async fn setup_status_returns_valid_response() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/setup/status")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/setup/status")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
-        assert!(body["data"]["agents_detected"].is_array(), "Setup status should include agents_detected");
+        assert!(
+            body["data"]["agents_detected"].is_array(),
+            "Setup status should include agents_detected"
+        );
     }
 
     // ─── Q7: Stats API ────────────────────────────────────────────────────────
@@ -501,8 +602,10 @@ mod tests {
     async fn stats_token_usage_returns_ok() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/stats/tokens")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/stats/tokens")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -514,8 +617,10 @@ mod tests {
     async fn discussions_list_empty() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/discussions")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -535,9 +640,11 @@ mod tests {
         });
 
         let req = Request::builder()
-            .method("POST").uri("/api/discussions")
+            .method("POST")
+            .uri("/api/discussions")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         // Create returns SSE stream, status should be 200
         assert_eq!(status, StatusCode::OK, "create discussion: {body}");
@@ -547,26 +654,37 @@ mod tests {
 
         // List discussions — should have 1
         let req = Request::builder()
-            .method("GET").uri("/api/discussions")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         let discussions = body["data"].as_array().unwrap();
-        assert_eq!(discussions.len(), 1, "Should have 1 discussion after create");
+        assert_eq!(
+            discussions.len(),
+            1,
+            "Should have 1 discussion after create"
+        );
         let disc_id = discussions[0]["id"].as_str().unwrap().to_string();
         assert_eq!(discussions[0]["title"].as_str().unwrap(), "Test Discussion");
         assert_eq!(discussions[0]["language"].as_str().unwrap(), "fr");
 
         // Get by ID
         let req = Request::builder()
-            .method("GET").uri(format!("/api/discussions/{}", disc_id))
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri(format!("/api/discussions/{}", disc_id))
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["id"].as_str().unwrap(), disc_id);
         // Should have at least the initial user message
         let messages = body["data"]["messages"].as_array().unwrap();
-        assert!(!messages.is_empty(), "Discussion should have at least 1 message");
+        assert!(
+            !messages.is_empty(),
+            "Discussion should have at least 1 message"
+        );
         assert_eq!(messages[0]["role"].as_str().unwrap(), "User");
     }
 
@@ -575,57 +693,68 @@ mod tests {
         let state = test_state();
 
         // Create via DB directly (faster, no SSE)
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let disc = crate::models::Discussion {
-                awaiting_agent: false,
-                id: "disc-1".into(),
-                project_id: None,
-                title: "Original Title".into(),
-                agent: crate::models::AgentType::ClaudeCode,
-                language: "en".into(),
-                participants: vec![crate::models::AgentType::ClaudeCode],
-                message_count: 0, non_system_message_count: 0,
-                messages: vec![],
-                skill_ids: vec![],
-                profile_ids: vec![],
-                directive_ids: vec![],
-                archived: false, pinned: false,
-                workspace_mode: "Direct".into(),
-                workspace_path: None,
-                worktree_branch: None,
-                tier: crate::models::ModelTier::Default,
-                model: None,
-                pin_first_message: false,
-                summary_cache: None,
-                summary_up_to_msg_idx: None,
-                summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-            shared_id: None,
-            shared_with: vec![],
-        workflow_run_id: None,
-        test_mode_restore_branch: None,
-        test_mode_stash_ref: None,
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::discussions::insert_discussion(conn, &disc)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let disc = crate::models::Discussion {
+                    awaiting_agent: false,
+                    id: "disc-1".into(),
+                    project_id: None,
+                    title: "Original Title".into(),
+                    agent: crate::models::AgentType::ClaudeCode,
+                    language: "en".into(),
+                    participants: vec![crate::models::AgentType::ClaudeCode],
+                    message_count: 0,
+                    non_system_message_count: 0,
+                    messages: vec![],
+                    skill_ids: vec![],
+                    profile_ids: vec![],
+                    directive_ids: vec![],
+                    archived: false,
+                    pinned: false,
+                    workspace_mode: "Direct".into(),
+                    workspace_path: None,
+                    worktree_branch: None,
+                    tier: crate::models::ModelTier::Default,
+                    model: None,
+                    pin_first_message: false,
+                    summary_cache: None,
+                    summary_up_to_msg_idx: None,
+                    summary_strategy: crate::models::SummaryStrategy::Auto,
+                    introspection_call_count: 0,
+                    shared_id: None,
+                    shared_with: vec![],
+                    workflow_run_id: None,
+                    test_mode_restore_branch: None,
+                    test_mode_stash_ref: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::discussions::insert_discussion(conn, &disc)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // PATCH — update title
         let update_body = serde_json::json!({ "title": "Updated Title" });
         let req = Request::builder()
-            .method("PATCH").uri("/api/discussions/disc-1")
+            .method("PATCH")
+            .uri("/api/discussions/disc-1")
             .header("Content-Type", "application/json")
-            .body(Body::from(update_body.to_string())).unwrap();
+            .body(Body::from(update_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "update discussion: {body}");
         assert!(body["success"].as_bool().unwrap());
 
         // Verify title changed
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-1")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-1")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["title"].as_str().unwrap(), "Updated Title");
@@ -633,16 +762,20 @@ mod tests {
         // PATCH — archive
         let archive_body = serde_json::json!({ "archived": true });
         let req = Request::builder()
-            .method("PATCH").uri("/api/discussions/disc-1")
+            .method("PATCH")
+            .uri("/api/discussions/disc-1")
             .header("Content-Type", "application/json")
-            .body(Body::from(archive_body.to_string())).unwrap();
+            .body(Body::from(archive_body.to_string()))
+            .unwrap();
         let (status, _) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
 
         // Verify archived
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-1")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-1")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state, false, req).await;
         assert!(body["data"]["archived"].as_bool().unwrap());
     }
@@ -662,19 +795,27 @@ mod tests {
         });
 
         let req = Request::builder()
-            .method("POST").uri("/api/discussions")
+            .method("POST")
+            .uri("/api/discussions")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (status, _) = send(state.clone(), false, req).await;
-        assert_eq!(status, StatusCode::OK, "create discussion with profiles/directives");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "create discussion with profiles/directives"
+        );
 
         // Wait for background persistence
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // List and verify stored profile_ids / directive_ids
         let req = Request::builder()
-            .method("GET").uri("/api/discussions")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         let discussions = body["data"].as_array().unwrap();
@@ -684,8 +825,12 @@ mod tests {
         let directive_ids = disc["directive_ids"].as_array().unwrap();
         assert_eq!(profile_ids.len(), 2, "Should store 2 profile_ids");
         assert_eq!(directive_ids.len(), 2, "Should store 2 directive_ids");
-        assert!(profile_ids.iter().any(|v| v.as_str() == Some("profile-dev")));
-        assert!(directive_ids.iter().any(|v| v.as_str() == Some("directive-eco")));
+        assert!(profile_ids
+            .iter()
+            .any(|v| v.as_str() == Some("profile-dev")));
+        assert!(directive_ids
+            .iter()
+            .any(|v| v.as_str() == Some("directive-eco")));
     }
 
     #[tokio::test]
@@ -695,17 +840,21 @@ mod tests {
 
         let update_body = serde_json::json!({ "title": "New Title" });
         let req = Request::builder()
-            .method("PATCH").uri("/api/discussions/disc-patch-title")
+            .method("PATCH")
+            .uri("/api/discussions/disc-patch-title")
             .header("Content-Type", "application/json")
-            .body(Body::from(update_body.to_string())).unwrap();
+            .body(Body::from(update_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "PATCH title: {body}");
         assert!(body["success"].as_bool().unwrap());
 
         // Verify title changed
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-patch-title")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-patch-title")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["title"].as_str().unwrap(), "New Title");
@@ -715,50 +864,72 @@ mod tests {
     async fn discussions_delete() {
         let state = test_state();
 
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let disc = crate::models::Discussion {
-                awaiting_agent: false,
-                id: "disc-del".into(),
-                project_id: None,
-                title: "To Delete".into(),
-                agent: crate::models::AgentType::Vibe,
-                language: "fr".into(),
-                participants: vec![],
-                message_count: 0, non_system_message_count: 0, messages: vec![],
-                skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-                archived: false, pinned: false, workspace_mode: "Direct".into(),
-                workspace_path: None, worktree_branch: None,
-                tier: crate::models::ModelTier::Default,
-                model: None,
-                pin_first_message: false,
-                summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-            shared_id: None,
-            shared_with: vec![],
-        workflow_run_id: None,
-        test_mode_restore_branch: None,
-        test_mode_stash_ref: None,
-                created_at: now, updated_at: now,
-            };
-            crate::db::discussions::insert_discussion(conn, &disc)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let disc = crate::models::Discussion {
+                    awaiting_agent: false,
+                    id: "disc-del".into(),
+                    project_id: None,
+                    title: "To Delete".into(),
+                    agent: crate::models::AgentType::Vibe,
+                    language: "fr".into(),
+                    participants: vec![],
+                    message_count: 0,
+                    non_system_message_count: 0,
+                    messages: vec![],
+                    skill_ids: vec![],
+                    profile_ids: vec![],
+                    directive_ids: vec![],
+                    archived: false,
+                    pinned: false,
+                    workspace_mode: "Direct".into(),
+                    workspace_path: None,
+                    worktree_branch: None,
+                    tier: crate::models::ModelTier::Default,
+                    model: None,
+                    pin_first_message: false,
+                    summary_cache: None,
+                    summary_up_to_msg_idx: None,
+                    summary_strategy: crate::models::SummaryStrategy::Auto,
+                    introspection_call_count: 0,
+                    shared_id: None,
+                    shared_with: vec![],
+                    workflow_run_id: None,
+                    test_mode_restore_branch: None,
+                    test_mode_stash_ref: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::discussions::insert_discussion(conn, &disc)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // DELETE
         let req = Request::builder()
-            .method("DELETE").uri("/api/discussions/disc-del")
-            .body(Body::empty()).unwrap();
+            .method("DELETE")
+            .uri("/api/discussions/disc-del")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
 
         // Verify gone
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-del")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-del")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!body["success"].as_bool().unwrap_or(true), "Deleted discussion should return error");
+        assert!(
+            !body["success"].as_bool().unwrap_or(true),
+            "Deleted discussion should return error"
+        );
     }
 
     #[tokio::test]
@@ -773,14 +944,18 @@ mod tests {
         });
 
         let req = Request::builder()
-            .method("POST").uri("/api/discussions")
+            .method("POST")
+            .uri("/api/discussions")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         // Should reject with validation error
         assert_eq!(status, StatusCode::OK);
-        assert!(!body["success"].as_bool().unwrap_or(true),
-            "Title >500 chars should be rejected: {body}");
+        assert!(
+            !body["success"].as_bool().unwrap_or(true),
+            "Title >500 chars should be rejected: {body}"
+        );
     }
 
     // ─── Q9: Agents API integration tests ─────────────────────────────────────
@@ -789,18 +964,26 @@ mod tests {
     async fn agents_detect_returns_list() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/agents")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/agents")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
         let agents = body["data"].as_array().unwrap();
         // Should detect at least some agents (even if not installed)
-        assert!(!agents.is_empty(), "Agent detection should return at least one entry");
+        assert!(
+            !agents.is_empty(),
+            "Agent detection should return at least one entry"
+        );
         // Each agent should have required fields
         for agent in agents {
             assert!(agent["name"].is_string(), "Agent should have name");
-            assert!(agent["agent_type"].is_string(), "Agent should have agent_type");
+            assert!(
+                agent["agent_type"].is_string(),
+                "Agent should have agent_type"
+            );
         }
     }
 
@@ -812,9 +995,11 @@ mod tests {
 
         // Toggle Vibe off
         let req = Request::builder()
-            .method("POST").uri("/api/agents/toggle")
+            .method("POST")
+            .uri("/api/agents/toggle")
             .header("Content-Type", "application/json")
-            .body(Body::from("\"Vibe\"")).unwrap();
+            .body(Body::from("\"Vibe\""))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "toggle agent: {body}");
         assert!(body["success"].as_bool().unwrap());
@@ -822,9 +1007,11 @@ mod tests {
 
         // Toggle again — should flip
         let req = Request::builder()
-            .method("POST").uri("/api/agents/toggle")
+            .method("POST")
+            .uri("/api/agents/toggle")
             .header("Content-Type", "application/json")
-            .body(Body::from("\"Vibe\"")).unwrap();
+            .body(Body::from("\"Vibe\""))
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         let new_enabled = body["data"].as_bool().unwrap();
@@ -837,8 +1024,10 @@ mod tests {
     async fn skills_list_returns_builtins() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/skills")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/skills")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -856,8 +1045,10 @@ mod tests {
     async fn profiles_list_returns_builtins() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/profiles")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/profiles")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -871,8 +1062,10 @@ mod tests {
     async fn directives_list_returns_builtins() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/directives")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/directives")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -890,8 +1083,10 @@ mod tests {
 
         // GET current server config
         let req = Request::builder()
-            .method("GET").uri("/api/config/server")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/server")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -903,9 +1098,11 @@ mod tests {
             "max_concurrent_agents": 3
         });
         let req = Request::builder()
-            .method("POST").uri("/api/config/server")
+            .method("POST")
+            .uri("/api/config/server")
             .header("Content-Type", "application/json")
-            .body(Body::from(new_config.to_string())).unwrap();
+            .body(Body::from(new_config.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "set server config: {body}");
     }
@@ -914,8 +1111,10 @@ mod tests {
     async fn config_scan_paths_get() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/config/scan-paths")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/scan-paths")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -925,8 +1124,10 @@ mod tests {
     async fn config_tokens_get() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/config/tokens")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/tokens")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -936,8 +1137,10 @@ mod tests {
     async fn config_db_info() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/config/db-info")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/db-info")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -947,67 +1150,95 @@ mod tests {
 
     /// Helper: insert a discussion directly in DB for fast test setup
     async fn insert_test_discussion(state: &AppState, id: &str, title: &str) {
-        state.db.with_conn({
-            let id = id.to_string();
-            let title = title.to_string();
-            move |conn| {
-                let now = chrono::Utc::now();
-                let disc = crate::models::Discussion {
-                    awaiting_agent: false,
-                    id: id.clone(),
-                    project_id: None,
-                    title,
-                    agent: crate::models::AgentType::ClaudeCode,
-                    language: "en".into(),
-                    participants: vec![crate::models::AgentType::ClaudeCode],
-                    message_count: 0, non_system_message_count: 0, messages: vec![],
-                    skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-                    archived: false, pinned: false, workspace_mode: "Direct".into(),
-                    workspace_path: None, worktree_branch: None,
-                    tier: crate::models::ModelTier::Default,
-                    model: None,
-                    pin_first_message: false,
-                    summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-            shared_id: None,
-            shared_with: vec![],
-        workflow_run_id: None,
-        test_mode_restore_branch: None,
-        test_mode_stash_ref: None,
-                    created_at: now, updated_at: now,
-                };
-                crate::db::discussions::insert_discussion(conn, &disc)?;
-                Ok(())
-            }
-        }).await.unwrap();
+        state
+            .db
+            .with_conn({
+                let id = id.to_string();
+                let title = title.to_string();
+                move |conn| {
+                    let now = chrono::Utc::now();
+                    let disc = crate::models::Discussion {
+                        awaiting_agent: false,
+                        id: id.clone(),
+                        project_id: None,
+                        title,
+                        agent: crate::models::AgentType::ClaudeCode,
+                        language: "en".into(),
+                        participants: vec![crate::models::AgentType::ClaudeCode],
+                        message_count: 0,
+                        non_system_message_count: 0,
+                        messages: vec![],
+                        skill_ids: vec![],
+                        profile_ids: vec![],
+                        directive_ids: vec![],
+                        archived: false,
+                        pinned: false,
+                        workspace_mode: "Direct".into(),
+                        workspace_path: None,
+                        worktree_branch: None,
+                        tier: crate::models::ModelTier::Default,
+                        model: None,
+                        pin_first_message: false,
+                        summary_cache: None,
+                        summary_up_to_msg_idx: None,
+                        summary_strategy: crate::models::SummaryStrategy::Auto,
+                        introspection_call_count: 0,
+                        shared_id: None,
+                        shared_with: vec![],
+                        workflow_run_id: None,
+                        test_mode_restore_branch: None,
+                        test_mode_stash_ref: None,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    crate::db::discussions::insert_discussion(conn, &disc)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
     }
 
     /// Helper: insert a message directly in DB
     async fn insert_test_message(state: &AppState, disc_id: &str, role: &str, content: &str) {
-        state.db.with_conn({
-            let disc_id = disc_id.to_string();
-            let role = role.to_string();
-            let content = content.to_string();
-            move |conn| {
-                let msg = crate::models::DiscussionMessage {
-                    model: None,
-                    lint_report: None,
-                    id: uuid::Uuid::new_v4().to_string(),
-                    role: match role.as_str() {
-                        "User" => crate::models::MessageRole::User,
-                        "Agent" => crate::models::MessageRole::Agent,
-                        _ => crate::models::MessageRole::System,
-                    },
-                    content,
-                    agent_type: if role == "Agent" { Some(crate::models::AgentType::ClaudeCode) } else { None },
-                    timestamp: chrono::Utc::now(),
-                    tokens_used: 0,
-                    auth_mode: None,
-                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
-                };
-                crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
-                Ok(())
-            }
-        }).await.unwrap();
+        state
+            .db
+            .with_conn({
+                let disc_id = disc_id.to_string();
+                let role = role.to_string();
+                let content = content.to_string();
+                move |conn| {
+                    let msg = crate::models::DiscussionMessage {
+                        model: None,
+                        lint_report: None,
+                        id: uuid::Uuid::new_v4().to_string(),
+                        role: match role.as_str() {
+                            "User" => crate::models::MessageRole::User,
+                            "Agent" => crate::models::MessageRole::Agent,
+                            _ => crate::models::MessageRole::System,
+                        },
+                        content,
+                        agent_type: if role == "Agent" {
+                            Some(crate::models::AgentType::ClaudeCode)
+                        } else {
+                            None
+                        },
+                        timestamp: chrono::Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
+                    };
+                    crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
+                    Ok(())
+                }
+            })
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1020,16 +1251,20 @@ mod tests {
 
         // DELETE last agent messages
         let req = Request::builder()
-            .method("DELETE").uri("/api/discussions/disc-msg/messages/last")
-            .body(Body::empty()).unwrap();
+            .method("DELETE")
+            .uri("/api/discussions/disc-msg/messages/last")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "delete last agent messages: {body}");
         assert!(body["success"].as_bool().unwrap());
 
         // Verify: discussion should only have the user message now
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-msg")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-msg")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state, false, req).await;
         let messages = body["data"]["messages"].as_array().unwrap();
         assert_eq!(messages.len(), 1, "Only user message should remain");
@@ -1046,24 +1281,35 @@ mod tests {
         // PATCH last user message
         let edit_body = serde_json::json!({ "content": "Edited message" });
         let req = Request::builder()
-            .method("PATCH").uri("/api/discussions/disc-edit/messages/last")
+            .method("PATCH")
+            .uri("/api/discussions/disc-edit/messages/last")
             .header("Content-Type", "application/json")
-            .body(Body::from(edit_body.to_string())).unwrap();
+            .body(Body::from(edit_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "edit last user message: {body}");
 
         // Verify: user message content updated, agent messages removed
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-edit")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-edit")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state, false, req).await;
         let messages = body["data"]["messages"].as_array().unwrap();
         // After edit, agent messages should be deleted and user message updated
-        let user_msgs: Vec<_> = messages.iter()
+        let user_msgs: Vec<_> = messages
+            .iter()
             .filter(|m| m["role"].as_str() == Some("User"))
             .collect();
-        assert!(!user_msgs.is_empty(), "Should have at least one user message");
-        assert_eq!(user_msgs.last().unwrap()["content"].as_str().unwrap(), "Edited message");
+        assert!(
+            !user_msgs.is_empty(),
+            "Should have at least one user message"
+        );
+        assert_eq!(
+            user_msgs.last().unwrap()["content"].as_str().unwrap(),
+            "Edited message"
+        );
     }
 
     #[tokio::test]
@@ -1075,16 +1321,20 @@ mod tests {
             "skill_ids": ["skill-rust", "skill-testing"]
         });
         let req = Request::builder()
-            .method("PATCH").uri("/api/discussions/disc-skills")
+            .method("PATCH")
+            .uri("/api/discussions/disc-skills")
             .header("Content-Type", "application/json")
-            .body(Body::from(update_body.to_string())).unwrap();
+            .body(Body::from(update_body.to_string()))
+            .unwrap();
         let (status, _) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
 
         // Verify
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-skills")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-skills")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state, false, req).await;
         let skill_ids = body["data"]["skill_ids"].as_array().unwrap();
         assert_eq!(skill_ids.len(), 2);
@@ -1097,15 +1347,19 @@ mod tests {
 
         let update_body = serde_json::json!({ "tier": "economy" });
         let req = Request::builder()
-            .method("PATCH").uri("/api/discussions/disc-tier")
+            .method("PATCH")
+            .uri("/api/discussions/disc-tier")
             .header("Content-Type", "application/json")
-            .body(Body::from(update_body.to_string())).unwrap();
+            .body(Body::from(update_body.to_string()))
+            .unwrap();
         let (status, _) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
 
         let req = Request::builder()
-            .method("GET").uri("/api/discussions/disc-tier")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/discussions/disc-tier")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state, false, req).await;
         assert_eq!(body["data"]["tier"].as_str().unwrap(), "economy");
     }
@@ -1116,8 +1370,10 @@ mod tests {
     async fn workflows_list_empty() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/workflows")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/workflows")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -1147,17 +1403,21 @@ mod tests {
         });
 
         let req = Request::builder()
-            .method("POST").uri("/api/workflows")
+            .method("POST")
+            .uri("/api/workflows")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "create workflow: {body}");
         let wf_id = body["data"]["id"].as_str().unwrap().to_string();
 
         // GET by ID
         let req = Request::builder()
-            .method("GET").uri(format!("/api/workflows/{}", wf_id))
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["data"]["name"].as_str().unwrap(), "Nightly Audit");
@@ -1187,22 +1447,32 @@ mod tests {
             "enabled": false,
         });
         let req = Request::builder()
-            .method("POST").uri("/api/workflows")
+            .method("POST")
+            .uri("/api/workflows")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "draft create: {body}");
-        assert_eq!(body["data"]["enabled"].as_bool(), Some(false),
-            "draft workflow MUST persist with enabled=false (no auto-fire)");
+        assert_eq!(
+            body["data"]["enabled"].as_bool(),
+            Some(false),
+            "draft workflow MUST persist with enabled=false (no auto-fire)"
+        );
         // Round-trip GET to make sure the value didn't flip on the way
         // through the DB serialiser.
         let wf_id = body["data"]["id"].as_str().unwrap().to_string();
         let req = Request::builder()
-            .method("GET").uri(format!("/api/workflows/{}", wf_id))
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
-        assert_eq!(body["data"]["enabled"].as_bool(), Some(false),
-            "draft persists as disabled across read");
+        assert_eq!(
+            body["data"]["enabled"].as_bool(),
+            Some(false),
+            "draft persists as disabled across read"
+        );
     }
 
     /// 0.8.5 — back-compat: every UI-driven POST without `enabled`
@@ -1224,12 +1494,17 @@ mod tests {
             "actions": [],
         });
         let req = Request::builder()
-            .method("POST").uri("/api/workflows")
+            .method("POST")
+            .uri("/api/workflows")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
-        assert_eq!(body["data"]["enabled"].as_bool(), Some(true),
-            "default behaviour MUST stay enabled=true when the field is omitted (back-compat)");
+        assert_eq!(
+            body["data"]["enabled"].as_bool(),
+            Some(true),
+            "default behaviour MUST stay enabled=true when the field is omitted (back-compat)"
+        );
     }
 
     #[tokio::test]
@@ -1251,9 +1526,11 @@ mod tests {
         });
 
         let req = Request::builder()
-            .method("POST").uri("/api/workflows")
+            .method("POST")
+            .uri("/api/workflows")
             .header("Content-Type", "application/json")
-            .body(Body::from(create_body.to_string())).unwrap();
+            .body(Body::from(create_body.to_string()))
+            .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
         let wf_id = body["data"]["id"].as_str().unwrap().to_string();
 
@@ -1272,30 +1549,38 @@ mod tests {
         });
 
         let req = Request::builder()
-            .method("PUT").uri(format!("/api/workflows/{}", wf_id))
+            .method("PUT")
+            .uri(format!("/api/workflows/{}", wf_id))
             .header("Content-Type", "application/json")
-            .body(Body::from(update_body.to_string())).unwrap();
+            .body(Body::from(update_body.to_string()))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK, "update workflow: {body}");
 
         // Verify updated
         let req = Request::builder()
-            .method("GET").uri(format!("/api/workflows/{}", wf_id))
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
         assert_eq!(body["data"]["name"].as_str().unwrap(), "Updated Name");
 
         // Delete
         let req = Request::builder()
-            .method("DELETE").uri(format!("/api/workflows/{}", wf_id))
-            .body(Body::empty()).unwrap();
+            .method("DELETE")
+            .uri(format!("/api/workflows/{}", wf_id))
+            .body(Body::empty())
+            .unwrap();
         let (status, _) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
 
         // Verify gone
         let req = Request::builder()
-            .method("GET").uri("/api/workflows")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/workflows")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state, false, req).await;
         assert_eq!(body["data"].as_array().unwrap().len(), 0);
     }
@@ -1306,13 +1591,18 @@ mod tests {
     async fn config_model_tiers_returns_config() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/config/model-tiers")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/model-tiers")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
         // model-tiers should return an object with tier configuration
-        assert!(body["data"].is_object(), "model-tiers should return a config object");
+        assert!(
+            body["data"].is_object(),
+            "model-tiers should return a config object"
+        );
     }
 
     // ─── Q16: Export/Import API ───────────────────────────────────────────────
@@ -1322,15 +1612,26 @@ mod tests {
         let state = test_state();
         let app = build_router_with_auth(state, false);
         let req = Request::builder()
-            .method("GET").uri("/api/config/export")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/config/export")
+            .body(Body::empty())
+            .unwrap();
         let resp = app.oneshot(req).await.expect("oneshot failed");
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
-            resp.headers().get("content-type").unwrap().to_str().unwrap(),
+            resp.headers()
+                .get("content-type")
+                .unwrap()
+                .to_str()
+                .unwrap(),
             "application/zip"
         );
-        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collect")
+            .to_bytes();
         // ZIP magic bytes
         assert!(bytes.len() > 4);
         assert_eq!(bytes[0], b'P');
@@ -1343,8 +1644,10 @@ mod tests {
     async fn stats_agent_usage_returns_ok() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/stats/agent-usage")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/stats/agent-usage")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
@@ -1356,14 +1659,18 @@ mod tests {
     async fn mcp_overview_includes_incompatibilities_field() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/mcps")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/mcps")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap());
         // incompatibilities field should exist (may be empty if no gitlab server in test DB)
-        assert!(body["data"]["incompatibilities"].is_array(),
-            "McpOverview must include incompatibilities array");
+        assert!(
+            body["data"]["incompatibilities"].is_array(),
+            "McpOverview must include incompatibilities array"
+        );
     }
 
     // ─── Error hint detection ────────────────────────────────────────────────
@@ -1384,7 +1691,10 @@ mod tests {
     async fn detect_error_hint_auth() {
         use crate::api::discussions::detect_agent_error_hint;
         use crate::models::AgentType;
-        let hint = detect_agent_error_hint("authentication_error: invalid API key", &AgentType::ClaudeCode);
+        let hint = detect_agent_error_hint(
+            "authentication_error: invalid API key",
+            &AgentType::ClaudeCode,
+        );
         assert!(hint.is_some(), "Should detect auth error");
     }
 
@@ -1392,7 +1702,8 @@ mod tests {
     async fn detect_error_hint_no_match() {
         use crate::api::discussions::detect_agent_error_hint;
         use crate::models::AgentType;
-        let hint = detect_agent_error_hint("Everything is fine, no errors here", &AgentType::ClaudeCode);
+        let hint =
+            detect_agent_error_hint("Everything is fine, no errors here", &AgentType::ClaudeCode);
         assert!(hint.is_none(), "Should not detect error in normal output");
     }
 
@@ -1402,12 +1713,16 @@ mod tests {
     async fn drift_check_no_project() {
         let state = test_state();
         let req = Request::builder()
-            .method("GET").uri("/api/projects/nonexistent/drift")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/nonexistent/drift")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK); // API returns 200 with success=false
-        assert!(!body["success"].as_bool().unwrap_or(true),
-            "Drift check on nonexistent project should return error: {body}");
+        assert!(
+            !body["success"].as_bool().unwrap_or(true),
+            "Drift check on nonexistent project should return error: {body}"
+        );
     }
 
     #[tokio::test]
@@ -1415,41 +1730,56 @@ mod tests {
         let state = test_state();
 
         // Insert a project with a real path so check_drift can run
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let project = crate::models::Project {
-                id: "drift-proj".into(),
-                name: "Drift Test Project".into(),
-                path: "/tmp/kronn-drift-test".into(),
-                repo_url: None,
-                token_override: None,
-                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
-                audit_status: crate::models::AiAuditStatus::NoTemplate,
-                ai_todo_count: 0,
-            tech_debt_count: 0,
-                needs_docs_migration: false,
-                path_exists: true,
-                default_skill_ids: vec![],
-                default_profile_id: None,
-                briefing_notes: None,
-            linked_repos: vec![],
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "drift-proj".into(),
+                    name: "Drift Test Project".into(),
+                    path: "/tmp/kronn-drift-test".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // Ensure the path exists (even if empty)
         std::fs::create_dir_all("/tmp/kronn-drift-test").ok();
 
         let req = Request::builder()
-            .method("GET").uri("/api/projects/drift-proj/drift")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/drift-proj/drift")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state, false, req).await;
-        assert_eq!(status, StatusCode::OK, "drift check route should return 200: {body}");
-        assert!(body["success"].as_bool().unwrap_or(false),
-            "drift check should succeed (empty drift): {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "drift check route should return 200: {body}"
+        );
+        assert!(
+            body["success"].as_bool().unwrap_or(false),
+            "drift check should succeed (empty drift): {body}"
+        );
     }
 
     #[tokio::test]
@@ -1457,30 +1787,37 @@ mod tests {
         let state = test_state();
 
         // Insert a project
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let project = crate::models::Project {
-                id: "partial-proj".into(),
-                name: "Partial Audit Test".into(),
-                path: "/tmp/kronn-partial-test".into(),
-                repo_url: None,
-                token_override: None,
-                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
-                audit_status: crate::models::AiAuditStatus::NoTemplate,
-                ai_todo_count: 0,
-            tech_debt_count: 0,
-                needs_docs_migration: false,
-                path_exists: true,
-                default_skill_ids: vec![],
-                default_profile_id: None,
-                briefing_notes: None,
-            linked_repos: vec![],
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "partial-proj".into(),
+                    name: "Partial Audit Test".into(),
+                    path: "/tmp/kronn-partial-test".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         std::fs::create_dir_all("/tmp/kronn-partial-test").ok();
 
@@ -1490,19 +1827,28 @@ mod tests {
             "steps": [99]
         });
         let req = Request::builder()
-            .method("POST").uri("/api/projects/partial-proj/partial-audit")
+            .method("POST")
+            .uri("/api/projects/partial-proj/partial-audit")
             .header("Content-Type", "application/json")
-            .body(Body::from(body_json.to_string())).unwrap();
+            .body(Body::from(body_json.to_string()))
+            .unwrap();
 
         let app = build_router_with_auth(state, false);
         let resp = app.oneshot(req).await.expect("oneshot failed");
         assert_eq!(resp.status(), StatusCode::OK, "SSE endpoint returns 200");
 
         // Consume SSE body and check for error event about invalid step
-        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collect")
+            .to_bytes();
         let body_str = String::from_utf8_lossy(&bytes);
-        assert!(body_str.contains("Invalid step"),
-            "Should contain error about invalid step: {body_str}");
+        assert!(
+            body_str.contains("Invalid step"),
+            "Should contain error about invalid step: {body_str}"
+        );
     }
 
     #[tokio::test]
@@ -1510,30 +1856,37 @@ mod tests {
         let state = test_state();
 
         // Insert a project
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let project = crate::models::Project {
-                id: "partial-ok-proj".into(),
-                name: "Partial OK Test".into(),
-                path: "/tmp/kronn-partial-ok-test".into(),
-                repo_url: None,
-                token_override: None,
-                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
-                audit_status: crate::models::AiAuditStatus::NoTemplate,
-                ai_todo_count: 0,
-            tech_debt_count: 0,
-                needs_docs_migration: false,
-                path_exists: true,
-                default_skill_ids: vec![],
-                default_profile_id: None,
-                briefing_notes: None,
-            linked_repos: vec![],
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "partial-ok-proj".into(),
+                    name: "Partial OK Test".into(),
+                    path: "/tmp/kronn-partial-ok-test".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         std::fs::create_dir_all("/tmp/kronn-partial-ok-test").ok();
 
@@ -1543,14 +1896,20 @@ mod tests {
             "steps": [1]
         });
         let req = Request::builder()
-            .method("POST").uri("/api/projects/partial-ok-proj/partial-audit")
+            .method("POST")
+            .uri("/api/projects/partial-ok-proj/partial-audit")
             .header("Content-Type", "application/json")
-            .body(Body::from(body_json.to_string())).unwrap();
+            .body(Body::from(body_json.to_string()))
+            .unwrap();
 
         let app = build_router_with_auth(state, false);
         let resp = app.oneshot(req).await.expect("oneshot failed");
         // SSE always returns 200
-        assert_eq!(resp.status(), StatusCode::OK, "partial-audit route should return 200 (SSE)");
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "partial-audit route should return 200 (SSE)"
+        );
     }
 
     #[tokio::test]
@@ -1558,73 +1917,104 @@ mod tests {
         let state = test_state();
 
         // Create a project
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let project = crate::models::Project {
-                id: "briefing-proj".into(),
-                name: "Briefing Test".into(),
-                path: "/tmp/briefing-test".into(),
-                repo_url: None,
-                token_override: None,
-                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
-                audit_status: crate::models::AiAuditStatus::NoTemplate,
-                ai_todo_count: 0,
-            tech_debt_count: 0,
-                needs_docs_migration: false,
-                path_exists: true,
-                default_skill_ids: vec![],
-                default_profile_id: None,
-                briefing_notes: None,
-            linked_repos: vec![],
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "briefing-proj".into(),
+                    name: "Briefing Test".into(),
+                    path: "/tmp/briefing-test".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // GET briefing — should be null initially
         let req = Request::builder()
-            .method("GET").uri("/api/projects/briefing-proj/briefing")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/briefing-proj/briefing")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap_or(false));
-        assert!(body["data"].is_null(), "Briefing should be null initially: {body}");
+        assert!(
+            body["data"].is_null(),
+            "Briefing should be null initially: {body}"
+        );
 
         // PUT briefing — set notes
         let req = Request::builder()
-            .method("PUT").uri("/api/projects/briefing-proj/briefing")
+            .method("PUT")
+            .uri("/api/projects/briefing-proj/briefing")
             .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"notes":"This is a Node.js monorepo with React frontend"}"#)).unwrap();
+            .body(Body::from(
+                r#"{"notes":"This is a Node.js monorepo with React frontend"}"#,
+            ))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["success"].as_bool().unwrap_or(false), "Set briefing should succeed: {body}");
+        assert!(
+            body["success"].as_bool().unwrap_or(false),
+            "Set briefing should succeed: {body}"
+        );
 
         // GET briefing — should return the notes
         let req = Request::builder()
-            .method("GET").uri("/api/projects/briefing-proj/briefing")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/briefing-proj/briefing")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["data"].as_str().unwrap(), "This is a Node.js monorepo with React frontend");
+        assert_eq!(
+            body["data"].as_str().unwrap(),
+            "This is a Node.js monorepo with React frontend"
+        );
 
         // PUT briefing — clear notes
         let req = Request::builder()
-            .method("PUT").uri("/api/projects/briefing-proj/briefing")
+            .method("PUT")
+            .uri("/api/projects/briefing-proj/briefing")
             .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"notes":null}"#)).unwrap();
+            .body(Body::from(r#"{"notes":null}"#))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body["success"].as_bool().unwrap_or(false));
 
         // GET briefing — should be null again
         let req = Request::builder()
-            .method("GET").uri("/api/projects/briefing-proj/briefing")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/briefing-proj/briefing")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["data"].is_null(), "Briefing should be null after clearing: {body}");
+        assert!(
+            body["data"].is_null(),
+            "Briefing should be null after clearing: {body}"
+        );
     }
 
     #[tokio::test]
@@ -1633,20 +2023,30 @@ mod tests {
 
         // GET briefing for nonexistent project — should return null (no project row found)
         let req = Request::builder()
-            .method("GET").uri("/api/projects/nonexistent/briefing")
-            .body(Body::empty()).unwrap();
+            .method("GET")
+            .uri("/api/projects/nonexistent/briefing")
+            .body(Body::empty())
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["data"].is_null(), "Briefing for nonexistent project should be null");
+        assert!(
+            body["data"].is_null(),
+            "Briefing for nonexistent project should be null"
+        );
 
         // PUT briefing for nonexistent project — should fail
         let req = Request::builder()
-            .method("PUT").uri("/api/projects/nonexistent/briefing")
+            .method("PUT")
+            .uri("/api/projects/nonexistent/briefing")
             .header("Content-Type", "application/json")
-            .body(Body::from(r#"{"notes":"test"}"#)).unwrap();
+            .body(Body::from(r#"{"notes":"test"}"#))
+            .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(!body["success"].as_bool().unwrap_or(true), "Set briefing on nonexistent project should fail: {body}");
+        assert!(
+            !body["success"].as_bool().unwrap_or(true),
+            "Set briefing on nonexistent project should fail: {body}"
+        );
     }
 
     // ─── Start briefing tests ────────────────────────────────────────────
@@ -1656,30 +2056,37 @@ mod tests {
         let state = test_state();
 
         // Create a project in DB
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let project = crate::models::Project {
-                id: "briefing-start-proj".into(),
-                name: "Start Briefing Test".into(),
-                path: "/tmp/kronn-start-briefing-test".into(),
-                repo_url: None,
-                token_override: None,
-                ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
-                audit_status: crate::models::AiAuditStatus::NoTemplate,
-                ai_todo_count: 0,
-            tech_debt_count: 0,
-                needs_docs_migration: false,
-                path_exists: true,
-                default_skill_ids: vec![],
-                default_profile_id: None,
-                briefing_notes: None,
-            linked_repos: vec![],
-                created_at: now,
-                updated_at: now,
-            };
-            crate::db::projects::insert_project(conn, &project)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let project = crate::models::Project {
+                    id: "briefing-start-proj".into(),
+                    name: "Start Briefing Test".into(),
+                    path: "/tmp/kronn-start-briefing-test".into(),
+                    repo_url: None,
+                    token_override: None,
+                    ai_config: crate::models::AiConfigStatus {
+                        detected: false,
+                        configs: vec![],
+                    },
+                    audit_status: crate::models::AiAuditStatus::NoTemplate,
+                    ai_todo_count: 0,
+                    tech_debt_count: 0,
+                    needs_docs_migration: false,
+                    path_exists: true,
+                    default_skill_ids: vec![],
+                    default_profile_id: None,
+                    briefing_notes: None,
+                    linked_repos: vec![],
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::projects::insert_project(conn, &project)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         let body_json = serde_json::json!({ "agent": "ClaudeCode" });
         let req = Request::builder()
@@ -1690,9 +2097,19 @@ mod tests {
             .unwrap();
 
         let (status, body) = send(state, false, req).await;
-        assert_eq!(status, StatusCode::OK, "start-briefing should return 200: {body}");
-        assert!(body["success"].as_bool().unwrap_or(false), "start-briefing should succeed: {body}");
-        assert!(body["data"]["discussion_id"].is_string(), "Response should contain discussion_id: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "start-briefing should return 200: {body}"
+        );
+        assert!(
+            body["success"].as_bool().unwrap_or(false),
+            "start-briefing should succeed: {body}"
+        );
+        assert!(
+            body["data"]["discussion_id"].is_string(),
+            "Response should contain discussion_id: {body}"
+        );
         let disc_id = body["data"]["discussion_id"].as_str().unwrap();
         assert!(!disc_id.is_empty(), "discussion_id should not be empty");
     }
@@ -1705,34 +2122,49 @@ mod tests {
         let state = test_state();
 
         // Insert a discussion with pin_first_message=true (simulating what validation creates)
-        state.db.with_conn(|conn| {
-            let now = chrono::Utc::now();
-            let disc = crate::models::Discussion {
-                awaiting_agent: false,
-                id: "disc-pin".into(),
-                project_id: None,
-                title: "Validation audit AI".into(),
-                agent: crate::models::AgentType::ClaudeCode,
-                language: "en".into(),
-                participants: vec![crate::models::AgentType::ClaudeCode],
-                message_count: 0, non_system_message_count: 0, messages: vec![],
-                skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-                archived: false, pinned: false, workspace_mode: "Direct".into(),
-                workspace_path: None, worktree_branch: None,
-                tier: crate::models::ModelTier::Default,
-                model: None,
-                pin_first_message: true,
-                summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-            shared_id: None,
-            shared_with: vec![],
-        workflow_run_id: None,
-        test_mode_restore_branch: None,
-        test_mode_stash_ref: None,
-                created_at: now, updated_at: now,
-            };
-            crate::db::discussions::insert_discussion(conn, &disc)?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now();
+                let disc = crate::models::Discussion {
+                    awaiting_agent: false,
+                    id: "disc-pin".into(),
+                    project_id: None,
+                    title: "Validation audit AI".into(),
+                    agent: crate::models::AgentType::ClaudeCode,
+                    language: "en".into(),
+                    participants: vec![crate::models::AgentType::ClaudeCode],
+                    message_count: 0,
+                    non_system_message_count: 0,
+                    messages: vec![],
+                    skill_ids: vec![],
+                    profile_ids: vec![],
+                    directive_ids: vec![],
+                    archived: false,
+                    pinned: false,
+                    workspace_mode: "Direct".into(),
+                    workspace_path: None,
+                    worktree_branch: None,
+                    tier: crate::models::ModelTier::Default,
+                    model: None,
+                    pin_first_message: true,
+                    summary_cache: None,
+                    summary_up_to_msg_idx: None,
+                    summary_strategy: crate::models::SummaryStrategy::Auto,
+                    introspection_call_count: 0,
+                    shared_id: None,
+                    shared_with: vec![],
+                    workflow_run_id: None,
+                    test_mode_restore_branch: None,
+                    test_mode_stash_ref: None,
+                    created_at: now,
+                    updated_at: now,
+                };
+                crate::db::discussions::insert_discussion(conn, &disc)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // GET the discussion and verify pin_first_message is true
         let req = Request::builder()
@@ -1742,9 +2174,14 @@ mod tests {
             .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["success"].as_bool().unwrap(), "GET disc-pin must succeed: {body}");
-        assert_eq!(body["data"]["pin_first_message"], true,
-            "pin_first_message must be true for validation discussions: {body}");
+        assert!(
+            body["success"].as_bool().unwrap(),
+            "GET disc-pin must succeed: {body}"
+        );
+        assert_eq!(
+            body["data"]["pin_first_message"], true,
+            "pin_first_message must be true for validation discussions: {body}"
+        );
 
         // Also verify via list endpoint
         let req = Request::builder()
@@ -1756,8 +2193,10 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let discs = body["data"].as_array().unwrap();
         let pin_disc = discs.iter().find(|d| d["id"] == "disc-pin").unwrap();
-        assert_eq!(pin_disc["pin_first_message"], true,
-            "pin_first_message must be true in list view too: {pin_disc}");
+        assert_eq!(
+            pin_disc["pin_first_message"], true,
+            "pin_first_message must be true in list view too: {pin_disc}"
+        );
     }
 
     #[tokio::test]
@@ -1773,9 +2212,15 @@ mod tests {
             .unwrap();
 
         let (status, body) = send(state, false, req).await;
-        assert_eq!(status, StatusCode::OK, "start-briefing on nonexistent project: {body}");
-        assert!(!body["success"].as_bool().unwrap_or(true),
-            "start-briefing on nonexistent project should return error: {body}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "start-briefing on nonexistent project: {body}"
+        );
+        assert!(
+            !body["success"].as_bool().unwrap_or(true),
+            "start-briefing on nonexistent project should return error: {body}"
+        );
     }
 
     // ─── Secret theme unlock ─────────────────────────────────────────────
@@ -1787,15 +2232,19 @@ mod tests {
         let state = test_state();
         {
             let mut cfg = state.config.write().await;
-            cfg.secret_themes.insert("matrix".into(), "alpha-code".into());
-            cfg.secret_themes.insert("sakura".into(), "beta-code".into());
+            cfg.secret_themes
+                .insert("matrix".into(), "alpha-code".into());
+            cfg.secret_themes
+                .insert("sakura".into(), "beta-code".into());
         }
 
         let req = Request::builder()
             .method("POST")
             .uri("/api/themes/unlock")
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({"code": "alpha-code"}).to_string()))
+            .body(Body::from(
+                serde_json::json!({"code": "alpha-code"}).to_string(),
+            ))
             .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
@@ -1813,22 +2262,27 @@ mod tests {
         let state = test_state();
         {
             let mut cfg = state.config.write().await;
-            cfg.secret_themes.insert("matrix".into(), "alpha-code".into());
+            cfg.secret_themes
+                .insert("matrix".into(), "alpha-code".into());
         }
 
         let req = Request::builder()
             .method("POST")
             .uri("/api/themes/unlock")
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({"code": "wrong-guess"}).to_string()))
+            .body(Body::from(
+                serde_json::json!({"code": "wrong-guess"}).to_string(),
+            ))
             .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["success"], false);
         // Error message must not leak configured theme names.
         let err = body["error"].as_str().unwrap_or_default();
-        assert!(!err.to_lowercase().contains("matrix"),
-            "error message leaks theme name: {err}");
+        assert!(
+            !err.to_lowercase().contains("matrix"),
+            "error message leaks theme name: {err}"
+        );
     }
 
     /// Empty / whitespace-only code is rejected up front — no DB lookup.
@@ -1856,7 +2310,9 @@ mod tests {
             .method("POST")
             .uri("/api/themes/unlock")
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({"code": "anything"}).to_string()))
+            .body(Body::from(
+                serde_json::json!({"code": "anything"}).to_string(),
+            ))
             .unwrap();
         let (_, body) = send(state, false, req).await;
         assert_eq!(body["success"], false);
@@ -1897,7 +2353,9 @@ mod tests {
             .method("POST")
             .uri("/api/themes/unlock")
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({"code": "kronnBatman"}).to_string()))
+            .body(Body::from(
+                serde_json::json!({"code": "kronnBatman"}).to_string(),
+            ))
             .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
@@ -1906,8 +2364,14 @@ mod tests {
         let unlocks = body["data"]["unlocks"].as_array().expect("unlocks array");
         assert_eq!(unlocks.len(), 2, "bundle should yield 2 entries: {body}");
         // Order is fixed by array declaration: profile first, theme second
-        let kinds: Vec<&str> = unlocks.iter().map(|u| u["kind"].as_str().unwrap()).collect();
-        let names: Vec<&str> = unlocks.iter().map(|u| u["name"].as_str().unwrap()).collect();
+        let kinds: Vec<&str> = unlocks
+            .iter()
+            .map(|u| u["kind"].as_str().unwrap())
+            .collect();
+        let names: Vec<&str> = unlocks
+            .iter()
+            .map(|u| u["name"].as_str().unwrap())
+            .collect();
         assert!(kinds.contains(&"profile"));
         assert!(kinds.contains(&"theme"));
         assert!(names.contains(&"batman"));
@@ -1915,8 +2379,11 @@ mod tests {
 
         // And the profile was persisted to config.
         let cfg = state.config.read().await;
-        assert!(cfg.unlocked_profiles.iter().any(|p| p == "batman"),
-            "batman must be in unlocked_profiles after unlock, got {:?}", cfg.unlocked_profiles);
+        assert!(
+            cfg.unlocked_profiles.iter().any(|p| p == "batman"),
+            "batman must be in unlocked_profiles after unlock, got {:?}",
+            cfg.unlocked_profiles
+        );
     }
 
     /// Batman is hidden from GET /api/profiles until unlocked, and
@@ -1934,11 +2401,18 @@ mod tests {
             .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
         let profiles = body["data"].as_array().expect("profiles array");
-        assert!(!profiles.iter().any(|p| p["id"] == "batman"),
-            "batman leaked in pre-unlock list");
+        assert!(
+            !profiles.iter().any(|p| p["id"] == "batman"),
+            "batman leaked in pre-unlock list"
+        );
 
         // Flip the flag manually (same as what unlock does).
-        state.config.write().await.unlocked_profiles.push("batman".into());
+        state
+            .config
+            .write()
+            .await
+            .unlocked_profiles
+            .push("batman".into());
 
         // Post-unlock: batman visible.
         let req = Request::builder()
@@ -1948,7 +2422,9 @@ mod tests {
             .unwrap();
         let (_, body) = send(state, false, req).await;
         let profiles = body["data"].as_array().expect("profiles array");
-        let batman = profiles.iter().find(|p| p["id"] == "batman")
+        let batman = profiles
+            .iter()
+            .find(|p| p["id"] == "batman")
             .expect("batman must be visible after unlock");
         // Sanity: frontmatter-derived fields made it through.
         assert_eq!(batman["avatar"], "🦇");
@@ -1971,14 +2447,22 @@ mod tests {
         assert_eq!(body["success"], false);
 
         // unlock then fetch
-        state.config.write().await.unlocked_profiles.push("batman".into());
+        state
+            .config
+            .write()
+            .await
+            .unlocked_profiles
+            .push("batman".into());
         let req = Request::builder()
             .method("GET")
             .uri("/api/profiles/batman")
             .body(Body::empty())
             .unwrap();
         let (_, body) = send(state, false, req).await;
-        assert_eq!(body["success"], true, "batman unfetchable post-unlock: {body}");
+        assert_eq!(
+            body["success"], true,
+            "batman unfetchable post-unlock: {body}"
+        );
         assert_eq!(body["data"]["id"], "batman");
     }
 
@@ -2000,7 +2484,10 @@ mod tests {
         // catches accidentally wiring a shared-across-tests singleton.
         assert!(Arc::strong_count(&state.config) >= 1);
         assert!(Arc::strong_count(&state.db) >= 1);
-        assert_eq!(state.agent_semaphore.available_permits(), DEFAULT_MAX_CONCURRENT_AGENTS);
+        assert_eq!(
+            state.agent_semaphore.available_permits(),
+            DEFAULT_MAX_CONCURRENT_AGENTS
+        );
         assert_eq!(
             state.audit_tracker.lock().unwrap().progress.len(),
             0,
@@ -2033,10 +2520,13 @@ mod tests {
             .method("POST")
             .uri("/api/docs/pdf")
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({
-                "discussion_id": "disc-1",
-                "html": "<html><body>hi</body></html>",
-            }).to_string()))
+            .body(Body::from(
+                serde_json::json!({
+                    "discussion_id": "disc-1",
+                    "html": "<html><body>hi</body></html>",
+                })
+                .to_string(),
+            ))
             .unwrap();
         let (status, body) = send(state, false, req).await;
         assert_eq!(status, StatusCode::OK);
@@ -2046,7 +2536,10 @@ mod tests {
             err.contains("Update or reinstall Kronn"),
             "error must give an installer-level recovery action, got: {err}"
         );
-        assert!(!err.contains("make docs-setup"), "must not expose a developer command");
+        assert!(
+            !err.contains("make docs-setup"),
+            "must not expose a developer command"
+        );
     }
 
     /// Reject requests with traversal payloads in `discussion_id` before
@@ -2059,10 +2552,13 @@ mod tests {
             .method("POST")
             .uri("/api/docs/pdf")
             .header("Content-Type", "application/json")
-            .body(Body::from(serde_json::json!({
-                "discussion_id": "../../etc",
-                "html": "<html></html>",
-            }).to_string()))
+            .body(Body::from(
+                serde_json::json!({
+                    "discussion_id": "../../etc",
+                    "html": "<html></html>",
+                })
+                .to_string(),
+            ))
             .unwrap();
         let (_, body) = send(state, false, req).await;
         assert_eq!(body["success"], false);
@@ -2106,11 +2602,26 @@ mod tests {
     #[tokio::test]
     async fn docs_all_formats_return_actionable_error_when_sidecar_absent() {
         let cases: &[(&str, serde_json::Value)] = &[
-            ("pdf",  serde_json::json!({"discussion_id": "d", "html": "<p>x</p>"})),
-            ("docx", serde_json::json!({"discussion_id": "d", "html": "<p>x</p>"})),
-            ("xlsx", serde_json::json!({"discussion_id": "d", "sheets": [{"name": "S", "rows": [["a"]]}]})),
-            ("csv",  serde_json::json!({"discussion_id": "d", "rows": [["a", "b"]]})),
-            ("pptx", serde_json::json!({"discussion_id": "d", "slides": [{"title": "Hi"}]})),
+            (
+                "pdf",
+                serde_json::json!({"discussion_id": "d", "html": "<p>x</p>"}),
+            ),
+            (
+                "docx",
+                serde_json::json!({"discussion_id": "d", "html": "<p>x</p>"}),
+            ),
+            (
+                "xlsx",
+                serde_json::json!({"discussion_id": "d", "sheets": [{"name": "S", "rows": [["a"]]}]}),
+            ),
+            (
+                "csv",
+                serde_json::json!({"discussion_id": "d", "rows": [["a", "b"]]}),
+            ),
+            (
+                "pptx",
+                serde_json::json!({"discussion_id": "d", "slides": [{"title": "Hi"}]}),
+            ),
         ];
         for (fmt, body) in cases {
             let state = test_state();
@@ -2122,13 +2633,19 @@ mod tests {
                 .unwrap();
             let (status, resp) = send(state, false, req).await;
             assert_eq!(status, StatusCode::OK, "[{fmt}]");
-            assert_eq!(resp["success"], false, "[{fmt}] should fail without sidecar: {resp}");
+            assert_eq!(
+                resp["success"], false,
+                "[{fmt}] should fail without sidecar: {resp}"
+            );
             let err = resp["error"].as_str().unwrap_or_default();
             assert!(
                 err.contains("Update or reinstall Kronn"),
                 "[{fmt}] error must give an installer-level recovery action, got: {err}"
             );
-            assert!(!err.contains("make docs-setup"), "[{fmt}] leaked a developer command");
+            assert!(
+                !err.contains("make docs-setup"),
+                "[{fmt}] leaked a developer command"
+            );
         }
     }
 
@@ -2201,9 +2718,18 @@ mod tests {
             .unwrap();
         let (status, body) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body["data"], true, "first toggle must report disabled=true: {body}");
+        assert_eq!(
+            body["data"], true,
+            "first toggle must report disabled=true: {body}"
+        );
         assert!(
-            state.config.read().await.disabled_auto_skills.iter().any(|s| s == "kronn-docs"),
+            state
+                .config
+                .read()
+                .await
+                .disabled_auto_skills
+                .iter()
+                .any(|s| s == "kronn-docs"),
             "config must now list kronn-docs as disabled"
         );
 
@@ -2224,7 +2750,10 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
-        assert_eq!(body["data"], false, "second toggle must report disabled=false: {body}");
+        assert_eq!(
+            body["data"], false,
+            "second toggle must report disabled=false: {body}"
+        );
         assert!(
             state.config.read().await.disabled_auto_skills.is_empty(),
             "list must be empty again"
@@ -2294,8 +2823,14 @@ mod tests {
         assert_eq!(resp["success"], true, "bundle should succeed: {resp}");
 
         let data = &resp["data"];
-        let qp_id = data["quick_prompts"][0]["id"].as_str().expect("qp id").to_string();
-        let qa_id = data["quick_apis"][0]["id"].as_str().expect("qa id").to_string();
+        let qp_id = data["quick_prompts"][0]["id"]
+            .as_str()
+            .expect("qp id")
+            .to_string();
+        let qa_id = data["quick_apis"][0]["id"]
+            .as_str()
+            .expect("qa id")
+            .to_string();
         let wf_id = data["workflow"]["id"].as_str().expect("wf id").to_string();
         assert!(!qp_id.is_empty() && !qa_id.is_empty() && !wf_id.is_empty());
         assert_eq!(data["quick_prompts"][0]["bundle_id"], "summarize");
@@ -2305,23 +2840,46 @@ mod tests {
         let req = Request::builder()
             .method("GET")
             .uri(format!("/api/workflows/{}", wf_id))
-            .body(Body::empty()).unwrap();
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
         let steps = &body["data"]["steps"];
-        assert_eq!(steps[0]["quick_api_id"], qa_id,
-            "step `fetch` quick_api_id must have been substituted from @bundle:fetch-cb to {qa_id}");
+        assert_eq!(
+            steps[0]["quick_api_id"], qa_id,
+            "step `fetch` quick_api_id must have been substituted from @bundle:fetch-cb to {qa_id}"
+        );
         assert_eq!(steps[1]["batch_quick_prompt_id"], qp_id,
             "step `summarize_each` batch_quick_prompt_id must have been substituted from @bundle:summarize to {qp_id}");
 
         // Double-check the QP and QA are listable independently.
-        let req = Request::builder().method("GET").uri("/api/quick-prompts").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/quick-prompts")
+            .body(Body::empty())
+            .unwrap();
         let (_, qps) = send(state.clone(), false, req).await;
-        assert!(qps["data"].as_array().unwrap().iter().any(|v| v["id"] == qp_id),
-            "created QP must appear in /api/quick-prompts");
-        let req = Request::builder().method("GET").uri("/api/quick-apis").body(Body::empty()).unwrap();
+        assert!(
+            qps["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == qp_id),
+            "created QP must appear in /api/quick-prompts"
+        );
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/quick-apis")
+            .body(Body::empty())
+            .unwrap();
         let (_, qas) = send(state.clone(), false, req).await;
-        assert!(qas["data"].as_array().unwrap().iter().any(|v| v["id"] == qa_id),
-            "created QA must appear in /api/quick-apis");
+        assert!(
+            qas["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|v| v["id"] == qa_id),
+            "created QA must appear in /api/quick-apis"
+        );
     }
 
     /// Validation: a workflow referencing `@bundle:nonexistent` must
@@ -2362,16 +2920,25 @@ mod tests {
         let (_, resp) = send(state.clone(), false, req).await;
         assert_eq!(resp["success"], false, "must reject: {resp}");
         let err = resp["error"].as_str().unwrap_or("");
-        assert!(err.contains("NONEXISTENT") || err.contains("unknown bundle_id"),
-            "error message must surface the missing ref: {err}");
+        assert!(
+            err.contains("NONEXISTENT") || err.contains("unknown bundle_id"),
+            "error message must surface the missing ref: {err}"
+        );
 
         // Negative side-effect check: the QP we declared must NOT
         // have landed in DB (the validator runs before any insert).
-        let req = Request::builder().method("GET").uri("/api/quick-prompts").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/quick-prompts")
+            .body(Body::empty())
+            .unwrap();
         let (_, qps) = send(state.clone(), false, req).await;
         let arr = qps["data"].as_array().unwrap();
-        assert!(arr.is_empty(),
-            "no QP must be created when the workflow validation fails: got {} rows", arr.len());
+        assert!(
+            arr.is_empty(),
+            "no QP must be created when the workflow validation fails: got {} rows",
+            arr.len()
+        );
     }
 
     /// Validation: duplicate bundle_id across categories must be
@@ -2404,9 +2971,15 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let (_, resp) = send(state, false, req).await;
-        assert_eq!(resp["success"], false, "must reject duplicate bundle_id: {resp}");
-        assert!(resp["error"].as_str().unwrap_or("").contains("Duplicate"),
-            "error must say 'Duplicate': {}", resp["error"]);
+        assert_eq!(
+            resp["success"], false,
+            "must reject duplicate bundle_id: {resp}"
+        );
+        assert!(
+            resp["error"].as_str().unwrap_or("").contains("Duplicate"),
+            "error must say 'Duplicate': {}",
+            resp["error"]
+        );
     }
 
     /// 0.8.3 — Linked repos PUT happy path. Creates a project,
@@ -2433,7 +3006,10 @@ mod tests {
             path: project_path.clone(),
             repo_url: None,
             token_override: None,
-            ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
             audit_status: Default::default(),
             ai_todo_count: 0,
             tech_debt_count: 0,
@@ -2446,9 +3022,11 @@ mod tests {
             created_at: now,
             updated_at: now,
         };
-        state.db.with_conn(move |conn| {
-            crate::db::projects::insert_project(conn, &project)
-        }).await.expect("insert project");
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .expect("insert project");
 
         let body = serde_json::json!([
             { "id": "lr-1", "name": "backend-api", "kind": "api",
@@ -2466,15 +3044,25 @@ mod tests {
             .unwrap();
         let (status, resp) = send(state.clone(), false, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(resp["success"], true, "PUT linked-repos must succeed: {resp}");
+        assert_eq!(
+            resp["success"], true,
+            "PUT linked-repos must succeed: {resp}"
+        );
 
         // Round-trip via GET /api/projects (list endpoint returns
         // `linked_repos` on each Project — the list view feeds the
         // ProjectCard which is where the user reads them back).
-        let req = Request::builder().method("GET").uri("/api/projects").body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/projects")
+            .body(Body::empty())
+            .unwrap();
         let (_, body) = send(state.clone(), false, req).await;
-        let proj = body["data"].as_array().unwrap()
-            .iter().find(|p| p["id"] == pid)
+        let proj = body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == pid)
             .expect("project must be in list");
         let linked = proj["linked_repos"].as_array().expect("linked_repos array");
         assert_eq!(linked.len(), 2);
@@ -2494,17 +3082,31 @@ mod tests {
         let now = chrono::Utc::now();
         let project = crate::models::Project {
             id: pid.clone(),
-            name: "p".into(), path: "/tmp/p".into(),
-            repo_url: None, token_override: None,
-            ai_config: crate::models::AiConfigStatus { detected: false, configs: vec![] },
+            name: "p".into(),
+            path: "/tmp/p".into(),
+            repo_url: None,
+            token_override: None,
+            ai_config: crate::models::AiConfigStatus {
+                detected: false,
+                configs: vec![],
+            },
             audit_status: Default::default(),
-            ai_todo_count: 0, tech_debt_count: 0, needs_docs_migration: false,
+            ai_todo_count: 0,
+            tech_debt_count: 0,
+            needs_docs_migration: false,
             path_exists: true,
-            default_skill_ids: vec![], default_profile_id: None,
-            briefing_notes: None, linked_repos: vec![],
-            created_at: now, updated_at: now,
+            default_skill_ids: vec![],
+            default_profile_id: None,
+            briefing_notes: None,
+            linked_repos: vec![],
+            created_at: now,
+            updated_at: now,
         };
-        state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &project)).await.unwrap();
+        state
+            .db
+            .with_conn(move |conn| crate::db::projects::insert_project(conn, &project))
+            .await
+            .unwrap();
 
         let body = serde_json::json!([
             { "id": "lr-1", "name": "weird", "kind": "blockchain-mainframe", "location": "/x" }
@@ -2516,9 +3118,15 @@ mod tests {
             .body(Body::from(serde_json::to_vec(&body).unwrap()))
             .unwrap();
         let (_, resp) = send(state, false, req).await;
-        assert_eq!(resp["success"], false, "unknown kind must be rejected: {resp}");
-        assert!(resp["error"].as_str().unwrap_or("").contains("kind"),
-            "error message must mention `kind`: {}", resp["error"]);
+        assert_eq!(
+            resp["success"], false,
+            "unknown kind must be rejected: {resp}"
+        );
+        assert!(
+            resp["error"].as_str().unwrap_or("").contains("kind"),
+            "error message must mention `kind`: {}",
+            resp["error"]
+        );
     }
 
     /// Empty bundle (no QP/QA, just a workflow) is allowed — behaves
@@ -2580,7 +3188,12 @@ mod tests {
             "expected text/markdown content-type, got {ct:?}",
         );
 
-        let bytes = resp.into_body().collect().await.expect("body collect").to_bytes();
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("body collect")
+            .to_bytes();
         let body = std::str::from_utf8(&bytes).expect("utf-8 body");
         assert!(body.contains("Kronn `AGENTS.md` convention"));
         assert!(body.contains("kronn:doc-version"));

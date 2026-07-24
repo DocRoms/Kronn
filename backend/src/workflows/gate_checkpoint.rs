@@ -96,7 +96,9 @@ pub fn commit_checkpoint(
         .current_dir(project_path)
         .output();
     if let Err(e) = add {
-        return CheckpointOutcome::GitCommandFailed { stderr: e.to_string() };
+        return CheckpointOutcome::GitCommandFailed {
+            stderr: e.to_string(),
+        };
     }
     if let Ok(o) = add {
         if !o.status.success() {
@@ -118,7 +120,9 @@ pub fn commit_checkpoint(
             };
         }
         Err(e) => {
-            return CheckpointOutcome::GitCommandFailed { stderr: e.to_string() };
+            return CheckpointOutcome::GitCommandFailed {
+                stderr: e.to_string(),
+            };
         }
         Ok(_) => {}
     }
@@ -135,7 +139,9 @@ pub fn commit_checkpoint(
         Ok(o) => CheckpointOutcome::GitCommandFailed {
             stderr: String::from_utf8_lossy(&o.stderr).into_owned(),
         },
-        Err(e) => CheckpointOutcome::GitCommandFailed { stderr: e.to_string() },
+        Err(e) => CheckpointOutcome::GitCommandFailed {
+            stderr: e.to_string(),
+        },
     }
 }
 
@@ -187,10 +193,8 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmp_repo() -> PathBuf {
-        let tmp = std::env::temp_dir().join(format!(
-            "kronn-checkpoint-test-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-checkpoint-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
         // Initialize git + commit-author config so commit doesn't fail
         // in CI sandboxes that have no global git identity.
@@ -226,10 +230,8 @@ mod tests {
 
     #[test]
     fn commit_checkpoint_in_non_git_dir_returns_not_a_git_repo() {
-        let tmp = std::env::temp_dir().join(format!(
-            "kronn-checkpoint-nogit-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("kronn-checkpoint-nogit-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&tmp).unwrap();
 
         let out = commit_checkpoint(&tmp, "pre-merge", "run-abc");
@@ -317,7 +319,10 @@ mod tests {
 
         reset_to_checkpoint(&tmp, &sha).expect("reset must succeed");
         // `oops.txt` is gone, HEAD is back at the checkpoint SHA.
-        assert!(!tmp.join("oops.txt").exists(), "post-reset file must be removed");
+        assert!(
+            !tmp.join("oops.txt").exists(),
+            "post-reset file must be removed"
+        );
         let head = crate::core::cmd::sync_cmd("git")
             .args(["rev-parse", "HEAD"])
             .current_dir(&tmp)
@@ -343,7 +348,10 @@ mod tests {
         };
         fs::write(tmp.join("wip.txt"), "human work in progress").unwrap();
         let err = reset_to_checkpoint(&tmp, &sha).unwrap_err();
-        assert!(err.contains("uncommitted changes"), "must name the refusal reason: {err}");
+        assert!(
+            err.contains("uncommitted changes"),
+            "must name the refusal reason: {err}"
+        );
         assert_eq!(
             fs::read_to_string(tmp.join("wip.txt")).unwrap(),
             "human work in progress",

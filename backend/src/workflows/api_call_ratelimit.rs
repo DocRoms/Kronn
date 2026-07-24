@@ -85,7 +85,9 @@ pub fn default_rate_per_second(plugin_slug: &str) -> Option<u32> {
 /// quota. Same plugin + same config = same bucket = parallel steps share
 /// the budget, which matches what the server enforces.
 pub async fn acquire_slot(plugin_slug: &str, config_id: &str) {
-    let Some(rate) = default_rate_per_second(plugin_slug) else { return };
+    let Some(rate) = default_rate_per_second(plugin_slug) else {
+        return;
+    };
     let key = bucket_key(plugin_slug, config_id);
 
     // Get-or-insert the limiter under a short-lived lock, then release
@@ -111,7 +113,9 @@ pub async fn acquire_slot(plugin_slug: &str, config_id: &str) {
 /// Production code should use [`acquire_slot`] which actually blocks.
 #[cfg(test)]
 pub async fn try_acquire_slot(plugin_slug: &str, config_id: &str) -> bool {
-    let Some(rate) = default_rate_per_second(plugin_slug) else { return true };
+    let Some(rate) = default_rate_per_second(plugin_slug) else {
+        return true;
+    };
     let key = bucket_key(plugin_slug, config_id);
 
     let limiter = {
@@ -196,10 +200,16 @@ mod tests {
         // create a bucket nor block.
         let start = std::time::Instant::now();
         acquire_slot("chartbeat", "cfg-1").await;
-        assert!(start.elapsed().as_millis() < 50,
-            "unbounded plugin should acquire instantly, took {}ms", start.elapsed().as_millis());
+        assert!(
+            start.elapsed().as_millis() < 50,
+            "unbounded plugin should acquire instantly, took {}ms",
+            start.elapsed().as_millis()
+        );
         let map_size = BUCKETS.lock().await.len();
-        assert_eq!(map_size, 0, "no bucket should be created for an unbounded plugin");
+        assert_eq!(
+            map_size, 0,
+            "no bucket should be created for an unbounded plugin"
+        );
     }
 
     #[tokio::test]
@@ -208,7 +218,10 @@ mod tests {
         reset_buckets().await;
         acquire_slot("jira", "cfg-test").await;
         let map = BUCKETS.lock().await;
-        assert!(map.contains_key("jira|cfg-test"), "bucket should be created on first call");
+        assert!(
+            map.contains_key("jira|cfg-test"),
+            "bucket should be created on first call"
+        );
     }
 
     #[tokio::test]
@@ -222,7 +235,10 @@ mod tests {
         assert!(try_acquire_slot("cloudflare", "cfg-burst").await);
         // 4th — burst exhausted, should be false.
         let fourth = try_acquire_slot("cloudflare", "cfg-burst").await;
-        assert!(!fourth, "4th call within 1s on a 3/s bucket should be rate-limited");
+        assert!(
+            !fourth,
+            "4th call within 1s on a 3/s bucket should be rate-limited"
+        );
     }
 
     #[tokio::test]
@@ -235,8 +251,10 @@ mod tests {
             try_acquire_slot("cloudflare", "cfg-A").await;
         }
         // cfg-A is exhausted, but cfg-B has its own fresh bucket.
-        assert!(try_acquire_slot("cloudflare", "cfg-B").await,
-            "second config must not be throttled by the first config's burst");
+        assert!(
+            try_acquire_slot("cloudflare", "cfg-B").await,
+            "second config must not be throttled by the first config's burst"
+        );
     }
 
     #[tokio::test]

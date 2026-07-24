@@ -57,10 +57,22 @@ mod tests {
 
     #[test]
     fn backend_parse_defaults_to_off() {
-        assert_eq!(FaithfulnessBackend::from_str_lenient("llm"), FaithfulnessBackend::Llm);
-        assert_eq!(FaithfulnessBackend::from_str_lenient("NLI"), FaithfulnessBackend::Nli);
-        assert_eq!(FaithfulnessBackend::from_str_lenient(""), FaithfulnessBackend::Off);
-        assert_eq!(FaithfulnessBackend::from_str_lenient("garbage"), FaithfulnessBackend::Off);
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient("llm"),
+            FaithfulnessBackend::Llm
+        );
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient("NLI"),
+            FaithfulnessBackend::Nli
+        );
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient(""),
+            FaithfulnessBackend::Off
+        );
+        assert_eq!(
+            FaithfulnessBackend::from_str_lenient("garbage"),
+            FaithfulnessBackend::Off
+        );
     }
 
     #[test]

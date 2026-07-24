@@ -1,10 +1,10 @@
+use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use anyhow::{Context, Result};
 use walkdir::WalkDir;
 
-use crate::models::{AiConfigType, DetectedRepo};
 use super::cmd::async_cmd;
+use crate::models::{AiConfigType, DetectedRepo};
 
 /// AI config file patterns to look for in repositories
 const AI_CONFIG_PATTERNS: &[(&str, AiConfigType)] = &[
@@ -20,10 +20,7 @@ const AI_CONFIG_PATTERNS: &[(&str, AiConfigType)] = &[
 const DEFAULT_SCAN_DEPTH: usize = 4;
 
 /// Scan a list of paths for git repositories
-pub async fn scan_paths(
-    paths: &[String],
-    ignore: &[String],
-) -> Result<Vec<DetectedRepo>> {
+pub async fn scan_paths(paths: &[String], ignore: &[String]) -> Result<Vec<DetectedRepo>> {
     scan_paths_with_depth(paths, ignore, DEFAULT_SCAN_DEPTH).await
 }
 
@@ -96,8 +93,7 @@ pub async fn scan_paths_with_depth(
             } else {
                 // No remote: try canonical path of the container-mapped path
                 let container_path = resolve_host_path(&r.path);
-                let canon = std::fs::canonicalize(&container_path)
-                    .unwrap_or(container_path);
+                let canon = std::fs::canonicalize(&container_path).unwrap_or(container_path);
                 format!("path:{}", canon.display())
             };
             if seen.contains(&key) {
@@ -179,9 +175,9 @@ async fn detect_repo(path: &Path) -> Result<DetectedRepo> {
     // Convert container path back to host path for storage
     let path_str = restore_host_path(path);
     // Hidden if any parent directory starts with "."
-    let hidden = path.components().any(|c| {
-        c.as_os_str().to_string_lossy().starts_with('.')
-    });
+    let hidden = path
+        .components()
+        .any(|c| c.as_os_str().to_string_lossy().starts_with('.'));
 
     Ok(DetectedRepo {
         path: path_str,
@@ -221,7 +217,8 @@ fn is_wsl_unc_path(path: &Path) -> bool {
 fn unc_to_wsl_linux_path(path: &Path) -> Option<String> {
     let s = path.to_string_lossy();
     // Strip \\wsl.localhost\<distro>\ or \\wsl$\<distro>\
-    let remainder = s.strip_prefix(r"\\wsl.localhost\")
+    let remainder = s
+        .strip_prefix(r"\\wsl.localhost\")
         .or_else(|| s.strip_prefix(r"\\wsl$\"))?;
     // Skip distro name (first path component) — handle both backslash and forward slash
     let sep_idx = remainder.find('\\').or_else(|| remainder.find('/'))?;
@@ -240,13 +237,16 @@ async fn run_git_command(path: &Path, args: &[&str]) -> Result<std::process::Out
                 let git_cmd = format!("git -C '{}' {}", linux_path, args.join(" "));
                 return async_cmd("wsl.exe")
                     .args(["-e", "bash", "-lc", &git_cmd])
-                    .output().await
+                    .output()
+                    .await
                     .context("Failed to run git via wsl.exe");
             }
         }
         async_cmd("git")
-            .args(args).current_dir(path)
-            .output().await
+            .args(args)
+            .current_dir(path)
+            .output()
+            .await
             .context("Failed to run git")
     }
     #[cfg(not(target_os = "windows"))]
@@ -361,9 +361,13 @@ pub(crate) fn host_home_aliases() -> Vec<String> {
     // layout still seen in older homedirs / some VMs). Include all forms.
     if let Some(rest) = host_home.strip_prefix("/Users/") {
         let canonical = format!("/System/Volumes/Data/Users/{}", rest);
-        if canonical != host_home { aliases.push(canonical); }
+        if canonical != host_home {
+            aliases.push(canonical);
+        }
         let legacy = format!("/private/var/Users/{}", rest);
-        if legacy != host_home { aliases.push(legacy); }
+        if legacy != host_home {
+            aliases.push(legacy);
+        }
     }
     aliases
 }
@@ -455,9 +459,8 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     // legacy (`ai/index.md`) conventions during the migration window.
     // A directory in EITHER shape with NO entry file = TemplateInstalled
     // (partial state, audit was started but never finished).
-    let any_docs_dir_exists = path.join("docs").is_dir()
-        || path.join("doc").is_dir()
-        || path.join("ai").is_dir();
+    let any_docs_dir_exists =
+        path.join("docs").is_dir() || path.join("doc").is_dir() || path.join("ai").is_dir();
     if !any_docs_dir_exists {
         return AiAuditStatus::NoTemplate;
     }
@@ -470,9 +473,15 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
         Ok(c) => c,
         Err(e) => {
             // File exists but can't be read (permission issue) — don't confuse with "no template"
-            tracing::warn!("Cannot read {} at {}: {} — treating as TemplateInstalled",
-                index_file.file_name().and_then(|n| n.to_str()).unwrap_or("entry"),
-                index_file.display(), e);
+            tracing::warn!(
+                "Cannot read {} at {}: {} — treating as TemplateInstalled",
+                index_file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("entry"),
+                index_file.display(),
+                e
+            );
             return AiAuditStatus::TemplateInstalled;
         }
     };
@@ -482,8 +491,11 @@ pub fn detect_audit_status(project_path: &str) -> crate::models::AiAuditStatus {
     }
     // Check for unfilled placeholders like {{PROJECT_NAME}}, but ignore instructional
     // text that mentions {{...}} as an example (e.g., "If you see an unfilled {{...}}")
-    if regex_lite::Regex::new(r"\{\{[A-Z_]+\}\}").ok()
-        .map(|re| re.is_match(&content)).unwrap_or(false) {
+    if regex_lite::Regex::new(r"\{\{[A-Z_]+\}\}")
+        .ok()
+        .map(|re| re.is_match(&content))
+        .unwrap_or(false)
+    {
         return AiAuditStatus::TemplateInstalled;
     }
 
@@ -586,20 +598,25 @@ pub struct KronnMarker {
 /// depth is bounded to keep the scan under ~1s on a 100kLOC repo.
 pub fn scan_kronn_markers(root: &std::path::Path) -> Vec<KronnMarker> {
     static SKIP_DIRS: &[&str] = &[
-        "node_modules", "vendor", "target", ".git", "dist", "build",
-        ".next", ".kronn", ".kronn-worktrees", ".venv", "__pycache__",
+        "node_modules",
+        "vendor",
+        "target",
+        ".git",
+        "dist",
+        "build",
+        ".next",
+        ".kronn",
+        ".kronn-worktrees",
+        ".venv",
+        "__pycache__",
     ];
     // Allowlist of text-source extensions. Anything else (.png, .lock,
     // .so, .map…) is skipped without a read, keeping the scan fast.
     static TEXT_EXTS: &[&str] = &[
-        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs",
-        "php", "py", "go", "java", "kt", "rb", "cs",
-        "c", "h", "cpp", "hpp", "cc",
-        "html", "twig", "vue", "svelte",
-        "yml", "yaml", "toml", "json", "ini", "env",
-        "sh", "bash", "zsh", "fish",
-        "scss", "sass", "css", "less",
-        "md", "mdx", "txt",
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "php", "py", "go", "java", "kt", "rb", "cs",
+        "c", "h", "cpp", "hpp", "cc", "html", "twig", "vue", "svelte", "yml", "yaml", "toml",
+        "json", "ini", "env", "sh", "bash", "zsh", "fish", "scss", "sass", "css", "less", "md",
+        "mdx", "txt",
     ];
     // The marker grammar:
     //   KRONN-<KIND>(<id>):<space><note...>
@@ -608,9 +625,8 @@ pub fn scan_kronn_markers(root: &std::path::Path) -> Vec<KronnMarker> {
     //   <id>   = kebab-case identifier ([A-Za-z0-9_-]+)
     //   <note> = anything until end of line
     static MARKER_RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(
-            r"KRONN-(ASSUMED|MOCKED|TODO)\(([A-Za-z0-9_.-]+)\):\s*(.*)"
-        ).expect("static regex must compile")
+        regex_lite::Regex::new(r"KRONN-(ASSUMED|MOCKED|TODO)\(([A-Za-z0-9_.-]+)\):\s*(.*)")
+            .expect("static regex must compile")
     });
     let re = &*MARKER_RE;
 
@@ -630,14 +646,17 @@ pub fn scan_kronn_markers(root: &std::path::Path) -> Vec<KronnMarker> {
             continue;
         }
         let path = entry.path();
-        let ext_ok = path.extension()
+        let ext_ok = path
+            .extension()
             .and_then(|e| e.to_str())
             .map(|ext| TEXT_EXTS.contains(&ext))
             .unwrap_or(false);
         if !ext_ok {
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(path) else { continue; };
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
         // Cheap pre-filter so we don't run regex on every line of
         // every source file — the marker is rare.
         if !content.contains("KRONN-") {
@@ -671,7 +690,11 @@ pub fn count_ai_todos(project_path: &str) -> u32 {
     }
 
     let mut count = 0u32;
-    for entry in WalkDir::new(&docs_dir).max_depth(3).into_iter().filter_map(|e| e.ok()) {
+    for entry in WalkDir::new(&docs_dir)
+        .max_depth(3)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
         if entry.file_type().is_file() && entry.path().extension().is_some_and(|ext| ext == "md") {
             if let Ok(content) = std::fs::read_to_string(entry.path()) {
                 count += content.matches("<!-- TODO").count() as u32;
@@ -787,7 +810,9 @@ mod tests {
         let prev = std::env::var("HOME").ok();
         std::env::set_var("HOME", "/home/testuser");
         assert_eq!(shellexpand("~/repos"), "/home/testuser/repos");
-        if let Some(p) = prev { std::env::set_var("HOME", p); }
+        if let Some(p) = prev {
+            std::env::set_var("HOME", p);
+        }
     }
 
     #[test]
@@ -801,14 +826,18 @@ mod tests {
         let prev = std::env::var("HOME").ok();
         std::env::set_var("HOME", r"C:\Users\testuser");
         assert_eq!(shellexpand(r"~\repos"), r"C:\Users\testuser\repos");
-        if let Some(p) = prev { std::env::set_var("HOME", p); }
+        if let Some(p) = prev {
+            std::env::set_var("HOME", p);
+        }
     }
 
     // ─── WSL UNC path detection ─────────────────────────────────────────────
 
     #[test]
     fn wsl_unc_detection_wsl_localhost() {
-        assert!(is_wsl_unc_path_str(r"\\wsl.localhost\Ubuntu\home\user\repos"));
+        assert!(is_wsl_unc_path_str(
+            r"\\wsl.localhost\Ubuntu\home\user\repos"
+        ));
     }
 
     #[test]
@@ -982,7 +1011,10 @@ mod tests {
 
         let dir = detect_docs_dir(tmp.path());
         assert_eq!(dir, tmp.path().join("docs"));
-        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("docs/AGENTS.md"));
+        assert_eq!(
+            detect_docs_entry(tmp.path()),
+            tmp.path().join("docs/AGENTS.md")
+        );
     }
 
     #[test]
@@ -993,7 +1025,10 @@ mod tests {
 
         let dir = detect_docs_dir(tmp.path());
         assert_eq!(dir, tmp.path().join("doc"));
-        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("doc/AGENTS.md"));
+        assert_eq!(
+            detect_docs_entry(tmp.path()),
+            tmp.path().join("doc/AGENTS.md")
+        );
     }
 
     #[test]
@@ -1007,7 +1042,10 @@ mod tests {
         let dir = detect_docs_dir(tmp.path());
         assert_eq!(dir, tmp.path().join("ai"));
         // Entry file is the legacy index.md, not AGENTS.md.
-        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("ai/index.md"));
+        assert_eq!(
+            detect_docs_entry(tmp.path()),
+            tmp.path().join("ai/index.md")
+        );
     }
 
     #[test]
@@ -1017,7 +1055,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let dir = detect_docs_dir(tmp.path());
         assert_eq!(dir, tmp.path().join("docs"));
-        assert_eq!(detect_docs_entry(tmp.path()), tmp.path().join("docs/AGENTS.md"));
+        assert_eq!(
+            detect_docs_entry(tmp.path()),
+            tmp.path().join("docs/AGENTS.md")
+        );
     }
 
     #[test]
@@ -1074,7 +1115,8 @@ mod tests {
              // KRONN-MOCKED(adobe-dtm-an): env var KRONN_ADOBE_DTM_AN_URL_PROD\n\
              public function getDtm(): string { return ''; }\n\
              // KRONN-TODO(adobe-visitor-an): waiting on Data team\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let markers = scan_kronn_markers(tmp.path());
         assert_eq!(markers.len(), 3, "expected 3 markers, got {markers:?}");
@@ -1083,7 +1125,9 @@ mod tests {
         assert!(kinds.contains(&"MOCKED"));
         assert!(kinds.contains(&"TODO"));
         // decision_id preserved verbatim.
-        assert!(markers.iter().any(|m| m.decision_id == "brand-context-impl"));
+        assert!(markers
+            .iter()
+            .any(|m| m.decision_id == "brand-context-impl"));
         assert!(markers.iter().any(|m| m.decision_id == "adobe-dtm-an"));
         assert!(markers.iter().any(|m| m.decision_id == "adobe-visitor-an"));
     }
@@ -1096,13 +1140,15 @@ mod tests {
         std::fs::write(
             tmp.path().join("node_modules/foo/index.js"),
             "// KRONN-ASSUMED(x): should not be found\n",
-        ).unwrap();
+        )
+        .unwrap();
         // Marker in src/ — must be found.
         std::fs::create_dir_all(tmp.path().join("src")).unwrap();
         std::fs::write(
             tmp.path().join("src/app.js"),
             "// KRONN-MOCKED(y): real marker\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let markers = scan_kronn_markers(tmp.path());
         assert_eq!(markers.len(), 1);
@@ -1117,7 +1163,8 @@ mod tests {
         std::fs::write(
             tmp.path().join("logo.png"),
             "KRONN-TODO(should-not-match): binary file\n",
-        ).unwrap();
+        )
+        .unwrap();
         let markers = scan_kronn_markers(tmp.path());
         assert!(markers.is_empty(), "binary file must be skipped");
     }
@@ -1130,7 +1177,8 @@ mod tests {
             "// line 1\n\
              fn main() {}\n\
              // KRONN-ASSUMED(decision-id): the rationale text here\n",
-        ).unwrap();
+        )
+        .unwrap();
         let markers = scan_kronn_markers(tmp.path());
         assert_eq!(markers.len(), 1);
         let m = &markers[0];

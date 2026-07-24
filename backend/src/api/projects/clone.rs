@@ -25,9 +25,11 @@ fn inject_token_into_url(url: &str, provider: &str, token: &str) -> Option<Strin
         return None;
     }
     match provider {
-        "github" if url.contains("github.com") => {
-            Some(url.replacen("https://github.com", &format!("https://x-access-token:{}@github.com", token), 1))
-        }
+        "github" if url.contains("github.com") => Some(url.replacen(
+            "https://github.com",
+            &format!("https://x-access-token:{}@github.com", token),
+            1,
+        )),
         "gitlab" if url.contains("gitlab") => {
             let real_token = token.split('|').next().unwrap_or(token);
             url.find("://").map(|i| {
@@ -205,7 +207,9 @@ pub async fn clone_project(
     }
 
     // Extract name from URL: last segment, remove .git suffix
-    let repo_name = req.name.as_deref()
+    let repo_name = req
+        .name
+        .as_deref()
         .filter(|n| !n.trim().is_empty())
         .map(|n| n.trim().to_string())
         .unwrap_or_else(|| {
@@ -218,7 +222,9 @@ pub async fn clone_project(
         });
 
     if repo_name.is_empty() {
-        return Json(ApiResponse::err("Could not determine repository name from URL"));
+        return Json(ApiResponse::err(
+            "Could not determine repository name from URL",
+        ));
     }
 
     // Determine parent directory (same logic as bootstrap)
@@ -229,7 +235,8 @@ pub async fn clone_project(
     };
 
     // Sanitize name for directory (kebab-case)
-    let dir_name: String = repo_name.to_lowercase()
+    let dir_name: String = repo_name
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
@@ -244,7 +251,10 @@ pub async fn clone_project(
     let host_path = resolved_parent.join(&dir_name);
 
     if host_path.exists() {
-        return Json(ApiResponse::err(format!("Directory already exists: {}", project_path)));
+        return Json(ApiResponse::err(format!(
+            "Directory already exists: {}",
+            project_path
+        )));
     }
 
     // Git clone — try the bare URL (native credential helper) first, then any
@@ -265,7 +275,8 @@ pub async fn clone_project(
                 .args(["remote", "set-url", "origin", &original_url])
                 .current_dir(&clone_path2)
                 .output()
-        }).await;
+        })
+        .await;
     }
 
     // Create project in DB
@@ -283,7 +294,7 @@ pub async fn clone_project(
         },
         audit_status: crate::models::AiAuditStatus::default(),
         ai_todo_count: 0,
-            tech_debt_count: 0,
+        tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
         default_skill_ids: vec![],
@@ -296,7 +307,11 @@ pub async fn clone_project(
     enrich_audit_status(&mut project);
 
     let p = project.clone();
-    if let Err(e) = state.db.with_conn(move |conn| crate::db::projects::insert_project(conn, &p)).await {
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| crate::db::projects::insert_project(conn, &p))
+        .await
+    {
         return Json(ApiResponse::err(format!("DB error: {}", e)));
     }
 
@@ -305,9 +320,13 @@ pub async fn clone_project(
     if !detected.is_empty() {
         let pid = project_id.clone();
         let skills = detected.clone();
-        if let Err(e) = state.db.with_conn(move |conn| {
-            crate::db::projects::update_project_default_skills(conn, &pid, &skills)
-        }).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::projects::update_project_default_skills(conn, &pid, &skills)
+            })
+            .await
+        {
             tracing::error!("Failed to update project default skills: {e}");
         }
     }
@@ -328,7 +347,11 @@ fn kebab_dir_name(raw: &str) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string();
-    if cleaned.is_empty() { "repo".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "repo".to_string()
+    } else {
+        cleaned
+    }
 }
 
 /// Pick a parent directory to clone into that ACTUALLY EXISTS on this host.
@@ -430,7 +453,9 @@ pub async fn clone_and_remap(
         Err(e) => return Json(ApiResponse::err(e)),
     };
     if scanner::contains_parent_dir(&parent_dir) {
-        return Json(ApiResponse::err("Parent directory may not contain '..' components"));
+        return Json(ApiResponse::err(
+            "Parent directory may not contain '..' components",
+        ));
     }
 
     // Directory name: prefer the project name, fall back to the URL tail.
@@ -508,7 +533,10 @@ mod clone_auth_tests {
     fn inject_github_token() {
         let url = "https://github.com/org/repo.git";
         let result = inject_token_into_url(url, "github", "ghp_abc123").unwrap();
-        assert_eq!(result, "https://x-access-token:ghp_abc123@github.com/org/repo.git");
+        assert_eq!(
+            result,
+            "https://x-access-token:ghp_abc123@github.com/org/repo.git"
+        );
     }
 
     #[test]
@@ -522,7 +550,10 @@ mod clone_auth_tests {
     fn inject_gitlab_token_no_pipe() {
         let url = "https://gitlab.example.com/org/repo.git";
         let result = inject_token_into_url(url, "gitlab", "glpat-xyz").unwrap();
-        assert_eq!(result, "https://oauth2:glpat-xyz@gitlab.example.com/org/repo.git");
+        assert_eq!(
+            result,
+            "https://oauth2:glpat-xyz@gitlab.example.com/org/repo.git"
+        );
     }
 
     #[test]
@@ -546,7 +577,10 @@ mod clone_auth_tests {
     #[test]
     fn https_to_ssh_gitlab() {
         let url = "https://gitlab.com/group/subgroup/repo.git";
-        assert_eq!(https_to_ssh(url).unwrap(), "git@gitlab.com:group/subgroup/repo.git");
+        assert_eq!(
+            https_to_ssh(url).unwrap(),
+            "git@gitlab.com:group/subgroup/repo.git"
+        );
     }
 
     #[test]
@@ -579,8 +613,14 @@ mod clone_auth_tests {
     fn redact_masks_token_in_https_url() {
         let s = "fatal: unable to access 'https://x-access-token:ghp_SECRET123@github.com/org/repo.git/'";
         let red = redact_url_credentials(s);
-        assert!(!red.contains("ghp_SECRET123"), "token must be masked: {red}");
-        assert!(red.contains("https://***@github.com/org/repo.git"), "got: {red}");
+        assert!(
+            !red.contains("ghp_SECRET123"),
+            "token must be masked: {red}"
+        );
+        assert!(
+            red.contains("https://***@github.com/org/repo.git"),
+            "got: {red}"
+        );
     }
 
     #[test]
@@ -627,7 +667,9 @@ mod clone_auth_tests {
 
     // ── build_clone_candidates (pure core of candidate_clone_urls) ──────────
 
-    fn gh(token: &str) -> (String, String) { ("github".into(), token.into()) }
+    fn gh(token: &str) -> (String, String) {
+        ("github".into(), token.into())
+    }
 
     #[test]
     fn candidates_non_https_yields_only_the_bare_url() {
@@ -642,16 +684,22 @@ mod clone_auth_tests {
         // before any injected PAT — the whole point of the 403-on-work-org fix.
         let out = build_clone_candidates("https://github.com/org/repo.git", &[gh("ghp_x")], false);
         assert_eq!(out[0], "https://github.com/org/repo.git");
-        assert_eq!(out[1], "https://x-access-token:ghp_x@github.com/org/repo.git");
+        assert_eq!(
+            out[1],
+            "https://x-access-token:ghp_x@github.com/org/repo.git"
+        );
     }
 
     #[test]
     fn candidates_appends_ssh_form_when_keys_present() {
         let out = build_clone_candidates("https://github.com/org/repo.git", &[], true);
-        assert_eq!(out, vec![
-            "https://github.com/org/repo.git".to_string(),
-            "git@github.com:org/repo.git".to_string(),
-        ]);
+        assert_eq!(
+            out,
+            vec![
+                "https://github.com/org/repo.git".to_string(),
+                "git@github.com:org/repo.git".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -663,11 +711,14 @@ mod clone_auth_tests {
     #[test]
     fn candidates_full_order_token_then_ssh() {
         let out = build_clone_candidates("https://github.com/org/repo.git", &[gh("ghp_x")], true);
-        assert_eq!(out, vec![
-            "https://github.com/org/repo.git".to_string(),
-            "https://x-access-token:ghp_x@github.com/org/repo.git".to_string(),
-            "git@github.com:org/repo.git".to_string(),
-        ]);
+        assert_eq!(
+            out,
+            vec![
+                "https://github.com/org/repo.git".to_string(),
+                "https://x-access-token:ghp_x@github.com/org/repo.git".to_string(),
+                "git@github.com:org/repo.git".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -678,10 +729,13 @@ mod clone_auth_tests {
             &[gh("ghp_x"), gh("ghp_x")],
             false,
         );
-        assert_eq!(out, vec![
-            "https://github.com/org/repo.git".to_string(),
-            "https://x-access-token:ghp_x@github.com/org/repo.git".to_string(),
-        ]);
+        assert_eq!(
+            out,
+            vec![
+                "https://github.com/org/repo.git".to_string(),
+                "https://x-access-token:ghp_x@github.com/org/repo.git".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -700,6 +754,9 @@ mod clone_auth_tests {
         // SSH form only for github/gitlab; a self-hosted https host with keys
         // present still gets no SSH candidate.
         let out = build_clone_candidates("https://git.example.com/org/repo.git", &[], true);
-        assert_eq!(out, vec!["https://git.example.com/org/repo.git".to_string()]);
+        assert_eq!(
+            out,
+            vec!["https://git.example.com/org/repo.git".to_string()]
+        );
     }
 }

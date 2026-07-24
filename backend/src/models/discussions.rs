@@ -119,7 +119,9 @@ pub struct Discussion {
     // append-only `disc_source_history` table.
 }
 
-fn default_workspace_mode() -> String { "Direct".into() }
+fn default_workspace_mode() -> String {
+    "Direct".into()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -221,8 +223,8 @@ impl SummaryStrategy {
 
 #[cfg(test)]
 mod summary_strategy_tests {
-    use super::SummaryStrategy::{Auto, Off, OnDemand};
     use super::SummaryStrategy;
+    use super::SummaryStrategy::{Auto, Off, OnDemand};
 
     #[test]
     fn global_off_is_a_master_kill_switch() {

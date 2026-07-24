@@ -14,8 +14,11 @@ mod tests {
     #[test]
     fn registry_count_at_least_35() {
         let reg = builtin_registry();
-        assert!(reg.len() >= 49,
-            "Expected at least 49 MCPs in registry, got {}", reg.len());
+        assert!(
+            reg.len() >= 49,
+            "Expected at least 49 MCPs in registry, got {}",
+            reg.len()
+        );
     }
 
     #[test]
@@ -45,19 +48,35 @@ mod tests {
         //   `api-*` → plugin is API-only (transport == ApiOnly)
         let reg = builtin_registry();
         for m in &reg {
-            assert!(m.id.starts_with("mcp-") || m.id.starts_with("api-"),
-                "Plugin id '{}' must start with 'mcp-' or 'api-' prefix", m.id);
-            assert!(!m.id.contains(' '),
-                "Plugin id '{}' must not contain spaces", m.id);
-            assert_eq!(m.id, m.id.to_lowercase(),
-                "Plugin id '{}' must be lowercase", m.id);
+            assert!(
+                m.id.starts_with("mcp-") || m.id.starts_with("api-"),
+                "Plugin id '{}' must start with 'mcp-' or 'api-' prefix",
+                m.id
+            );
+            assert!(
+                !m.id.contains(' '),
+                "Plugin id '{}' must not contain spaces",
+                m.id
+            );
+            assert_eq!(
+                m.id,
+                m.id.to_lowercase(),
+                "Plugin id '{}' must be lowercase",
+                m.id
+            );
             // Consistency: api-* plugins must have api_spec, and their
             // transport must be ApiOnly.
             if m.id.starts_with("api-") {
-                assert!(m.api_spec.is_some(),
-                    "Plugin '{}' uses `api-` prefix but has no api_spec", m.id);
-                assert!(matches!(m.transport, McpTransport::ApiOnly),
-                    "Plugin '{}' uses `api-` prefix but transport is not ApiOnly", m.id);
+                assert!(
+                    m.api_spec.is_some(),
+                    "Plugin '{}' uses `api-` prefix but has no api_spec",
+                    m.id
+                );
+                assert!(
+                    matches!(m.transport, McpTransport::ApiOnly),
+                    "Plugin '{}' uses `api-` prefix but transport is not ApiOnly",
+                    m.id
+                );
             }
         }
     }
@@ -66,7 +85,11 @@ mod tests {
     fn registry_all_have_descriptions() {
         let reg = builtin_registry();
         for m in &reg {
-            assert!(!m.description.is_empty(), "MCP {} has empty description", m.id);
+            assert!(
+                !m.description.is_empty(),
+                "MCP {} has empty description",
+                m.id
+            );
         }
     }
 
@@ -81,12 +104,24 @@ mod tests {
     #[test]
     fn registry_all_stdio_have_valid_command() {
         let reg = builtin_registry();
-        let valid_commands = ["npx", "uvx", "node", "python", "docker", "fastly-mcp", "glab"];
+        let valid_commands = [
+            "npx",
+            "uvx",
+            "node",
+            "python",
+            "docker",
+            "fastly-mcp",
+            "glab",
+        ];
         for m in &reg {
             if let McpTransport::Stdio { command, .. } = &m.transport {
-                assert!(valid_commands.contains(&command.as_str()),
+                assert!(
+                    valid_commands.contains(&command.as_str()),
                     "MCP {} uses unknown command '{}' (expected one of {:?})",
-                    m.id, command, valid_commands);
+                    m.id,
+                    command,
+                    valid_commands
+                );
             }
         }
     }
@@ -96,8 +131,12 @@ mod tests {
         let reg = builtin_registry();
         for m in &reg {
             if let McpTransport::Sse { url } = &m.transport {
-                assert!(url.starts_with("http://") || url.starts_with("https://"),
-                    "MCP {} SSE url '{}' must start with http(s)://", m.id, url);
+                assert!(
+                    url.starts_with("http://") || url.starts_with("https://"),
+                    "MCP {} SSE url '{}' must start with http(s)://",
+                    m.id,
+                    url
+                );
             }
         }
     }
@@ -108,9 +147,11 @@ mod tests {
         for m in &reg {
             if !m.env_keys.is_empty() {
                 let has_guidance = m.token_url.is_some() || m.token_help.is_some();
-                assert!(has_guidance,
+                assert!(
+                    has_guidance,
                     "MCP {} requires env keys {:?} but has no token_url or token_help",
-                    m.id, m.env_keys);
+                    m.id, m.env_keys
+                );
             }
         }
     }
@@ -121,7 +162,11 @@ mod tests {
         for m in &reg {
             assert!(!m.id.is_empty(), "MCP has empty id");
             assert!(!m.name.is_empty(), "MCP {} has empty name", m.id);
-            assert!(!m.description.is_empty(), "MCP {} has empty description", m.id);
+            assert!(
+                !m.description.is_empty(),
+                "MCP {} has empty description",
+                m.id
+            );
             assert!(!m.tags.is_empty(), "MCP {} has no tags", m.id);
         }
     }
@@ -133,22 +178,40 @@ mod tests {
         let reg = builtin_registry();
         let required = [
             // Core / AI
-            "mcp-memory", "mcp-sequential-thinking", "mcp-filesystem",
+            "mcp-memory",
+            "mcp-sequential-thinking",
+            "mcp-filesystem",
             // Git & Code
-            "mcp-github", "mcp-gitlab", "mcp-git",
+            "mcp-github",
+            "mcp-gitlab",
+            "mcp-git",
             // Databases
-            "mcp-postgres", "mcp-sqlite", "mcp-redis", "mcp-neon", "mcp-mongodb", "mcp-qdrant",
+            "mcp-postgres",
+            "mcp-sqlite",
+            "mcp-redis",
+            "mcp-neon",
+            "mcp-mongodb",
+            "mcp-qdrant",
             // Monitoring
-            "mcp-sentry", "mcp-grafana", "mcp-datadog",
+            "mcp-sentry",
+            "mcp-grafana",
+            "mcp-datadog",
             // Cloud & Analytics
-            "mcp-cloudflare", "mcp-aws-cloudwatch", "mcp-aws-api", "mcp-azure", "mcp-gcloud", "mcp-bigquery",
+            "mcp-cloudflare",
+            "mcp-aws-cloudwatch",
+            "mcp-aws-api",
+            "mcp-azure",
+            "mcp-gcloud",
+            "mcp-bigquery",
             "mcp-google-analytics",
             // Browser & Testing
-            "mcp-playwright", "mcp-chrome-devtools",
+            "mcp-playwright",
+            "mcp-chrome-devtools",
             // CDN & Edge
             "mcp-fastly",
             // Code Quality & IaC
-            "mcp-sonarqube", "mcp-terraform",
+            "mcp-sonarqube",
+            "mcp-terraform",
             // Hosting
             "mcp-vercel",
             // Search
@@ -162,15 +225,23 @@ mod tests {
             // Search
             "mcp-perplexity",
             // Communication & PM
-            "mcp-slack", "mcp-linear", "mcp-atlassian", "mcp-microsoft-365",
+            "mcp-slack",
+            "mcp-linear",
+            "mcp-atlassian",
+            "mcp-microsoft-365",
             // Design
-            "mcp-figma", "mcp-drawio",
+            "mcp-figma",
+            "mcp-drawio",
             // Knowledge & Docs
-            "mcp-notion", "mcp-context7",
+            "mcp-notion",
+            "mcp-context7",
         ];
         for id in &required {
-            assert!(reg.iter().any(|m| m.id == *id),
-                "Required MCP {} not found in registry", id);
+            assert!(
+                reg.iter().any(|m| m.id == *id),
+                "Required MCP {} not found in registry",
+                id
+            );
         }
     }
 
@@ -180,15 +251,20 @@ mod tests {
     fn memory_mcp_configuration() {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-memory").unwrap();
-        assert!(m.description.contains("knowledge graph"), "Memory MCP should mention knowledge graph");
+        assert!(
+            m.description.contains("knowledge graph"),
+            "Memory MCP should mention knowledge graph"
+        );
         assert!(m.env_keys.is_empty(), "Memory MCP needs no API keys");
         assert!(m.tags.contains(&"memory".to_string()));
         assert!(m.tags.contains(&"core".to_string()));
         match &m.transport {
             McpTransport::Stdio { command, args } => {
                 assert_eq!(command, "npx");
-                assert!(args.iter().any(|a| a.contains("server-memory")),
-                    "Memory MCP args should reference server-memory package");
+                assert!(
+                    args.iter().any(|a| a.contains("server-memory")),
+                    "Memory MCP args should reference server-memory package"
+                );
             }
             _ => panic!("Memory MCP should use Stdio transport"),
         }
@@ -200,7 +276,10 @@ mod tests {
         let m = reg.iter().find(|m| m.id == "mcp-gcloud").unwrap();
         assert!(m.tags.contains(&"gcp".to_string()));
         assert!(m.tags.contains(&"cloud".to_string()));
-        assert!(m.env_keys.is_empty(), "gcloud MCP uses CLI auth, not API keys");
+        assert!(
+            m.env_keys.is_empty(),
+            "gcloud MCP uses CLI auth, not API keys"
+        );
         match &m.transport {
             McpTransport::Stdio { command, .. } => {
                 assert_eq!(command, "npx");
@@ -215,8 +294,10 @@ mod tests {
         let m = reg.iter().find(|m| m.id == "mcp-bigquery").unwrap();
         assert!(m.tags.contains(&"sql".to_string()));
         assert!(m.tags.contains(&"gcp".to_string()));
-        assert!(m.env_keys.contains(&"GOOGLE_PROJECT_ID".to_string()),
-            "BigQuery requires GOOGLE_PROJECT_ID");
+        assert!(
+            m.env_keys.contains(&"GOOGLE_PROJECT_ID".to_string()),
+            "BigQuery requires GOOGLE_PROJECT_ID"
+        );
     }
 
     #[test]
@@ -244,7 +325,9 @@ mod tests {
         assert!(grafana.is_some(), "Grafana MCP should be in registry");
         let g = grafana.unwrap();
         assert!(g.env_keys.contains(&"GRAFANA_URL".to_string()));
-        assert!(g.env_keys.contains(&"GRAFANA_SERVICE_ACCOUNT_TOKEN".to_string()));
+        assert!(g
+            .env_keys
+            .contains(&"GRAFANA_SERVICE_ACCOUNT_TOKEN".to_string()));
     }
 
     #[test]
@@ -264,10 +347,16 @@ mod tests {
     fn chrome_devtools_in_registry() {
         let reg = builtin_registry();
         let chrome = reg.iter().find(|m| m.id == "mcp-chrome-devtools");
-        assert!(chrome.is_some(), "Chrome DevTools MCP should be in registry");
+        assert!(
+            chrome.is_some(),
+            "Chrome DevTools MCP should be in registry"
+        );
         let c = chrome.unwrap();
         assert!(!c.description.is_empty());
-        assert!(c.tags.iter().any(|t| t.contains("browser") || t.contains("debug")));
+        assert!(c
+            .tags
+            .iter()
+            .any(|t| t.contains("browser") || t.contains("debug")));
     }
 
     #[test]
@@ -283,8 +372,14 @@ mod tests {
         // provides, so anyone with it can drive a browser.
         if let crate::models::McpTransport::Stdio { args, .. } = &m.transport {
             let joined = args.join(" ");
-            assert!(joined.contains("--browser"), "Playwright MCP must set --browser: {joined}");
-            assert!(joined.contains("chromium"), "Playwright MCP must use bundled chromium, not the chrome channel: {joined}");
+            assert!(
+                joined.contains("--browser"),
+                "Playwright MCP must set --browser: {joined}"
+            );
+            assert!(
+                joined.contains("chromium"),
+                "Playwright MCP must use bundled chromium, not the chrome channel: {joined}"
+            );
         } else {
             panic!("Playwright MCP must be a Stdio transport");
         }
@@ -294,7 +389,10 @@ mod tests {
     fn figma_mcp_configuration() {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-figma").unwrap();
-        assert!(m.description.contains("Dev Mode"), "Figma MCP should mention Dev Mode");
+        assert!(
+            m.description.contains("Dev Mode"),
+            "Figma MCP should mention Dev Mode"
+        );
         assert!(m.tags.contains(&"design".to_string()));
         assert!(m.tags.contains(&"ui".to_string()));
         assert!(m.env_keys.contains(&"FIGMA_API_KEY".to_string()));
@@ -316,7 +414,10 @@ mod tests {
         let m = reg.iter().find(|m| m.id == "mcp-linear").unwrap();
         match &m.transport {
             McpTransport::Sse { url } => {
-                assert!(url.contains("linear.app"), "Linear SSE URL should point to linear.app");
+                assert!(
+                    url.contains("linear.app"),
+                    "Linear SSE URL should point to linear.app"
+                );
             }
             _ => panic!("Linear should use SSE transport"),
         }
@@ -344,17 +445,21 @@ mod tests {
     #[test]
     fn search_by_tag_monitoring_finds_multiple() {
         let results = search("monitoring");
-        assert!(results.len() >= 3,
+        assert!(
+            results.len() >= 3,
             "Should find at least Sentry, Grafana, Datadog for 'monitoring', got {}",
-            results.len());
+            results.len()
+        );
     }
 
     #[test]
     fn search_by_tag_cloud_finds_multiple() {
         let results = search("cloud");
-        assert!(results.len() >= 3,
+        assert!(
+            results.len() >= 3,
             "Should find multiple cloud providers for 'cloud', got {}",
-            results.len());
+            results.len()
+        );
     }
 
     #[test]
@@ -373,8 +478,10 @@ mod tests {
     #[test]
     fn search_by_description() {
         let results = search("knowledge graph");
-        assert!(results.iter().any(|m| m.id == "mcp-memory"),
-            "Searching 'knowledge graph' should find Memory MCP");
+        assert!(
+            results.iter().any(|m| m.id == "mcp-memory"),
+            "Searching 'knowledge graph' should find Memory MCP"
+        );
     }
 
     #[test]
@@ -382,12 +489,23 @@ mod tests {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-fastly").unwrap();
         assert_eq!(m.name, "Fastly");
-        assert!(m.description.contains("CDN"), "Fastly MCP should mention CDN");
-        assert!(m.env_keys.is_empty(), "Official Fastly MCP uses CLI profiles, not env vars");
+        assert!(
+            m.description.contains("CDN"),
+            "Fastly MCP should mention CDN"
+        );
+        assert!(
+            m.env_keys.is_empty(),
+            "Official Fastly MCP uses CLI profiles, not env vars"
+        );
         assert!(m.tags.contains(&"cdn".to_string()));
         assert!(m.token_url.is_some());
-        assert!(m.token_help.as_ref().unwrap().contains("fastly profile create"),
-            "token_help should guide users to create a Fastly CLI profile");
+        assert!(
+            m.token_help
+                .as_ref()
+                .unwrap()
+                .contains("fastly profile create"),
+            "token_help should guide users to create a Fastly CLI profile"
+        );
     }
 
     #[test]
@@ -395,7 +513,10 @@ mod tests {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-tavily").unwrap();
         assert_eq!(m.name, "Tavily");
-        assert!(m.description.contains("search"), "Tavily MCP should mention search");
+        assert!(
+            m.description.contains("search"),
+            "Tavily MCP should mention search"
+        );
         assert!(m.env_keys.contains(&"TAVILY_API_KEY".to_string()));
         assert!(m.tags.contains(&"search".to_string()));
     }
@@ -405,7 +526,10 @@ mod tests {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-google-colab").unwrap();
         assert_eq!(m.name, "Google Colab");
-        assert!(m.description.contains("GPU"), "Colab MCP should mention GPU");
+        assert!(
+            m.description.contains("GPU"),
+            "Colab MCP should mention GPU"
+        );
         assert!(m.tags.contains(&"compute".to_string()));
         assert!(m.env_keys.is_empty(), "Colab uses browser auth, no API key");
     }
@@ -415,7 +539,10 @@ mod tests {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-aws-api").unwrap();
         assert_eq!(m.name, "AWS API");
-        assert!(m.description.contains("Unified"), "AWS API MCP should mention unified access");
+        assert!(
+            m.description.contains("Unified"),
+            "AWS API MCP should mention unified access"
+        );
         assert!(m.env_keys.contains(&"AWS_ACCESS_KEY_ID".to_string()));
         assert!(m.env_keys.contains(&"AWS_SECRET_ACCESS_KEY".to_string()));
         assert!(m.tags.contains(&"aws".to_string()));
@@ -428,7 +555,9 @@ mod tests {
         let m = reg.iter().find(|m| m.id == "mcp-google-analytics").unwrap();
         assert_eq!(m.name, "Google Analytics 4");
         assert!(m.description.contains("GA4"), "GA4 MCP should mention GA4");
-        assert!(m.env_keys.contains(&"GOOGLE_APPLICATION_CREDENTIALS".to_string()));
+        assert!(m
+            .env_keys
+            .contains(&"GOOGLE_APPLICATION_CREDENTIALS".to_string()));
         assert!(m.tags.contains(&"analytics".to_string()));
         assert!(m.token_url.is_some());
         match &m.transport {
@@ -483,7 +612,10 @@ mod tests {
     fn redis_uses_official_server() {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-redis").unwrap();
-        assert!(m.description.contains("official Redis"), "Redis should use official Redis server, not Anthropic's");
+        assert!(
+            m.description.contains("official Redis"),
+            "Redis should use official Redis server, not Anthropic's"
+        );
         match &m.transport {
             McpTransport::Stdio { command, args } => {
                 assert_eq!(command, "uvx");
@@ -498,15 +630,20 @@ mod tests {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-drawio").unwrap();
         assert_eq!(m.name, "draw.io");
-        assert!(m.description.contains("diagrams"), "draw.io MCP should mention diagrams");
+        assert!(
+            m.description.contains("diagrams"),
+            "draw.io MCP should mention diagrams"
+        );
         assert!(m.tags.contains(&"design".to_string()));
         assert!(m.tags.contains(&"diagrams".to_string()));
         assert!(m.env_keys.is_empty(), "draw.io MCP needs no API keys");
         match &m.transport {
             McpTransport::Stdio { command, args } => {
                 assert_eq!(command, "npx");
-                assert!(args.iter().any(|a| a.contains("drawio-mcp")),
-                    "draw.io MCP args should reference drawio-mcp package");
+                assert!(
+                    args.iter().any(|a| a.contains("drawio-mcp")),
+                    "draw.io MCP args should reference drawio-mcp package"
+                );
             }
             _ => panic!("draw.io MCP should use Stdio transport"),
         }
@@ -555,9 +692,12 @@ mod tests {
         let official_count = reg.iter().filter(|m| m.official).count();
         let community_count = reg.iter().filter(|m| !m.official).count();
         // Most MCPs should be vendor-official
-        assert!(official_count > community_count,
+        assert!(
+            official_count > community_count,
             "Expected more official ({}) than community ({}) MCPs",
-            official_count, community_count);
+            official_count,
+            community_count
+        );
     }
 
     // ─── New MCPs (0.3.3+) ───────────────────────────────────────────────────
@@ -565,24 +705,35 @@ mod tests {
     #[test]
     fn puppeteer_removed_from_registry() {
         let reg = builtin_registry();
-        assert!(reg.iter().all(|m| m.id != "mcp-puppeteer"),
-            "Puppeteer should be removed — use Playwright instead");
+        assert!(
+            reg.iter().all(|m| m.id != "mcp-puppeteer"),
+            "Puppeteer should be removed — use Playwright instead"
+        );
     }
 
     #[test]
     fn mongodb_mcp_configuration() {
         let reg = builtin_registry();
-        let m = reg.iter().find(|m| m.id == "mcp-mongodb").expect("mcp-mongodb missing");
+        let m = reg
+            .iter()
+            .find(|m| m.id == "mcp-mongodb")
+            .expect("mcp-mongodb missing");
         assert_eq!(m.publisher, "MongoDB");
         assert!(m.official);
         assert!(m.env_keys.contains(&"MDB_MCP_CONNECTION_STRING".into()));
-        match &m.transport { McpTransport::Stdio { command, .. } => assert_eq!(command, "npx"), _ => panic!("expected Stdio") }
+        match &m.transport {
+            McpTransport::Stdio { command, .. } => assert_eq!(command, "npx"),
+            _ => panic!("expected Stdio"),
+        }
     }
 
     #[test]
     fn kubernetes_mcp_configuration() {
         let reg = builtin_registry();
-        let m = reg.iter().find(|m| m.id == "mcp-kubernetes").expect("mcp-kubernetes missing");
+        let m = reg
+            .iter()
+            .find(|m| m.id == "mcp-kubernetes")
+            .expect("mcp-kubernetes missing");
         assert_eq!(m.publisher, "Red Hat");
         assert!(m.official);
         assert!(m.tags.contains(&"containers".into()));
@@ -591,17 +742,26 @@ mod tests {
     #[test]
     fn qdrant_mcp_configuration() {
         let reg = builtin_registry();
-        let m = reg.iter().find(|m| m.id == "mcp-qdrant").expect("mcp-qdrant missing");
+        let m = reg
+            .iter()
+            .find(|m| m.id == "mcp-qdrant")
+            .expect("mcp-qdrant missing");
         assert_eq!(m.publisher, "Qdrant");
         assert!(m.official);
         assert!(m.env_keys.contains(&"QDRANT_URL".into()));
-        match &m.transport { McpTransport::Stdio { command, .. } => assert_eq!(command, "uvx"), _ => panic!("expected Stdio") }
+        match &m.transport {
+            McpTransport::Stdio { command, .. } => assert_eq!(command, "uvx"),
+            _ => panic!("expected Stdio"),
+        }
     }
 
     #[test]
     fn perplexity_mcp_configuration() {
         let reg = builtin_registry();
-        let m = reg.iter().find(|m| m.id == "mcp-perplexity").expect("mcp-perplexity missing");
+        let m = reg
+            .iter()
+            .find(|m| m.id == "mcp-perplexity")
+            .expect("mcp-perplexity missing");
         assert_eq!(m.publisher, "Perplexity");
         assert!(m.official);
         assert!(m.env_keys.contains(&"PERPLEXITY_API_KEY".into()));
@@ -610,7 +770,10 @@ mod tests {
     #[test]
     fn microsoft_365_mcp_configuration() {
         let reg = builtin_registry();
-        let m = reg.iter().find(|m| m.id == "mcp-microsoft-365").expect("mcp-microsoft-365 missing");
+        let m = reg
+            .iter()
+            .find(|m| m.id == "mcp-microsoft-365")
+            .expect("mcp-microsoft-365 missing");
         assert_eq!(m.publisher, "Softeria (community)");
         assert!(!m.official);
         assert!(m.tags.contains(&"email".into()));
@@ -621,7 +784,10 @@ mod tests {
     fn google_analytics_publisher_is_community() {
         let reg = builtin_registry();
         let m = reg.iter().find(|m| m.id == "mcp-google-analytics").unwrap();
-        assert_eq!(m.publisher, "Community", "GA4 MCP is not by Google — should be Community");
+        assert_eq!(
+            m.publisher, "Community",
+            "GA4 MCP is not by Google — should be Community"
+        );
         assert!(!m.official);
     }
 
@@ -631,11 +797,19 @@ mod tests {
         for id in &["mcp-sonarqube", "mcp-terraform"] {
             let m = reg.iter().find(|m| m.id == *id).unwrap();
             match &m.transport {
-                McpTransport::Stdio { command, .. } => assert_eq!(command, "docker", "{} should use docker", id),
+                McpTransport::Stdio { command, .. } => {
+                    assert_eq!(command, "docker", "{} should use docker", id)
+                }
                 _ => panic!("{} should be Stdio", id),
             }
-            assert!(m.token_help.as_ref().map(|h| h.contains("Docker")).unwrap_or(false),
-                "{} help should mention Docker requirement", id);
+            assert!(
+                m.token_help
+                    .as_ref()
+                    .map(|h| h.contains("Docker"))
+                    .unwrap_or(false),
+                "{} help should mention Docker requirement",
+                id
+            );
         }
     }
 
@@ -643,8 +817,14 @@ mod tests {
     fn anthropic_mcps_are_not_vendor_official() {
         // Anthropic-built MCPs for third-party services should NOT be marked official
         let reg = builtin_registry();
-        let anthropic = reg.iter().filter(|m| m.publisher == "Anthropic").collect::<Vec<_>>();
-        assert!(!anthropic.is_empty(), "Should have Anthropic-published MCPs");
+        let anthropic = reg
+            .iter()
+            .filter(|m| m.publisher == "Anthropic")
+            .collect::<Vec<_>>();
+        assert!(
+            !anthropic.is_empty(),
+            "Should have Anthropic-published MCPs"
+        );
         for m in &anthropic {
             assert!(!m.official,
                 "MCP {} is by Anthropic but marked official — only the service vendor should be official",

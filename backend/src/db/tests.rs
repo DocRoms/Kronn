@@ -1,7 +1,7 @@
-use chrono::{TimeZone, Utc};
-use rusqlite::Connection;
 use crate::db::migrations;
 use crate::models::*;
+use chrono::{TimeZone, Utc};
+use rusqlite::Connection;
 
 /// Create an in-memory database with all migrations applied
 fn test_db() -> Connection {
@@ -14,14 +14,8 @@ fn test_db() -> Connection {
 #[test]
 fn parse_dt_accepts_rfc3339_and_sqlite_utc_without_drift() {
     let expected = Utc.with_ymd_and_hms(2026, 7, 7, 19, 11, 11).unwrap();
-    assert_eq!(
-        super::parse_dt("2026-07-07T19:11:11Z".into()),
-        expected,
-    );
-    assert_eq!(
-        super::parse_dt("2026-07-07 19:11:11".into()),
-        expected,
-    );
+    assert_eq!(super::parse_dt("2026-07-07T19:11:11Z".into()), expected,);
+    assert_eq!(super::parse_dt("2026-07-07 19:11:11".into()), expected,);
 }
 
 // ─── ADR-001 O2 (stab-2) — read-connection guards ───────────────────────
@@ -50,35 +44,49 @@ async fn read_conn_sees_committed_writes_and_refuses_its_own() {
             "INSERT INTO projects (id, name, path, created_at, updated_at)
              VALUES ('p-o2', 'O2', '/tmp/o2', datetime('now'), datetime('now'))",
             [],
-        ).map_err(Into::into)
-    }).await.unwrap();
+        )
+        .map_err(Into::into)
+    })
+    .await
+    .unwrap();
 
     // Visibility: the WAL reader sees the committed write.
-    let name: String = db.with_read_conn(|conn| {
-        conn.query_row("SELECT name FROM projects WHERE id = 'p-o2'", [], |r| r.get(0))
+    let name: String = db
+        .with_read_conn(|conn| {
+            conn.query_row("SELECT name FROM projects WHERE id = 'p-o2'", [], |r| {
+                r.get(0)
+            })
             .map_err(Into::into)
-    }).await.unwrap();
+        })
+        .await
+        .unwrap();
     assert_eq!(name, "O2");
 
     // query_only guard: a stray write through the read path is an
     // immediate SQLite error, not a silent drift.
-    let err = db.with_read_conn(|conn| {
-        conn.execute("DELETE FROM projects WHERE id = 'p-o2'", [])
-            .map_err(Into::into)
-            .map(|_| ())
-    }).await.expect_err("writes must be refused on the read connection");
+    let err = db
+        .with_read_conn(|conn| {
+            conn.execute("DELETE FROM projects WHERE id = 'p-o2'", [])
+                .map_err(Into::into)
+                .map(|_| ())
+        })
+        .await
+        .expect_err("writes must be refused on the read connection");
     assert!(err.to_string().to_lowercase().contains("readonly"), "{err}");
 
     // Codex round 4: flip `query_only` OFF and try again — the write must
     // STILL be refused because the handle itself is SQLITE_OPEN_READ_ONLY.
     // Locks the open flag: a regression back to a read-write open guarded
     // only by the pragma would pass the assertion above but fail here.
-    let err = db.with_read_conn(|conn| {
-        conn.execute_batch("PRAGMA query_only=0;")?;
-        conn.execute("DELETE FROM projects WHERE id = 'p-o2'", [])
-            .map_err(Into::into)
-            .map(|_| ())
-    }).await.expect_err("the READ_ONLY handle must refuse writes even without query_only");
+    let err = db
+        .with_read_conn(|conn| {
+            conn.execute_batch("PRAGMA query_only=0;")?;
+            conn.execute("DELETE FROM projects WHERE id = 'p-o2'", [])
+                .map_err(Into::into)
+                .map(|_| ())
+        })
+        .await
+        .expect_err("the READ_ONLY handle must refuse writes even without query_only");
     assert!(err.to_string().to_lowercase().contains("readonly"), "{err}");
 }
 
@@ -88,9 +96,8 @@ async fn reads_are_not_blocked_by_a_busy_writer() {
     // freeze every read. The read connection completes while the writer
     // sleeps. Generous bounds — this asserts ORDERING, not precise timing.
     let tmp = tempfile::TempDir::new().unwrap();
-    let db = std::sync::Arc::new(
-        crate::db::Database::open_path(&tmp.path().join("o2b.db")).unwrap(),
-    );
+    let db =
+        std::sync::Arc::new(crate::db::Database::open_path(&tmp.path().join("o2b.db")).unwrap());
     if !read_companion_available(&db) {
         return;
     }
@@ -106,15 +113,21 @@ async fn reads_are_not_blocked_by_a_busy_writer() {
             let _ = locked_tx.send(());
             std::thread::sleep(std::time::Duration::from_millis(1500));
             Ok(())
-        }).await
+        })
+        .await
     });
-    locked_rx.await.expect("writer must signal lock acquisition");
+    locked_rx
+        .await
+        .expect("writer must signal lock acquisition");
 
     let started = std::time::Instant::now();
-    let n: i64 = db.with_read_conn(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
-            .map_err(Into::into)
-    }).await.unwrap();
+    let n: i64 = db
+        .with_read_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
     let elapsed = started.elapsed();
 
     assert_eq!(n, 0);
@@ -147,8 +160,12 @@ async fn wal_disabled_skips_the_reader_and_falls_back() {
             "INSERT INTO projects (id, name, path, created_at, updated_at)
              VALUES ('p-nowal', 'NoWal', '/tmp/nw', datetime('now'), datetime('now'))",
             [],
-        ).map_err(Into::into).map(|_| ())
-    }).await.expect("without WAL the read path IS the write connection (fallback)");
+        )
+        .map_err(Into::into)
+        .map(|_| ())
+    })
+    .await
+    .expect("without WAL the read path IS the write connection (fallback)");
 }
 
 #[tokio::test]
@@ -156,10 +173,13 @@ async fn in_memory_db_falls_back_to_the_write_connection() {
     // A second `:memory:` handle would be a DIFFERENT database — the read
     // path must fall back so tests keep working on one shared connection.
     let db = crate::db::Database::open_in_memory().unwrap();
-    let n: i64 = db.with_read_conn(|conn| {
-        conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
-            .map_err(Into::into)
-    }).await.unwrap();
+    let n: i64 = db
+        .with_read_conn(|conn| {
+            conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0))
+                .map_err(Into::into)
+        })
+        .await
+        .unwrap();
     assert_eq!(n, 0);
 }
 
@@ -171,16 +191,19 @@ fn sample_project(id: &str, name: &str) -> Project {
         path: format!("/tmp/{}", name),
         repo_url: Some("https://github.com/test/repo".into()),
         token_override: None,
-        ai_config: AiConfigStatus { detected: false, configs: vec![] },
+        ai_config: AiConfigStatus {
+            detected: false,
+            configs: vec![],
+        },
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
-            tech_debt_count: 0,
+        tech_debt_count: 0,
         needs_docs_migration: false,
         path_exists: true,
         default_skill_ids: vec![],
         default_profile_id: None,
         briefing_notes: None,
-            linked_repos: vec![],
+        linked_repos: vec![],
         created_at: now,
         updated_at: now,
     }
@@ -197,7 +220,8 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         language: "fr".into(),
         participants: vec![AgentType::ClaudeCode],
         messages: vec![],
-        message_count: 0, non_system_message_count: 0,
+        message_count: 0,
+        non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -211,9 +235,10 @@ fn sample_discussion(id: &str, project_id: Option<&str>) -> Discussion {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-            shared_id: None,
-            shared_with: vec![],
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: None,
+        shared_with: vec![],
         workflow_run_id: None,
         test_mode_restore_branch: None,
         test_mode_stash_ref: None,
@@ -233,8 +258,12 @@ fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
         timestamp: Utc::now(),
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None,
-        source_msg_id: None, duration_ms: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
+        duration_ms: None,
     }
 }
 
@@ -330,18 +359,25 @@ fn capture_schema(conn: &rusqlite::Connection) -> String {
 /// doubles them on re-run.
 fn capture_seed_row_counts(conn: &rusqlite::Connection) -> Vec<(String, i64)> {
     let candidate_tables = [
-        "projects", "discussions", "messages", "mcp_servers", "mcp_configs",
-        "workflows", "workflow_runs", "quick_prompts", "skills", "profiles",
-        "directives", "contacts", "discussion_sessions",
+        "projects",
+        "discussions",
+        "messages",
+        "mcp_servers",
+        "mcp_configs",
+        "workflows",
+        "workflow_runs",
+        "quick_prompts",
+        "skills",
+        "profiles",
+        "directives",
+        "contacts",
+        "discussion_sessions",
     ];
     candidate_tables
         .iter()
         .filter_map(|t| {
-            let n: rusqlite::Result<i64> = conn.query_row(
-                &format!("SELECT COUNT(*) FROM {}", t),
-                [],
-                |r| r.get(0),
-            );
+            let n: rusqlite::Result<i64> =
+                conn.query_row(&format!("SELECT COUNT(*) FROM {}", t), [], |r| r.get(0));
             n.ok().map(|c| (t.to_string(), c))
         })
         .collect()
@@ -356,13 +392,34 @@ fn migrations_create_all_tables() {
     .query_map([], |r| r.get(0)).unwrap()
     .filter_map(|r| r.ok()).collect();
 
-    assert!(tables.contains(&"projects".into()), "Missing 'projects' table");
-    assert!(tables.contains(&"discussions".into()), "Missing 'discussions' table");
-    assert!(tables.contains(&"messages".into()), "Missing 'messages' table");
-    assert!(tables.contains(&"mcp_servers".into()), "Missing 'mcp_servers' table");
-    assert!(tables.contains(&"mcp_configs".into()), "Missing 'mcp_configs' table");
-    assert!(tables.contains(&"workflows".into()), "Missing 'workflows' table");
-    assert!(tables.contains(&"workflow_runs".into()), "Missing 'workflow_runs' table");
+    assert!(
+        tables.contains(&"projects".into()),
+        "Missing 'projects' table"
+    );
+    assert!(
+        tables.contains(&"discussions".into()),
+        "Missing 'discussions' table"
+    );
+    assert!(
+        tables.contains(&"messages".into()),
+        "Missing 'messages' table"
+    );
+    assert!(
+        tables.contains(&"mcp_servers".into()),
+        "Missing 'mcp_servers' table"
+    );
+    assert!(
+        tables.contains(&"mcp_configs".into()),
+        "Missing 'mcp_configs' table"
+    );
+    assert!(
+        tables.contains(&"workflows".into()),
+        "Missing 'workflows' table"
+    );
+    assert!(
+        tables.contains(&"workflow_runs".into()),
+        "Missing 'workflow_runs' table"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -421,7 +478,9 @@ fn projects_update_ai_config() {
     };
     crate::db::projects::update_project_ai_config(&conn, "p1", &new_config).unwrap();
 
-    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    let p = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
     assert!(p.ai_config.detected);
     assert_eq!(p.ai_config.configs.len(), 2);
 }
@@ -452,8 +511,13 @@ fn projects_update_default_skills() {
     let updated = crate::db::projects::update_project_default_skills(&conn, "p1", &skills).unwrap();
     assert!(updated, "update should affect one row");
 
-    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
-    assert_eq!(p.default_skill_ids, skills, "Default skills must persist after update");
+    let p = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        p.default_skill_ids, skills,
+        "Default skills must persist after update"
+    );
 }
 
 #[test]
@@ -465,8 +529,13 @@ fn projects_update_default_skills_to_empty() {
 
     crate::db::projects::update_project_default_skills(&conn, "p1", &[]).unwrap();
 
-    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
-    assert!(p.default_skill_ids.is_empty(), "Skills should be clearable to empty");
+    let p = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
+    assert!(
+        p.default_skill_ids.is_empty(),
+        "Skills should be clearable to empty"
+    );
 }
 
 #[test]
@@ -475,16 +544,25 @@ fn projects_update_default_profile() {
     crate::db::projects::insert_project(&conn, &sample_project("p1", "A")).unwrap();
 
     // Set a profile
-    let updated = crate::db::projects::update_project_default_profile(&conn, "p1", Some("profile-senior")).unwrap();
+    let updated =
+        crate::db::projects::update_project_default_profile(&conn, "p1", Some("profile-senior"))
+            .unwrap();
     assert!(updated);
 
-    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
+    let p = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
     assert_eq!(p.default_profile_id.as_deref(), Some("profile-senior"));
 
     // Clear the profile
     crate::db::projects::update_project_default_profile(&conn, "p1", None).unwrap();
-    let p = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
-    assert!(p.default_profile_id.is_none(), "Profile should be clearable to None");
+    let p = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
+    assert!(
+        p.default_profile_id.is_none(),
+        "Profile should be clearable to None"
+    );
 }
 
 #[test]
@@ -512,11 +590,20 @@ fn projects_delete_cascade_discussions() {
 fn disc_no_agent_flag_round_trips() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    assert!(!crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "default agent-capable");
+    assert!(
+        !crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(),
+        "default agent-capable"
+    );
     assert!(crate::db::discussions::set_disc_no_agent(&conn, "d1", true).unwrap());
-    assert!(crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "flag set");
+    assert!(
+        crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(),
+        "flag set"
+    );
     crate::db::discussions::set_disc_no_agent(&conn, "d1", false).unwrap();
-    assert!(!crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(), "flag cleared");
+    assert!(
+        !crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(),
+        "flag cleared"
+    );
 }
 
 #[test]
@@ -527,11 +614,15 @@ fn discussion_model_override_round_trips() {
     let mut d = sample_discussion("d-model", None);
     d.model = Some("qwen3:8b".into());
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
-    let got = crate::db::discussions::get_discussion(&conn, "d-model").unwrap().unwrap();
+    let got = crate::db::discussions::get_discussion(&conn, "d-model")
+        .unwrap()
+        .unwrap();
     assert_eq!(got.model, Some("qwen3:8b".into()));
 
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d-none", None)).unwrap();
-    let none = crate::db::discussions::get_discussion(&conn, "d-none").unwrap().unwrap();
+    let none = crate::db::discussions::get_discussion(&conn, "d-none")
+        .unwrap()
+        .unwrap();
     assert_eq!(none.model, None, "no override → None, resolve from tier");
 }
 
@@ -540,13 +631,19 @@ fn ensure_mirror_by_shared_id_is_idempotent_and_formats_title() {
     let conn = test_db();
     // First call creates the mirror and returns its local id.
     let id1 = crate::db::discussions::ensure_mirror_by_shared_id(
-        &conn, "shared-abc", "Topic", "PeerAlpha",
+        &conn,
+        "shared-abc",
+        "Topic",
+        "PeerAlpha",
     )
     .unwrap();
     // Second call with the same shared_id returns the SAME local disc — no dup
     // (this is what makes the HTTP-create + late-WS-invite paths converge).
     let id2 = crate::db::discussions::ensure_mirror_by_shared_id(
-        &conn, "shared-abc", "Topic", "PeerAlpha",
+        &conn,
+        "shared-abc",
+        "Topic",
+        "PeerAlpha",
     )
     .unwrap();
     assert_eq!(id1, id2, "idempotent on shared_id");
@@ -576,18 +673,33 @@ fn federated_context_file_insert_exists_and_get() {
 
     // F8: insert a file received from a peer, pinned to a message.
     crate::db::discussions::insert_federated_context_file(
-        &conn, "f1", "d1", "m1", "doc.pdf", "application/pdf", 1234, "/tmp/x.pdf",
+        &conn,
+        "f1",
+        "d1",
+        "m1",
+        "doc.pdf",
+        "application/pdf",
+        1234,
+        "/tmp/x.pdf",
     )
     .unwrap();
     assert!(crate::db::discussions::context_file_exists(&conn, "f1").unwrap());
 
-    let cf = crate::db::discussions::get_context_file(&conn, "f1").unwrap().unwrap();
+    let cf = crate::db::discussions::get_context_file(&conn, "f1")
+        .unwrap()
+        .unwrap();
     assert_eq!(cf.filename, "doc.pdf");
     assert_eq!(cf.mime_type, "application/pdf");
     assert_eq!(cf.original_size, 1234);
-    assert_eq!(cf.message_id.as_deref(), Some("m1"), "pinned to the right message");
+    assert_eq!(
+        cf.message_id.as_deref(),
+        Some("m1"),
+        "pinned to the right message"
+    );
     assert_eq!(cf.disk_path.as_deref(), Some("/tmp/x.pdf"));
-    assert!(crate::db::discussions::get_context_file(&conn, "missing").unwrap().is_none());
+    assert!(crate::db::discussions::get_context_file(&conn, "missing")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -623,13 +735,18 @@ fn shared_id_unique_index_rejects_duplicate_and_ensure_mirror_absorbs_it() {
     // ensure_mirror_by_shared_id never trips it: it returns the existing disc.
     let id = crate::db::discussions::ensure_mirror_by_shared_id(&conn, "dup-shared", "T", "Peer")
         .unwrap();
-    assert_eq!(id, "d1", "ensure_mirror returns the existing local disc, no duplicate");
+    assert_eq!(
+        id, "d1",
+        "ensure_mirror returns the existing local disc, no duplicate"
+    );
 }
 
 #[test]
 fn projects_update_nonexistent_returns_false() {
     let conn = test_db();
-    let updated = crate::db::projects::update_project_default_skills(&conn, "nonexistent", &["s1".into()]).unwrap();
+    let updated =
+        crate::db::projects::update_project_default_skills(&conn, "nonexistent", &["s1".into()])
+            .unwrap();
     assert!(!updated, "Updating nonexistent project should return false");
 }
 
@@ -644,16 +761,27 @@ fn projects_briefing_notes_set_and_get() {
 
     // Set notes
     let updated = crate::db::projects::update_project_briefing_notes(
-        &conn, "p1", Some("This is a React app with a REST API backend")
-    ).unwrap();
+        &conn,
+        "p1",
+        Some("This is a React app with a REST API backend"),
+    )
+    .unwrap();
     assert!(updated);
 
     let notes = crate::db::projects::get_project_briefing_notes(&conn, "p1").unwrap();
-    assert_eq!(notes.as_deref(), Some("This is a React app with a REST API backend"));
+    assert_eq!(
+        notes.as_deref(),
+        Some("This is a React app with a REST API backend")
+    );
 
     // Verify it's also returned in get_project
-    let project = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
-    assert_eq!(project.briefing_notes.as_deref(), Some("This is a React app with a REST API backend"));
+    let project = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        project.briefing_notes.as_deref(),
+        Some("This is a React app with a REST API backend")
+    );
 }
 
 #[test]
@@ -666,14 +794,22 @@ fn projects_briefing_notes_clear() {
     crate::db::projects::update_project_briefing_notes(&conn, "p1", None).unwrap();
 
     let notes = crate::db::projects::get_project_briefing_notes(&conn, "p1").unwrap();
-    assert!(notes.is_none(), "Briefing notes should be clearable to None");
+    assert!(
+        notes.is_none(),
+        "Briefing notes should be clearable to None"
+    );
 }
 
 #[test]
 fn projects_briefing_notes_nonexistent_project() {
     let conn = test_db();
-    let updated = crate::db::projects::update_project_briefing_notes(&conn, "nonexistent", Some("notes")).unwrap();
-    assert!(!updated, "Updating briefing notes for nonexistent project should return false");
+    let updated =
+        crate::db::projects::update_project_briefing_notes(&conn, "nonexistent", Some("notes"))
+            .unwrap();
+    assert!(
+        !updated,
+        "Updating briefing notes for nonexistent project should return false"
+    );
 }
 
 #[test]
@@ -683,8 +819,13 @@ fn projects_briefing_notes_persisted_in_insert() {
     p.briefing_notes = Some("Pre-filled briefing".into());
     crate::db::projects::insert_project(&conn, &p).unwrap();
 
-    let loaded = crate::db::projects::get_project(&conn, "p1").unwrap().unwrap();
-    assert_eq!(loaded.briefing_notes.as_deref(), Some("Pre-filled briefing"));
+    let loaded = crate::db::projects::get_project(&conn, "p1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.briefing_notes.as_deref(),
+        Some("Pre-filled briefing")
+    );
 }
 
 #[test]
@@ -746,7 +887,9 @@ fn discussions_with_project() {
     crate::db::projects::insert_project(&conn, &sample_project("p1", "Proj")).unwrap();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", Some("p1"))).unwrap();
 
-    let disc = crate::db::discussions::get_discussion(&conn, "d1").unwrap().unwrap();
+    let disc = crate::db::discussions::get_discussion(&conn, "d1")
+        .unwrap()
+        .unwrap();
     assert_eq!(disc.project_id, Some("p1".into()));
 }
 
@@ -806,7 +949,8 @@ fn messages_with_tokens_and_auth_mode() {
 fn messages_update_tokens() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::Agent)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::Agent))
+        .unwrap();
 
     crate::db::discussions::update_message_tokens(&conn, "m1", 999, Some("local")).unwrap();
 
@@ -820,9 +964,12 @@ fn messages_delete_last_agent() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
 
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m3", MessageRole::System)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
+        .unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent))
+        .unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m3", MessageRole::System))
+        .unwrap();
 
     let deleted = crate::db::discussions::delete_last_agent_messages(&conn, "d1").unwrap();
     assert_eq!(deleted, 2); // Agent + System messages after last User
@@ -836,9 +983,11 @@ fn messages_delete_last_agent() {
 fn messages_edit_last_user() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
+        .unwrap();
 
-    let edited = crate::db::discussions::edit_last_user_message(&conn, "d1", "updated content").unwrap();
+    let edited =
+        crate::db::discussions::edit_last_user_message(&conn, "d1", "updated content").unwrap();
     assert!(edited);
 
     let messages = crate::db::discussions::list_messages(&conn, "d1").unwrap();
@@ -849,10 +998,14 @@ fn messages_edit_last_user() {
 fn discussions_loaded_with_messages() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
+        .unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent))
+        .unwrap();
 
-    let disc = crate::db::discussions::get_discussion(&conn, "d1").unwrap().unwrap();
+    let disc = crate::db::discussions::get_discussion(&conn, "d1")
+        .unwrap()
+        .unwrap();
     assert_eq!(disc.messages.len(), 2);
 }
 
@@ -881,7 +1034,10 @@ fn mcp_server_upsert_and_list() {
     assert_eq!(servers[0].name, "Test");
 
     // Upsert again (update)
-    let updated = McpServer { name: "Updated Test".into(), ..server };
+    let updated = McpServer {
+        name: "Updated Test".into(),
+        ..server
+    };
     crate::db::mcps::upsert_server(&conn, &updated).unwrap();
 
     let servers = crate::db::mcps::list_servers(&conn).unwrap();
@@ -897,7 +1053,9 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
     // silently filters it out. The startup sync must re-mirror the
     // registry's current api_spec onto every existing row, without
     // creating rows for plugins the user never configured.
-    use crate::models::{ApiAuthKind, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpSource, McpTransport};
+    use crate::models::{
+        ApiAuthKind, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpSource, McpTransport,
+    };
     let conn = test_db();
 
     // Pre-existing row, no api_spec — mirrors the "configured before
@@ -906,7 +1064,10 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
         id: "mcp-foo".into(),
         name: "Foo".into(),
         description: "old".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "foo".into()] },
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "foo".into()],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -919,7 +1080,10 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
             id: "mcp-foo".into(),
             name: "Foo".into(),
             description: "fresh".into(),
-            transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "foo".into()] },
+            transport: McpTransport::Stdio {
+                command: "npx".into(),
+                args: vec!["-y".into(), "foo".into()],
+            },
             env_keys: vec!["FOO_TOKEN".into()],
             tags: vec![],
             token_url: None,
@@ -930,10 +1094,16 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
             default_context: None,
             api_spec: Some(ApiSpec {
                 base_url: "https://api.foo".into(),
-                auth: ApiAuthKind::Bearer { env_key: "FOO_TOKEN".into() },
+                auth: ApiAuthKind::Bearer {
+                    env_key: "FOO_TOKEN".into(),
+                },
                 docs_url: None,
                 config_keys: vec![],
-                endpoints: vec![ApiEndpoint { path: "/me".into(), method: "GET".into(), description: "x".into() }],
+                endpoints: vec![ApiEndpoint {
+                    path: "/me".into(),
+                    method: "GET".into(),
+                    description: "x".into(),
+                }],
             }),
         },
         // User never created a config for this one — sync must NOT
@@ -942,7 +1112,10 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
             id: "mcp-never-added".into(),
             name: "Never Added".into(),
             description: "x".into(),
-            transport: McpTransport::Stdio { command: "x".into(), args: vec![] },
+            transport: McpTransport::Stdio {
+                command: "x".into(),
+                args: vec![],
+            },
             env_keys: vec![],
             tags: vec![],
             token_url: None,
@@ -965,7 +1138,11 @@ fn sync_registry_refreshes_api_spec_on_existing_rows_only() {
     assert_eq!(updated, 1, "only the existing row gets refreshed");
 
     let after = crate::db::mcps::list_servers(&conn).unwrap();
-    assert_eq!(after.len(), 1, "sync must NOT create rows for unconfigured plugins");
+    assert_eq!(
+        after.len(),
+        1,
+        "sync must NOT create rows for unconfigured plugins"
+    );
     let foo = &after[0];
     assert!(foo.api_spec.is_some(), "stale row gets the new api_spec");
     assert_eq!(foo.api_spec.as_ref().unwrap().base_url, "https://api.foo");
@@ -977,8 +1154,12 @@ fn mcp_config_insert_with_projects() {
     let conn = test_db();
     // Create server and projects first
     let server = McpServer {
-        id: "srv1".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Sse { url: "http://localhost".into() },
+        id: "srv1".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Sse {
+            url: "http://localhost".into(),
+        },
         source: McpSource::Manual,
         api_spec: None,
     };
@@ -986,10 +1167,17 @@ fn mcp_config_insert_with_projects() {
     crate::db::projects::insert_project(&conn, &sample_project("p1", "Proj1")).unwrap();
 
     let config = McpConfig {
-        id: "cfg1".into(), server_id: "srv1".into(), label: "My Config".into(),
-        env_keys: vec!["KEY1".into()], env_encrypted: "enc".into(),
-        args_override: None, is_global: false, include_general: true, config_hash: "hash1".into(),
-        project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
+        id: "cfg1".into(),
+        server_id: "srv1".into(),
+        label: "My Config".into(),
+        env_keys: vec!["KEY1".into()],
+        env_encrypted: "enc".into(),
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "hash1".into(),
+        project_ids: vec!["p1".into()],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -1002,8 +1190,13 @@ fn mcp_config_insert_with_projects() {
 fn mcp_configs_for_project_includes_global() {
     let conn = test_db();
     let server = McpServer {
-        id: "srv1".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        id: "srv1".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "test".into(),
+            args: vec![],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1012,19 +1205,33 @@ fn mcp_configs_for_project_includes_global() {
 
     // Global config
     let global = McpConfig {
-        id: "cfg-global".into(), server_id: "srv1".into(), label: "Global".into(),
-        env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: true, include_general: true, config_hash: "h1".into(),
-        project_ids: vec![], host_sync: HostSyncMode::None,
+        id: "cfg-global".into(),
+        server_id: "srv1".into(),
+        label: "Global".into(),
+        env_keys: vec![],
+        env_encrypted: "".into(),
+        args_override: None,
+        is_global: true,
+        include_general: true,
+        config_hash: "h1".into(),
+        project_ids: vec![],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &global).unwrap();
 
     // Project-specific config
     let specific = McpConfig {
-        id: "cfg-proj".into(), server_id: "srv1".into(), label: "Proj".into(),
-        env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: false, include_general: true, config_hash: "h2".into(),
-        project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
+        id: "cfg-proj".into(),
+        server_id: "srv1".into(),
+        label: "Proj".into(),
+        env_keys: vec![],
+        env_encrypted: "".into(),
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "h2".into(),
+        project_ids: vec!["p1".into()],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &specific).unwrap();
 
@@ -1061,8 +1268,13 @@ fn mcp_encrypt_empty_env() {
 #[test]
 fn mcp_config_hash_deterministic() {
     let server = McpServer {
-        id: "srv".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        id: "srv".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "pkg".into()],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1077,8 +1289,13 @@ fn mcp_config_hash_deterministic() {
 #[test]
 fn mcp_config_hash_differs_on_env() {
     let server = McpServer {
-        id: "srv".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
+        id: "srv".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec![],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1102,8 +1319,13 @@ fn mcp_config_update_env_persists() {
     let secret = crate::core::crypto::generate_secret();
 
     let server = McpServer {
-        id: "srv1".into(), name: "GitHub".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        id: "srv1".into(),
+        name: "GitHub".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "pkg".into()],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1114,10 +1336,17 @@ fn mcp_config_update_env_persists() {
     let encrypted = crate::db::mcps::encrypt_env(&env, &secret).unwrap();
 
     let config = McpConfig {
-        id: "cfg1".into(), server_id: "srv1".into(), label: "My GitHub".into(),
-        env_keys: vec!["TOKEN".into()], env_encrypted: encrypted,
-        args_override: None, is_global: false, include_general: true,
-        config_hash: "h1".into(), project_ids: vec![], host_sync: HostSyncMode::None,
+        id: "cfg1".into(),
+        server_id: "srv1".into(),
+        label: "My GitHub".into(),
+        env_keys: vec!["TOKEN".into()],
+        env_encrypted: encrypted,
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "h1".into(),
+        project_ids: vec![],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -1128,24 +1357,46 @@ fn mcp_config_update_env_persists() {
     let new_keys = vec!["TOKEN".to_string()];
 
     let updated = crate::db::mcps::update_config(
-        &conn, "cfg1", None, Some(&new_encrypted), Some(&new_keys),
-        None, None, None, None, None,
-    ).unwrap();
+        &conn,
+        "cfg1",
+        None,
+        Some(&new_encrypted),
+        Some(&new_keys),
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(updated, "update_config should return true");
 
     // Verify the stored encrypted value decrypts to the new value
     let loaded = crate::db::mcps::get_config(&conn, "cfg1").unwrap().unwrap();
     let decrypted = crate::db::mcps::decrypt_env(&loaded.env_encrypted, &secret).unwrap();
-    assert_eq!(decrypted.get("TOKEN").unwrap(), "new-secret-value",
-        "Updated env value must persist after update_config");
+    assert_eq!(
+        decrypted.get("TOKEN").unwrap(),
+        "new-secret-value",
+        "Updated env value must persist after update_config"
+    );
 }
 
 #[test]
 fn mcp_config_update_nonexistent_returns_false() {
     let conn = test_db();
     let result = crate::db::mcps::update_config(
-        &conn, "nonexistent", Some("label"), None, None, None, None, None, None, None,
-    ).unwrap();
+        &conn,
+        "nonexistent",
+        Some("label"),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     assert!(!result, "Updating a nonexistent config should return false");
 }
 
@@ -1168,8 +1419,13 @@ fn mcp_config_global_visible_to_all_projects() {
     let secret = crate::core::crypto::generate_secret();
 
     let server = McpServer {
-        id: "srv1".into(), name: "Sentry".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec![] },
+        id: "srv1".into(),
+        name: "Sentry".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec![],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1183,10 +1439,17 @@ fn mcp_config_global_visible_to_all_projects() {
     let encrypted = crate::db::mcps::encrypt_env(&env, &secret).unwrap();
 
     let config = McpConfig {
-        id: "cfg-global".into(), server_id: "srv1".into(), label: "Sentry Global".into(),
-        env_keys: vec!["SENTRY_TOKEN".into()], env_encrypted: encrypted.clone(),
-        args_override: None, is_global: true, include_general: true,
-        config_hash: "h".into(), project_ids: vec![], host_sync: HostSyncMode::None,
+        id: "cfg-global".into(),
+        server_id: "srv1".into(),
+        label: "Sentry Global".into(),
+        env_keys: vec!["SENTRY_TOKEN".into()],
+        env_encrypted: encrypted.clone(),
+        args_override: None,
+        is_global: true,
+        include_general: true,
+        config_hash: "h".into(),
+        project_ids: vec![],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -1201,22 +1464,40 @@ fn mcp_config_global_visible_to_all_projects() {
     new_env.insert("SENTRY_TOKEN".into(), "tok-456-updated".into());
     let new_encrypted = crate::db::mcps::encrypt_env(&new_env, &secret).unwrap();
     crate::db::mcps::update_config(
-        &conn, "cfg-global", None, Some(&new_encrypted), None, None, None, None, None, None,
-    ).unwrap();
+        &conn,
+        "cfg-global",
+        None,
+        Some(&new_encrypted),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     // Both projects should see the UPDATED value
     let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
     let decrypted = crate::db::mcps::decrypt_env(&for_p1[0].env_encrypted, &secret).unwrap();
-    assert_eq!(decrypted.get("SENTRY_TOKEN").unwrap(), "tok-456-updated",
-        "Global config update must be visible to all projects immediately");
+    assert_eq!(
+        decrypted.get("SENTRY_TOKEN").unwrap(),
+        "tok-456-updated",
+        "Global config update must be visible to all projects immediately"
+    );
 }
 
 #[test]
 fn mcp_set_config_projects_relinks() {
     let conn = test_db();
     let server = McpServer {
-        id: "srv1".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        id: "srv1".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "test".into(),
+            args: vec![],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1226,10 +1507,17 @@ fn mcp_set_config_projects_relinks() {
     crate::db::projects::insert_project(&conn, &sample_project("p3", "P3")).unwrap();
 
     let config = McpConfig {
-        id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
-        env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: false, include_general: true,
-        config_hash: "h".into(), project_ids: vec!["p1".into(), "p2".into()], host_sync: HostSyncMode::None,
+        id: "cfg1".into(),
+        server_id: "srv1".into(),
+        label: "Test".into(),
+        env_keys: vec![],
+        env_encrypted: "".into(),
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "h".into(),
+        project_ids: vec!["p1".into(), "p2".into()],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -1241,9 +1529,18 @@ fn mcp_set_config_projects_relinks() {
     crate::db::mcps::set_config_projects(&conn, "cfg1", &["p2".into(), "p3".into()]).unwrap();
 
     let reloaded = crate::db::mcps::get_config(&conn, "cfg1").unwrap().unwrap();
-    assert!(!reloaded.project_ids.contains(&"p1".to_string()), "p1 should be unlinked");
-    assert!(reloaded.project_ids.contains(&"p2".to_string()), "p2 should remain");
-    assert!(reloaded.project_ids.contains(&"p3".to_string()), "p3 should be added");
+    assert!(
+        !reloaded.project_ids.contains(&"p1".to_string()),
+        "p1 should be unlinked"
+    );
+    assert!(
+        reloaded.project_ids.contains(&"p2".to_string()),
+        "p2 should remain"
+    );
+    assert!(
+        reloaded.project_ids.contains(&"p3".to_string()),
+        "p3 should be added"
+    );
 
     // p1 should no longer see this config
     let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
@@ -1254,8 +1551,13 @@ fn mcp_set_config_projects_relinks() {
 fn mcp_delete_config_removes_project_links() {
     let conn = test_db();
     let server = McpServer {
-        id: "srv1".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        id: "srv1".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "test".into(),
+            args: vec![],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1263,10 +1565,17 @@ fn mcp_delete_config_removes_project_links() {
     crate::db::projects::insert_project(&conn, &sample_project("p1", "P1")).unwrap();
 
     let config = McpConfig {
-        id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
-        env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: false, include_general: true,
-        config_hash: "h".into(), project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
+        id: "cfg1".into(),
+        server_id: "srv1".into(),
+        label: "Test".into(),
+        env_keys: vec![],
+        env_encrypted: "".into(),
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "h".into(),
+        project_ids: vec!["p1".into()],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
@@ -1276,15 +1585,23 @@ fn mcp_delete_config_removes_project_links() {
 
     // Project should have no configs
     let for_p1 = crate::db::mcps::configs_for_project(&conn, "p1").unwrap();
-    assert!(for_p1.is_empty(), "Deleted config should not appear in project configs");
+    assert!(
+        for_p1.is_empty(),
+        "Deleted config should not appear in project configs"
+    );
 }
 
 #[test]
 fn mcp_config_update_global_flag_changes_visibility() {
     let conn = test_db();
     let server = McpServer {
-        id: "srv1".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "test".into(), args: vec![] },
+        id: "srv1".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "test".into(),
+            args: vec![],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1294,32 +1611,61 @@ fn mcp_config_update_global_flag_changes_visibility() {
 
     // Create non-global config linked to p1 only
     let config = McpConfig {
-        id: "cfg1".into(), server_id: "srv1".into(), label: "Test".into(),
-        env_keys: vec![], env_encrypted: "".into(),
-        args_override: None, is_global: false, include_general: true,
-        config_hash: "h".into(), project_ids: vec!["p1".into()], host_sync: HostSyncMode::None,
+        id: "cfg1".into(),
+        server_id: "srv1".into(),
+        label: "Test".into(),
+        env_keys: vec![],
+        env_encrypted: "".into(),
+        args_override: None,
+        is_global: false,
+        include_general: true,
+        config_hash: "h".into(),
+        project_ids: vec!["p1".into()],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
     // p2 should NOT see it
     let for_p2 = crate::db::mcps::configs_for_project(&conn, "p2").unwrap();
-    assert!(for_p2.is_empty(), "Non-global config should not be visible to unlinked project");
+    assert!(
+        for_p2.is_empty(),
+        "Non-global config should not be visible to unlinked project"
+    );
 
     // Promote to global
     crate::db::mcps::update_config(
-        &conn, "cfg1", None, None, None, None, Some(true), None, None, None,
-    ).unwrap();
+        &conn,
+        "cfg1",
+        None,
+        None,
+        None,
+        None,
+        Some(true),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
 
     // Now p2 should see it
     let for_p2 = crate::db::mcps::configs_for_project(&conn, "p2").unwrap();
-    assert_eq!(for_p2.len(), 1, "Global config must be visible to all projects");
+    assert_eq!(
+        for_p2.len(),
+        1,
+        "Global config must be visible to all projects"
+    );
 }
 
 #[test]
 fn mcp_config_hash_changes_on_env_update() {
     let server = McpServer {
-        id: "srv".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        id: "srv".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "pkg".into()],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
@@ -1332,27 +1678,35 @@ fn mcp_config_hash_changes_on_env_update() {
     let hash_old = crate::db::mcps::compute_config_hash(&server, &env_old, None);
     let hash_new = crate::db::mcps::compute_config_hash(&server, &env_new, None);
 
-    assert_ne!(hash_old, hash_new,
-        "Config hash must change when env values change (dedup detection)");
+    assert_ne!(
+        hash_old, hash_new,
+        "Config hash must change when env values change (dedup detection)"
+    );
 }
 
 #[test]
 fn mcp_config_hash_changes_on_args_override() {
     let server = McpServer {
-        id: "srv".into(), name: "S".into(), description: "".into(),
-        transport: McpTransport::Stdio { command: "npx".into(), args: vec!["-y".into(), "pkg".into()] },
+        id: "srv".into(),
+        name: "S".into(),
+        description: "".into(),
+        transport: McpTransport::Stdio {
+            command: "npx".into(),
+            args: vec!["-y".into(), "pkg".into()],
+        },
         source: McpSource::Registry,
         api_spec: None,
     };
     let env = std::collections::HashMap::new();
 
     let hash_default = crate::db::mcps::compute_config_hash(&server, &env, None);
-    let hash_override = crate::db::mcps::compute_config_hash(
-        &server, &env, Some(&vec!["--custom-flag".into()]),
-    );
+    let hash_override =
+        crate::db::mcps::compute_config_hash(&server, &env, Some(&vec!["--custom-flag".into()]));
 
-    assert_ne!(hash_default, hash_override,
-        "Config hash must differ when args_override is set");
+    assert_ne!(
+        hash_default, hash_override,
+        "Config hash must differ when args_override is set"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1426,7 +1780,10 @@ fn sample_workflow(id: &str) -> Workflow {
         }],
         actions: vec![],
         safety: WorkflowSafety {
-            sandbox: false, max_files: None, max_lines: None, require_approval: false,
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
         },
         workspace_config: None,
         concurrency_limit: None,
@@ -1475,7 +1832,9 @@ fn workflows_update() {
     wf.enabled = false;
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 
-    let updated = crate::db::workflows::get_workflow(&conn, "w1").unwrap().unwrap();
+    let updated = crate::db::workflows::get_workflow(&conn, "w1")
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.name, "Updated");
     assert!(!updated.enabled);
 }
@@ -1495,11 +1854,21 @@ fn workflows_pinned_roundtrip() {
     let conn = test_db();
     let mut wf = sample_workflow("w1");
     crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
-    assert!(!crate::db::workflows::get_workflow(&conn, "w1").unwrap().unwrap().pinned);
+    assert!(
+        !crate::db::workflows::get_workflow(&conn, "w1")
+            .unwrap()
+            .unwrap()
+            .pinned
+    );
 
     wf.pinned = true;
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
-    assert!(crate::db::workflows::get_workflow(&conn, "w1").unwrap().unwrap().pinned);
+    assert!(
+        crate::db::workflows::get_workflow(&conn, "w1")
+            .unwrap()
+            .unwrap()
+            .pinned
+    );
     assert!(crate::db::workflows::list_workflows(&conn).unwrap()[0].pinned);
 }
 
@@ -1580,10 +1949,16 @@ fn purge_runs_older_than_deletes_old_terminal_but_preserves_parents_and_recent()
     crate::db::workflows::insert_run(&conn, &running).unwrap();
 
     let n = crate::db::workflows::purge_runs_older_than(&conn, 90).unwrap();
-    assert_eq!(n, 2, "old standalone terminal + the (unreferenced-after) child");
+    assert_eq!(
+        n, 2,
+        "old standalone terminal + the (unreferenced-after) child"
+    );
 
     let exists = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().is_some();
-    assert!(exists("parent"), "parent referenced by a child is preserved");
+    assert!(
+        exists("parent"),
+        "parent referenced by a child is preserved"
+    );
     assert!(!exists("old-standalone"), "old standalone terminal purged");
     assert!(!exists("child"), "old terminal child purged");
     assert!(exists("recent"), "recent run kept");
@@ -1620,21 +1995,42 @@ fn reconcile_stale_runs_flips_only_old_running_pending_to_interrupted() {
     crate::db::workflows::insert_run(&conn, &done).unwrap();
 
     let flipped = crate::db::workflows::reconcile_stale_runs(&conn, 30 * 60).unwrap();
-    assert_eq!(flipped.len(), 2, "the two stale in-flight runs are reconciled");
+    assert_eq!(
+        flipped.len(),
+        2,
+        "the two stale in-flight runs are reconciled"
+    );
     // The reconciler reports enough to webhook the dead runs.
-    assert!(flipped.iter().all(|r| !r.workflow_name.is_empty() && !r.started_at.is_empty()));
+    assert!(flipped
+        .iter()
+        .all(|r| !r.workflow_name.is_empty() && !r.started_at.is_empty()));
 
     let by_id = |id: &str| crate::db::workflows::get_run(&conn, id).unwrap().unwrap();
     assert_eq!(by_id("stale").status, RunStatus::Interrupted);
-    assert!(by_id("stale").finished_at.is_some(), "Interrupted run gets a finished_at");
+    assert!(
+        by_id("stale").finished_at.is_some(),
+        "Interrupted run gets a finished_at"
+    );
     assert_eq!(by_id("stale-pending").status, RunStatus::Interrupted);
-    assert_eq!(by_id("fresh").status, RunStatus::Running, "recent run untouched");
-    assert_eq!(by_id("done").status, RunStatus::Success, "terminal run untouched");
+    assert_eq!(
+        by_id("fresh").status,
+        RunStatus::Running,
+        "recent run untouched"
+    );
+    assert_eq!(
+        by_id("done").status,
+        RunStatus::Success,
+        "terminal run untouched"
+    );
 
     // Cutoff 0 = the BOOT call (Copilot, PR #114): at boot there is no runner,
     // so even a JUST-started zombie must flip — no 30-min lie window.
     let flipped0 = crate::db::workflows::reconcile_stale_runs(&conn, 0).unwrap();
-    assert_eq!(flipped0.len(), 1, "the fresh zombie is reconciled at cutoff 0");
+    assert_eq!(
+        flipped0.len(),
+        1,
+        "the fresh zombie is reconciled at cutoff 0"
+    );
     assert_eq!(by_id("fresh").status, RunStatus::Interrupted);
 }
 
@@ -1649,22 +2045,42 @@ fn set_run_state_key_merges_one_key_under_status_guard() {
     crate::db::workflows::insert_run(&conn, &run).unwrap();
 
     // Merge lands while Running, without clobbering sibling keys.
-    assert!(crate::db::workflows::set_run_state_key(&conn, "r-state-1", "k", "v1", &[Running]).unwrap());
-    let row = crate::db::workflows::get_run(&conn, "r-state-1").unwrap().unwrap();
+    assert!(
+        crate::db::workflows::set_run_state_key(&conn, "r-state-1", "k", "v1", &[Running]).unwrap()
+    );
+    let row = crate::db::workflows::get_run(&conn, "r-state-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(row.state.get("k").map(String::as_str), Some("v1"));
-    assert_eq!(row.state.get("existing").map(String::as_str), Some("kept"), "sibling keys untouched");
+    assert_eq!(
+        row.state.get("existing").map(String::as_str),
+        Some("kept"),
+        "sibling keys untouched"
+    );
 
     // Refused once the run changed hands (Interrupted), row unchanged.
     run.status = crate::models::RunStatus::Interrupted;
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(&row);
-    let mut snap = snap; snap.status = crate::models::RunStatus::Interrupted;
+    let mut snap = snap;
+    snap.status = crate::models::RunStatus::Interrupted;
     assert!(crate::db::workflows::update_run_progress(&conn, snap).unwrap());
-    assert!(!crate::db::workflows::set_run_state_key(&conn, "r-state-1", "k", "v2", &[Running]).unwrap());
-    let row = crate::db::workflows::get_run(&conn, "r-state-1").unwrap().unwrap();
-    assert_eq!(row.state.get("k").map(String::as_str), Some("v1"), "guarded write must not land");
+    assert!(
+        !crate::db::workflows::set_run_state_key(&conn, "r-state-1", "k", "v2", &[Running])
+            .unwrap()
+    );
+    let row = crate::db::workflows::get_run(&conn, "r-state-1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        row.state.get("k").map(String::as_str),
+        Some("v1"),
+        "guarded write must not land"
+    );
 
     // Missing run → false.
-    assert!(!crate::db::workflows::set_run_state_key(&conn, "r-ghost", "k", "v", &[Running]).unwrap());
+    assert!(
+        !crate::db::workflows::set_run_state_key(&conn, "r-ghost", "k", "v", &[Running]).unwrap()
+    );
 }
 
 #[test]
@@ -1678,11 +2094,16 @@ fn append_foreach_done_builds_versioned_doc_and_freezes_off_running() {
 
     for (idx, id) in [(0u32, "t-a"), (1u32, "t-b")] {
         assert!(crate::db::workflows::append_foreach_done(
-            &conn, "r-fd-1", "fanout",
+            &conn,
+            "r-fd-1",
+            "fanout",
             serde_json::json!({"idx": idx, "id": id, "status": "Success", "child_run_id": "c"}),
-        ).unwrap());
+        )
+        .unwrap());
     }
-    let row = crate::db::workflows::get_run(&conn, "r-fd-1").unwrap().unwrap();
+    let row = crate::db::workflows::get_run(&conn, "r-fd-1")
+        .unwrap()
+        .unwrap();
     let doc: serde_json::Value =
         serde_json::from_str(row.state.get("__kronn.foreach_done.fanout").unwrap()).unwrap();
     assert_eq!(doc["v"], 1);
@@ -1694,10 +2115,16 @@ fn append_foreach_done_builds_versioned_doc_and_freezes_off_running() {
     let mut snap = crate::db::workflows::RunProgressSnapshot::from_run(&row);
     snap.status = Cancelled;
     assert!(crate::db::workflows::update_run_progress(&conn, snap).unwrap());
-    assert!(!crate::db::workflows::append_foreach_done(
-        &conn, "r-fd-1", "fanout",
-        serde_json::json!({"idx": 2, "id": "t-late", "status": "Success", "child_run_id": "c"}),
-    ).unwrap(), "late child must not extend a frozen done-set");
+    assert!(
+        !crate::db::workflows::append_foreach_done(
+            &conn,
+            "r-fd-1",
+            "fanout",
+            serde_json::json!({"idx": 2, "id": "t-late", "status": "Success", "child_run_id": "c"}),
+        )
+        .unwrap(),
+        "late child must not extend a frozen done-set"
+    );
 }
 
 #[test]
@@ -1706,7 +2133,16 @@ fn run_status_state_machine_is_locked_for_progress_snapshots() {
     // Pending/Running, or when it rewrites the SAME status. Exhaustive over
     // every (from, to) pair so a future transition can't slip in untested.
     use crate::models::RunStatus::*;
-    let all = [Pending, Running, Success, Failed, Cancelled, WaitingApproval, StoppedByGuard, Interrupted];
+    let all = [
+        Pending,
+        Running,
+        Success,
+        Failed,
+        Cancelled,
+        WaitingApproval,
+        StoppedByGuard,
+        Interrupted,
+    ];
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
 
@@ -1740,16 +2176,26 @@ fn claim_run_status_requires_exact_from_and_single_winner() {
     let mut run = sample_run("r-claim-1", "w1");
     run.status = Running;
     crate::db::workflows::insert_run(&conn, &run).unwrap();
-    assert!(!crate::db::workflows::claim_run_status(&conn, "r-claim-1", &Interrupted, &Running).unwrap());
+    assert!(
+        !crate::db::workflows::claim_run_status(&conn, "r-claim-1", &Interrupted, &Running)
+            .unwrap()
+    );
 
     // Right from → wins once; the second identical claim loses (double-click).
     let mut run = sample_run("r-claim-2", "w1");
     run.status = Interrupted;
     crate::db::workflows::insert_run(&conn, &run).unwrap();
-    assert!(crate::db::workflows::claim_run_status(&conn, "r-claim-2", &Interrupted, &Running).unwrap());
-    assert!(!crate::db::workflows::claim_run_status(&conn, "r-claim-2", &Interrupted, &Running).unwrap(),
-        "second claim must lose");
-    let row = crate::db::workflows::get_run(&conn, "r-claim-2").unwrap().unwrap();
+    assert!(
+        crate::db::workflows::claim_run_status(&conn, "r-claim-2", &Interrupted, &Running).unwrap()
+    );
+    assert!(
+        !crate::db::workflows::claim_run_status(&conn, "r-claim-2", &Interrupted, &Running)
+            .unwrap(),
+        "second claim must lose"
+    );
+    let row = crate::db::workflows::get_run(&conn, "r-claim-2")
+        .unwrap()
+        .unwrap();
     assert_eq!(row.status, Running);
 
     // Wrapper keeps the gate contract.
@@ -1788,7 +2234,9 @@ fn batch_counters_and_final_status_freeze_off_running() {
     run.run_type = "batch".into();
     run.batch_total = 1;
     crate::db::workflows::insert_run(&conn, &run).unwrap();
-    let out = crate::db::workflows::increment_batch_progress(&conn, "r-batch-live", true).unwrap().unwrap();
+    let out = crate::db::workflows::increment_batch_progress(&conn, "r-batch-live", true)
+        .unwrap()
+        .unwrap();
     assert_eq!(out.status, Success);
 }
 
@@ -1812,11 +2260,17 @@ fn cancelled_status_is_sticky_in_update_run_progress() {
     // Runner's late terminal write must be BLOCKED…
     run.status = RunStatus::Failed;
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
-    assert!(!crate::db::workflows::update_run_progress(&conn, snap).unwrap(), "Failed-over-Cancelled must be rejected");
+    assert!(
+        !crate::db::workflows::update_run_progress(&conn, snap).unwrap(),
+        "Failed-over-Cancelled must be rejected"
+    );
     // …and so must the resume path's Running resurrection.
     run.status = RunStatus::Running;
     let snap = crate::db::workflows::RunProgressSnapshot::from_run(&run);
-    assert!(!crate::db::workflows::update_run_progress(&conn, snap).unwrap(), "Running-over-Cancelled must be rejected");
+    assert!(
+        !crate::db::workflows::update_run_progress(&conn, snap).unwrap(),
+        "Running-over-Cancelled must be rejected"
+    );
 
     let row = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
     assert_eq!(row.status, RunStatus::Cancelled, "row stays Cancelled");
@@ -1847,8 +2301,16 @@ fn list_runs_enriches_subworkflow_parent_provenance() {
     let runs = crate::db::workflows::list_runs(&conn, "child-wf").unwrap();
     assert_eq!(runs.len(), 1);
     let r = &runs[0];
-    assert_eq!(r.parent_workflow_id.as_deref(), Some("parent-wf"), "parent workflow id resolved");
-    assert_eq!(r.parent_workflow_name.as_deref(), Some("Cron Parent"), "parent workflow name resolved via JOIN");
+    assert_eq!(
+        r.parent_workflow_id.as_deref(),
+        Some("parent-wf"),
+        "parent workflow id resolved"
+    );
+    assert_eq!(
+        r.parent_workflow_name.as_deref(),
+        Some("Cron Parent"),
+        "parent workflow name resolved via JOIN"
+    );
     assert_eq!(
         r.parent_run_started_at.map(|d| d.timestamp()),
         Some(parent_run.started_at.timestamp()),
@@ -1856,7 +2318,9 @@ fn list_runs_enriches_subworkflow_parent_provenance() {
     );
 
     // get_run enriches too.
-    let one = crate::db::workflows::get_run(&conn, "child-run-1").unwrap().unwrap();
+    let one = crate::db::workflows::get_run(&conn, "child-run-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(one.parent_workflow_name.as_deref(), Some("Cron Parent"));
 }
 
@@ -1892,7 +2356,10 @@ fn list_runs_provenance_cleared_when_parent_deleted() {
 
     let runs = crate::db::workflows::list_runs(&conn, "child-wf").unwrap();
     assert_eq!(runs.len(), 1);
-    assert!(runs[0].parent_workflow_name.is_none(), "parent gone → no stale provenance");
+    assert!(
+        runs[0].parent_workflow_name.is_none(),
+        "parent gone → no stale provenance"
+    );
 }
 
 #[test]
@@ -1958,7 +2425,10 @@ fn workflow_runs_produced_branches_round_trip() {
 
     let loaded = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
     assert_eq!(loaded.produced_branches.len(), 2);
-    assert_eq!(loaded.produced_branches[0].branch_name, "kronn/Autobot/abcdef12");
+    assert_eq!(
+        loaded.produced_branches[0].branch_name,
+        "kronn/Autobot/abcdef12"
+    );
     assert_eq!(loaded.produced_branches[0].ahead, 3);
     assert!(!loaded.produced_branches[0].pushed_upstream);
     assert!(loaded.produced_branches[1].pushed_upstream);
@@ -1995,11 +2465,18 @@ fn claim_waiting_run_first_caller_wins_second_loses() {
     // run is no longer WaitingApproval and loses — NO second resume spawned.
     let won_second =
         crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Cancelled).unwrap();
-    assert!(!won_second, "second claimer must lose once the run left WaitingApproval");
+    assert!(
+        !won_second,
+        "second claimer must lose once the run left WaitingApproval"
+    );
 
     // The winner's status sticks; the loser's Cancelled never applied.
     let run = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
-    assert_eq!(run.status, RunStatus::Running, "first claim's status must persist");
+    assert_eq!(
+        run.status,
+        RunStatus::Running,
+        "first claim's status must persist"
+    );
 }
 
 #[test]
@@ -2011,7 +2488,10 @@ fn claim_waiting_run_rejects_a_run_that_is_not_waiting() {
 
     let claimed =
         crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Cancelled).unwrap();
-    assert!(!claimed, "a Running run is not claimable — only WaitingApproval is");
+    assert!(
+        !claimed,
+        "a Running run is not claimable — only WaitingApproval is"
+    );
 
     let run = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
     assert_eq!(run.status, RunStatus::Running, "status must be untouched");
@@ -2028,13 +2508,15 @@ fn claim_waiting_run_supports_the_reject_transition() {
     let won = crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Cancelled).unwrap();
     assert!(won);
     assert_eq!(
-        crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap().status,
+        crate::db::workflows::get_run(&conn, "r1")
+            .unwrap()
+            .unwrap()
+            .status,
         RunStatus::Cancelled,
     );
 
     // Re-claiming a cancelled run loses.
-    let again =
-        crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Running).unwrap();
+    let again = crate::db::workflows::claim_waiting_run(&conn, "r1", &RunStatus::Running).unwrap();
     assert!(!again);
 }
 
@@ -2045,7 +2527,10 @@ fn claim_waiting_run_on_unknown_id_is_false_not_error() {
     // No run inserted — the UPDATE matches zero rows.
     let claimed =
         crate::db::workflows::claim_waiting_run(&conn, "ghost", &RunStatus::Running).unwrap();
-    assert!(!claimed, "claiming a non-existent run is a clean false, not an error");
+    assert!(
+        !claimed,
+        "claiming a non-existent run is a clean false, not an error"
+    );
 }
 
 #[test]
@@ -2055,7 +2540,10 @@ fn workflow_runs_legacy_row_has_empty_produced_branches() {
     let conn = test_db();
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("w1")).unwrap();
     let run = sample_run("r1", "w1");
-    assert!(run.produced_branches.is_empty(), "sample_run starts with empty");
+    assert!(
+        run.produced_branches.is_empty(),
+        "sample_run starts with empty"
+    );
     crate::db::workflows::insert_run(&conn, &run).unwrap();
 
     let loaded = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
@@ -2084,8 +2572,15 @@ fn workflow_runs_produced_branches_survive_update() {
     crate::db::workflows::update_run(&conn, &run).unwrap();
 
     let loaded = crate::db::workflows::get_run(&conn, "r1").unwrap().unwrap();
-    assert_eq!(loaded.produced_branches.len(), 1, "produced_branches must survive update");
-    assert_eq!(loaded.produced_branches[0].branch_name, "kronn/Autobot/persisted");
+    assert_eq!(
+        loaded.produced_branches.len(),
+        1,
+        "produced_branches must survive update"
+    );
+    assert_eq!(
+        loaded.produced_branches[0].branch_name,
+        "kronn/Autobot/persisted"
+    );
 }
 
 #[test]
@@ -2192,7 +2687,12 @@ fn sample_batch_run(id: &str, qp_id: &str, total: u32) -> WorkflowRun {
 }
 
 /// Insert a batch run with its placeholder workflow in one shot.
-fn insert_batch_run_with_placeholder(conn: &rusqlite::Connection, id: &str, qp_id: &str, total: u32) {
+fn insert_batch_run_with_placeholder(
+    conn: &rusqlite::Connection,
+    id: &str,
+    qp_id: &str,
+    total: u32,
+) {
     crate::db::workflows::ensure_batch_placeholder_workflow(conn, qp_id, "TestQP", None).unwrap();
     let run = sample_batch_run(id, qp_id, total);
     crate::db::workflows::insert_run(conn, &run).unwrap();
@@ -2202,7 +2702,9 @@ fn insert_batch_run_with_placeholder(conn: &rusqlite::Connection, id: &str, qp_i
 fn batch_run_persists_fields() {
     let conn = test_db();
     insert_batch_run_with_placeholder(&conn, "br1", "qp-br1", 5);
-    let loaded = crate::db::workflows::get_run(&conn, "br1").unwrap().unwrap();
+    let loaded = crate::db::workflows::get_run(&conn, "br1")
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.run_type, "batch");
     assert_eq!(loaded.batch_total, 5);
     assert_eq!(loaded.batch_completed, 0);
@@ -2215,7 +2717,8 @@ fn batch_placeholder_workflow_is_hidden_from_list() {
     let conn = test_db();
     // Insert a real workflow AND a batch placeholder
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("real-wf")).unwrap();
-    crate::db::workflows::ensure_batch_placeholder_workflow(&conn, "qp-test", "TestQP", None).unwrap();
+    crate::db::workflows::ensure_batch_placeholder_workflow(&conn, "qp-test", "TestQP", None)
+        .unwrap();
     // Placeholder is in the DB but filtered out of list_workflows
     let visible = crate::db::workflows::list_workflows(&conn).unwrap();
     assert_eq!(visible.len(), 1);
@@ -2244,12 +2747,16 @@ fn batch_progress_increments_success_counter() {
     assert_eq!(updated.status, RunStatus::Running);
 
     // Second child succeeds
-    let updated = crate::db::workflows::increment_batch_progress(&conn, "br2", true).unwrap().unwrap();
+    let updated = crate::db::workflows::increment_batch_progress(&conn, "br2", true)
+        .unwrap()
+        .unwrap();
     assert_eq!(updated.batch_completed, 2);
     assert_eq!(updated.status, RunStatus::Running);
 
     // Third (last) child succeeds → run is marked Success and finished
-    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br2", true).unwrap().unwrap();
+    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br2", true)
+        .unwrap()
+        .unwrap();
     assert_eq!(final_run.batch_completed, 3);
     assert_eq!(final_run.status, RunStatus::Success);
     assert!(final_run.finished_at.is_some());
@@ -2261,7 +2768,9 @@ fn batch_progress_marks_failed_if_all_children_fail() {
     insert_batch_run_with_placeholder(&conn, "br3", "qp-br3", 2);
 
     crate::db::workflows::increment_batch_progress(&conn, "br3", false).unwrap();
-    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br3", false).unwrap().unwrap();
+    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br3", false)
+        .unwrap()
+        .unwrap();
     assert_eq!(final_run.batch_failed, 2);
     assert_eq!(final_run.batch_completed, 0);
     // At least one success is needed to mark Success — otherwise Failed
@@ -2276,7 +2785,9 @@ fn batch_progress_marks_success_if_at_least_one_child_succeeds() {
 
     crate::db::workflows::increment_batch_progress(&conn, "br4", false).unwrap();
     crate::db::workflows::increment_batch_progress(&conn, "br4", true).unwrap();
-    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br4", false).unwrap().unwrap();
+    let final_run = crate::db::workflows::increment_batch_progress(&conn, "br4", false)
+        .unwrap()
+        .unwrap();
     assert_eq!(final_run.batch_completed, 1);
     assert_eq!(final_run.batch_failed, 2);
     // Mixed result — one success is enough to count as "the batch did something"
@@ -2293,9 +2804,14 @@ fn batch_progress_ignores_linear_runs() {
     // The UPDATE is guarded on run_type = 'batch' so nothing was written,
     // and the helper returns None early once it loads the run and sees
     // it's not a batch. The caller treats None as "no-op, no broadcast".
-    assert!(result.is_none(), "linear runs must be skipped by batch progress helper");
+    assert!(
+        result.is_none(),
+        "linear runs must be skipped by batch progress helper"
+    );
     // Verify the linear run is untouched in DB
-    let unchanged = crate::db::workflows::get_run(&conn, "lr1").unwrap().unwrap();
+    let unchanged = crate::db::workflows::get_run(&conn, "lr1")
+        .unwrap()
+        .unwrap();
     assert_eq!(unchanged.batch_completed, 0);
     assert_eq!(unchanged.status, RunStatus::Running);
 }
@@ -2354,12 +2870,18 @@ fn projects_get_names_empty() {
 fn discussions_list_does_not_load_messages() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
+        .unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent))
+        .unwrap();
 
     let discussions = crate::db::discussions::list_discussions(&conn).unwrap();
     assert_eq!(discussions.len(), 1);
-    assert_eq!(discussions[0].messages.len(), 0, "list_discussions should not load messages");
+    assert_eq!(
+        discussions[0].messages.len(),
+        0,
+        "list_discussions should not load messages"
+    );
 }
 
 #[test]
@@ -2367,9 +2889,12 @@ fn discussions_list_with_messages_batch_loads() {
     let conn = test_db();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d1", None)).unwrap();
     crate::db::discussions::insert_discussion(&conn, &sample_discussion("d2", None)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d2", &sample_message("m3", MessageRole::User)).unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m1", MessageRole::User))
+        .unwrap();
+    crate::db::discussions::insert_message(&conn, "d1", &sample_message("m2", MessageRole::Agent))
+        .unwrap();
+    crate::db::discussions::insert_message(&conn, "d2", &sample_message("m3", MessageRole::User))
+        .unwrap();
 
     let discussions = crate::db::discussions::list_discussions_with_messages(&conn).unwrap();
     assert_eq!(discussions.len(), 2);
@@ -2449,31 +2974,25 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
             quick_prompt: &qp,
             items: vec![
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-100".into(),
 
                     prompt: "Analyse le ticket EW-100 en profondeur".into(),
 
                     agent_override: None,
-
                 },
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-101".into(),
 
                     prompt: "Analyse le ticket EW-101 en profondeur".into(),
 
                     agent_override: None,
-
                 },
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-102".into(),
 
                     prompt: "Analyse le ticket EW-102 en profondeur".into(),
 
                     agent_override: None,
-
                 },
             ],
             batch_name: Some("Cadrage hebdo".into()),
@@ -2484,13 +3003,16 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
             language: "fr".into(),
             workspace_mode: "Direct".into(),
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     assert_eq!(outcome.batch_total, 3);
     assert_eq!(outcome.discussion_ids.len(), 3);
 
     // Run is persisted with parent_run_id = None
-    let run = crate::db::workflows::get_run(&conn, &outcome.run_id).unwrap().unwrap();
+    let run = crate::db::workflows::get_run(&conn, &outcome.run_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(run.run_type, "batch");
     assert_eq!(run.batch_total, 3);
     assert_eq!(run.batch_name.as_deref(), Some("Cadrage hebdo"));
@@ -2499,11 +3021,16 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
 
     // All three child discussions exist and link back via workflow_run_id
     for (i, disc_id) in outcome.discussion_ids.iter().enumerate() {
-        let disc = crate::db::discussions::get_discussion(&conn, disc_id).unwrap().unwrap();
+        let disc = crate::db::discussions::get_discussion(&conn, disc_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(disc.workflow_run_id.as_ref(), Some(&outcome.run_id));
         assert_eq!(disc.title, format!("EW-{}", 100 + i));
         assert_eq!(disc.messages.len(), 1);
-        assert_eq!(disc.messages[0].content, format!("Analyse le ticket EW-{} en profondeur", 100 + i));
+        assert_eq!(
+            disc.messages[0].content,
+            format!("Analyse le ticket EW-{} en profondeur", 100 + i)
+        );
         assert_eq!(disc.messages[0].author_pseudo.as_deref(), Some("TestUser"));
     }
 }
@@ -2527,22 +3054,18 @@ fn create_batch_run_chained_from_linear_parent() {
             quick_prompt: &qp,
             items: vec![
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-200".into(),
 
                     prompt: "rendered prompt A".into(),
 
                     agent_override: None,
-
                 },
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-201".into(),
 
                     prompt: "rendered prompt B".into(),
 
                     agent_override: None,
-
                 },
             ],
             batch_name: Some("Chained batch".into()),
@@ -2553,16 +3076,21 @@ fn create_batch_run_chained_from_linear_parent() {
             language: "fr".into(),
             workspace_mode: "Direct".into(),
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     // 3. The child batch run persists parent_run_id back to the linear parent
-    let child = crate::db::workflows::get_run(&conn, &outcome.run_id).unwrap().unwrap();
+    let child = crate::db::workflows::get_run(&conn, &outcome.run_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(child.parent_run_id.as_deref(), Some("parent-linear-1"));
     assert_eq!(child.run_type, "batch");
     assert_eq!(child.batch_total, 2);
 
     // 4. The linear parent is untouched (still Running, no batch_total)
-    let parent_reloaded = crate::db::workflows::get_run(&conn, "parent-linear-1").unwrap().unwrap();
+    let parent_reloaded = crate::db::workflows::get_run(&conn, "parent-linear-1")
+        .unwrap()
+        .unwrap();
     assert_eq!(parent_reloaded.run_type, "linear");
     assert_eq!(parent_reloaded.batch_total, 0);
     assert_eq!(parent_reloaded.parent_run_id, None);
@@ -2586,7 +3114,8 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         language: "fr".into(),
         participants: vec![AgentType::ClaudeCode],
         messages: vec![],
-        message_count: 0, non_system_message_count: 0,
+        message_count: 0,
+        non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -2600,7 +3129,8 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         pin_first_message: false,
         summary_cache: None,
         summary_up_to_msg_idx: None,
-        summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
         shared_id: None,
         shared_with: vec![],
         workflow_run_id: None,
@@ -2616,9 +3146,13 @@ fn partial_response_set_then_recover_inserts_agent_message() {
     crate::db::discussions::set_partial_response(&conn, "disc-pr-1", Some(partial)).unwrap();
 
     // Verify it's there
-    let stored: Option<String> = conn.query_row(
-        "SELECT partial_response FROM discussions WHERE id = 'disc-pr-1'", [], |r| r.get(0),
-    ).unwrap();
+    let stored: Option<String> = conn
+        .query_row(
+            "SELECT partial_response FROM discussions WHERE id = 'disc-pr-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(stored.as_deref(), Some(partial));
 
     // Boot scan recovers it
@@ -2627,23 +3161,43 @@ fn partial_response_set_then_recover_inserts_agent_message() {
     assert_eq!(recovered[0], "disc-pr-1");
 
     // partial_response is now cleared
-    let after: Option<String> = conn.query_row(
-        "SELECT partial_response FROM discussions WHERE id = 'disc-pr-1'", [], |r| r.get(0),
-    ).unwrap();
-    assert!(after.is_none(), "partial_response must be cleared after recovery");
+    let after: Option<String> = conn
+        .query_row(
+            "SELECT partial_response FROM discussions WHERE id = 'disc-pr-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        after.is_none(),
+        "partial_response must be cleared after recovery"
+    );
 
     // A new Agent message exists with the partial + footer
-    let msg_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-pr-1'", [], |r| r.get(0),
-    ).unwrap();
+    let msg_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id = 'disc-pr-1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(msg_count, 1);
-    let (role, content): (String, String) = conn.query_row(
-        "SELECT role, content FROM messages WHERE discussion_id = 'disc-pr-1'", [],
-        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-    ).unwrap();
+    let (role, content): (String, String) = conn
+        .query_row(
+            "SELECT role, content FROM messages WHERE discussion_id = 'disc-pr-1'",
+            [],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .unwrap();
     assert_eq!(role, "Agent");
-    assert!(content.starts_with(partial), "Recovered message must start with the partial");
-    assert!(content.contains("Réflexion interrompue"), "Footer must be appended");
+    assert!(
+        content.starts_with(partial),
+        "Recovered message must start with the partial"
+    );
+    assert!(
+        content.contains("Réflexion interrompue"),
+        "Footer must be appended"
+    );
 }
 
 #[test]
@@ -2666,49 +3220,91 @@ fn partial_response_preserves_started_at_across_checkpoints() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
-        id: "disc-ts".into(), project_id: None, title: "X".into(),
-        agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
-        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        id: "disc-ts".into(),
+        project_id: None,
+        title: "X".into(),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode],
+        messages: vec![],
+        message_count: 0,
+        non_system_message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
         archived: false,
-        pinned: false, workspace_mode: "Direct".into(),
-        workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        pinned: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
         model: None,
-        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-        shared_id: None, shared_with: vec![], workflow_run_id: None,
-        test_mode_restore_branch: None, test_mode_stash_ref: None,
-        created_at: now, updated_at: now,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: None,
+        shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
+        created_at: now,
+        updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
 
     // First checkpoint sets the started_at
     crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v1")).unwrap();
-    let first_ts: String = conn.query_row(
-        "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'", [], |r| r.get(0),
-    ).unwrap();
-    assert!(!first_ts.is_empty(), "First checkpoint must populate started_at");
+    let first_ts: String = conn
+        .query_row(
+            "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        !first_ts.is_empty(),
+        "First checkpoint must populate started_at"
+    );
 
     // Wait a tick (in real life: 30s of agent thinking) — second checkpoint
     // updates `partial_response` but MUST NOT shift `started_at`.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v2 longer")).unwrap();
-    let second_ts: String = conn.query_row(
-        "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'", [], |r| r.get(0),
-    ).unwrap();
-    assert_eq!(first_ts, second_ts, "started_at must be preserved across updates");
+    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v2 longer"))
+        .unwrap();
+    let second_ts: String = conn
+        .query_row(
+            "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        first_ts, second_ts,
+        "started_at must be preserved across updates"
+    );
 
     // Recovery uses the started_at, not now()
     let ids = crate::db::discussions::recover_partial_responses(&conn).unwrap();
     assert_eq!(ids, vec!["disc-ts"]);
-    let msg_ts_str: String = conn.query_row(
-        "SELECT timestamp FROM messages WHERE discussion_id = 'disc-ts'", [], |r| r.get(0),
-    ).unwrap();
+    let msg_ts_str: String = conn
+        .query_row(
+            "SELECT timestamp FROM messages WHERE discussion_id = 'disc-ts'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     let msg_ts = chrono::DateTime::parse_from_rfc3339(&msg_ts_str).unwrap();
     let started = chrono::DateTime::parse_from_rfc3339(&first_ts).unwrap();
     // Tolerate sub-second drift but not seconds — the recovered message
     // must use the checkpoint time, not Utc::now() at recovery moment.
     let drift = (msg_ts - started).num_milliseconds().abs();
-    assert!(drift < 100, "Recovered message timestamp must match started_at within 100ms (got {}ms drift)", drift);
+    assert!(
+        drift < 100,
+        "Recovered message timestamp must match started_at within 100ms (got {}ms drift)",
+        drift
+    );
 }
 
 #[test]
@@ -2717,18 +3313,37 @@ fn has_pending_partial_returns_true_when_set() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
-        id: "disc-pending".into(), project_id: None, title: "X".into(),
-        agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
-        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        id: "disc-pending".into(),
+        project_id: None,
+        title: "X".into(),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode],
+        messages: vec![],
+        message_count: 0,
+        non_system_message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
         archived: false,
-        pinned: false, workspace_mode: "Direct".into(),
-        workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        pinned: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
         model: None,
-        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-        shared_id: None, shared_with: vec![], workflow_run_id: None,
-        test_mode_restore_branch: None, test_mode_stash_ref: None,
-        created_at: now, updated_at: now,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: None,
+        shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
+        created_at: now,
+        updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
     assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
@@ -2744,18 +3359,37 @@ fn partial_response_clear_with_none_wipes_column() {
     let now = chrono::Utc::now();
     let disc = Discussion {
         awaiting_agent: false,
-        id: "disc-clear".into(), project_id: None, title: "X".into(),
-        agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
-        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
+        id: "disc-clear".into(),
+        project_id: None,
+        title: "X".into(),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode],
+        messages: vec![],
+        message_count: 0,
+        non_system_message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
         archived: false,
-        pinned: false, workspace_mode: "Direct".into(),
-        workspace_path: None, worktree_branch: None, tier: ModelTier::Default,
+        pinned: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
         model: None,
-        pin_first_message: false, summary_cache: None, summary_up_to_msg_idx: None, summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
-        shared_id: None, shared_with: vec![], workflow_run_id: None,
-        test_mode_restore_branch: None, test_mode_stash_ref: None,
-        created_at: now, updated_at: now,
+        pin_first_message: false,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
+        summary_strategy: crate::models::SummaryStrategy::Auto,
+        introspection_call_count: 0,
+        shared_id: None,
+        shared_with: vec![],
+        workflow_run_id: None,
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
+        created_at: now,
+        updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
     crate::db::discussions::set_partial_response(&conn, "disc-clear", Some("draft")).unwrap();
@@ -2765,7 +3399,10 @@ fn partial_response_clear_with_none_wipes_column() {
         [], |r| Ok((r.get(0)?, r.get(1)?)),
     ).unwrap();
     assert!(after.is_none(), "partial_response must be cleared");
-    assert!(after_ts.is_none(), "partial_response_started_at must be cleared too");
+    assert!(
+        after_ts.is_none(),
+        "partial_response_started_at must be cleared too"
+    );
 }
 
 #[test]
@@ -2783,31 +3420,25 @@ fn delete_batch_run_cascades_discussions_and_messages() {
             quick_prompt: &qp,
             items: vec![
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-1".into(),
 
                     prompt: "p1".into(),
 
                     agent_override: None,
-
                 },
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-2".into(),
 
                     prompt: "p2".into(),
 
                     agent_override: None,
-
                 },
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-3".into(),
 
                     prompt: "p3".into(),
 
                     agent_override: None,
-
                 },
             ],
             batch_name: Some("To-be-deleted".into()),
@@ -2818,42 +3449,56 @@ fn delete_batch_run_cascades_discussions_and_messages() {
             language: "fr".into(),
             workspace_mode: "Direct".into(),
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     // Sanity: 3 discs + 3 initial messages exist
-    let n_discs_before: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
-        rusqlite::params![&outcome.run_id], |r| r.get(0),
-    ).unwrap();
+    let n_discs_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
+            rusqlite::params![&outcome.run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(n_discs_before, 3);
-    let n_msgs_before: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM messages WHERE discussion_id IN \
+    let n_msgs_before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM messages WHERE discussion_id IN \
          (SELECT id FROM discussions WHERE workflow_run_id = ?1)",
-        rusqlite::params![&outcome.run_id], |r| r.get(0),
-    ).unwrap();
+            rusqlite::params![&outcome.run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(n_msgs_before, 3);
 
     // Delete the batch
-    let summary = crate::db::workflows::delete_batch_run_with_discussions(
-        &conn, &outcome.run_id,
-    ).unwrap();
+    let summary =
+        crate::db::workflows::delete_batch_run_with_discussions(&conn, &outcome.run_id).unwrap();
     assert_eq!(summary.discussions_deleted, 3);
     assert_eq!(summary.run_id, outcome.run_id);
 
     // Run row gone
-    assert!(crate::db::workflows::get_run(&conn, &outcome.run_id).unwrap().is_none());
+    assert!(crate::db::workflows::get_run(&conn, &outcome.run_id)
+        .unwrap()
+        .is_none());
     // Discussions gone
-    let n_discs_after: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
-        rusqlite::params![&outcome.run_id], |r| r.get(0),
-    ).unwrap();
+    let n_discs_after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM discussions WHERE workflow_run_id = ?1",
+            rusqlite::params![&outcome.run_id],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(n_discs_after, 0);
     // Messages cascaded out (would be 3 if cascade was broken)
     for disc_id in &outcome.discussion_ids {
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
-            rusqlite::params![disc_id], |r| r.get(0),
-        ).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE discussion_id = ?1",
+                rusqlite::params![disc_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n, 0, "Messages of disc {} should have cascaded", disc_id);
     }
 }
@@ -2867,22 +3512,24 @@ fn delete_batch_run_refuses_linear_runs() {
     crate::db::workflows::insert_workflow(&conn, &sample_workflow("wf-linear")).unwrap();
     crate::db::workflows::insert_run(&conn, &sample_run("linear-run-1", "wf-linear")).unwrap();
 
-    let result = crate::db::workflows::delete_batch_run_with_discussions(
-        &conn, "linear-run-1",
-    );
+    let result = crate::db::workflows::delete_batch_run_with_discussions(&conn, "linear-run-1");
     assert!(result.is_err(), "Should reject linear runs");
     let err = format!("{}", result.unwrap_err());
-    assert!(err.contains("not 'batch'"), "Error must mention the type mismatch: {}", err);
+    assert!(
+        err.contains("not 'batch'"),
+        "Error must mention the type mismatch: {}",
+        err
+    );
     // Run still exists (transaction rolled back / never started)
-    assert!(crate::db::workflows::get_run(&conn, "linear-run-1").unwrap().is_some());
+    assert!(crate::db::workflows::get_run(&conn, "linear-run-1")
+        .unwrap()
+        .is_some());
 }
 
 #[test]
 fn delete_batch_run_unknown_id_errors() {
     let conn = test_db();
-    let result = crate::db::workflows::delete_batch_run_with_discussions(
-        &conn, "does-not-exist",
-    );
+    let result = crate::db::workflows::delete_batch_run_with_discussions(&conn, "does-not-exist");
     assert!(result.is_err());
     assert!(format!("{}", result.unwrap_err()).contains("not found"));
 }
@@ -2906,22 +3553,18 @@ fn create_batch_run_isolated_mode_persists_on_children() {
             quick_prompt: &qp,
             items: vec![
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-1".into(),
 
                     prompt: "prompt 1".into(),
 
                     agent_override: None,
-
                 },
                 crate::db::workflows::BatchItemInput {
-
                     title: "EW-2".into(),
 
                     prompt: "prompt 2".into(),
 
                     agent_override: None,
-
                 },
             ],
             batch_name: Some("Isolated batch".into()),
@@ -2932,10 +3575,13 @@ fn create_batch_run_isolated_mode_persists_on_children() {
             language: "fr".into(),
             workspace_mode: "Isolated".into(),
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     for disc_id in &outcome.discussion_ids {
-        let disc = crate::db::discussions::get_discussion(&conn, disc_id).unwrap().unwrap();
+        let disc = crate::db::discussions::get_discussion(&conn, disc_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(disc.workspace_mode, "Isolated");
     }
 }
@@ -2952,7 +3598,11 @@ fn create_batch_run_direct_mode_is_default_when_empty() {
         &conn,
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
-            items: vec![crate::db::workflows::BatchItemInput { title: "EW-1".into(), prompt: "prompt 1".into(), agent_override: None }],
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "EW-1".into(),
+                prompt: "prompt 1".into(),
+                agent_override: None,
+            }],
             batch_name: None,
             project_id: None,
             parent_run_id: None,
@@ -2961,9 +3611,12 @@ fn create_batch_run_direct_mode_is_default_when_empty() {
             language: "fr".into(),
             workspace_mode: "".into(),
         },
-    ).unwrap();
+    )
+    .unwrap();
 
-    let disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[0]).unwrap().unwrap();
+    let disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[0])
+        .unwrap()
+        .unwrap();
     assert_eq!(disc.workspace_mode, "Direct");
 }
 
@@ -2980,7 +3633,11 @@ fn create_batch_run_sets_workflow_run_id_on_discussions() {
         &conn,
         crate::db::workflows::CreateBatchRunInput {
             quick_prompt: &qp,
-            items: vec![crate::db::workflows::BatchItemInput { title: "X-1".into(), prompt: "prompt 1".into(), agent_override: None }],
+            items: vec![crate::db::workflows::BatchItemInput {
+                title: "X-1".into(),
+                prompt: "prompt 1".into(),
+                agent_override: None,
+            }],
             batch_name: None,
             project_id: None,
             parent_run_id: None,
@@ -2989,7 +3646,8 @@ fn create_batch_run_sets_workflow_run_id_on_discussions() {
             language: "fr".into(),
             workspace_mode: "Direct".into(),
         },
-    ).unwrap();
+    )
+    .unwrap();
 
     let disc = crate::db::discussions::get_discussion(&conn, &outcome.discussion_ids[0])
         .unwrap()
@@ -3039,35 +3697,35 @@ fn workflow_multi_step_roundtrip() {
                 batch_concurrent_limit: None,
                 quick_api_id: None,
                 notify_config: None,
-            api_plugin_slug: None,
-            api_config_id: None,
-            api_endpoint_path: None,
-            api_method: None,
-            api_path_params: None,
-            api_query: None,
-            api_headers: None,
-            api_body: None,
-            api_extract: None,
-            api_pagination: None,
-            api_timeout_ms: None,
-            api_max_retries: None,
-            api_output_var: None,
-            gate_message: None,
-            gate_request_changes_target: None,
-            gate_notify_url: None,
-            gate_checkpoint_before: None,
-            gate_auto_approve_after_secs: None,
-            exec_command: None,
-            exec_args: vec![],
-            exec_timeout_secs: None,
-            exec_setup_command: None,
-            exec_setup_args: vec![],
-            exec_stdin: None,
-            quick_prompt_id: None,
-            json_data_payload: None,
-            sub_workflow_id: None,
-            sub_workflow_foreach_file: None,
-            multi_agent_review: None,
+                api_plugin_slug: None,
+                api_config_id: None,
+                api_endpoint_path: None,
+                api_method: None,
+                api_path_params: None,
+                api_query: None,
+                api_headers: None,
+                api_body: None,
+                api_extract: None,
+                api_pagination: None,
+                api_timeout_ms: None,
+                api_max_retries: None,
+                api_output_var: None,
+                gate_message: None,
+                gate_request_changes_target: None,
+                gate_notify_url: None,
+                gate_checkpoint_before: None,
+                gate_auto_approve_after_secs: None,
+                exec_command: None,
+                exec_args: vec![],
+                exec_timeout_secs: None,
+                exec_setup_command: None,
+                exec_setup_args: vec![],
+                exec_stdin: None,
+                quick_prompt_id: None,
+                json_data_payload: None,
+                sub_workflow_id: None,
+                sub_workflow_foreach_file: None,
+                multi_agent_review: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -3099,35 +3757,35 @@ fn workflow_multi_step_roundtrip() {
                 batch_concurrent_limit: None,
                 quick_api_id: None,
                 notify_config: None,
-            api_plugin_slug: None,
-            api_config_id: None,
-            api_endpoint_path: None,
-            api_method: None,
-            api_path_params: None,
-            api_query: None,
-            api_headers: None,
-            api_body: None,
-            api_extract: None,
-            api_pagination: None,
-            api_timeout_ms: None,
-            api_max_retries: None,
-            api_output_var: None,
-            gate_message: None,
-            gate_request_changes_target: None,
-            gate_notify_url: None,
-            gate_checkpoint_before: None,
-            gate_auto_approve_after_secs: None,
-            exec_command: None,
-            exec_args: vec![],
-            exec_timeout_secs: None,
-            exec_setup_command: None,
-            exec_setup_args: vec![],
-            exec_stdin: None,
-            quick_prompt_id: None,
-            json_data_payload: None,
-            sub_workflow_id: None,
-            sub_workflow_foreach_file: None,
-            multi_agent_review: None,
+                api_plugin_slug: None,
+                api_config_id: None,
+                api_endpoint_path: None,
+                api_method: None,
+                api_path_params: None,
+                api_query: None,
+                api_headers: None,
+                api_body: None,
+                api_extract: None,
+                api_pagination: None,
+                api_timeout_ms: None,
+                api_max_retries: None,
+                api_output_var: None,
+                gate_message: None,
+                gate_request_changes_target: None,
+                gate_notify_url: None,
+                gate_checkpoint_before: None,
+                gate_auto_approve_after_secs: None,
+                exec_command: None,
+                exec_args: vec![],
+                exec_timeout_secs: None,
+                exec_setup_command: None,
+                exec_setup_args: vec![],
+                exec_stdin: None,
+                quick_prompt_id: None,
+                json_data_payload: None,
+                sub_workflow_id: None,
+                sub_workflow_foreach_file: None,
+                multi_agent_review: None,
             },
             WorkflowStep {
                 step_type: StepType::default(),
@@ -3156,40 +3814,43 @@ fn workflow_multi_step_roundtrip() {
                 batch_concurrent_limit: None,
                 quick_api_id: None,
                 notify_config: None,
-            api_plugin_slug: None,
-            api_config_id: None,
-            api_endpoint_path: None,
-            api_method: None,
-            api_path_params: None,
-            api_query: None,
-            api_headers: None,
-            api_body: None,
-            api_extract: None,
-            api_pagination: None,
-            api_timeout_ms: None,
-            api_max_retries: None,
-            api_output_var: None,
-            gate_message: None,
-            gate_request_changes_target: None,
-            gate_notify_url: None,
-            gate_checkpoint_before: None,
-            gate_auto_approve_after_secs: None,
-            exec_command: None,
-            exec_args: vec![],
-            exec_timeout_secs: None,
-            exec_setup_command: None,
-            exec_setup_args: vec![],
-            exec_stdin: None,
-            quick_prompt_id: None,
-            json_data_payload: None,
-            sub_workflow_id: None,
-            sub_workflow_foreach_file: None,
-            multi_agent_review: None,
+                api_plugin_slug: None,
+                api_config_id: None,
+                api_endpoint_path: None,
+                api_method: None,
+                api_path_params: None,
+                api_query: None,
+                api_headers: None,
+                api_body: None,
+                api_extract: None,
+                api_pagination: None,
+                api_timeout_ms: None,
+                api_max_retries: None,
+                api_output_var: None,
+                gate_message: None,
+                gate_request_changes_target: None,
+                gate_notify_url: None,
+                gate_checkpoint_before: None,
+                gate_auto_approve_after_secs: None,
+                exec_command: None,
+                exec_args: vec![],
+                exec_timeout_secs: None,
+                exec_setup_command: None,
+                exec_setup_args: vec![],
+                exec_stdin: None,
+                quick_prompt_id: None,
+                json_data_payload: None,
+                sub_workflow_id: None,
+                sub_workflow_foreach_file: None,
+                multi_agent_review: None,
             },
         ],
         actions: vec![],
         safety: WorkflowSafety {
-            sandbox: false, max_files: None, max_lines: None, require_approval: false,
+            sandbox: false,
+            max_files: None,
+            max_lines: None,
+            require_approval: false,
         },
         workspace_config: None,
         concurrency_limit: None,
@@ -3205,7 +3866,9 @@ fn workflow_multi_step_roundtrip() {
 
     crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
 
-    let loaded = crate::db::workflows::get_workflow(&conn, "wm1").unwrap().unwrap();
+    let loaded = crate::db::workflows::get_workflow(&conn, "wm1")
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.steps.len(), 3);
     assert_eq!(loaded.steps[0].name, "analyze");
     assert_eq!(loaded.steps[0].agent, AgentType::ClaudeCode);
@@ -3255,39 +3918,41 @@ fn workflow_update_steps_count() {
         batch_concurrent_limit: None,
         quick_api_id: None,
         notify_config: None,
-            api_plugin_slug: None,
-            api_config_id: None,
-            api_endpoint_path: None,
-            api_method: None,
-            api_path_params: None,
-            api_query: None,
-            api_headers: None,
-            api_body: None,
-            api_extract: None,
-            api_pagination: None,
-            api_timeout_ms: None,
-            api_max_retries: None,
-            api_output_var: None,
-            gate_message: None,
-            gate_request_changes_target: None,
-            gate_notify_url: None,
-            gate_checkpoint_before: None,
-            gate_auto_approve_after_secs: None,
-            exec_command: None,
-            exec_args: vec![],
-            exec_timeout_secs: None,
-            exec_setup_command: None,
-            exec_setup_args: vec![],
-            exec_stdin: None,
-            quick_prompt_id: None,
-            json_data_payload: None,
-            sub_workflow_id: None,
-            sub_workflow_foreach_file: None,
-            multi_agent_review: None,
+        api_plugin_slug: None,
+        api_config_id: None,
+        api_endpoint_path: None,
+        api_method: None,
+        api_path_params: None,
+        api_query: None,
+        api_headers: None,
+        api_body: None,
+        api_extract: None,
+        api_pagination: None,
+        api_timeout_ms: None,
+        api_max_retries: None,
+        api_output_var: None,
+        gate_message: None,
+        gate_request_changes_target: None,
+        gate_notify_url: None,
+        gate_checkpoint_before: None,
+        gate_auto_approve_after_secs: None,
+        exec_command: None,
+        exec_args: vec![],
+        exec_timeout_secs: None,
+        exec_setup_command: None,
+        exec_setup_args: vec![],
+        exec_stdin: None,
+        quick_prompt_id: None,
+        json_data_payload: None,
+        sub_workflow_id: None,
+        sub_workflow_foreach_file: None,
+        multi_agent_review: None,
     });
     crate::db::workflows::update_workflow(&conn, &wf).unwrap();
 
-    let loaded = crate::db::workflows::get_workflow(&conn, "wu1").unwrap().unwrap();
+    let loaded = crate::db::workflows::get_workflow(&conn, "wu1")
+        .unwrap()
+        .unwrap();
     assert_eq!(loaded.steps.len(), 2);
     assert_eq!(loaded.steps[1].name, "step2");
     assert_eq!(loaded.steps[1].prompt_template, "Second step");
@@ -3303,10 +3968,7 @@ fn workflow_batch_chain_prompt_ids_roundtrip() {
     let mut wf = sample_workflow("wc1");
     wf.steps[0].step_type = StepType::BatchQuickPrompt;
     wf.steps[0].batch_quick_prompt_id = Some("qp-init".into());
-    wf.steps[0].batch_chain_prompt_ids = vec![
-        "qp-review".into(),
-        "qp-summary".into(),
-    ];
+    wf.steps[0].batch_chain_prompt_ids = vec!["qp-review".into(), "qp-summary".into()];
     wf.created_at = now;
     wf.updated_at = now;
     crate::db::workflows::insert_workflow(&conn, &wf).unwrap();
@@ -3394,14 +4056,18 @@ fn mcp_config_display_secrets_broken_when_decrypt_fails() {
         is_global: false,
         include_general: true,
         config_hash: "hash-broken-test".into(),
-        project_ids: vec![], host_sync: HostSyncMode::None,
+        project_ids: vec![],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
     // Decrypt with wrong secret (secret_b) → secrets_broken should be true
     let display = crate::db::mcps::list_configs_display(&conn, Some(&secret_b)).unwrap();
     assert_eq!(display.len(), 1);
-    assert!(display[0].secrets_broken, "secrets_broken should be true when decryption fails with wrong key");
+    assert!(
+        display[0].secrets_broken,
+        "secrets_broken should be true when decryption fails with wrong key"
+    );
 }
 
 #[test]
@@ -3436,14 +4102,18 @@ fn mcp_config_display_secrets_ok_when_decrypt_succeeds() {
         is_global: false,
         include_general: true,
         config_hash: "hash-ok-test".into(),
-        project_ids: vec![], host_sync: HostSyncMode::None,
+        project_ids: vec![],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
     // Decrypt with correct secret → secrets_broken should be false
     let display = crate::db::mcps::list_configs_display(&conn, Some(&secret_a)).unwrap();
     assert_eq!(display.len(), 1);
-    assert!(!display[0].secrets_broken, "secrets_broken should be false when decryption succeeds");
+    assert!(
+        !display[0].secrets_broken,
+        "secrets_broken should be false when decryption succeeds"
+    );
 }
 
 #[test]
@@ -3468,19 +4138,23 @@ fn mcp_config_display_secrets_broken_false_when_no_env() {
         id: "cfg-noenv-test".into(),
         server_id: "srv-noenv-test".into(),
         label: "NoEnvConfig".into(),
-        env_keys: vec![],        // no env keys
+        env_keys: vec![],             // no env keys
         env_encrypted: String::new(), // no encrypted data
         args_override: None,
         is_global: false,
         include_general: true,
         config_hash: "hash-noenv-test".into(),
-        project_ids: vec![], host_sync: HostSyncMode::None,
+        project_ids: vec![],
+        host_sync: HostSyncMode::None,
     };
     crate::db::mcps::insert_config(&conn, &config).unwrap();
 
     let display = crate::db::mcps::list_configs_display(&conn, Some(&secret_a)).unwrap();
     assert_eq!(display.len(), 1);
-    assert!(!display[0].secrets_broken, "secrets_broken should be false when no env keys exist");
+    assert!(
+        !display[0].secrets_broken,
+        "secrets_broken should be false when no env keys exist"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3494,9 +4168,14 @@ fn update_project_path_success() {
     crate::db::projects::insert_project(&conn, &p).unwrap();
 
     let updated = crate::db::projects::update_project_path(&conn, "p-remap", "/new/path").unwrap();
-    assert!(updated, "update_project_path should return true for existing project");
+    assert!(
+        updated,
+        "update_project_path should return true for existing project"
+    );
 
-    let project = crate::db::projects::get_project(&conn, "p-remap").unwrap().unwrap();
+    let project = crate::db::projects::get_project(&conn, "p-remap")
+        .unwrap()
+        .unwrap();
     assert_eq!(project.path, "/new/path");
 }
 
@@ -3504,7 +4183,10 @@ fn update_project_path_success() {
 fn update_project_path_nonexistent() {
     let conn = test_db();
     let updated = crate::db::projects::update_project_path(&conn, "nonexistent", "/any").unwrap();
-    assert!(!updated, "update_project_path should return false for nonexistent project");
+    assert!(
+        !updated,
+        "update_project_path should return false for nonexistent project"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -3558,12 +4240,20 @@ fn quick_prompt_crud() {
         prompt_template: "Analyse le ticket {{ticket}} sur le projet {{project}}".into(),
         variables: vec![
             crate::models::PromptVariable {
-                name: "ticket".into(), label: "Ticket".into(), placeholder: "PROJ-123".into(),
-                description: Some("Identifiant Jira du ticket à analyser".into()), required: true, pattern: None,
+                name: "ticket".into(),
+                label: "Ticket".into(),
+                placeholder: "PROJ-123".into(),
+                description: Some("Identifiant Jira du ticket à analyser".into()),
+                required: true,
+                pattern: None,
             },
             crate::models::PromptVariable {
-                name: "project".into(), label: "Projet".into(), placeholder: "acme-frontend".into(),
-                description: None, required: true, pattern: None,
+                name: "project".into(),
+                label: "Projet".into(),
+                placeholder: "acme-frontend".into(),
+                description: None,
+                required: true,
+                pattern: None,
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,
@@ -3590,10 +4280,19 @@ fn quick_prompt_crud() {
     let found = crate::db::quick_prompts::get_quick_prompt(&conn, "qp1").unwrap();
     assert!(found.is_some());
     let found_qp = found.unwrap();
-    assert_eq!(found_qp.prompt_template, "Analyse le ticket {{ticket}} sur le projet {{project}}");
+    assert_eq!(
+        found_qp.prompt_template,
+        "Analyse le ticket {{ticket}} sur le projet {{project}}"
+    );
     // v2 fields: description on the QP + per-variable description/required
-    assert_eq!(found_qp.description, "Analyse technique d'un ticket Jira pour cadrage");
-    assert_eq!(found_qp.variables[0].description.as_deref(), Some("Identifiant Jira du ticket à analyser"));
+    assert_eq!(
+        found_qp.description,
+        "Analyse technique d'un ticket Jira pour cadrage"
+    );
+    assert_eq!(
+        found_qp.variables[0].description.as_deref(),
+        Some("Identifiant Jira du ticket à analyser")
+    );
     assert!(found_qp.variables[0].required);
     assert!(found_qp.variables[1].description.is_none());
     // 0.8.5 — profile/directive ids roundtrip.
@@ -3605,7 +4304,9 @@ fn quick_prompt_crud() {
     updated.name = "Analyse ticket v2".into();
     updated.updated_at = Utc::now();
     crate::db::quick_prompts::update_quick_prompt(&conn, &updated).unwrap();
-    let found2 = crate::db::quick_prompts::get_quick_prompt(&conn, "qp1").unwrap().unwrap();
+    let found2 = crate::db::quick_prompts::get_quick_prompt(&conn, "qp1")
+        .unwrap()
+        .unwrap();
     assert_eq!(found2.name, "Analyse ticket v2");
 
     // Delete
@@ -3640,7 +4341,8 @@ fn quick_prompt_insert_seeds_version_v1() {
         updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
-    let versions = crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-versions-1").unwrap();
+    let versions =
+        crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-versions-1").unwrap();
     assert_eq!(versions.len(), 1);
     assert_eq!(versions[0].version_index, 1);
     assert_eq!(versions[0].prompt_template, "Initial body");
@@ -3682,7 +4384,8 @@ fn quick_prompt_update_snapshots_v2_v3() {
     qp.updated_at = Utc::now();
     crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
 
-    let versions = crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-versions-2").unwrap();
+    let versions =
+        crate::db::quick_prompts::list_quick_prompt_versions(&conn, "qp-versions-2").unwrap();
     // Newest first: v3, v2, v1
     assert_eq!(versions.len(), 3);
     assert_eq!(versions[0].version_index, 3);
@@ -3699,7 +4402,7 @@ fn quick_prompt_update_snapshots_v2_v3() {
 
 #[test]
 fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
-    use crate::models::{Discussion, DiscussionMessage, MessageRole, AgentType, ModelTier};
+    use crate::models::{AgentType, Discussion, DiscussionMessage, MessageRole, ModelTier};
     let conn = test_db();
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
@@ -3730,40 +4433,72 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
     let seed_disc = |disc_id: &str, v: u32, agent_tokens: u64, agent_dur: u64| {
         let d = Discussion {
             awaiting_agent: false,
-            id: disc_id.into(), project_id: None, title: format!("Disc {}", disc_id),
-            agent: AgentType::ClaudeCode, language: "fr".into(),
-            participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
-            skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-            archived: false, pinned: false,
-            workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
-            tier: ModelTier::Default, pin_first_message: false,
+            id: disc_id.into(),
+            project_id: None,
+            title: format!("Disc {}", disc_id),
+            agent: AgentType::ClaudeCode,
+            language: "fr".into(),
+            participants: vec![AgentType::ClaudeCode],
+            messages: vec![],
+            message_count: 0,
+            non_system_message_count: 0,
+            skill_ids: vec![],
+            profile_ids: vec![],
+            directive_ids: vec![],
+            archived: false,
+            pinned: false,
+            workspace_mode: "Direct".into(),
+            workspace_path: None,
+            worktree_branch: None,
+            tier: ModelTier::Default,
+            pin_first_message: false,
             model: None,
-            summary_cache: None, summary_up_to_msg_idx: None,
+            summary_cache: None,
+            summary_up_to_msg_idx: None,
             summary_strategy: crate::models::SummaryStrategy::Auto,
             introspection_call_count: 0,
-            shared_id: None, shared_with: vec![],
+            shared_id: None,
+            shared_with: vec![],
             workflow_run_id: None,
-            test_mode_restore_branch: None, test_mode_stash_ref: None,
-            created_at: Utc::now(), updated_at: Utc::now(),
+            test_mode_restore_branch: None,
+            test_mode_stash_ref: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
         };
         crate::db::discussions::insert_discussion(&conn, &d).unwrap();
         // User msg + Agent msg (with tokens + duration).
         let user_msg = DiscussionMessage {
             model: None,
             lint_report: None,
-            id: format!("{}-u", disc_id), role: MessageRole::User, content: "ask".into(),
-            agent_type: None, timestamp: Utc::now(), tokens_used: 0,
-            auth_mode: None, model_tier: None, cost_usd: None,
-            author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+            id: format!("{}-u", disc_id),
+            role: MessageRole::User,
+            content: "ask".into(),
+            agent_type: None,
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
         };
         let agent_msg = DiscussionMessage {
             model: None,
             lint_report: None,
-            id: format!("{}-a", disc_id), role: MessageRole::Agent, content: "reply".into(),
-            agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
-            tokens_used: agent_tokens, auth_mode: None,
-            model_tier: None, cost_usd: None,
-            author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+            id: format!("{}-a", disc_id),
+            role: MessageRole::Agent,
+            content: "reply".into(),
+            agent_type: Some(AgentType::ClaudeCode),
+            timestamp: Utc::now(),
+            tokens_used: agent_tokens,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
             duration_ms: Some(agent_dur),
         };
         crate::db::discussions::insert_message(&conn, disc_id, &user_msg).unwrap();
@@ -3772,9 +4507,10 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
     };
     seed_disc("d-v1-a", 1, 1000, 5000);
     seed_disc("d-v1-b", 1, 2000, 7000);
-    seed_disc("d-v2-a", 2, 800,  3000);
+    seed_disc("d-v2-a", 2, 800, 3000);
 
-    let metrics = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-metrics").unwrap();
+    let metrics =
+        crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-metrics").unwrap();
     // Newest first: v2 then v1
     assert_eq!(metrics.len(), 2);
     assert_eq!(metrics[0].version_index, 2);
@@ -3809,7 +4545,8 @@ fn quick_prompt_metrics_empty_for_qp_without_launches() {
         updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
-    let m = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-no-launches").unwrap();
+    let m = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-no-launches")
+        .unwrap();
     assert!(m.is_empty(), "no launches → no metrics rows");
 }
 
@@ -3819,13 +4556,21 @@ fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
     let conn = test_db();
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
-        id: "qp-del".into(), name: "Del".into(), icon: "⚡".into(),
+        id: "qp-del".into(),
+        name: "Del".into(),
+        icon: "⚡".into(),
         prompt_template: "v1".into(),
-        variables: vec![], agent: AgentType::ClaudeCode,
-        project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        tier: ModelTier::Default, description: "".into(),
+        variables: vec![],
+        agent: AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: ModelTier::Default,
+        description: "".into(),
         agent_settings: None,
-        created_at: now, updated_at: now,
+        created_at: now,
+        updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
     qp.prompt_template = "v2".into();
@@ -3836,8 +4581,13 @@ fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
     crate::db::quick_prompts::update_quick_prompt(&conn, &qp).unwrap();
 
     // current = v3; trying to delete it MUST fail.
-    let err = crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-del", 3).unwrap_err();
-    assert!(err.to_string().contains("current"), "error mentions current: {}", err);
+    let err =
+        crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-del", 3).unwrap_err();
+    assert!(
+        err.to_string().contains("current"),
+        "error mentions current: {}",
+        err
+    );
 
     // Deleting v2 (older) succeeds and returns true.
     let ok = crate::db::quick_prompts::delete_quick_prompt_version(&conn, "qp-del", 2).unwrap();
@@ -3854,17 +4604,25 @@ fn quick_prompt_delete_version_refuses_current_and_succeeds_on_older() {
 
 #[test]
 fn quick_prompt_delete_version_clears_discussion_lineage() {
-    use crate::models::{Discussion, AgentType, ModelTier};
+    use crate::models::{AgentType, Discussion, ModelTier};
     let conn = test_db();
     let now = Utc::now();
     let mut qp = crate::models::QuickPrompt {
-        id: "qp-cascade".into(), name: "C".into(), icon: "⚡".into(),
+        id: "qp-cascade".into(),
+        name: "C".into(),
+        icon: "⚡".into(),
         prompt_template: "v1".into(),
-        variables: vec![], agent: AgentType::ClaudeCode,
-        project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        tier: ModelTier::Default, description: "".into(),
+        variables: vec![],
+        agent: AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: ModelTier::Default,
+        description: "".into(),
         agent_settings: None,
-        created_at: now, updated_at: now,
+        created_at: now,
+        updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
     qp.prompt_template = "v2".into();
@@ -3874,21 +4632,37 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
     // Seed a discussion stamped with v1 (the version we'll delete).
     let d = Discussion {
         awaiting_agent: false,
-        id: "d-orphan".into(), project_id: None, title: "T".into(),
-        agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
-        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        archived: false, pinned: false,
-        workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
-        tier: ModelTier::Default, pin_first_message: false,
+        id: "d-orphan".into(),
+        project_id: None,
+        title: "T".into(),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode],
+        messages: vec![],
+        message_count: 0,
+        non_system_message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        pinned: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
+        pin_first_message: false,
         model: None,
-        summary_cache: None, summary_up_to_msg_idx: None,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
         summary_strategy: crate::models::SummaryStrategy::Auto,
         introspection_call_count: 0,
-        shared_id: None, shared_with: vec![],
+        shared_id: None,
+        shared_with: vec![],
         workflow_run_id: None,
-        test_mode_restore_branch: None, test_mode_stash_ref: None,
-        created_at: Utc::now(), updated_at: Utc::now(),
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
     };
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
     crate::db::discussions::set_originating_qp(&conn, "d-orphan", "qp-cascade", 1).unwrap();
@@ -3903,8 +4677,14 @@ fn quick_prompt_delete_version_clears_discussion_lineage() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap();
-    assert!(orig_qp.is_none(), "originating_qp_id must be cleared after version deletion");
-    assert!(orig_version.is_none(), "originating_qp_version must be cleared too");
+    assert!(
+        orig_qp.is_none(),
+        "originating_qp_id must be cleared after version deletion"
+    );
+    assert!(
+        orig_version.is_none(),
+        "originating_qp_version must be cleared too"
+    );
 }
 
 #[test]
@@ -3912,59 +4692,120 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
     // If a discussion has 3 agent messages, only the FIRST counts toward
     // the QP's metrics — the QP's pertinence is reflected in the
     // initial reply, not subsequent back-and-forth.
-    use crate::models::{Discussion, DiscussionMessage, MessageRole, AgentType, ModelTier};
+    use crate::models::{AgentType, Discussion, DiscussionMessage, MessageRole, ModelTier};
     let conn = test_db();
     let now = Utc::now();
     let qp = crate::models::QuickPrompt {
         id: "qp-first-only".into(),
-        name: "F".into(), icon: "⚡".into(), prompt_template: "v1".into(),
-        variables: vec![], agent: AgentType::ClaudeCode,
-        project_id: None, skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        tier: ModelTier::Default, description: "".into(),
+        name: "F".into(),
+        icon: "⚡".into(),
+        prompt_template: "v1".into(),
+        variables: vec![],
+        agent: AgentType::ClaudeCode,
+        project_id: None,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        tier: ModelTier::Default,
+        description: "".into(),
         agent_settings: None,
-        created_at: now, updated_at: now,
+        created_at: now,
+        updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
     let d = Discussion {
         awaiting_agent: false,
-        id: "d-multi".into(), project_id: None, title: "T".into(),
-        agent: AgentType::ClaudeCode, language: "fr".into(),
-        participants: vec![AgentType::ClaudeCode], messages: vec![], message_count: 0, non_system_message_count: 0,
-        skill_ids: vec![], profile_ids: vec![], directive_ids: vec![],
-        archived: false, pinned: false,
-        workspace_mode: "Direct".into(), workspace_path: None, worktree_branch: None,
-        tier: ModelTier::Default, pin_first_message: false,
+        id: "d-multi".into(),
+        project_id: None,
+        title: "T".into(),
+        agent: AgentType::ClaudeCode,
+        language: "fr".into(),
+        participants: vec![AgentType::ClaudeCode],
+        messages: vec![],
+        message_count: 0,
+        non_system_message_count: 0,
+        skill_ids: vec![],
+        profile_ids: vec![],
+        directive_ids: vec![],
+        archived: false,
+        pinned: false,
+        workspace_mode: "Direct".into(),
+        workspace_path: None,
+        worktree_branch: None,
+        tier: ModelTier::Default,
+        pin_first_message: false,
         model: None,
-        summary_cache: None, summary_up_to_msg_idx: None,
+        summary_cache: None,
+        summary_up_to_msg_idx: None,
         summary_strategy: crate::models::SummaryStrategy::Auto,
         introspection_call_count: 0,
-        shared_id: None, shared_with: vec![],
+        shared_id: None,
+        shared_with: vec![],
         workflow_run_id: None,
-        test_mode_restore_branch: None, test_mode_stash_ref: None,
-        created_at: Utc::now(), updated_at: Utc::now(),
+        test_mode_restore_branch: None,
+        test_mode_stash_ref: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
     };
     crate::db::discussions::insert_discussion(&conn, &d).unwrap();
     // Three Agent replies — only the first should be counted.
     let mk = |id: &str, role: MessageRole, toks: u64, dur: u64| DiscussionMessage {
         model: None,
         lint_report: None,
-        id: id.into(), role, content: "x".into(),
-        agent_type: Some(AgentType::ClaudeCode), timestamp: Utc::now(),
-        tokens_used: toks, auth_mode: None,
-        model_tier: None, cost_usd: None,
-        author_pseudo: None, author_avatar_email: None, source_msg_id: None,
+        id: id.into(),
+        role,
+        content: "x".into(),
+        agent_type: Some(AgentType::ClaudeCode),
+        timestamp: Utc::now(),
+        tokens_used: toks,
+        auth_mode: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo: None,
+        author_avatar_email: None,
+        source_msg_id: None,
         duration_ms: Some(dur),
     };
-    crate::db::discussions::insert_message(&conn, "d-multi",
-        &DiscussionMessage { agent_type: None, ..mk("u1", MessageRole::User, 0, 0) }).unwrap();
-    crate::db::discussions::insert_message(&conn, "d-multi", &mk("a1", MessageRole::Agent, 1000, 5000)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d-multi",
-        &DiscussionMessage { agent_type: None, ..mk("u2", MessageRole::User, 0, 0) }).unwrap();
-    crate::db::discussions::insert_message(&conn, "d-multi", &mk("a2", MessageRole::Agent, 9999, 99999)).unwrap();
-    crate::db::discussions::insert_message(&conn, "d-multi", &mk("a3", MessageRole::Agent, 8888, 88888)).unwrap();
+    crate::db::discussions::insert_message(
+        &conn,
+        "d-multi",
+        &DiscussionMessage {
+            agent_type: None,
+            ..mk("u1", MessageRole::User, 0, 0)
+        },
+    )
+    .unwrap();
+    crate::db::discussions::insert_message(
+        &conn,
+        "d-multi",
+        &mk("a1", MessageRole::Agent, 1000, 5000),
+    )
+    .unwrap();
+    crate::db::discussions::insert_message(
+        &conn,
+        "d-multi",
+        &DiscussionMessage {
+            agent_type: None,
+            ..mk("u2", MessageRole::User, 0, 0)
+        },
+    )
+    .unwrap();
+    crate::db::discussions::insert_message(
+        &conn,
+        "d-multi",
+        &mk("a2", MessageRole::Agent, 9999, 99999),
+    )
+    .unwrap();
+    crate::db::discussions::insert_message(
+        &conn,
+        "d-multi",
+        &mk("a3", MessageRole::Agent, 8888, 88888),
+    )
+    .unwrap();
     crate::db::discussions::set_originating_qp(&conn, "d-multi", "qp-first-only", 1).unwrap();
 
-    let m = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-first-only").unwrap();
+    let m = crate::db::quick_prompts::list_quick_prompt_version_metrics(&conn, "qp-first-only")
+        .unwrap();
     assert_eq!(m.len(), 1);
     assert_eq!(m[0].launches, 1);
     // The first agent message's values, not the later ones.
@@ -3990,12 +4831,20 @@ fn quick_prompt_variables_roundtrip() {
         prompt_template: "{{#jira}}Ticket {{jira}}, {{/jira}}{{#pr}}PR #{{pr}}{{/pr}}".into(),
         variables: vec![
             crate::models::PromptVariable {
-                name: "jira".into(), label: "Ticket Jira".into(), placeholder: "PROJ-123".into(),
-                description: None, required: false, pattern: None,
+                name: "jira".into(),
+                label: "Ticket Jira".into(),
+                placeholder: "PROJ-123".into(),
+                description: None,
+                required: false,
+                pattern: None,
             },
             crate::models::PromptVariable {
-                name: "pr".into(), label: "PR".into(), placeholder: "42".into(),
-                description: None, required: false, pattern: None,
+                name: "pr".into(),
+                label: "PR".into(),
+                placeholder: "42".into(),
+                description: None,
+                required: false,
+                pattern: None,
             },
         ],
         agent: crate::models::AgentType::ClaudeCode,
@@ -4010,7 +4859,9 @@ fn quick_prompt_variables_roundtrip() {
         updated_at: now,
     };
     crate::db::quick_prompts::insert_quick_prompt(&conn, &qp).unwrap();
-    let loaded = crate::db::quick_prompts::get_quick_prompt(&conn, "qp-vars").unwrap().unwrap();
+    let loaded = crate::db::quick_prompts::get_quick_prompt(&conn, "qp-vars")
+        .unwrap()
+        .unwrap();
 
     // Variables preserved
     assert_eq!(loaded.variables.len(), 2);
@@ -4056,7 +4907,8 @@ fn cross_agent_db_round_trip_all_types() {
             language: "en".into(),
             participants: vec![agent_type.clone()],
             messages: vec![],
-            message_count: 0, non_system_message_count: 0,
+            message_count: 0,
+            non_system_message_count: 0,
             skill_ids: vec![],
             profile_ids: vec![],
             directive_ids: vec![],
@@ -4070,7 +4922,8 @@ fn cross_agent_db_round_trip_all_types() {
             pin_first_message: false,
             summary_cache: None,
             summary_up_to_msg_idx: None,
-            summary_strategy: crate::models::SummaryStrategy::Auto, introspection_call_count: 0,
+            summary_strategy: crate::models::SummaryStrategy::Auto,
+            introspection_call_count: 0,
             shared_id: None,
             shared_with: vec![],
             workflow_run_id: None,
@@ -4080,9 +4933,14 @@ fn cross_agent_db_round_trip_all_types() {
             updated_at: now,
         };
         crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
-        let loaded = crate::db::discussions::get_discussion(&conn, &disc_id).unwrap().unwrap();
-        assert_eq!(loaded.agent, *agent_type,
-            "DB round-trip failed for {:?} — agent_type mutated after insert+read", agent_type);
+        let loaded = crate::db::discussions::get_discussion(&conn, &disc_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            loaded.agent, *agent_type,
+            "DB round-trip failed for {:?} — agent_type mutated after insert+read",
+            agent_type
+        );
     }
 }
 
@@ -4274,7 +5132,8 @@ fn foreach_step_result(output: String) -> StepResult {
         "output": output,
         "tokens_used": 0,
         "duration_ms": 0,
-    })).expect("minimal StepResult")
+    }))
+    .expect("minimal StepResult")
 }
 
 fn foreach_envelope(items: serde_json::Value) -> String {
@@ -4305,7 +5164,10 @@ fn backfill_foreach_output_fills_missing_metrics_and_preserves_markers() {
     assert!(patched.contains("---STEP_OUTPUT---"));
     assert!(patched.ends_with("[SIGNAL: OK]"));
     let env = crate::workflows::step_output_format::parse_envelope_for_test(&patched);
-    assert!(env["data"]["last_output"].as_str().unwrap().contains("---END_STEP_OUTPUT---"));
+    assert!(env["data"]["last_output"]
+        .as_str()
+        .unwrap()
+        .contains("---END_STEP_OUTPUT---"));
 
     let items = env["data"]["items"].as_array().unwrap();
     assert_eq!(items[0]["tokens"], 1500);
@@ -4343,18 +5205,36 @@ fn backfill_foreach_output_fills_only_the_missing_field() {
     let env = crate::workflows::step_output_format::parse_envelope_for_test(&patched);
     let it = &env["data"]["items"][0];
     assert_eq!(it["tokens"], 111, "existing tokens must not be overridden");
-    assert_eq!(it["duration_ms"], 45200, "missing duration backfilled from child metrics");
+    assert_eq!(
+        it["duration_ms"], 45200,
+        "missing duration backfilled from child metrics"
+    );
 }
 
 #[test]
 fn backfill_foreach_output_ignores_non_foreach_and_junk() {
     let m: std::collections::HashMap<String, (u64, Option<u64>)> = std::collections::HashMap::new();
     let single = crate::workflows::step_output_format::format_step_output(
-        serde_json::json!({"child_run_id": "x", "child_status": "Success"}), "OK", "s", None, &["OK"]);
-    assert!(crate::db::workflows::backfill_foreach_output(&single, &m).is_none(), "non-foreach envelope");
-    assert!(crate::db::workflows::backfill_foreach_output("free text", &m).is_none(), "no markers");
+        serde_json::json!({"child_run_id": "x", "child_status": "Success"}),
+        "OK",
+        "s",
+        None,
+        &["OK"],
+    );
     assert!(
-        crate::db::workflows::backfill_foreach_output("---STEP_OUTPUT---\n{not json\n---END_STEP_OUTPUT---", &m).is_none(),
+        crate::db::workflows::backfill_foreach_output(&single, &m).is_none(),
+        "non-foreach envelope"
+    );
+    assert!(
+        crate::db::workflows::backfill_foreach_output("free text", &m).is_none(),
+        "no markers"
+    );
+    assert!(
+        crate::db::workflows::backfill_foreach_output(
+            "---STEP_OUTPUT---\n{not json\n---END_STEP_OUTPUT---",
+            &m
+        )
+        .is_none(),
         "unparseable inner JSON"
     );
 }
@@ -4387,11 +5267,20 @@ fn get_run_backfills_foreach_child_metrics_from_child_rows() {
     crate::db::workflows::insert_run(&conn, &mk_child("child-a", 1500, 45200)).unwrap();
     crate::db::workflows::insert_run(&conn, &mk_child("child-b", 900, 12000)).unwrap();
 
-    let run = crate::db::workflows::get_run(&conn, "parent-run-1").unwrap().unwrap();
-    let env = crate::workflows::step_output_format::parse_envelope_for_test(&run.step_results[0].output);
+    let run = crate::db::workflows::get_run(&conn, "parent-run-1")
+        .unwrap()
+        .unwrap();
+    let env =
+        crate::workflows::step_output_format::parse_envelope_for_test(&run.step_results[0].output);
     let items = env["data"]["items"].as_array().unwrap();
-    assert_eq!(items[0]["tokens"], 1500, "child-a tokens joined from its run row");
-    assert_eq!(items[0]["duration_ms"], 45200, "child-a duration = finished - started");
+    assert_eq!(
+        items[0]["tokens"], 1500,
+        "child-a tokens joined from its run row"
+    );
+    assert_eq!(
+        items[0]["duration_ms"], 45200,
+        "child-a duration = finished - started"
+    );
     assert_eq!(items[1]["tokens"], 900);
     assert_eq!(items[1]["duration_ms"], 12000);
 }

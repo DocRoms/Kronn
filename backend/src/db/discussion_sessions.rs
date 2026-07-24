@@ -339,7 +339,9 @@ pub fn clear_session_activity(
 fn activity_of_row(activity: Option<String>, expires_at: Option<String>) -> Option<String> {
     let act = activity?;
     let exp = expires_at?;
-    let exp_dt = chrono::DateTime::parse_from_rfc3339(&exp).ok()?.with_timezone(&Utc);
+    let exp_dt = chrono::DateTime::parse_from_rfc3339(&exp)
+        .ok()?
+        .with_timezone(&Utc);
     (exp_dt > Utc::now()).then_some(act)
 }
 
@@ -404,14 +406,20 @@ pub fn reap_abandoned_sessions(conn: &Connection) -> Result<u64> {
             if now_dt < newest_utc {
                 tracing::warn!(
                     "reap: system clock ({}) is behind the newest session activity ({}) — \
-                     skipping reap (suspected clock skew)", now_dt, newest_utc);
+                     skipping reap (suspected clock skew)",
+                    now_dt,
+                    newest_utc
+                );
                 return Ok(0);
             }
             if now_dt - newest_utc > Duration::days(SESSION_SKEW_SANITY_DAYS) {
                 tracing::warn!(
                     "reap: system clock is implausibly far ahead (>{} days) of the newest \
                      session activity ({}) — skipping reap (suspected clock skew / garbage \
-                     timestamp)", SESSION_SKEW_SANITY_DAYS, newest_utc);
+                     timestamp)",
+                    SESSION_SKEW_SANITY_DAYS,
+                    newest_utc
+                );
                 return Ok(0);
             }
         }
@@ -455,12 +463,7 @@ pub fn create_invite_token(conn: &Connection, disc_id: &str) -> Result<InviteTok
         "INSERT INTO discussion_invite_tokens
             (token_hash, disc_id, created_at, expires_at)
          VALUES (?1, ?2, ?3, ?4)",
-        params![
-            hash,
-            disc_id,
-            now.to_rfc3339(),
-            expires_at.to_rfc3339(),
-        ],
+        params![hash, disc_id, now.to_rfc3339(), expires_at.to_rfc3339(),],
     )?;
     Ok(InviteTokenIssued {
         token: plain,
@@ -525,8 +528,8 @@ pub fn consume_invite_token(
         )
         .optional()?;
 
-    let (token_id, disc_id, expires_at, used_at) = row
-        .ok_or_else(|| anyhow!("invite token not found — was it copy-pasted in full ?"))?;
+    let (token_id, disc_id, expires_at, used_at) =
+        row.ok_or_else(|| anyhow!("invite token not found — was it copy-pasted in full ?"))?;
 
     if expires_at.as_str() < now.as_str() {
         return Err(anyhow!(
@@ -608,8 +611,8 @@ pub fn join_via_token(
         )
         .optional()?;
 
-    let (token_id, disc_id, expires_at, used_at) = row
-        .ok_or_else(|| anyhow!("invite token not found — was it copy-pasted in full ?"))?;
+    let (token_id, disc_id, expires_at, used_at) =
+        row.ok_or_else(|| anyhow!("invite token not found — was it copy-pasted in full ?"))?;
 
     if expires_at.as_str() < now.as_str() {
         return Err(anyhow!(
@@ -682,42 +685,70 @@ pub fn join_via_token(
 
 /// Resume a host-launched peer after its MCP bridge reloads. The opaque
 /// credential identifies exactly one logical session row; a successful resume
-/// updates that row in place and rotates the credential atomically. The old
-/// `session_id` immediately loses the ability to refresh activity/presence.
+/// updates that row in place. New bridges prepare and durably persist
+/// `next_resume_token` before calling: the transaction atomically rotates to
+/// that exact successor, while an exact replay `(old, next)` is idempotent.
+/// This closes the response-loss window where the server had committed a
+/// random successor the client could no longer recover. Legacy callers that
+/// omit a successor resume without rotation (availability over fake safety).
+/// The old `session_id` immediately loses the ability to refresh presence.
 pub fn resume_disc_session(
     conn: &Connection,
     agent_type: &str,
     resume_token: &str,
     new_session_id: &str,
+    next_resume_token: Option<&str>,
 ) -> Result<JoinViaTokenResult> {
     let old_hash = sha256_hex(resume_token);
-    let (next_token, next_hash) = new_resume_credential();
+    let next_token = next_resume_token.unwrap_or(resume_token).to_string();
+    let next_hash = sha256_hex(&next_token);
     let now = Utc::now().to_rfc3339();
     let tx = conn.unchecked_transaction()?;
 
-    let row: Option<(i64, String)> = tx
+    // Match either the current credential (first commit) or the exact
+    // client-prepared successor (response-loss replay). A divergent successor
+    // cannot match and is rejected, so concurrent writers never silently
+    // overwrite the credential another bridge persisted.
+    let row: Option<(i64, String, String)> = tx
         .query_row(
-            "SELECT id, disc_id FROM discussion_sessions
-              WHERE resume_token_hash = ?1 AND agent_type = ?2 AND status != 'left'
+            "SELECT id, disc_id, resume_token_hash FROM discussion_sessions
+              WHERE resume_token_hash IN (?1, ?2)
+                AND agent_type = ?3 AND status != 'left'
+              ORDER BY CASE WHEN resume_token_hash = ?1 THEN 0 ELSE 1 END
               LIMIT 1",
-            params![&old_hash, agent_type],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            params![&old_hash, &next_hash, agent_type],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    let (session_pk, disc_id) =
+    let (session_pk, disc_id, stored_hash) =
         row.ok_or_else(|| anyhow!("resume credential invalid, replayed, or no longer active"))?;
 
-    let updated = tx.execute(
-        "UPDATE discussion_sessions
-            SET session_id = ?2,
-                last_seen = ?3,
-                activity = NULL,
-                activity_expires_at = NULL,
-                resume_token_hash = ?4,
-                resume_rotated_at = ?3
-          WHERE id = ?1 AND resume_token_hash = ?5 AND status != 'left'",
-        params![session_pk, new_session_id, &now, &next_hash, &old_hash],
-    )?;
+    let updated = if stored_hash == old_hash {
+        tx.execute(
+            "UPDATE discussion_sessions
+                SET session_id = ?2,
+                    last_seen = ?3,
+                    activity = NULL,
+                    activity_expires_at = NULL,
+                    resume_token_hash = ?4,
+                    resume_rotated_at = ?3
+              WHERE id = ?1 AND resume_token_hash = ?5 AND status != 'left'",
+            params![session_pk, new_session_id, &now, &next_hash, &old_hash],
+        )?
+    } else {
+        // Exact replay after the first transaction committed but its response
+        // was lost. Keep the already-selected successor and only rebind the
+        // caller identity/heartbeat.
+        tx.execute(
+            "UPDATE discussion_sessions
+                SET session_id = ?2,
+                    last_seen = ?3,
+                    activity = NULL,
+                    activity_expires_at = NULL
+              WHERE id = ?1 AND resume_token_hash = ?4 AND status != 'left'",
+            params![session_pk, new_session_id, &now, &next_hash],
+        )?
+    };
     if updated != 1 {
         return Err(anyhow!("resume credential was rotated concurrently"));
     }
@@ -848,7 +879,9 @@ mod tests {
             Some("d1")
         );
         // Unknown token → None (the cross-instance "we don't host it" signal).
-        assert!(resolve_token_disc(&conn, "kr-join-deadbeef").unwrap().is_none());
+        assert!(resolve_token_disc(&conn, "kr-join-deadbeef")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -898,8 +931,15 @@ mod tests {
             .unwrap();
         assert_ne!(stored, joined.resume_token, "database stores only a digest");
 
-        let resumed =
-            resume_disc_session(&conn, "Codex", &joined.resume_token, "new-child-ppid").unwrap();
+        let successor = "kr-resume-11111111111111111111111111111111";
+        let resumed = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "new-child-ppid",
+            Some(successor),
+        )
+        .unwrap();
         assert_eq!(
             resumed.session_pk, joined.session_pk,
             "resume updates the same row"
@@ -910,12 +950,25 @@ mod tests {
             "credential rotates"
         );
 
-        let replay =
-            resume_disc_session(&conn, "Codex", &joined.resume_token, "replay-child").unwrap_err();
+        assert_eq!(resumed.resume_token, successor);
+
+        let replay = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "replay-child",
+            Some("kr-resume-22222222222222222222222222222222"),
+        )
+        .unwrap_err();
         assert!(replay.to_string().contains("invalid, replayed"));
-        let wrong_agent =
-            resume_disc_session(&conn, "ClaudeCode", &resumed.resume_token, "attacker-child")
-                .unwrap_err();
+        let wrong_agent = resume_disc_session(
+            &conn,
+            "ClaudeCode",
+            &resumed.resume_token,
+            "attacker-child",
+            Some("kr-resume-33333333333333333333333333333333"),
+        )
+        .unwrap_err();
         assert!(wrong_agent.to_string().contains("invalid, replayed"));
 
         set_session_activity(
@@ -936,14 +989,75 @@ mod tests {
     }
 
     #[test]
+    fn resume_exact_successor_replay_is_idempotent_but_divergence_is_rejected() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Codex", "before").unwrap();
+        let next = "kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+        let first = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "after-first",
+            Some(next),
+        )
+        .unwrap();
+        let replay = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "after-response-loss",
+            Some(next),
+        )
+        .unwrap();
+        assert_eq!(replay.session_pk, first.session_pk);
+        assert_eq!(replay.resume_token, next);
+
+        let divergent = resume_disc_session(
+            &conn,
+            "Codex",
+            &joined.resume_token,
+            "racer",
+            Some("kr-resume-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+        )
+        .unwrap_err();
+        assert!(divergent.to_string().contains("invalid, replayed"));
+
+        let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
+        assert_eq!(row.session_id.as_deref(), Some("after-response-loss"));
+    }
+
+    #[test]
+    fn legacy_resume_without_successor_is_non_rotating_and_retryable() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Codex", "before").unwrap();
+
+        let first =
+            resume_disc_session(&conn, "Codex", &joined.resume_token, "legacy-one", None).unwrap();
+        let retry =
+            resume_disc_session(&conn, "Codex", &joined.resume_token, "legacy-two", None).unwrap();
+        assert_eq!(first.resume_token, joined.resume_token);
+        assert_eq!(retry.resume_token, joined.resume_token);
+        assert_eq!(first.session_pk, retry.session_pk);
+    }
+
+    #[test]
     fn resuming_one_same_agent_peer_never_supersedes_its_sibling() {
         let conn = setup_db();
         let invite = create_invite_token(&conn, "d1").unwrap();
         let first = join_via_token(&conn, &invite.token, "Codex", "codex-a-old").unwrap();
         let second = join_via_token(&conn, &invite.token, "Codex", "codex-b").unwrap();
 
-        let resumed =
-            resume_disc_session(&conn, "Codex", &first.resume_token, "codex-a-new").unwrap();
+        let resumed = resume_disc_session(
+            &conn,
+            "Codex",
+            &first.resume_token,
+            "codex-a-new",
+            Some("kr-resume-cccccccccccccccccccccccccccccccc"),
+        )
+        .unwrap();
         assert_eq!(resumed.session_pk, first.session_pk);
 
         let rows = list_sessions(&conn, "d1", false).unwrap();
@@ -963,14 +1077,23 @@ mod tests {
         // A bound session starts with no heartbeat…
         join_disc_session(&conn, "d1", "ClaudeCode", "sess-1").unwrap();
         let before = list_sessions(&conn, "d1", false).unwrap();
-        let s = before.iter().find(|s| s.session_id.as_deref() == Some("sess-1")).unwrap();
+        let s = before
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-1"))
+            .unwrap();
         assert!(s.last_seen.is_none(), "no activity yet → last_seen None");
         // …and after a heartbeat (every disc_append calls this), it's surfaced
         // so the UI can show "active" vs "silent" instead of a dead-looking room.
         touch_session_by_agent(&conn, "d1", "ClaudeCode").unwrap();
         let after = list_sessions(&conn, "d1", false).unwrap();
-        let s = after.iter().find(|s| s.session_id.as_deref() == Some("sess-1")).unwrap();
-        assert!(s.last_seen.is_some(), "heartbeat must surface in list_sessions");
+        let s = after
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-1"))
+            .unwrap();
+        assert!(
+            s.last_seen.is_some(),
+            "heartbeat must surface in list_sessions"
+        );
     }
 
     #[test]
@@ -1015,19 +1138,38 @@ mod tests {
 
         set_session_activity(&conn, "d1", "ClaudeCode", Some("sess-mac"), "listening", 60).unwrap();
         let rows = list_sessions(&conn, "d1", false).unwrap();
-        let mac = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-mac")).unwrap();
-        let wsl = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-wsl")).unwrap();
+        let mac = rows
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-mac"))
+            .unwrap();
+        let wsl = rows
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-wsl"))
+            .unwrap();
         assert_eq!(mac.activity.as_deref(), Some("listening"));
-        assert!(wsl.activity.is_none(), "the sibling session must not inherit the placeholder");
+        assert!(
+            wsl.activity.is_none(),
+            "the sibling session must not inherit the placeholder"
+        );
 
         // Scoped clear removes only the targeted session's activity.
         set_session_activity(&conn, "d1", "ClaudeCode", Some("sess-wsl"), "reading", 60).unwrap();
         clear_session_activity(&conn, "d1", "ClaudeCode", Some("sess-mac")).unwrap();
         let rows = list_sessions(&conn, "d1", false).unwrap();
-        let mac = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-mac")).unwrap();
-        let wsl = rows.iter().find(|s| s.session_id.as_deref() == Some("sess-wsl")).unwrap();
+        let mac = rows
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-mac"))
+            .unwrap();
+        let wsl = rows
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-wsl"))
+            .unwrap();
         assert!(mac.activity.is_none());
-        assert_eq!(wsl.activity.as_deref(), Some("reading"), "scoped clear spares the sibling");
+        assert_eq!(
+            wsl.activity.as_deref(),
+            Some("reading"),
+            "scoped clear spares the sibling"
+        );
     }
 
     #[test]
@@ -1037,8 +1179,14 @@ mod tests {
         set_session_status(&conn, pk, "paused").unwrap();
         set_session_activity(&conn, "d1", "Codex", None, "listening", 60).unwrap();
         let all = list_sessions(&conn, "d1", false).unwrap();
-        let s = all.iter().find(|s| s.session_id.as_deref() == Some("sess-c")).unwrap();
-        assert!(s.activity.is_none(), "a paused session is not a live listener");
+        let s = all
+            .iter()
+            .find(|s| s.session_id.as_deref() == Some("sess-c"))
+            .unwrap();
+        assert!(
+            s.activity.is_none(),
+            "a paused session is not a live listener"
+        );
     }
 
     #[test]
@@ -1143,8 +1291,7 @@ mod tests {
     #[test]
     fn create_session_rejects_invalid_role() {
         let conn = setup_db();
-        let err =
-            create_session(&conn, "d1", "Codex", Some("sess-1"), "admin").unwrap_err();
+        let err = create_session(&conn, "d1", "Codex", Some("sess-1"), "admin").unwrap_err();
         assert!(err.to_string().contains("invalid role"));
     }
 
@@ -1215,11 +1362,23 @@ mod tests {
         set_session_status(&conn, id_paused, "paused").unwrap();
         mark_session_left(&conn, id_left).unwrap();
         // active=1, paused=1, left=1
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "only the active session is a live responder");
-        assert_eq!(count_active_participants(&conn, "d1").unwrap(), 2, "active+paused for the UI badge");
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            1,
+            "only the active session is a live responder"
+        );
+        assert_eq!(
+            count_active_participants(&conn, "d1").unwrap(),
+            2,
+            "active+paused for the UI badge"
+        );
         // Pausing the last active one → no live responder (Kronn should auto-spawn).
         set_session_status(&conn, id_active, "paused").unwrap();
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 0, "all paused → no live responder");
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            0,
+            "all paused → no live responder"
+        );
     }
 
     #[test]
@@ -1240,13 +1399,25 @@ mod tests {
             params![id_old, old_ts],
         )
         .unwrap();
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 2, "an idle-but-active peer still counts (sticky)");
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            2,
+            "an idle-but-active peer still counts (sticky)"
+        );
 
         // paused / left drop out.
         set_session_status(&conn, id_fresh, "paused").unwrap();
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "paused no longer a live responder");
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            1,
+            "paused no longer a live responder"
+        );
         mark_session_left(&conn, id_old).unwrap();
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 0, "left no longer a live responder");
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            0,
+            "left no longer a live responder"
+        );
     }
 
     #[test]
@@ -1258,15 +1429,25 @@ mod tests {
         let id_recent = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
         let id_dead = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
         // Recent peer: last_seen 1h ago (well within 24h) → kept.
-        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
-            params![id_recent, (Utc::now() - Duration::hours(1)).to_rfc3339()]).unwrap();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_recent, (Utc::now() - Duration::hours(1)).to_rfc3339()],
+        )
+        .unwrap();
         // Dead ghost: last_seen 3 days ago → reaped.
-        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
-            params![id_dead, (Utc::now() - Duration::days(3)).to_rfc3339()]).unwrap();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_dead, (Utc::now() - Duration::days(3)).to_rfc3339()],
+        )
+        .unwrap();
 
         let reaped = reap_abandoned_sessions(&conn).unwrap();
         assert_eq!(reaped, 1, "only the 3-day-old ghost is retired");
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "recent peer still live, ghost gone");
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            1,
+            "recent peer still live, ghost gone"
+        );
         // Idempotent: a second pass reaps nothing.
         assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "idempotent");
     }
@@ -1280,14 +1461,28 @@ mod tests {
         let id_future = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
         let id_ghost = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
         // Newest activity is in the FUTURE → now < newest → suspected skew.
-        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
-            params![id_future, (Utc::now() + Duration::hours(1)).to_rfc3339()]).unwrap();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_future, (Utc::now() + Duration::hours(1)).to_rfc3339()],
+        )
+        .unwrap();
         // A normally-reapable 3-day-old ghost — must be spared while skew suspected.
-        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
-            params![id_ghost, (Utc::now() - Duration::days(3)).to_rfc3339()]).unwrap();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![id_ghost, (Utc::now() - Duration::days(3)).to_rfc3339()],
+        )
+        .unwrap();
 
-        assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "clock behind activity → skip reap");
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 2, "no session reaped under suspected skew");
+        assert_eq!(
+            reap_abandoned_sessions(&conn).unwrap(),
+            0,
+            "clock behind activity → skip reap"
+        );
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            2,
+            "no session reaped under suspected skew"
+        );
     }
 
     /// I8: if `now` is absurdly far AHEAD of all recorded activity (>10 years — a
@@ -1296,18 +1491,36 @@ mod tests {
     fn reap_skips_when_clock_is_absurdly_ahead_of_activity() {
         let conn = setup_db();
         let id = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
-        conn.execute("UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
-            params![id, (Utc::now() - Duration::days(SESSION_SKEW_SANITY_DAYS + 30)).to_rfc3339()]).unwrap();
+        conn.execute(
+            "UPDATE discussion_sessions SET last_seen = ?2 WHERE id = ?1",
+            params![
+                id,
+                (Utc::now() - Duration::days(SESSION_SKEW_SANITY_DAYS + 30)).to_rfc3339()
+            ],
+        )
+        .unwrap();
 
-        assert_eq!(reap_abandoned_sessions(&conn).unwrap(), 0, "clock absurdly ahead → skip reap");
-        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 1, "session spared under suspected skew");
+        assert_eq!(
+            reap_abandoned_sessions(&conn).unwrap(),
+            0,
+            "clock absurdly ahead → skip reap"
+        );
+        assert_eq!(
+            count_live_participants(&conn, "d1").unwrap(),
+            1,
+            "session spared under suspected skew"
+        );
     }
 
     #[test]
     fn create_invite_token_yields_kr_join_prefix() {
         let conn = setup_db();
         let issued = create_invite_token(&conn, "d1").unwrap();
-        assert!(issued.token.starts_with("kr-join-"), "token = {}", issued.token);
+        assert!(
+            issued.token.starts_with("kr-join-"),
+            "token = {}",
+            issued.token
+        );
         assert_eq!(issued.disc_id, "d1");
         // Plain token must NOT be stored in DB.
         let count: i64 = conn
@@ -1318,7 +1531,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 0, "plain token must never appear in token_hash column");
+        assert_eq!(
+            count, 0,
+            "plain token must never appear in token_hash column"
+        );
         // The HASH should exist.
         let hash = sha256_hex(&issued.token);
         let count_by_hash: i64 = conn
@@ -1338,15 +1554,19 @@ mod tests {
         // Same token can be consumed by N peers within its 10-min TTL.
         let conn = setup_db();
         let issued = create_invite_token(&conn, "d1").unwrap();
-        let session_a =
-            create_session(&conn, "d1", "Codex", Some("sess-a"), "peer").unwrap();
-        let session_b =
-            create_session(&conn, "d1", "GeminiCli", Some("sess-b"), "peer").unwrap();
+        let session_a = create_session(&conn, "d1", "Codex", Some("sess-a"), "peer").unwrap();
+        let session_b = create_session(&conn, "d1", "GeminiCli", Some("sess-b"), "peer").unwrap();
 
         // First use OK.
-        assert_eq!(consume_invite_token(&conn, &issued.token, session_a).unwrap(), "d1");
+        assert_eq!(
+            consume_invite_token(&conn, &issued.token, session_a).unwrap(),
+            "d1"
+        );
         // Second use ALSO OK (different agent reusing the same invite link).
-        assert_eq!(consume_invite_token(&conn, &issued.token, session_b).unwrap(), "d1");
+        assert_eq!(
+            consume_invite_token(&conn, &issued.token, session_b).unwrap(),
+            "d1"
+        );
     }
 
     #[test]
@@ -1355,20 +1575,20 @@ mod tests {
         // Subsequent uses don't overwrite the audit columns.
         let conn = setup_db();
         let issued = create_invite_token(&conn, "d1").unwrap();
-        let session_a =
-            create_session(&conn, "d1", "Codex", Some("sess-a"), "peer").unwrap();
-        let session_b =
-            create_session(&conn, "d1", "GeminiCli", Some("sess-b"), "peer").unwrap();
+        let session_a = create_session(&conn, "d1", "Codex", Some("sess-a"), "peer").unwrap();
+        let session_b = create_session(&conn, "d1", "GeminiCli", Some("sess-b"), "peer").unwrap();
 
         consume_invite_token(&conn, &issued.token, session_a).unwrap();
         consume_invite_token(&conn, &issued.token, session_b).unwrap();
 
-        let first_user_pk: i64 = conn.query_row(
-            "SELECT used_by_session_id FROM discussion_invite_tokens
+        let first_user_pk: i64 = conn
+            .query_row(
+                "SELECT used_by_session_id FROM discussion_invite_tokens
               WHERE disc_id = 'd1' LIMIT 1",
-            [],
-            |r| r.get(0),
-        ).unwrap();
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
             first_user_pk, session_a,
             "audit column must record FIRST use, not last",
@@ -1386,8 +1606,7 @@ mod tests {
     #[test]
     fn consume_invite_token_rejects_expired_token() {
         let conn = setup_db();
-        let session_id =
-            create_session(&conn, "d1", "Codex", Some("sess"), "peer").unwrap();
+        let session_id = create_session(&conn, "d1", "Codex", Some("sess"), "peer").unwrap();
         // Insert an expired token directly (bypass create_invite_token's
         // chrono::Utc::now to forge the past).
         let plain = "kr-join-expiredtokenfortest";

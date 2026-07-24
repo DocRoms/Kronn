@@ -14,9 +14,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::{
-    response::sse::{Event, Sse},
-};
+use axum::response::sse::{Event, Sse};
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -24,14 +22,14 @@ use crate::agents::runner;
 use crate::models::*;
 use crate::AppState;
 
-use crate::api::disc_helpers::{auth_mode_for, estimate_extra_context_len};
-use crate::api::disc_prompts::build_agent_prompt;
 use super::orchestration::detect_agent_error_hint;
 use super::{
     detect_terminal_signal, truncate_after_signal, AgentStreamEvent, SseStream,
     AGENT_GLOBAL_TIMEOUT, DEFAULT_STALL_TIMEOUT_MIN, MAX_AGENT_RESPONSE_BYTES,
     NON_STREAMING_STALL_TIMEOUT,
 };
+use crate::api::disc_helpers::{auth_mode_for, estimate_extra_context_len};
+use crate::api::disc_prompts::build_agent_prompt;
 
 // ── Decoder-loop detector (shared by make_agent_stream + run_agent_streaming) ──
 //
@@ -81,7 +79,11 @@ pub(super) fn effective_stall_timeout(
     configured: std::time::Duration,
     global: std::time::Duration,
 ) -> std::time::Duration {
-    if is_stream_json { configured } else { global }
+    if is_stream_json {
+        configured
+    } else {
+        global
+    }
 }
 
 /// Whether a finished child run counts as a SUCCESS for batch accounting.
@@ -153,9 +155,12 @@ pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
 /// EVERY child outcome must route through here or the run sticks at n-1/N.
 async fn bump_batch_progress(state: &AppState, run_id: &str, disc_id: &str, child_succeeded: bool) {
     let run_id_inner = run_id.to_string();
-    let batch_updated = state.db.with_conn(move |conn| {
-        crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
-    }).await;
+    let batch_updated = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
+        })
+        .await;
     match batch_updated {
         Ok(Some(updated_run)) => {
             let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
@@ -181,8 +186,10 @@ async fn bump_batch_progress(state: &AppState, run_id: &str, disc_id: &str, chil
             if is_final {
                 tracing::info!(
                     "Batch run {} finished: {}/{} ok, {} failed",
-                    updated_run.id, updated_run.batch_completed,
-                    updated_run.batch_total, updated_run.batch_failed
+                    updated_run.id,
+                    updated_run.batch_completed,
+                    updated_run.batch_total,
+                    updated_run.batch_failed
                 );
             }
         }
@@ -211,15 +218,22 @@ pub(crate) async fn make_agent_stream(
     let run_started_at: std::time::Instant = std::time::Instant::now();
 
     // Extract info from DB
-    let disc = state.db.with_conn({
-        let did = discussion_id.clone();
-        move |conn| crate::db::discussions::get_discussion(conn, &did)
-    }).await.ok().flatten();
+    let disc = state
+        .db
+        .with_conn({
+            let did = discussion_id.clone();
+            move |conn| crate::db::discussions::get_discussion(conn, &did)
+        })
+        .await
+        .ok()
+        .flatten();
 
     if disc.is_none() {
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(
-                Event::default().event("error").data("{\"error\":\"Discussion not found\"}")
+                Event::default()
+                    .event("error")
+                    .data("{\"error\":\"Discussion not found\"}"),
             )
         }));
         return Sse::new(stream);
@@ -229,9 +243,11 @@ pub(crate) async fn make_agent_stream(
         Some(d) => d,
         None => {
             let stream: SseStream = Box::pin(futures::stream::once(async {
-                Ok::<_, Infallible>(Event::default().event("error").data(
-                    serde_json::json!({ "error": "Discussion not found" }).to_string()
-                ))
+                Ok::<_, Infallible>(
+                    Event::default()
+                        .event("error")
+                        .data(serde_json::json!({ "error": "Discussion not found" }).to_string()),
+                )
             }));
             return Sse::new(stream);
         }
@@ -252,10 +268,14 @@ pub(crate) async fn make_agent_stream(
 
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
-        state.db.with_conn(move |conn| {
-            let p = crate::db::projects::get_project(conn, &pid)?;
-            Ok(p.map(|p| p.path).unwrap_or_default())
-        }).await.unwrap_or_default()
+        state
+            .db
+            .with_conn(move |conn| {
+                let p = crate::db::projects::get_project(conn, &pid)?;
+                Ok(p.map(|p| p.path).unwrap_or_default())
+            })
+            .await
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -269,10 +289,14 @@ pub(crate) async fn make_agent_stream(
             // Fetch project name for slug
             let pname = if let Some(ref pid) = disc.project_id {
                 let pid = pid.clone();
-                state.db.with_conn(move |conn| {
-                    let p = crate::db::projects::get_project(conn, &pid)?;
-                    Ok(p.map(|p| p.name).unwrap_or_default())
-                }).await.unwrap_or_default()
+                state
+                    .db
+                    .with_conn(move |conn| {
+                        let p = crate::db::projects::get_project(conn, &pid)?;
+                        Ok(p.map(|p| p.name).unwrap_or_default())
+                    })
+                    .await
+                    .unwrap_or_default()
             } else {
                 String::new()
             };
@@ -282,9 +306,14 @@ pub(crate) async fn make_agent_stream(
                     let did = disc.id.clone();
                     let wp = info.path.clone();
                     let wb = info.branch.clone();
-                    let _ = state.db.with_conn(move |conn| {
-                        crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
-                    }).await;
+                    let _ = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::update_discussion_workspace(
+                                conn, &did, &wp, &wb,
+                            )
+                        })
+                        .await;
                     tracing::info!("Auto re-locked worktree for discussion '{}'", disc.title);
                     workspace_path = Some(info.path);
                 }
@@ -312,16 +341,26 @@ pub(crate) async fn make_agent_stream(
                         timestamp: Utc::now(),
                         tokens_used: 0,
                         auth_mode: None,
-                        model_tier: None, cost_usd: None, author_pseudo: None,
-                        author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
                     };
                     let did = discussion_id.clone();
-                    if let Err(db_err) = state.db.with_conn(move |conn| {
-                        // Both ops even if the insert fails.
-                        let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_err);
-                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
-                        inserted.and(cleared)
-                    }).await {
+                    if let Err(db_err) = state
+                        .db
+                        .with_conn(move |conn| {
+                            // Both ops even if the insert fails.
+                            let inserted =
+                                crate::db::discussions::insert_message(conn, &did, &persisted_err);
+                            let cleared =
+                                crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                            inserted.and(cleared)
+                        })
+                        .await
+                    {
                         tracing::error!("Failed to persist re-lock preflight error: {db_err}");
                     }
                     if let Some(ref run_id) = batch_run_id {
@@ -329,9 +368,9 @@ pub(crate) async fn make_agent_stream(
                     }
                     let stream: SseStream = Box::pin(futures::stream::once(async move {
                         Ok::<_, Infallible>(
-                            Event::default().event("error").data(
-                                serde_json::json!({ "error": err_msg }).to_string()
-                            )
+                            Event::default()
+                                .event("error")
+                                .data(serde_json::json!({ "error": err_msg }).to_string()),
                         )
                     }));
                     return Sse::new(stream);
@@ -346,44 +385,72 @@ pub(crate) async fn make_agent_stream(
     let validation_redaction_scope = if let Some(ref project_id) = disc.project_id {
         let did = disc.id.clone();
         let pid = project_id.clone();
-        match state.db.with_conn(move |conn| {
-            crate::db::audit_runs::validation_discussion_belongs_to_project(conn, &did, &pid)
-        }).await {
+        match state
+            .db
+            .with_conn(move |conn| {
+                crate::db::audit_runs::validation_discussion_belongs_to_project(conn, &did, &pid)
+            })
+            .await
+        {
             Ok(true) => {
                 let root = crate::core::scanner::resolve_host_path(
                     workspace_path.as_deref().unwrap_or(&project_path),
                 );
-                let targets: Vec<String> = crate::api::audit::assemble_chained_steps(
-                    crate::models::AuditKind::Full,
-                ).into_iter().map(|step| step.target_file.to_string()).collect();
+                let targets: Vec<String> =
+                    crate::api::audit::assemble_chained_steps(crate::models::AuditKind::Full)
+                        .into_iter()
+                        .map(|step| step.target_file.to_string())
+                        .collect();
                 if let Err(error) = crate::api::audit::redact_artifacts::sanitize_all(
-                    &root, &targets, "validation-pre-agent",
+                    &root,
+                    &targets,
+                    "validation-pre-agent",
                 ) {
                     tracing::error!(target: "kronn::invariant", disc_id = %discussion_id,
                         error = %error, "validation artifact redaction failed before agent spawn");
                     let safe_error = "Validation bloquée : impossible de garantir la suppression des secrets dans les artefacts d’audit.";
                     let persisted_err = DiscussionMessage {
-                        model: None, lint_report: None, id: Uuid::new_v4().to_string(),
-                        role: MessageRole::System, content: safe_error.to_string(), agent_type: None,
-                        timestamp: Utc::now(), tokens_used: 0, auth_mode: None,
-                        model_tier: None, cost_usd: None, author_pseudo: None,
-                        author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                        model: None,
+                        lint_report: None,
+                        id: Uuid::new_v4().to_string(),
+                        role: MessageRole::System,
+                        content: safe_error.to_string(),
+                        agent_type: None,
+                        timestamp: Utc::now(),
+                        tokens_used: 0,
+                        auth_mode: None,
+                        model_tier: None,
+                        cost_usd: None,
+                        author_pseudo: None,
+                        author_avatar_email: None,
+                        source_msg_id: None,
+                        duration_ms: None,
                     };
                     let did = discussion_id.clone();
-                    if let Err(db_error) = state.db.with_conn(move |conn| {
-                        let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_err);
-                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
-                        inserted.and(cleared)
-                    }).await {
-                        tracing::error!("Failed to persist validation redaction preflight error: {db_error}");
+                    if let Err(db_error) = state
+                        .db
+                        .with_conn(move |conn| {
+                            let inserted =
+                                crate::db::discussions::insert_message(conn, &did, &persisted_err);
+                            let cleared =
+                                crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                            inserted.and(cleared)
+                        })
+                        .await
+                    {
+                        tracing::error!(
+                            "Failed to persist validation redaction preflight error: {db_error}"
+                        );
                     }
                     if let Some(ref run_id) = batch_run_id {
                         bump_batch_progress(&state, run_id, &discussion_id, false).await;
                     }
                     let stream: SseStream = Box::pin(futures::stream::once(async move {
-                        Ok::<_, Infallible>(Event::default().event("error").data(
-                            serde_json::json!({ "error": safe_error }).to_string()
-                        ))
+                        Ok::<_, Infallible>(
+                            Event::default()
+                                .event("error")
+                                .data(serde_json::json!({ "error": safe_error }).to_string()),
+                        )
                     }));
                     return Sse::new(stream);
                 }
@@ -395,27 +462,46 @@ pub(crate) async fn make_agent_stream(
                     error = %error, "could not resolve durable validation-discussion link");
                 let safe_error = "Impossible de vérifier le périmètre de cette discussion avant le lancement de l’agent.";
                 let persisted_err = DiscussionMessage {
-                    model: None, lint_report: None, id: Uuid::new_v4().to_string(),
-                    role: MessageRole::System, content: safe_error.to_string(), agent_type: None,
-                    timestamp: Utc::now(), tokens_used: 0, auth_mode: None,
-                    model_tier: None, cost_usd: None, author_pseudo: None,
-                    author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                    model: None,
+                    lint_report: None,
+                    id: Uuid::new_v4().to_string(),
+                    role: MessageRole::System,
+                    content: safe_error.to_string(),
+                    agent_type: None,
+                    timestamp: Utc::now(),
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
                 };
                 let did = discussion_id.clone();
-                if let Err(db_error) = state.db.with_conn(move |conn| {
-                    let inserted = crate::db::discussions::insert_message(conn, &did, &persisted_err);
-                    let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
-                    inserted.and(cleared)
-                }).await {
-                    tracing::error!("Failed to persist validation-link preflight error: {db_error}");
+                if let Err(db_error) = state
+                    .db
+                    .with_conn(move |conn| {
+                        let inserted =
+                            crate::db::discussions::insert_message(conn, &did, &persisted_err);
+                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                        inserted.and(cleared)
+                    })
+                    .await
+                {
+                    tracing::error!(
+                        "Failed to persist validation-link preflight error: {db_error}"
+                    );
                 }
                 if let Some(ref run_id) = batch_run_id {
                     bump_batch_progress(&state, run_id, &discussion_id, false).await;
                 }
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
-                    Ok::<_, Infallible>(Event::default().event("error").data(
-                        serde_json::json!({ "error": safe_error }).to_string()
-                    ))
+                    Ok::<_, Infallible>(
+                        Event::default()
+                            .event("error")
+                            .data(serde_json::json!({ "error": safe_error }).to_string()),
+                    )
                 }));
                 return Sse::new(stream);
             }
@@ -449,7 +535,11 @@ pub(crate) async fn make_agent_stream(
             .audit_tracker
             .lock()
             .ok()
-            .and_then(|t| disc.project_id.as_ref().map(|pid| t.progress.contains_key(pid)))
+            .and_then(|t| {
+                disc.project_id
+                    .as_ref()
+                    .map(|pid| t.progress.contains_key(pid))
+            })
             .unwrap_or(false);
         if !audit_running {
             if let Some(ref pid) = disc.project_id {
@@ -459,10 +549,15 @@ pub(crate) async fn make_agent_stream(
                 };
                 if let Some(secret) = secret {
                     let pid = pid.clone();
-                    let _ = state.db.with_conn(move |conn| {
-                        let _ = crate::core::mcp_scanner::sync_project_mcps_to_disk(conn, &pid, &secret);
-                        Ok::<_, anyhow::Error>(())
-                    }).await;
+                    let _ = state
+                        .db
+                        .with_conn(move |conn| {
+                            let _ = crate::core::mcp_scanner::sync_project_mcps_to_disk(
+                                conn, &pid, &secret,
+                            );
+                            Ok::<_, anyhow::Error>(())
+                        })
+                        .await;
                 }
             }
         } else {
@@ -479,7 +574,11 @@ pub(crate) async fn make_agent_stream(
             let server_count = std::fs::read_to_string(&mcp_path)
                 .ok()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| v.get("mcpServers").and_then(|m| m.as_object()).map(|m| m.len()))
+                .and_then(|v| {
+                    v.get("mcpServers")
+                        .and_then(|m| m.as_object())
+                        .map(|m| m.len())
+                })
                 .unwrap_or(0);
             tracing::debug!(target: "kronn::mcp",
                 disc_id = %discussion_id,
@@ -514,11 +613,15 @@ pub(crate) async fn make_agent_stream(
                     // by the broker metadata block (tenant id, workspace
                     // slug, …). Auth values stay in this backend process and
                     // are never rendered into agent context.
-                    let plugins = state.db.with_conn(move |conn| {
-                        crate::core::mcp_scanner::collect_active_api_plugins(
-                            conn, &pid, &secret_c,
-                        )
-                    }).await.unwrap_or_default();
+                    let plugins = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::core::mcp_scanner::collect_active_api_plugins(
+                                conn, &pid, &secret_c,
+                            )
+                        })
+                        .await
+                        .unwrap_or_default();
 
                     // Token exchange belongs exclusively to `api_call` at
                     // request time. Resolving it here used to put the bearer
@@ -554,9 +657,14 @@ pub(crate) async fn make_agent_stream(
     // Load context files for prompt injection
     let context_files_prompt = {
         let did = discussion_id.clone();
-        let entries = state.db.with_conn(move |conn| {
-            crate::db::discussions::get_context_files_for_prompt(conn, &did).map_err(|e| anyhow::anyhow!(e))
-        }).await.unwrap_or_default();
+        let entries = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::get_context_files_for_prompt(conn, &did)
+                    .map_err(|e| anyhow::anyhow!(e))
+            })
+            .await
+            .unwrap_or_default();
         crate::core::context_files::build_context_prompt(&entries)
     };
 
@@ -575,17 +683,29 @@ pub(crate) async fn make_agent_stream(
             match mode {
                 "never" => None,
                 "no_project" if has_project => None,
-                _ => config.server.global_context.clone().filter(|g| !g.trim().is_empty()),
+                _ => config
+                    .server
+                    .global_context
+                    .clone()
+                    .filter(|g| !g.trim().is_empty()),
             }
         };
-        (config.tokens.clone(), fa, config.agents.model_tiers.clone(), bio, gc)
+        (
+            config.tokens.clone(),
+            fa,
+            config.agents.model_tiers.clone(),
+            bio,
+            gc,
+        )
     };
 
     // Build the context preamble: user bio (first exchange) + global context (always)
     let context_files_prompt = {
         let mut preamble = String::new();
         if let Some(ref bio) = user_bio {
-            let pseudo = disc.messages.first()
+            let pseudo = disc
+                .messages
+                .first()
                 .and_then(|m| m.author_pseudo.as_deref())
                 .unwrap_or("User");
             preamble.push_str(&format!("--- About the user ({}) ---\n{}\n\n", pseudo, bio));
@@ -604,10 +724,8 @@ pub(crate) async fn make_agent_stream(
     // turn even though the user has `front_api` registered as a
     // linked_repo on the project. Empty string for general (no-project)
     // discussions; cheap (2 DB reads) on project discussions.
-    let companion_context = crate::api::projects::compute_companion_context(
-        &state,
-        disc.project_id.as_deref(),
-    ).await;
+    let companion_context =
+        crate::api::projects::compute_companion_context(&state, disc.project_id.as_deref()).await;
     let context_files_prompt = if companion_context.is_empty() {
         context_files_prompt
     } else {
@@ -617,8 +735,12 @@ pub(crate) async fn make_agent_stream(
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.
     // This mirrors what runner::start_agent_with_config will build.
     let extra_context_len = estimate_extra_context_len(
-        &skill_ids, &directive_ids, &profile_ids,
-        &project_path, global_mcp_context.as_deref(), &agent_type,
+        &skill_ids,
+        &directive_ids,
+        &profile_ids,
+        &project_path,
+        global_mcp_context.as_deref(),
+        &agent_type,
     ) + context_files_prompt.len();
     let prompt = build_agent_prompt(&disc, &agent_type, extra_context_len);
 
@@ -639,10 +761,18 @@ pub(crate) async fn make_agent_stream(
     // Cleared on delivery/error by the task's terminal paths. Best-effort.
     {
         let did_mark = disc_id.clone();
-        if let Err(e) = state.db.with_conn(move |conn| {
-            crate::db::discussions::set_awaiting_agent(conn, &did_mark, true)
-        }).await {
-            tracing::warn!("make_agent_stream: failed to mark awaiting_agent for {}: {}", disc_id, e);
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::set_awaiting_agent(conn, &did_mark, true)
+            })
+            .await
+        {
+            tracing::warn!(
+                "make_agent_stream: failed to mark awaiting_agent for {}: {}",
+                disc_id,
+                e
+            );
         }
     }
 
@@ -663,9 +793,11 @@ pub(crate) async fn make_agent_stream(
         let _permit = match semaphore.acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
-                let _ = tx.send(AgentStreamEvent::Error {
-                    data: serde_json::json!({ "error": "Server shutting down" }),
-                }).await;
+                let _ = tx
+                    .send(AgentStreamEvent::Error {
+                        data: serde_json::json!({ "error": "Server shutting down" }),
+                    })
+                    .await;
                 return;
             }
         };
@@ -686,21 +818,30 @@ pub(crate) async fn make_agent_stream(
         }
 
         let _ = tx.send(AgentStreamEvent::Start).await;
-        let _ = tx.send(AgentStreamEvent::Meta { auth_mode: auth_mode_str.clone() }).await;
+        let _ = tx
+            .send(AgentStreamEvent::Meta {
+                auth_mode: auth_mode_str.clone(),
+            })
+            .await;
 
         match runner::start_agent_with_config(runner::AgentStartConfig {
             work_dir: workspace_path.as_deref(),
             full_access,
-            skill_ids: &skill_ids, directive_ids: &directive_ids, profile_ids: &profile_ids,
+            skill_ids: &skill_ids,
+            directive_ids: &directive_ids,
+            profile_ids: &profile_ids,
             mcp_context_override: global_mcp_context.as_deref(),
-            tier: disc_tier, model_tiers: Some(&model_tiers_config),
+            tier: disc_tier,
+            model_tiers: Some(&model_tiers_config),
             model_override: disc_model.as_deref(),
             context_files_prompt: &context_files_prompt,
             // Forward to the agent process env so the kronn-internal MCP
             // bridge knows which discussion to introspect when called.
             discussion_id: Some(&discussion_id),
             ..runner::AgentStartConfig::new(&agent_type, &project_path, &prompt, &tokens)
-        }).await {
+        })
+        .await
+        {
             Ok(mut process) => {
                 let mut full_response = String::new();
                 let mut stream_json_tokens: u64 = 0;
@@ -741,9 +882,16 @@ pub(crate) async fn make_agent_stream(
                     let did = checkpoint_disc_id.clone();
                     let db = checkpoint_db.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = db.with_conn(move |conn| {
-                            crate::db::discussions::set_partial_response(conn, &did, Some(&partial))
-                        }).await {
+                        if let Err(e) = db
+                            .with_conn(move |conn| {
+                                crate::db::discussions::set_partial_response(
+                                    conn,
+                                    &did,
+                                    Some(&partial),
+                                )
+                            })
+                            .await
+                        {
                             tracing::warn!("partial_response checkpoint failed: {}", e);
                         }
                     });
@@ -758,24 +906,37 @@ pub(crate) async fn make_agent_stream(
                         tokio::time::sleep(Duration::from_millis(500)).await;
                         let lines = match stderr_log_capture.lock() {
                             Ok(g) => g.clone(),
-                            Err(e) => { tracing::warn!("stderr lock poisoned: {}", e); break; }
+                            Err(e) => {
+                                tracing::warn!("stderr lock poisoned: {}", e);
+                                break;
+                            }
                         };
                         if lines.len() > last_len {
                             for line in &lines[last_len..] {
                                 let trimmed = line.trim();
                                 if !trimmed.is_empty() {
-                                    let _ = log_tx.send(AgentStreamEvent::Log { text: trimmed.to_string() }).await;
+                                    let _ = log_tx
+                                        .send(AgentStreamEvent::Log {
+                                            text: trimmed.to_string(),
+                                        })
+                                        .await;
                                 }
                             }
                             last_len = lines.len();
                         }
-                        if log_tx.is_closed() { break; }
+                        if log_tx.is_closed() {
+                            break;
+                        }
                     }
                 });
                 let stall_timeout_min = {
                     let cfg = state.config.read().await;
                     let t = cfg.server.agent_stall_timeout_min;
-                    if t > 0 { t } else { DEFAULT_STALL_TIMEOUT_MIN }
+                    if t > 0 {
+                        t
+                    } else {
+                        DEFAULT_STALL_TIMEOUT_MIN
+                    }
                 };
                 // Streaming agents use the configured stall; non-streaming
                 // (Text) agents are silent until the end and rely on the global
@@ -853,7 +1014,11 @@ pub(crate) async fn make_agent_stream(
                                 // deltas (". ", "\n") can repeat legitimately
                                 // in formatted output without signalling a
                                 // decoder loop.
-                                if is_decoder_loop(&text, &mut last_text_delta, &mut repeat_delta_count) {
+                                if is_decoder_loop(
+                                    &text,
+                                    &mut last_text_delta,
+                                    &mut repeat_delta_count,
+                                ) {
                                     tracing::warn!(
                                         "Agent stream entered a decoder loop — same delta {:?} repeated {} times, aborting",
                                         text.chars().take(40).collect::<String>(),
@@ -879,7 +1044,10 @@ pub(crate) async fn make_agent_stream(
                                 }
                                 // Terminal-signal detection — see TERMINAL_SIGNALS doc.
                                 if let Some(sig) = detect_terminal_signal(&full_response) {
-                                    tracing::info!("Terminal signal {} detected — stopping agent", sig);
+                                    tracing::info!(
+                                        "Terminal signal {} detected — stopping agent",
+                                        sig
+                                    );
                                     // Strip anything the LLM wrote AFTER the signal in
                                     // the same chunk (orphan letters, half-sentences).
                                     // The skill rule is "STOP immediately after the
@@ -898,8 +1066,13 @@ pub(crate) async fn make_agent_stream(
                                     break;
                                 }
                             }
-                            runner::StreamJsonEvent::Usage { input_tokens, output_tokens, cost_usd } => {
-                                stream_json_tokens = stream_json_tokens.max(input_tokens + output_tokens);
+                            runner::StreamJsonEvent::Usage {
+                                input_tokens,
+                                output_tokens,
+                                cost_usd,
+                            } => {
+                                stream_json_tokens =
+                                    stream_json_tokens.max(input_tokens + output_tokens);
                                 if let Some(c) = cost_usd {
                                     stream_json_cost = Some(c);
                                 }
@@ -913,7 +1086,10 @@ pub(crate) async fn make_agent_stream(
                             }
                             runner::StreamJsonEvent::ToolEnd => {
                                 if let Some(ref tool) = current_tool {
-                                    let log = crate::api::disc_git::format_tool_log(tool, &current_tool_input);
+                                    let log = crate::api::disc_git::format_tool_log(
+                                        tool,
+                                        &current_tool_input,
+                                    );
                                     if !client_gone {
                                         let _ = tx.send(AgentStreamEvent::Log { text: log }).await;
                                     }
@@ -928,7 +1104,9 @@ pub(crate) async fn make_agent_stream(
                                     //     MCP servers, etc.).
                                     match classify_tool_call(tool, &current_tool_input) {
                                         ToolRecord::Kronn(record) => kronn_tool_calls.push(record),
-                                        ToolRecord::Native(record) => native_tool_calls.push(record),
+                                        ToolRecord::Native(record) => {
+                                            native_tool_calls.push(record)
+                                        }
                                     }
                                 }
                                 current_tool = None;
@@ -982,17 +1160,28 @@ pub(crate) async fn make_agent_stream(
                 // Kill agent on timeout/stall OR terminal signal OR size cap
                 // OR user-triggered cancel OR decoder-loop detection
                 // (process may still be running and producing output here).
-                if was_interrupted || stopped_on_signal.is_some() || stopped_on_size || stopped_on_cancel || stopped_on_loop {
+                if was_interrupted
+                    || stopped_on_signal.is_some()
+                    || stopped_on_size
+                    || stopped_on_cancel
+                    || stopped_on_loop
+                {
                     let _ = process.child.kill().await;
                 }
 
                 let status = process.child.wait().await;
                 process.fix_ownership();
-                let validation_redaction_error = validation_redaction_scope.as_ref().and_then(
-                    |(root, targets)| crate::api::audit::redact_artifacts::sanitize_all(
-                        root, targets, "validation-post-agent",
-                    ).err()
-                );
+                let validation_redaction_error =
+                    validation_redaction_scope
+                        .as_ref()
+                        .and_then(|(root, targets)| {
+                            crate::api::audit::redact_artifacts::sanitize_all(
+                                root,
+                                targets,
+                                "validation-post-agent",
+                            )
+                            .err()
+                        });
                 let exit_info = match &status {
                     Ok(s) => format!("exit code: {:?}", s.code()),
                     Err(e) => format!("wait error: {}", e),
@@ -1067,7 +1256,9 @@ pub(crate) async fn make_agent_stream(
                 if full_response.is_empty() && !success {
                     tracing::error!(
                         "Agent {:?} exited with error ({}). stderr ({} lines): {}",
-                        agent_type, exit_info, stderr_lines.len(),
+                        agent_type,
+                        exit_info,
+                        stderr_lines.len(),
                         // Truncate stderr by char count, not byte count.
                         // Agent stderr may contain UTF-8 (French error
                         // messages, emoji from npm, etc.) — `&s[..500]`
@@ -1089,7 +1280,10 @@ pub(crate) async fn make_agent_stream(
                             exit_info
                         );
                     } else {
-                        full_response = format!("[Agent exited with error] ({})\n\n{}", exit_info, stderr_text);
+                        full_response = format!(
+                            "[Agent exited with error] ({})\n\n{}",
+                            exit_info, stderr_text
+                        );
                     }
                 }
 
@@ -1118,7 +1312,8 @@ pub(crate) async fn make_agent_stream(
                 let tokens_used = if stream_json_tokens > 0 {
                     stream_json_tokens
                 } else {
-                    let (cleaned, count) = runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
+                    let (cleaned, count) =
+                        runner::parse_token_usage(&agent_type, &full_response, &stderr_lines);
                     if count > 0 {
                         full_response = cleaned;
                     }
@@ -1141,7 +1336,10 @@ pub(crate) async fn make_agent_stream(
                 let cost_usd = stream_json_cost.or_else(|| {
                     if tokens_used > 0 {
                         {
-                            let at_str = serde_json::to_string(&agent_type).unwrap_or_default().trim_matches('"').to_string();
+                            let at_str = serde_json::to_string(&agent_type)
+                                .unwrap_or_default()
+                                .trim_matches('"')
+                                .to_string();
                             crate::core::pricing::estimate_cost(&at_str, tokens_used)
                         }
                     } else {
@@ -1163,14 +1361,23 @@ pub(crate) async fn make_agent_stream(
                 // sibling repo (front_apollo, …) isn't flagged "couldn't verify".
                 let linked_repo_paths: Vec<String> = if let Some(ref pid) = disc.project_id {
                     let pid = pid.clone();
-                    state.db.with_conn(move |conn| {
-                        let p = crate::db::projects::get_project(conn, &pid)?;
-                        Ok(p.map(|p| p.linked_repos.into_iter()
-                            .map(|lr| lr.location)
-                            .filter(|loc| !loc.starts_with("http://") && !loc.starts_with("https://"))
-                            .collect::<Vec<_>>())
+                    state
+                        .db
+                        .with_conn(move |conn| {
+                            let p = crate::db::projects::get_project(conn, &pid)?;
+                            Ok(p.map(|p| {
+                                p.linked_repos
+                                    .into_iter()
+                                    .map(|lr| lr.location)
+                                    .filter(|loc| {
+                                        !loc.starts_with("http://") && !loc.starts_with("https://")
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
                             .unwrap_or_default())
-                    }).await.unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -1222,9 +1429,11 @@ pub(crate) async fn make_agent_stream(
 
                 let did = disc_id.clone();
                 let msg = agent_msg.clone();
-                if let Err(e) = state.db.with_conn(move |conn| {
-                    crate::db::discussions::insert_message(conn, &did, &msg)
-                }).await {
+                if let Err(e) = state
+                    .db
+                    .with_conn(move |conn| crate::db::discussions::insert_message(conn, &did, &msg))
+                    .await
+                {
                     tracing::error!("Failed to save agent message: {e}");
                 }
                 // F1 — federate the native-runner reply to peers of a shared
@@ -1252,7 +1461,9 @@ pub(crate) async fn make_agent_stream(
                         lint_report: None,
                         id: Uuid::new_v4().to_string(),
                         role: MessageRole::System,
-                        content: crate::core::anti_halluc::enforce_refusal_message(fabricated_count),
+                        content: crate::core::anti_halluc::enforce_refusal_message(
+                            fabricated_count,
+                        ),
                         agent_type: None,
                         timestamp: Utc::now(),
                         tokens_used: 0,
@@ -1266,9 +1477,13 @@ pub(crate) async fn make_agent_stream(
                     };
                     let did_ref = disc_id.clone();
                     let m = refusal.clone();
-                    if let Err(e) = state.db.with_conn(move |conn| {
-                        crate::db::discussions::insert_message(conn, &did_ref, &m)
-                    }).await {
+                    if let Err(e) = state
+                        .db
+                        .with_conn(move |conn| {
+                            crate::db::discussions::insert_message(conn, &did_ref, &m)
+                        })
+                        .await
+                    {
                         tracing::warn!("Failed to insert enforce refusal system message: {e}");
                     }
                     tracing::info!(
@@ -1292,7 +1507,8 @@ pub(crate) async fn make_agent_stream(
                 // one — defensive, no behaviour change for them.
                 let markers = super::slash_markers::parse_markers(&agent_msg.content);
                 if !markers.is_empty() {
-                    let resolutions = super::slash_markers::resolve_markers(&state, &disc_id, &markers).await;
+                    let resolutions =
+                        super::slash_markers::resolve_markers(&state, &disc_id, &markers).await;
                     for body in resolutions {
                         let sys_msg = DiscussionMessage {
                             model: None,
@@ -1307,19 +1523,26 @@ pub(crate) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                            author_avatar_email: None,
+                            source_msg_id: None,
+                            duration_ms: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
-                        if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::discussions::insert_message(conn, &did_sys, &m)
-                        }).await {
+                        if let Err(e) = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::discussions::insert_message(conn, &did_sys, &m)
+                            })
+                            .await
+                        {
                             tracing::warn!("Failed to insert slash-marker system message: {e}");
                         }
                     }
                     tracing::info!(
                         "Resolved {} slash-marker(s) for disc {}",
-                        markers.len(), disc_id
+                        markers.len(),
+                        disc_id
                     );
                 }
 
@@ -1348,19 +1571,28 @@ pub(crate) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                            author_avatar_email: None,
+                            source_msg_id: None,
+                            duration_ms: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
-                        if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::discussions::insert_message(conn, &did_sys, &m)
-                        }).await {
-                            tracing::warn!("Failed to insert kronn-internal tool-call system message: {e}");
+                        if let Err(e) = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::discussions::insert_message(conn, &did_sys, &m)
+                            })
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to insert kronn-internal tool-call system message: {e}"
+                            );
                         }
                     }
                     tracing::info!(
                         "Persisted {} kronn-internal MCP tool-call(s) for disc {}",
-                        kronn_tool_calls.len(), disc_id
+                        kronn_tool_calls.len(),
+                        disc_id
                     );
                 }
 
@@ -1386,19 +1618,28 @@ pub(crate) async fn make_agent_stream(
                             model_tier: None,
                             cost_usd: None,
                             author_pseudo: None,
-                            author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                            author_avatar_email: None,
+                            source_msg_id: None,
+                            duration_ms: None,
                         };
                         let did_sys = disc_id.clone();
                         let m = sys_msg.clone();
-                        if let Err(e) = state.db.with_conn(move |conn| {
-                            crate::db::discussions::insert_message(conn, &did_sys, &m)
-                        }).await {
-                            tracing::warn!("Failed to insert agent-native tool-call system message: {e}");
+                        if let Err(e) = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::discussions::insert_message(conn, &did_sys, &m)
+                            })
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to insert agent-native tool-call system message: {e}"
+                            );
                         }
                     }
                     tracing::info!(
                         "Persisted {} agent-native tool-call(s) for disc {}",
-                        native_tool_calls.len(), disc_id
+                        native_tool_calls.len(),
+                        disc_id
                     );
                 }
 
@@ -1411,14 +1652,19 @@ pub(crate) async fn make_agent_stream(
                 // interruption mid-run stays flagged and the boot reconcile
                 // catches it — no blind window.
                 let did_clear = disc_id.clone();
-                let _ = state.db.with_conn(move |conn| {
-                    // Attempt both clears even if the first fails — a `?` here
-                    // would leave the awaiting marker stale on a partial-clear
-                    // error and trigger needless boot reconcile work.
-                    let partial = crate::db::discussions::set_partial_response(conn, &did_clear, None);
-                    let awaiting = crate::db::discussions::set_awaiting_agent(conn, &did_clear, false);
-                    partial.and(awaiting)
-                }).await;
+                let _ = state
+                    .db
+                    .with_conn(move |conn| {
+                        // Attempt both clears even if the first fails — a `?` here
+                        // would leave the awaiting marker stale on a partial-clear
+                        // error and trigger needless boot reconcile work.
+                        let partial =
+                            crate::db::discussions::set_partial_response(conn, &did_clear, None);
+                        let awaiting =
+                            crate::db::discussions::set_awaiting_agent(conn, &did_clear, false);
+                        partial.and(awaiting)
+                    })
+                    .await;
 
                 // ── 0.8.4 (#329 / F9) Auto-archive on validation complete ──
                 //
@@ -1440,15 +1686,24 @@ pub(crate) async fn make_agent_stream(
                 if let Some(sig) = stopped_on_signal {
                     if super::signal_should_auto_archive(sig) {
                         let did_archive = disc_id.clone();
-                        let archived = state.db.with_conn(move |conn| {
-                            crate::db::discussions::update_discussion(
-                                conn, &did_archive, None, Some(true), None, None,
-                            )
-                        }).await;
+                        let archived = state
+                            .db
+                            .with_conn(move |conn| {
+                                crate::db::discussions::update_discussion(
+                                    conn,
+                                    &did_archive,
+                                    None,
+                                    Some(true),
+                                    None,
+                                    None,
+                                )
+                            })
+                            .await;
                         match archived {
                             Ok(true) => tracing::info!(
                                 "Auto-archived discussion {} after terminal signal {}",
-                                disc_id, sig,
+                                disc_id,
+                                sig,
                             ),
                             Ok(false) => tracing::warn!(
                                 "Auto-archive of disc {} returned no-op (disc deleted?)",
@@ -1456,7 +1711,9 @@ pub(crate) async fn make_agent_stream(
                             ),
                             Err(e) => tracing::warn!(
                                 "Auto-archive failed for disc {} on {}: {}",
-                                disc_id, sig, e,
+                                disc_id,
+                                sig,
+                                e,
                             ),
                         }
                     }
@@ -1474,7 +1731,12 @@ pub(crate) async fn make_agent_stream(
                 }
 
                 // Detect KRONN:BRIEFING_COMPLETE marker
-                if success && agent_msg.content.to_uppercase().contains("KRONN:BRIEFING_COMPLETE") {
+                if success
+                    && agent_msg
+                        .content
+                        .to_uppercase()
+                        .contains("KRONN:BRIEFING_COMPLETE")
+                {
                     if let Some(ref pid) = disc_project_id {
                         let briefing_project_id = pid.clone();
                         let briefing_project_path = project_path.clone();
@@ -1482,20 +1744,38 @@ pub(crate) async fn make_agent_stream(
                         tokio::spawn(async move {
                             // Read briefing.md from the project's docs folder.
                             // Path-agnostic — works on docs/ post-pivot AND legacy ai/.
-                            let resolved = crate::core::scanner::resolve_host_path(&briefing_project_path);
-                            let briefing_file = crate::core::scanner::detect_docs_dir(&resolved).join("briefing.md");
+                            let resolved =
+                                crate::core::scanner::resolve_host_path(&briefing_project_path);
+                            let briefing_file = crate::core::scanner::detect_docs_dir(&resolved)
+                                .join("briefing.md");
                             let notes = tokio::task::spawn_blocking(move || {
                                 std::fs::read_to_string(&briefing_file).ok()
-                            }).await.unwrap_or(None);
+                            })
+                            .await
+                            .unwrap_or(None);
 
                             if let Some(content) = notes {
                                 let pid = briefing_project_id.clone();
-                                if let Err(e) = briefing_state.db.with_conn(move |conn| {
-                                    crate::db::projects::update_project_briefing_notes(conn, &pid, Some(&content))
-                                }).await {
-                                    tracing::error!("Failed to save briefing notes for project {}: {e}", briefing_project_id);
+                                if let Err(e) = briefing_state
+                                    .db
+                                    .with_conn(move |conn| {
+                                        crate::db::projects::update_project_briefing_notes(
+                                            conn,
+                                            &pid,
+                                            Some(&content),
+                                        )
+                                    })
+                                    .await
+                                {
+                                    tracing::error!(
+                                        "Failed to save briefing notes for project {}: {e}",
+                                        briefing_project_id
+                                    );
                                 } else {
-                                    tracing::info!("Briefing notes saved for project {}", briefing_project_id);
+                                    tracing::info!(
+                                        "Briefing notes saved for project {}",
+                                        briefing_project_id
+                                    );
                                 }
                             } else {
                                 tracing::warn!("BRIEFING_COMPLETE detected but ai/briefing.md not found for project {}", briefing_project_id);
@@ -1512,9 +1792,12 @@ pub(crate) async fn make_agent_stream(
                     let summary_tokens = tokens.clone();
                     tokio::spawn(async move {
                         super::orchestration::maybe_generate_summary(
-                            &summary_state, &summary_disc_id,
-                            &summary_agent_type, &summary_tokens,
-                        ).await;
+                            &summary_state,
+                            &summary_disc_id,
+                            &summary_agent_type,
+                            &summary_tokens,
+                        )
+                        .await;
                     });
                 }
 
@@ -1534,21 +1817,30 @@ pub(crate) async fn make_agent_stream(
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
-                    model_tier: None, cost_usd: None, author_pseudo: None, author_avatar_email: None, source_msg_id: None, duration_ms: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
                 };
 
                 let did = disc_id.clone();
                 let err_msg_fed = err_msg.clone();
-                if let Err(db_err) = state.db.with_conn(move |conn| {
-                    // The agent was handled (it failed to start), so it's
-                    // no longer "owed a run": clear the marker so the boot
-                    // reconcile doesn't later flag this as interrupted. Both
-                    // ops run even if the insert fails — a `?` would leave the
-                    // marker stale exactly when the run never started.
-                    let inserted = crate::db::discussions::insert_message(conn, &did, &err_msg);
-                    let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
-                    inserted.and(cleared)
-                }).await {
+                if let Err(db_err) = state
+                    .db
+                    .with_conn(move |conn| {
+                        // The agent was handled (it failed to start), so it's
+                        // no longer "owed a run": clear the marker so the boot
+                        // reconcile doesn't later flag this as interrupted. Both
+                        // ops run even if the insert fails — a `?` would leave the
+                        // marker stale exactly when the run never started.
+                        let inserted = crate::db::discussions::insert_message(conn, &did, &err_msg);
+                        let cleared = crate::db::discussions::set_awaiting_agent(conn, &did, false);
+                        inserted.and(cleared)
+                    })
+                    .await
+                {
                     tracing::error!("Failed to save agent error message: {db_err}");
                 }
                 // F1 — let the peer see the turn failed instead of silence.
@@ -1739,18 +2031,24 @@ pub(super) async fn run_agent_streaming(
             Some(s) => format!("exit code: {:?}", s.code),
             None => "exit status unavailable".to_string(),
         };
-        tracing::error!("Agent {:?} exited with error ({}). stderr: {}",
-            agent_type, exit_info,
+        tracing::error!(
+            "Agent {:?} exited with error ({}). stderr: {}",
+            agent_type,
+            exit_info,
             // Char-count truncation — see twin site above for rationale.
             if stderr_text.chars().count() > 500 {
                 stderr_text.chars().take(500).collect::<String>()
             } else {
                 stderr_text.clone()
-            });
+            }
+        );
         full_response = if stderr_text.is_empty() {
             format!("[Agent exited with error] ({})", exit_info)
         } else {
-            format!("[Agent exited with error] ({})\n\n{}", exit_info, stderr_text)
+            format!(
+                "[Agent exited with error] ({})\n\n{}",
+                exit_info, stderr_text
+            )
         };
     } else if full_response.is_empty() {
         full_response = "[No response]".to_string();
@@ -1767,11 +2065,16 @@ pub(super) async fn run_agent_streaming(
         stream_tokens
     } else {
         let (cleaned, count) = runner::parse_token_usage(agent_type, &full_response, &stderr);
-        if count > 0 { full_response = cleaned; }
+        if count > 0 {
+            full_response = cleaned;
+        }
         count
     };
 
-    AgentRunResult { response: full_response, tokens_used }
+    AgentRunResult {
+        response: full_response,
+        tokens_used,
+    }
 }
 
 /// Run an agent silently (no SSE streaming), return collected text.
@@ -1812,7 +2115,6 @@ pub(super) async fn run_agent_collect(mut process: impl runner::AgentIo) -> Stri
     let _ = process.wait().await;
     output.trim().to_string()
 }
-
 
 /// Render `kronn-internal` tool args as a compact human-readable
 /// string for the System-message badge in the disc transcript. The
@@ -1859,8 +2161,14 @@ fn pretty_kronn_args(tool_name: &str, raw_json: &str) -> String {
                 .map(str::to_owned)
                 .or_else(|| val.get("idx").map(|value| value.to_string()))
                 .unwrap_or_default();
-            let before = val.get("before").and_then(|value| value.as_u64()).unwrap_or(0);
-            let after = val.get("after").and_then(|value| value.as_u64()).unwrap_or(0);
+            let before = val
+                .get("before")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
+            let after = val
+                .get("after")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(0);
             match (before, after) {
                 (0, 0) => selector,
                 _ => format!("{}, -{}/+{}", selector, before, after),
@@ -1869,7 +2177,10 @@ fn pretty_kronn_args(tool_name: &str, raw_json: &str) -> String {
         "disc_summarize" => {
             let from = val.get("from").and_then(|v| v.as_i64());
             let to = val.get("to").and_then(|v| v.as_i64());
-            let force = val.get("force_refresh").and_then(|v| v.as_bool()).unwrap_or(false);
+            let force = val
+                .get("force_refresh")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             match (from, to) {
                 (Some(f), Some(t)) if force => format!("{}..{}, refresh", f, t),
                 (Some(f), Some(t)) => format!("{}..{}", f, t),
@@ -1919,7 +2230,10 @@ mod pretty_kronn_args_tests {
     #[test]
     fn summarize_with_refresh_appends_flag() {
         assert_eq!(
-            pretty_kronn_args("disc_summarize", r#"{"from":0,"to":5,"force_refresh":true}"#),
+            pretty_kronn_args(
+                "disc_summarize",
+                r#"{"from":0,"to":5,"force_refresh":true}"#
+            ),
             "0..5, refresh",
         );
     }
@@ -1941,7 +2255,10 @@ mod pretty_kronn_args_tests {
 
 #[cfg(test)]
 mod agent_lifecycle_tests {
-    use super::{effective_stall_timeout, child_run_counts_as_success, cap_agent_response, AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT};
+    use super::{
+        cap_agent_response, child_run_counts_as_success, effective_stall_timeout,
+        AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
+    };
     use std::time::Duration;
 
     // ── #1 — stall watchdog must not apply to non-streaming agents ──
@@ -1969,10 +2286,14 @@ mod agent_lifecycle_tests {
             NON_STREAMING_STALL_TIMEOUT,
             "Codex/Text agents use the bounded non-streaming stall",
         );
-        assert!(NON_STREAMING_STALL_TIMEOUT > configured,
-            "must outlast the short streaming stall (else slow non-streamers die early)");
-        assert!(NON_STREAMING_STALL_TIMEOUT < AGENT_GLOBAL_TIMEOUT,
-            "must be SHORTER than the global, else a hung run squats its slot too long");
+        assert!(
+            NON_STREAMING_STALL_TIMEOUT > configured,
+            "must outlast the short streaming stall (else slow non-streamers die early)"
+        );
+        assert!(
+            NON_STREAMING_STALL_TIMEOUT < AGENT_GLOBAL_TIMEOUT,
+            "must be SHORTER than the global, else a hung run squats its slot too long"
+        );
     }
 
     // ── #2 — empty-but-clean-exit child is NOT a batch success ──
@@ -1980,18 +2301,30 @@ mod agent_lifecycle_tests {
 
     #[test]
     fn clean_exit_with_real_reply_is_success() {
-        assert!(child_run_counts_as_success(true, "Triage:\n- clear: EW-1 ready to frame"));
+        assert!(child_run_counts_as_success(
+            true,
+            "Triage:\n- clear: EW-1 ready to frame"
+        ));
     }
 
     #[test]
     fn clean_exit_with_blank_reply_is_not_success() {
-        assert!(!child_run_counts_as_success(true, ""), "empty reply ≠ success");
-        assert!(!child_run_counts_as_success(true, "   \n\t  "), "whitespace-only ≠ success");
+        assert!(
+            !child_run_counts_as_success(true, ""),
+            "empty reply ≠ success"
+        );
+        assert!(
+            !child_run_counts_as_success(true, "   \n\t  "),
+            "whitespace-only ≠ success"
+        );
     }
 
     #[test]
     fn failed_exit_is_never_success_even_with_partial_text() {
-        assert!(!child_run_counts_as_success(false, "partial output before crash"));
+        assert!(!child_run_counts_as_success(
+            false,
+            "partial output before crash"
+        ));
     }
 
     // ── cap_agent_response — the source fix: no multi-MB message reaches
@@ -2007,7 +2340,11 @@ mod agent_lifecycle_tests {
     fn oversized_response_is_capped_with_marker() {
         let huge = "x".repeat(3_000_000); // ~2.4 MB Codex dump shape
         let out = cap_agent_response(huge, 2_000_000);
-        assert!(out.len() <= 2_000_000 + 80, "must be bounded near the limit, got {}", out.len());
+        assert!(
+            out.len() <= 2_000_000 + 80,
+            "must be bounded near the limit, got {}",
+            out.len()
+        );
         assert!(out.contains("tronqué"), "must signal truncation");
     }
 
@@ -2017,7 +2354,7 @@ mod agent_lifecycle_tests {
         // is_char_boundary guard (French stderr / emoji are common).
         let s = "é".repeat(1000); // 2000 bytes
         let out = cap_agent_response(s, 1001); // 1001 lands mid-'é'
-        // No panic + still valid UTF-8 (String guarantees it if no panic).
+                                               // No panic + still valid UTF-8 (String guarantees it if no panic).
         assert!(out.contains("tronqué"));
         assert!(out.len() <= 1001 + 80);
     }
@@ -2030,7 +2367,10 @@ mod truncate_tool_args_tests {
     #[test]
     fn short_input_passes_through_unchanged() {
         assert_eq!(truncate_tool_args("hello", 120), "hello");
-        assert_eq!(truncate_tool_args(r#"{"file":"a.rs"}"#, 120), r#"{"file":"a.rs"}"#);
+        assert_eq!(
+            truncate_tool_args(r#"{"file":"a.rs"}"#, 120),
+            r#"{"file":"a.rs"}"#
+        );
     }
 
     #[test]
@@ -2057,7 +2397,7 @@ mod truncate_tool_args_tests {
         // would panic. .chars().take() is boundary-safe by definition.
         let raw = "écoute 🦀 ".repeat(30);
         let out = truncate_tool_args(&raw, 20);
-        assert_eq!(out.chars().count(), 21);  // 20 + ellipsis
+        assert_eq!(out.chars().count(), 21); // 20 + ellipsis
     }
 
     #[test]
@@ -2149,8 +2489,8 @@ mod run_agent_streaming_tests {
     //! truncation, decoder-loop abort, and the error-exit message — all
     //! without spawning a CLI or burning tokens.
     use super::{run_agent_streaming, AgentStreamMeta};
-    use crate::api::discussions::AgentStreamEvent;
     use crate::agents::runner::ScriptedProcess;
+    use crate::api::discussions::AgentStreamEvent;
     use crate::models::AgentType;
 
     fn text_delta(s: &str) -> String {
@@ -2199,7 +2539,8 @@ mod run_agent_streaming_tests {
         let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
         drop(tx);
         assert_eq!(res.response, "line one\nline two");
-        let chunks = drain(rx).into_iter()
+        let chunks = drain(rx)
+            .into_iter()
             .filter(|e| matches!(e, AgentStreamEvent::Chunk { .. }))
             .count();
         assert_eq!(chunks, 2, "one Chunk per raw line");
@@ -2212,7 +2553,9 @@ mod run_agent_streaming_tests {
         let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
         drop(tx);
         assert_eq!(res.response, "Hello world");
-        assert!(drain(rx).iter().any(|e| matches!(e, AgentStreamEvent::Chunk { .. })));
+        assert!(drain(rx)
+            .iter()
+            .any(|e| matches!(e, AgentStreamEvent::Chunk { .. })));
     }
 
     #[tokio::test]
@@ -2232,10 +2575,15 @@ mod run_agent_streaming_tests {
         drop(tx);
         // Tool JSON must NOT leak into the prose response.
         assert_eq!(res.response, "Reading file. Done.");
-        let logs: Vec<_> = drain(rx).into_iter()
+        let logs: Vec<_> = drain(rx)
+            .into_iter()
             .filter(|e| matches!(e, AgentStreamEvent::Log { .. }))
             .collect();
-        assert_eq!(logs.len(), 1, "exactly one Log event for the Read tool call");
+        assert_eq!(
+            logs.len(),
+            1,
+            "exactly one Log event for the Read tool call"
+        );
         if let AgentStreamEvent::Log { text } = &logs[0] {
             assert!(text.contains("Read"), "log should name the tool: {text}");
         }
@@ -2257,7 +2605,8 @@ mod run_agent_streaming_tests {
         assert!(res.response.contains("Architecture proposed."));
         assert!(
             !res.response.contains("trailing line must never be reached"),
-            "content after the terminal signal must be truncated: {:?}", res.response
+            "content after the terminal signal must be truncated: {:?}",
+            res.response
         );
         let _ = drain(rx);
     }
@@ -2293,8 +2642,16 @@ mod run_agent_streaming_tests {
             .with_stderr(["boom: something failed"]);
         let res = run_agent_streaming(proc, &tx, &meta(), &AgentType::ClaudeCode).await;
         drop(tx);
-        assert!(res.response.contains("[Agent exited with error]"), "got: {:?}", res.response);
-        assert!(res.response.contains("boom: something failed"), "stderr should surface: {:?}", res.response);
+        assert!(
+            res.response.contains("[Agent exited with error]"),
+            "got: {:?}",
+            res.response
+        );
+        assert!(
+            res.response.contains("boom: something failed"),
+            "stderr should surface: {:?}",
+            res.response
+        );
         let _ = drain(rx);
     }
 
@@ -2353,9 +2710,18 @@ mod stream_helpers_tests {
         // output (". ", "\n") and must NEVER trip the detector.
         let (mut last, mut count) = (String::new(), 0u32);
         for _ in 0..200 {
-            assert!(!is_decoder_loop(". ", &mut last, &mut count), "short delta must not fire");
-            assert!(!is_decoder_loop("\n\n\n", &mut last, &mut count), "whitespace delta must not fire");
-            assert!(!is_decoder_loop("a", &mut last, &mut count), "1-char delta must not fire");
+            assert!(
+                !is_decoder_loop(". ", &mut last, &mut count),
+                "short delta must not fire"
+            );
+            assert!(
+                !is_decoder_loop("\n\n\n", &mut last, &mut count),
+                "whitespace delta must not fire"
+            );
+            assert!(
+                !is_decoder_loop("a", &mut last, &mut count),
+                "1-char delta must not fire"
+            );
         }
         assert_eq!(count, 0, "ignored deltas never increment the counter");
     }
@@ -2376,7 +2742,10 @@ mod stream_helpers_tests {
         let r = classify_tool_call("mcp__kronn-internal__disc_get_message", r#"{"idx":4}"#);
         match r {
             ToolRecord::Kronn(s) => {
-                assert!(s.starts_with("[kronn-internal: disc_get_message("), "got {s}");
+                assert!(
+                    s.starts_with("[kronn-internal: disc_get_message("),
+                    "got {s}"
+                );
                 assert!(s.contains('4'), "pretty args should surface the idx: {s}");
             }
             ToolRecord::Native(_) => panic!("kronn-internal prefix must map to Kronn bucket"),
@@ -2412,8 +2781,14 @@ mod stream_helpers_tests {
         let r = classify_tool_call("Write", &big);
         match r {
             ToolRecord::Native(s) => {
-                assert!(s.contains('…'), "long input should be truncated with ellipsis: {s}");
-                assert!(s.len() < big.len(), "record must be shorter than the raw input");
+                assert!(
+                    s.contains('…'),
+                    "long input should be truncated with ellipsis: {s}"
+                );
+                assert!(
+                    s.len() < big.len(),
+                    "record must be shorter than the raw input"
+                );
             }
             ToolRecord::Kronn(_) => panic!("Write is native"),
         }

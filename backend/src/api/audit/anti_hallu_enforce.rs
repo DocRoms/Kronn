@@ -94,7 +94,11 @@ path / out-of-bounds line / outside the project is treated as **fabricated** and
     ));
     out.push_str("Fabricated citations:\n");
     for s in &verdict.fabricated {
-        out.push_str(&format!("- `[src: {}]` → {}\n", s.raw.trim(), s.detail.trim()));
+        out.push_str(&format!(
+            "- `[src: {}]` → {}\n",
+            s.raw.trim(),
+            s.detail.trim()
+        ));
     }
     out.push_str(
         "\nFor EACH one: either correct it to a real `path:line` you have actually read, OR \
@@ -159,7 +163,10 @@ mod tests {
         fs::write(dir.path().join("real.rs"), "line1\nline2\nline3\n").unwrap();
         let content = "Stack uses real.rs [src: file: real.rs:2].";
         let verdict = lint_step_file(content, &[dir.path()]);
-        assert!(verdict.is_clean(), "verified citation must not be fabricated");
+        assert!(
+            verdict.is_clean(),
+            "verified citation must not be fabricated"
+        );
     }
 
     #[test]
@@ -185,7 +192,10 @@ mod tests {
         let clean = CitationVerdict::default();
         assert_eq!(decide(&clean, 1, MAX_ATTEMPTS), GateDecision::Pass);
         // Clean always passes, even on the last attempt.
-        assert_eq!(decide(&clean, MAX_ATTEMPTS, MAX_ATTEMPTS), GateDecision::Pass);
+        assert_eq!(
+            decide(&clean, MAX_ATTEMPTS, MAX_ATTEMPTS),
+            GateDecision::Pass
+        );
     }
 
     #[test]
@@ -209,8 +219,7 @@ mod tests {
     #[test]
     fn corrective_feedback_names_each_broken_citation() {
         let dir = tempdir().unwrap();
-        let content =
-            "A [src: file: ghost.rs:1] and B [src: file: phantom.rs:2] are made up.";
+        let content = "A [src: file: ghost.rs:1] and B [src: file: phantom.rs:2] are made up.";
         let verdict = lint_step_file(content, &[dir.path()]);
         let fb = corrective_feedback("docs/AGENTS.md", &verdict);
         assert!(fb.contains("docs/AGENTS.md"));
@@ -233,7 +242,8 @@ mod tests {
 
     #[test]
     fn stamp_refreshes_stale_audit_date() {
-        let input = "<!-- kronn:section name=\"stack\" curated=\"ai\" audit=\"2026-01-01\" -->\nB\n";
+        let input =
+            "<!-- kronn:section name=\"stack\" curated=\"ai\" audit=\"2026-01-01\" -->\nB\n";
         let out = stamp_curated_audit_dates(input, "2026-06-14").expect("should change");
         assert!(out.contains("audit=\"2026-06-14\""));
         assert!(!out.contains("2026-01-01"), "stale date must be replaced");
@@ -241,7 +251,8 @@ mod tests {
 
     #[test]
     fn stamp_is_noop_when_already_today() {
-        let input = "<!-- kronn:section name=\"stack\" curated=\"ai\" audit=\"2026-06-14\" -->\nB\n";
+        let input =
+            "<!-- kronn:section name=\"stack\" curated=\"ai\" audit=\"2026-06-14\" -->\nB\n";
         assert_eq!(stamp_curated_audit_dates(input, "2026-06-14"), None);
     }
 
@@ -258,9 +269,13 @@ mod tests {
     #[test]
     fn stamp_preserves_trailing_newline() {
         let with_nl = "<!-- kronn:section name=\"s\" curated=\"ai\" -->\nB\n";
-        assert!(stamp_curated_audit_dates(with_nl, "2026-06-14").unwrap().ends_with('\n'));
+        assert!(stamp_curated_audit_dates(with_nl, "2026-06-14")
+            .unwrap()
+            .ends_with('\n'));
         let no_nl = "<!-- kronn:section name=\"s\" curated=\"ai\" -->";
-        assert!(!stamp_curated_audit_dates(no_nl, "2026-06-14").unwrap().ends_with('\n'));
+        assert!(!stamp_curated_audit_dates(no_nl, "2026-06-14")
+            .unwrap()
+            .ends_with('\n'));
     }
 
     // ─── Multi-attempt gate SEQUENCE (the full.rs loop contract) ────────────
@@ -355,9 +370,17 @@ mod tests {
 
         assert_eq!(run.decision, GateDecision::Pass);
         assert_eq!(run.attempts_used, 1, "a clean first pass must not retry");
-        assert!(run.feedbacks.is_empty(), "no corrective feedback on a clean pass");
-        let stamped = run.stamped.expect("a Pass on an ai-curated section must stamp");
-        assert!(stamped.contains("audit=\"2026-06-17\""), "stamp applied: {stamped}");
+        assert!(
+            run.feedbacks.is_empty(),
+            "no corrective feedback on a clean pass"
+        );
+        let stamped = run
+            .stamped
+            .expect("a Pass on an ai-curated section must stamp");
+        assert!(
+            stamped.contains("audit=\"2026-06-17\""),
+            "stamp applied: {stamped}"
+        );
     }
 
     #[test]
@@ -381,7 +404,10 @@ mod tests {
             "the retry feedback must name the broken ref so the agent can fix it: {}",
             run.feedbacks[0],
         );
-        assert!(run.stamped.is_some(), "the winning attempt stamps the dates");
+        assert!(
+            run.stamped.is_some(),
+            "the winning attempt stamps the dates"
+        );
     }
 
     #[test]
@@ -396,13 +422,19 @@ mod tests {
         let run = drive_enforce_gate(&[forever_broken], &[dir.path()], "2026-06-17", MAX_ATTEMPTS);
 
         assert_eq!(run.decision, GateDecision::Fail);
-        assert_eq!(run.attempts_used, MAX_ATTEMPTS, "uses the full budget before failing");
+        assert_eq!(
+            run.attempts_used, MAX_ATTEMPTS,
+            "uses the full budget before failing"
+        );
         assert_eq!(
             run.feedbacks.len(),
             MAX_ATTEMPTS - 1,
             "a corrective round between each attempt, none after the last",
         );
-        assert!(run.stamped.is_none(), "a failed step must NOT stamp the doc as verified");
+        assert!(
+            run.stamped.is_none(),
+            "a failed step must NOT stamp the doc as verified"
+        );
     }
 
     #[test]
@@ -470,7 +502,8 @@ pub fn evaluate_enforce_gate(
         GateDecision::Fail => EnforceGateOutcome::Fail {
             reason: format!(
                 "{} fabricated `[src:]` citation(s) still present after {} attempts (enforce mode)",
-                verdict.count(), max_attempts
+                verdict.count(),
+                max_attempts
             ),
         },
         GateDecision::Pass => EnforceGateOutcome::Pass { written },
@@ -501,10 +534,11 @@ mod enforce_gate_tests {
         let pre = target_snapshot(tmp.path(), "docs/architecture.md").unwrap();
         assert!(matches!(pre, TargetSnapshot::Present(_)));
 
-        let outcome = evaluate_enforce_gate(
-            true, true, "docs/architecture.md", tmp.path(), 0, 3,
+        let outcome = evaluate_enforce_gate(true, true, "docs/architecture.md", tmp.path(), 0, 3);
+        assert!(
+            matches!(outcome, EnforceGateOutcome::Pass { .. }),
+            "lint-green must Pass"
         );
-        assert!(matches!(outcome, EnforceGateOutcome::Pass { .. }), "lint-green must Pass");
 
         let post = target_snapshot(tmp.path(), "docs/architecture.md").unwrap();
         assert_eq!(pre, post, "a passing gate must not fabricate a rewrite");

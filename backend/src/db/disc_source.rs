@@ -57,15 +57,17 @@ pub fn bind_to_source(
     // Check whether a row for THIS pair is already open (idempotent
     // re-bind). If so, only the disc columns need updating — the
     // history row stays untouched.
-    let already_open: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM disc_source_history
+    let already_open: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM disc_source_history
          WHERE disc_id = ?1
            AND source_agent = ?2
            AND source_session_id = ?3
            AND unlinked_at IS NULL",
-        params![disc_id, source_agent, source_session_id],
-        |row| row.get(0),
-    ).unwrap_or(false);
+            params![disc_id, source_agent, source_session_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
 
     if !already_open {
         // Close any other open binding on this disc — only one source
@@ -127,16 +129,18 @@ pub fn find_disc_by_source_session(
     source_agent: &str,
     source_session_id: &str,
 ) -> Result<Option<String>> {
-    let id: Option<String> = conn.query_row(
-        "SELECT disc_id FROM disc_source_history
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT disc_id FROM disc_source_history
          WHERE source_agent = ?1
            AND source_session_id = ?2
            AND unlinked_at IS NULL
          ORDER BY linked_at DESC
          LIMIT 1",
-        params![source_agent, source_session_id],
-        |row| row.get(0),
-    ).ok();
+            params![source_agent, source_session_id],
+            |row| row.get(0),
+        )
+        .ok();
     Ok(id)
 }
 
@@ -161,7 +165,7 @@ pub fn list_all_source_bindings(conn: &Connection) -> Result<Vec<DiscSourceBindi
     let mut stmt = conn.prepare(
         "SELECT id, source_agent, source_session_id, imported_at, diverged_at
          FROM discussions
-         WHERE source_agent IS NOT NULL AND source_session_id IS NOT NULL"
+         WHERE source_agent IS NOT NULL AND source_session_id IS NOT NULL",
     )?;
     let rows = stmt.query_map([], |row| {
         Ok(DiscSourceBinding {
@@ -182,12 +186,15 @@ pub fn list_all_source_bindings(conn: &Connection) -> Result<Vec<DiscSourceBindi
 /// Full history chain for a disc (most recent first). Used by the
 /// frontend tooltip + a forensic "where did this thread come from?"
 /// view. Closed rows surface as `unlinked_at: Some(...)`.
-pub fn list_source_history(conn: &Connection, disc_id: &str) -> Result<Vec<DiscSourceHistoryEntry>> {
+pub fn list_source_history(
+    conn: &Connection,
+    disc_id: &str,
+) -> Result<Vec<DiscSourceHistoryEntry>> {
     let mut stmt = conn.prepare(
         "SELECT source_agent, source_session_id, linked_at, unlinked_at
          FROM disc_source_history
          WHERE disc_id = ?1
-         ORDER BY linked_at DESC"
+         ORDER BY linked_at DESC",
     )?;
     let rows = stmt.query_map(params![disc_id], |row| {
         Ok(DiscSourceHistoryEntry {
@@ -209,11 +216,14 @@ pub fn list_source_history(conn: &Connection, disc_id: &str) -> Result<Vec<DiscS
 /// migration 054 + the comment in `models/discussions.rs`), so we
 /// query the column here.
 pub fn get_diverged_at(conn: &Connection, disc_id: &str) -> Result<Option<String>> {
-    let v: Option<String> = conn.query_row(
-        "SELECT diverged_at FROM discussions WHERE id = ?1",
-        params![disc_id],
-        |row| row.get(0),
-    ).ok().flatten();
+    let v: Option<String> = conn
+        .query_row(
+            "SELECT diverged_at FROM discussions WHERE id = ?1",
+            params![disc_id],
+            |row| row.get(0),
+        )
+        .ok()
+        .flatten();
     Ok(v)
 }
 
@@ -239,12 +249,14 @@ pub fn message_exists_for_source_id(
     disc_id: &str,
     source_msg_id: &str,
 ) -> Result<bool> {
-    let exists: bool = conn.query_row(
-        "SELECT COUNT(*) > 0 FROM messages
+    let exists: bool = conn
+        .query_row(
+            "SELECT COUNT(*) > 0 FROM messages
          WHERE discussion_id = ?1 AND source_msg_id = ?2",
-        params![disc_id, source_msg_id],
-        |row| row.get(0),
-    ).unwrap_or(false);
+            params![disc_id, source_msg_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
     Ok(exists)
 }
 
@@ -288,7 +300,7 @@ pub fn search_discussions(conn: &Connection, q: &str, limit: u32) -> Result<Vec<
                 WHERE m.discussion_id = d.id AND m.content LIKE ?1 ESCAPE '\\'
             )
          ORDER BY d.updated_at DESC
-         LIMIT ?2"
+         LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![pattern, lim as i64], |row| {
         let raw_snip: String = row.get(4)?;
@@ -401,7 +413,7 @@ mod tests {
         // at a time.
         let conn = fresh_conn();
         bind_to_source(&conn, "d-alpha", "ClaudeCode", "sess-A").unwrap();
-        bind_to_source(&conn, "d-alpha", "Cursor",     "sess-B").unwrap();
+        bind_to_source(&conn, "d-alpha", "Cursor", "sess-B").unwrap();
 
         let hist = list_source_history(&conn, "d-alpha").unwrap();
         assert_eq!(hist.len(), 2);
@@ -409,12 +421,24 @@ mod tests {
         assert_eq!(hist[0].source_session_id, "sess-B");
         assert!(hist[0].unlinked_at.is_none());
         assert_eq!(hist[1].source_session_id, "sess-A");
-        assert!(hist[1].unlinked_at.is_some(), "previous binding must be closed on re-link");
+        assert!(
+            hist[1].unlinked_at.is_some(),
+            "previous binding must be closed on re-link"
+        );
 
         // find_by_source_session must return d-alpha only for the new pair.
-        assert_eq!(find_disc_by_source_session(&conn, "Cursor", "sess-B").unwrap().as_deref(), Some("d-alpha"));
-        assert!(find_disc_by_source_session(&conn, "ClaudeCode", "sess-A").unwrap().is_none(),
-            "old (closed) binding must not resolve anymore");
+        assert_eq!(
+            find_disc_by_source_session(&conn, "Cursor", "sess-B")
+                .unwrap()
+                .as_deref(),
+            Some("d-alpha")
+        );
+        assert!(
+            find_disc_by_source_session(&conn, "ClaudeCode", "sess-A")
+                .unwrap()
+                .is_none(),
+            "old (closed) binding must not resolve anymore"
+        );
     }
 
     #[test]
@@ -428,7 +452,9 @@ mod tests {
         assert_eq!(hist.len(), 1);
         assert!(hist[0].unlinked_at.is_some());
         // find resolves to None.
-        assert!(find_disc_by_source_session(&conn, "ClaudeCode", "sess-Z").unwrap().is_none());
+        assert!(find_disc_by_source_session(&conn, "ClaudeCode", "sess-Z")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -444,8 +470,10 @@ mod tests {
         assert!(message_exists_for_source_id(&conn, "d-alpha", "cc-msg-1").unwrap());
         assert!(message_exists_for_source_id(&conn, "d-alpha", "cc-msg-2").unwrap());
         assert!(!message_exists_for_source_id(&conn, "d-alpha", "cc-msg-999").unwrap());
-        assert!(!message_exists_for_source_id(&conn, "d-beta", "cc-msg-1").unwrap(),
-            "scope must be (disc_id, source_msg_id) — no cross-disc leak");
+        assert!(
+            !message_exists_for_source_id(&conn, "d-beta", "cc-msg-1").unwrap(),
+            "scope must be (disc_id, source_msg_id) — no cross-disc leak"
+        );
     }
 
     #[test]
@@ -471,8 +499,10 @@ mod tests {
             [],
         ).unwrap();
         let hits = search_discussions(&conn, "100%", 10).unwrap();
-        assert!(hits.iter().any(|h| h.disc_id == "d-pct"),
-            "must still find the literal-% disc");
+        assert!(
+            hits.iter().any(|h| h.disc_id == "d-pct"),
+            "must still find the literal-% disc"
+        );
     }
 
     #[test]
@@ -480,26 +510,44 @@ mod tests {
         let conn = fresh_conn();
         // d-beta has no source binding → mark_diverged is a no-op.
         mark_diverged(&conn, "d-beta").unwrap();
-        let diverged: Option<String> = conn.query_row(
-            "SELECT diverged_at FROM discussions WHERE id = 'd-beta'", [], |r| r.get(0),
-        ).unwrap();
+        let diverged: Option<String> = conn
+            .query_row(
+                "SELECT diverged_at FROM discussions WHERE id = 'd-beta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert!(diverged.is_none(), "non-imported disc cannot diverge");
 
         // After bind, mark_diverged populates the column.
         bind_to_source(&conn, "d-beta", "Codex", "sess-div").unwrap();
         mark_diverged(&conn, "d-beta").unwrap();
-        let diverged: Option<String> = conn.query_row(
-            "SELECT diverged_at FROM discussions WHERE id = 'd-beta'", [], |r| r.get(0),
-        ).unwrap();
-        assert!(diverged.is_some(), "bound disc must now be flagged diverged");
+        let diverged: Option<String> = conn
+            .query_row(
+                "SELECT diverged_at FROM discussions WHERE id = 'd-beta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            diverged.is_some(),
+            "bound disc must now be flagged diverged"
+        );
 
         // Second mark_diverged is idempotent (COALESCE preserves the
         // original timestamp).
         let original = diverged.clone();
         mark_diverged(&conn, "d-beta").unwrap();
-        let diverged2: Option<String> = conn.query_row(
-            "SELECT diverged_at FROM discussions WHERE id = 'd-beta'", [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(diverged2, original, "diverged_at must NOT be overwritten on re-mark");
+        let diverged2: Option<String> = conn
+            .query_row(
+                "SELECT diverged_at FROM discussions WHERE id = 'd-beta'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            diverged2, original,
+            "diverged_at must NOT be overwritten on re-mark"
+        );
     }
 }
