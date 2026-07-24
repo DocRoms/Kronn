@@ -12,7 +12,7 @@ the delivery sequence below reaches the Planning phase. `[src: user: 2026-07-24:
 
 Current checkpoint:
 
-1. **Complete in the working tree — quick wins**:
+1. **Complete and merged — quick wins**:
    - bundled PDF/DOCX desktop export and visual fidelity;
    - standard copyable ID pills and feedback for discussions, workflows and
      messages;
@@ -20,12 +20,15 @@ Current checkpoint:
    - full MCP getters for skills, profiles and directives;
    - shared SQLite/RFC3339 date parsing plus one-shot normalization;
    - Agent+Exec isolation warning and the workflow form-label sweep.
-2. **Next — maintainer delivery loop**:
-   - create the delivery branch;
-   - deploy it to production for verification;
-   - merge it.
-3. **Then — finish the in-progress audit changes and release 0.8.13.**
-4. **Only after that release — start the Planning implementation.**
+2. **Complete locally — Audit follow-up and release hardening**:
+   - crash-safe resume-token rotation;
+   - Claude resume binding scoped by logical session and terminal project;
+   - repository-wide Rust formatting baseline and enforced CI gate;
+   - current Rust clippy findings resolved;
+   - complete local backend, frontend, MCP, shell, document-export and Tauri
+     quality gates.
+3. **Next — push the pre-release branch, run CI, merge, then publish 0.8.13.**
+4. **Only after the 0.8.13 release — start the Planning implementation.**
 
 The message-ID work belongs to the quick-win branch because it is a
 small, independently useful foundation for future task provenance. The email

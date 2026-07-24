@@ -14,12 +14,14 @@ order, not status. `[src: file: docs/inconsistencies-tech-debt.md:25-50]`
 
 ### 1. 0.8.13 — stabilization and audit release
 
-1. Finish and validate the quick-win working tree.
-2. Maintainer creates the branch.
-3. Deploy to production and verify document exports, stable IDs and MCP reads.
-4. Merge.
-5. Finish the already in-progress audit modifications.
-6. Run the complete quality gates and publish 0.8.13.
+- [x] Finish and validate the quick-win working tree.
+- [x] Create the delivery branch.
+- [x] Deploy and verify document exports, stable IDs and MCP reads.
+- [x] Merge the quick wins.
+- [x] Finish the Audit follow-up on the local pre-release branch.
+- [x] Run the complete local quality gates.
+- [ ] Push the pre-release branch, run CI and merge it.
+- [ ] Publish 0.8.13.
 
 The headless-backend design remains a later 0.8.14 candidate, but it must not
 enter or delay the 0.8.13 stabilization path. Its own estimate and candidate
