@@ -322,11 +322,27 @@ mod tests {
     }
 
     #[test]
+    fn os_keychain_constructor_exposes_stable_vault_name() {
+        let vault = OsKeychain::kronn();
+        assert_eq!(vault.name(), "keychain");
+        assert_eq!(vault.service, KEYCHAIN_SERVICE);
+        assert_eq!(vault.account, KEYCHAIN_ACCOUNT);
+    }
+
+    #[test]
     #[serial]
     fn primary_prefers_env_over_vaults() {
-        std::env::set_var(ENV_KEK, "envkey");
+        std::env::set_var(ENV_KEK, "  envkey \n");
         let ks = KeyStore::from_vaults(vec![boxed(MockVault::with_value("keychain", "otherkey"))]);
         assert_eq!(ks.primary(), Some(("envkey".to_string(), "env")));
+        std::env::remove_var(ENV_KEK);
+    }
+
+    #[test]
+    #[serial]
+    fn env_override_ignores_whitespace_only_value() {
+        std::env::set_var(ENV_KEK, " \n\t ");
+        assert_eq!(KeyStore::env_override(), None);
         std::env::remove_var(ENV_KEK);
     }
 
@@ -367,6 +383,14 @@ mod tests {
         // Disagreement must be VISIBLE, not silently resolved — the reconciler
         // picks by KID against the stored ciphertext.
         assert_ne!(snap[1].1, snap[2].1);
+    }
+
+    #[test]
+    #[serial]
+    fn snapshot_degrades_unavailable_vault_to_none() {
+        std::env::remove_var(ENV_KEK);
+        let ks = KeyStore::from_vaults(vec![boxed(MockVault::unavailable("keychain"))]);
+        assert_eq!(ks.snapshot(), vec![("env", None), ("keychain", None)]);
     }
 
     #[test]
@@ -456,5 +480,50 @@ mod tests {
         let sc = SidecarFile::in_dir(dir.path());
         std::fs::write(sc.path(), "   \n").unwrap();
         assert_eq!(sc.retrieve().unwrap(), None);
+    }
+
+    #[test]
+    fn sidecar_read_error_degrades_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let sc = SidecarFile::in_dir(dir.path());
+        std::fs::create_dir(sc.path()).unwrap();
+        assert_eq!(sc.retrieve().unwrap(), None);
+    }
+
+    #[test]
+    fn sidecar_store_reports_missing_parent() {
+        let sc = SidecarFile {
+            path: PathBuf::new(),
+        };
+        assert!(sc
+            .store("cafebabe")
+            .unwrap_err()
+            .to_string()
+            .contains("sidecar path has no parent dir"));
+    }
+
+    #[test]
+    fn sidecar_store_reports_blocked_parent_creation() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("not-a-directory");
+        std::fs::write(&blocker, "block").unwrap();
+        let sc = SidecarFile::in_dir(&blocker.join("nested"));
+        assert!(sc
+            .store("cafebabe")
+            .unwrap_err()
+            .to_string()
+            .contains("create data dir for sidecar"));
+    }
+
+    #[test]
+    fn sidecar_store_reports_temp_write_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(format!(".{}.tmp", SIDECAR_FILENAME))).unwrap();
+        let sc = SidecarFile::in_dir(dir.path());
+        assert!(sc
+            .store("cafebabe")
+            .unwrap_err()
+            .to_string()
+            .contains("write sidecar temp"));
     }
 }
