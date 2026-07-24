@@ -447,9 +447,9 @@ pub fn build_agent_prompt(
     // agents like Gemini detect -p mode and refuse to interact on the first message.
     let interactive_hint = if user_msgs.len() > 1 || disc.pin_first_message {
         match disc.language.as_str() {
-            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque message te sera transmis avec l'historique complet.\n\n",
-            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada mensaje te sera transmitido con el historial completo.\n\n",
-            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each message will be sent to you with the full history.\n\n",
+            "fr" => "NOTE: Tu es dans une conversation multi-tours geree par Kronn. Tu PEUX poser des questions et attendre des reponses. Chaque tour inclut la fenetre d'historique disponible ; si les outils d'historique sont indiques plus haut, utilise-les seulement lorsqu'un contexte plus ancien te manque.\n\n",
+            "es" => "NOTA: Estas en una conversacion multi-turno gestionada por Kronn. PUEDES hacer preguntas y esperar respuestas. Cada turno incluye la ventana de historial disponible; si las herramientas de historial aparecen arriba, úsalas solo cuando te falte contexto anterior.\n\n",
+            _ => "NOTE: You are in a multi-turn conversation managed by Kronn. You CAN ask questions and wait for answers. Each turn includes the available history window; when history tools are listed above, use them only when older context is missing.\n\n",
         }
     } else {
         ""
