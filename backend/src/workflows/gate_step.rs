@@ -30,10 +30,7 @@ use super::template::TemplateContext;
 /// (rather than `WaitingApproval`) so a typo in `{{...}}` doesn't
 /// silently block the run forever waiting for an approval that has
 /// no message to show.
-pub fn execute_gate_step(
-    step: &WorkflowStep,
-    ctx: &TemplateContext,
-) -> StepOutcome {
+pub fn execute_gate_step(step: &WorkflowStep, ctx: &TemplateContext) -> StepOutcome {
     let start = Instant::now();
     // 0.8.2 — Capture the wall-clock start so the resume handler can
     // compute the actual pause duration once a human approves the gate.
@@ -171,15 +168,22 @@ mod tests {
         let before = chrono::Utc::now();
         let outcome = execute_gate_step(&step, &ctx);
         let after = chrono::Utc::now();
-        let started_at = outcome.result.started_at
+        let started_at = outcome
+            .result
+            .started_at
             .expect("gate must carry a started_at so resume can compute pause duration");
-        assert!(started_at >= before && started_at <= after,
-            "started_at must be set at executor time, got {started_at} outside [{before}, {after}]");
+        assert!(
+            started_at >= before && started_at <= after,
+            "started_at must be set at executor time, got {started_at} outside [{before}, {after}]"
+        );
     }
 
     #[test]
     fn renders_message_and_returns_waiting_approval() {
-        let step = gate_step("approve_pr", Some("Valider le PR `{{steps.audit.summary}}` ?"));
+        let step = gate_step(
+            "approve_pr",
+            Some("Valider le PR `{{steps.audit.summary}}` ?"),
+        );
         let mut ctx = TemplateContext::new();
         ctx.set_step_output(
             "audit",
@@ -187,7 +191,11 @@ mod tests {
         );
         let outcome = execute_gate_step(&step, &ctx);
         assert_eq!(outcome.result.status, RunStatus::WaitingApproval);
-        assert!(outcome.result.output.contains("12 fichiers analysés"), "got: {}", outcome.result.output);
+        assert!(
+            outcome.result.output.contains("12 fichiers analysés"),
+            "got: {}",
+            outcome.result.output
+        );
         assert_eq!(outcome.result.tokens_used, 0);
         assert!(outcome.condition_action.is_none());
     }

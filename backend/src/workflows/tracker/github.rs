@@ -54,7 +54,10 @@ impl GitHubTracker {
     }
 
     fn api_url(&self, path: &str) -> String {
-        format!("https://api.github.com/repos/{}/{}{}", self.owner, self.repo, path)
+        format!(
+            "https://api.github.com/repos/{}/{}{}",
+            self.owner, self.repo, path
+        )
     }
 }
 
@@ -67,7 +70,9 @@ impl TrackerSource for GitHubTracker {
             url.push_str(&format!("&labels={}", labels.join(",")));
         }
 
-        let response = self.client.get(&url)
+        let response = self
+            .client
+            .get(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -81,10 +86,13 @@ impl TrackerSource for GitHubTracker {
             anyhow::bail!("GitHub API error {}: {}", status, body);
         }
 
-        let issues: Vec<GhIssue> = response.json().await
+        let issues: Vec<GhIssue> = response
+            .json()
+            .await
             .context("Failed to parse GitHub issues")?;
 
-        let tracked: Vec<TrackedIssue> = issues.into_iter()
+        let tracked: Vec<TrackedIssue> = issues
+            .into_iter()
             // Filter out pull requests (GitHub API returns PRs in /issues)
             .filter(|i| i.pull_request.is_none())
             .map(|i| TrackedIssue {
@@ -108,7 +116,9 @@ impl TrackerSource for GitHubTracker {
             _ => "open",
         };
 
-        let response = self.client.patch(&url)
+        let response = self
+            .client
+            .patch(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -128,7 +138,9 @@ impl TrackerSource for GitHubTracker {
     async fn comment(&self, issue_id: &str, body: &str) -> Result<()> {
         let url = self.api_url(&format!("/issues/{}/comments", issue_id));
 
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -148,7 +160,9 @@ impl TrackerSource for GitHubTracker {
     async fn create_pr(&self, title: &str, body: &str, head: &str, base: &str) -> Result<String> {
         let url = self.api_url("/pulls");
 
-        let response = self.client.post(&url)
+        let response = self
+            .client
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.token))
             .header("User-Agent", "Kronn/0.1")
             .header("Accept", "application/vnd.github+json")
@@ -213,14 +227,20 @@ mod tests {
     fn api_url_issue_by_number() {
         let t = make_tracker();
         let url = t.api_url(&format!("/issues/{}", 42));
-        assert_eq!(url, "https://api.github.com/repos/my-owner/my-repo/issues/42");
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/my-owner/my-repo/issues/42"
+        );
     }
 
     #[test]
     fn api_url_issue_comments() {
         let t = make_tracker();
         let url = t.api_url(&format!("/issues/{}/comments", 7));
-        assert_eq!(url, "https://api.github.com/repos/my-owner/my-repo/issues/7/comments");
+        assert_eq!(
+            url,
+            "https://api.github.com/repos/my-owner/my-repo/issues/7/comments"
+        );
     }
 
     // ─── GhIssue deserialization ─────────────────────────────────────────
@@ -309,7 +329,8 @@ mod tests {
             },
         ];
 
-        let tracked: Vec<TrackedIssue> = issues.into_iter()
+        let tracked: Vec<TrackedIssue> = issues
+            .into_iter()
             .filter(|i| i.pull_request.is_none())
             .map(|i| TrackedIssue {
                 id: i.number.to_string(),
@@ -374,7 +395,11 @@ mod tests {
                 "closed" | "done" | "resolved" => "closed",
                 _ => "open",
             };
-            assert_eq!(state, "closed", "Status '{}' should map to 'closed'", status);
+            assert_eq!(
+                state, "closed",
+                "Status '{}' should map to 'closed'",
+                status
+            );
         }
     }
 

@@ -15,17 +15,35 @@ pub fn estimate_cost(agent_type: &str, tokens_used: u64) -> Option<f64> {
     // We estimate a 60/40 split (input/output) as a reasonable default.
     let price = match agent_type {
         // Anthropic — Claude Sonnet 4 (most common via Claude Code)
-        "ClaudeCode" => ModelPrice { input_per_m: 3.0, output_per_m: 15.0 },
+        "ClaudeCode" => ModelPrice {
+            input_per_m: 3.0,
+            output_per_m: 15.0,
+        },
         // OpenAI — GPT-4.1 (Codex default)
-        "Codex" => ModelPrice { input_per_m: 2.0, output_per_m: 8.0 },
+        "Codex" => ModelPrice {
+            input_per_m: 2.0,
+            output_per_m: 8.0,
+        },
         // Google — Gemini 2.5 Pro
-        "GeminiCli" => ModelPrice { input_per_m: 1.25, output_per_m: 10.0 },
+        "GeminiCli" => ModelPrice {
+            input_per_m: 1.25,
+            output_per_m: 10.0,
+        },
         // Mistral — Mistral Large
-        "Vibe" => ModelPrice { input_per_m: 2.0, output_per_m: 6.0 },
+        "Vibe" => ModelPrice {
+            input_per_m: 2.0,
+            output_per_m: 6.0,
+        },
         // Kiro — uses Bedrock (Claude), credits already converted
-        "Kiro" => ModelPrice { input_per_m: 3.0, output_per_m: 15.0 },
+        "Kiro" => ModelPrice {
+            input_per_m: 3.0,
+            output_per_m: 15.0,
+        },
         // GitHub Copilot — uses GPT-4o by default
-        "CopilotCli" => ModelPrice { input_per_m: 2.5, output_per_m: 10.0 },
+        "CopilotCli" => ModelPrice {
+            input_per_m: 2.5,
+            output_per_m: 10.0,
+        },
         // Ollama — local inference, zero cost
         "Ollama" => return Some(0.0),
         _ => return None,
@@ -34,7 +52,8 @@ pub fn estimate_cost(agent_type: &str, tokens_used: u64) -> Option<f64> {
     // Assume 60% input, 40% output for combined token counts
     let input_tokens = (tokens_used as f64) * 0.6;
     let output_tokens = (tokens_used as f64) * 0.4;
-    let cost = (input_tokens * price.input_per_m + output_tokens * price.output_per_m) / 1_000_000.0;
+    let cost =
+        (input_tokens * price.input_per_m + output_tokens * price.output_per_m) / 1_000_000.0;
     Some(cost)
 }
 
@@ -47,7 +66,11 @@ mod tests {
         // 100K tokens → ~60K input + 40K output
         // (60K × 3.0 + 40K × 15.0) / 1M = (180K + 600K) / 1M = 0.78
         let cost = estimate_cost("ClaudeCode", 100_000).unwrap();
-        assert!((cost - 0.78).abs() < 0.01, "Expected ~$0.78, got ${:.4}", cost);
+        assert!(
+            (cost - 0.78).abs() < 0.01,
+            "Expected ~$0.78, got ${:.4}",
+            cost
+        );
     }
 
     #[test]
@@ -70,31 +93,59 @@ mod tests {
     #[test]
     fn gemini_cost_estimation() {
         let cost = estimate_cost("GeminiCli", 100_000).unwrap();
-        assert!(cost > 0.0 && cost < 1.0, "GeminiCli 100K tokens should cost < $1, got ${:.4}", cost);
+        assert!(
+            cost > 0.0 && cost < 1.0,
+            "GeminiCli 100K tokens should cost < $1, got ${:.4}",
+            cost
+        );
     }
 
     #[test]
     fn vibe_cost_estimation() {
         let cost = estimate_cost("Vibe", 100_000).unwrap();
-        assert!(cost > 0.0 && cost < 1.0, "Vibe 100K tokens should cost < $1, got ${:.4}", cost);
+        assert!(
+            cost > 0.0 && cost < 1.0,
+            "Vibe 100K tokens should cost < $1, got ${:.4}",
+            cost
+        );
     }
 
     #[test]
     fn kiro_cost_estimation() {
         let cost = estimate_cost("Kiro", 100_000).unwrap();
-        assert!(cost > 0.0 && cost < 1.0, "Kiro 100K tokens should cost < $1, got ${:.4}", cost);
+        assert!(
+            cost > 0.0 && cost < 1.0,
+            "Kiro 100K tokens should cost < $1, got ${:.4}",
+            cost
+        );
     }
 
     #[test]
     fn copilot_cost_estimation() {
         let cost = estimate_cost("CopilotCli", 100_000).unwrap();
-        assert!(cost > 0.0 && cost < 1.0, "CopilotCli 100K tokens should cost < $1, got ${:.4}", cost);
+        assert!(
+            cost > 0.0 && cost < 1.0,
+            "CopilotCli 100K tokens should cost < $1, got ${:.4}",
+            cost
+        );
     }
 
     #[test]
     fn all_known_agents_have_pricing() {
-        for agent in &["ClaudeCode", "Codex", "GeminiCli", "Vibe", "Kiro", "CopilotCli", "Ollama"] {
-            assert!(estimate_cost(agent, 1000).is_some(), "Missing pricing for {}", agent);
+        for agent in &[
+            "ClaudeCode",
+            "Codex",
+            "GeminiCli",
+            "Vibe",
+            "Kiro",
+            "CopilotCli",
+            "Ollama",
+        ] {
+            assert!(
+                estimate_cost(agent, 1000).is_some(),
+                "Missing pricing for {}",
+                agent
+            );
         }
         // Ollama is free
         assert_eq!(estimate_cost("Ollama", 1_000_000), Some(0.0));

@@ -111,9 +111,7 @@ fn sixty_fabricated_markers_cap_and_all_red() {
     let root = temp_project();
     let mut txt = String::new();
     for i in 0..60 {
-        txt.push_str(&format!(
-            "Claim {i} [src: file: src/ghost_{i}.rs:1]. "
-        ));
+        txt.push_str(&format!("Claim {i} [src: file: src/ghost_{i}.rs:1]. "));
     }
     let r = analyze(&txt, Some(&root));
     assert_eq!(

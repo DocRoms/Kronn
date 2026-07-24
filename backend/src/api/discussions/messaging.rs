@@ -48,9 +48,11 @@ pub async fn send_message(
     // Input validation
     if req.content.len() > MAX_CONTENT_LEN {
         let stream: SseStream = Box::pin(futures::stream::once(async {
-            Ok::<_, Infallible>(Event::default().event("error").data(
-                serde_json::json!({ "error": "Message too long" }).to_string()
-            ))
+            Ok::<_, Infallible>(
+                Event::default()
+                    .event("error")
+                    .data(serde_json::json!({ "error": "Message too long" }).to_string()),
+            )
         }));
         return Sse::new(stream);
     }
@@ -62,9 +64,11 @@ pub async fn send_message(
     // Agent message. The frontend can either wait for the PartialResponseRecovered
     // WS event or explicitly dismiss the partial (same endpoint below).
     let pending_check_id = id.clone();
-    let has_partial = state.db.with_conn(move |conn| {
-        crate::db::discussions::has_pending_partial(conn, &pending_check_id)
-    }).await.unwrap_or(false);
+    let has_partial = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::has_pending_partial(conn, &pending_check_id))
+        .await
+        .unwrap_or(false);
     if has_partial {
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(Event::default().event("error").data(
@@ -82,7 +86,10 @@ pub async fn send_message(
     // Read user identity from config for message attribution
     let (author_pseudo, author_avatar_email) = {
         let config = state.config.read().await;
-        (config.server.pseudo.clone(), config.server.avatar_email.clone())
+        (
+            config.server.pseudo.clone(),
+            config.server.avatar_email.clone(),
+        )
     };
 
     // Add user message to DB
@@ -96,34 +103,51 @@ pub async fn send_message(
         timestamp: Utc::now(),
         tokens_used: 0,
         auth_mode: None,
-        model_tier: None, cost_usd: None, author_pseudo, author_avatar_email,
-        source_msg_id: None, duration_ms: None,
+        model_tier: None,
+        cost_usd: None,
+        author_pseudo,
+        author_avatar_email,
+        source_msg_id: None,
+        duration_ms: None,
     };
     let disc_id = id.clone();
     let msg = user_msg.clone();
     let target_clone = target.clone();
 
-    if let Err(e) = state.db.with_conn(move |conn| {
-        crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
-        // Pin any files the user staged in the composer to THIS message (0.8.8),
-        // so they render in its bubble and clear from the input. Non-fatal: a
-        // link failure must not drop the message the user just sent.
-        if let Err(e) = crate::db::discussions::link_pending_context_files_to_message(conn, &disc_id, &msg.id) {
-            tracing::warn!("Failed to link pending context files to message {}: {e}", msg.id);
-        }
-        // Track new participant
-        if let Some(ref t) = target_clone {
-            let disc = crate::db::discussions::get_discussion(conn, &disc_id)?;
-            if let Some(d) = disc {
-                if !d.participants.contains(t) {
-                    let mut participants = d.participants;
-                    participants.push(t.clone());
-                    crate::db::discussions::update_discussion_participants(conn, &disc_id, &participants)?;
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_message(conn, &disc_id, &msg)?;
+            // Pin any files the user staged in the composer to THIS message (0.8.8),
+            // so they render in its bubble and clear from the input. Non-fatal: a
+            // link failure must not drop the message the user just sent.
+            if let Err(e) = crate::db::discussions::link_pending_context_files_to_message(
+                conn, &disc_id, &msg.id,
+            ) {
+                tracing::warn!(
+                    "Failed to link pending context files to message {}: {e}",
+                    msg.id
+                );
+            }
+            // Track new participant
+            if let Some(ref t) = target_clone {
+                let disc = crate::db::discussions::get_discussion(conn, &disc_id)?;
+                if let Some(d) = disc {
+                    if !d.participants.contains(t) {
+                        let mut participants = d.participants;
+                        participants.push(t.clone());
+                        crate::db::discussions::update_discussion_participants(
+                            conn,
+                            &disc_id,
+                            &participants,
+                        )?;
+                    }
                 }
             }
-        }
-        Ok(())
-    }).await {
+            Ok(())
+        })
+        .await
+    {
         tracing::error!("Failed to save user message: {e}");
     }
 
@@ -171,9 +195,13 @@ pub async fn send_message(
     // transient error must not leave the human with no reply at all. The
     // worst case is a one-off double-response, far less bad than silence —
     // but log it so a persistent error is visible (Codex review 2026-06-04).
-    let live_agents = match state.db.with_conn(move |conn| {
-        crate::db::discussion_sessions::count_live_participants(conn, &live_check_id)
-    }).await {
+    let live_agents = match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussion_sessions::count_live_participants(conn, &live_check_id)
+        })
+        .await
+    {
         Ok(n) => n,
         Err(e) => {
             tracing::warn!("send_message: count_live_participants failed for disc {id}, falling back to local runner: {e}");
@@ -188,7 +216,8 @@ pub async fn send_message(
             "skipped": true,
             "reason": "live_mcp_agents",
             "live_agents": live_agents,
-        }).to_string();
+        })
+        .to_string();
         let stream: SseStream = Box::pin(futures::stream::once(async move {
             Ok::<_, Infallible>(Event::default().event("skipped_live_agents").data(payload))
         }));
@@ -203,10 +232,7 @@ pub async fn send_message(
 }
 
 /// POST /api/discussions/:id/run
-pub async fn run_agent(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Sse<SseStream> {
+pub async fn run_agent(State(state): State<AppState>, Path(id): Path<String>) -> Sse<SseStream> {
     // The awaiting_agent marker is set inside make_agent_stream (after
     // preflights) so a forced run that fails preflight never leaves a stuck
     // flag. See send_message above.
@@ -226,22 +252,30 @@ pub async fn dismiss_partial(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<serde_json::Value>> {
-    let ids = match state.db.with_conn(move |conn| {
-        // Reuses the boot recovery — process-wide (handles every disc with
-        // a non-null partial), so a "dismiss" click incidentally cleans up
-        // any other dangling partials too. Cheap (one indexed scan).
-        crate::db::discussions::recover_partial_responses(conn)
-    }).await {
+    let ids = match state
+        .db
+        .with_conn(move |conn| {
+            // Reuses the boot recovery — process-wide (handles every disc with
+            // a non-null partial), so a "dismiss" click incidentally cleans up
+            // any other dangling partials too. Cheap (one indexed scan).
+            crate::db::discussions::recover_partial_responses(conn)
+        })
+        .await
+    {
         Ok(list) => list,
         Err(e) => return Json(ApiResponse::err(format!("Recovery failed: {}", e))),
     };
     let recovered_this = ids.iter().any(|d| d == &id);
     if !ids.is_empty() {
-        let _ = state.ws_broadcast.send(WsMessage::PartialResponseRecovered {
-            discussion_ids: ids,
-        });
+        let _ = state
+            .ws_broadcast
+            .send(WsMessage::PartialResponseRecovered {
+                discussion_ids: ids,
+            });
     }
-    Json(ApiResponse::ok(serde_json::json!({ "recovered": recovered_this })))
+    Json(ApiResponse::ok(
+        serde_json::json!({ "recovered": recovered_this }),
+    ))
 }
 
 /// POST /api/discussions/:id/stop
@@ -272,7 +306,9 @@ pub async fn stop_agent(
             false
         }
     };
-    Json(ApiResponse::ok(serde_json::json!({ "cancelled": cancelled })))
+    Json(ApiResponse::ok(
+        serde_json::json!({ "cancelled": cancelled }),
+    ))
 }
 
 #[cfg(test)]
@@ -334,7 +370,13 @@ mod tests {
         state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::create_session(conn, disc, "Codex", Some("sess-x"), "peer")
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "Codex",
+                    Some("sess-x"),
+                    "peer",
+                )
             })
             .await
             .unwrap();
@@ -342,11 +384,17 @@ mod tests {
         let resp = send_message(
             State(state.clone()),
             Path(disc.to_string()),
-            Json(SendMessageRequest { content: "hello peers".into(), target_agent: None }),
+            Json(SendMessageRequest {
+                content: "hello peers".into(),
+                target_agent: None,
+            }),
         )
         .await;
         let body = sse_body_to_string(resp).await;
-        assert!(body.contains("skipped_live_agents"), "expected skip event, got: {body}");
+        assert!(
+            body.contains("skipped_live_agents"),
+            "expected skip event, got: {body}"
+        );
         assert!(body.contains("live_mcp_agents"), "skip reason present");
 
         // User message persisted, and NO Agent message (runner never ran).
@@ -375,22 +423,35 @@ mod tests {
         let pk = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::create_session(conn, disc, "Codex", Some("sess-p"), "peer")
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "Codex",
+                    Some("sess-p"),
+                    "peer",
+                )
             })
             .await
             .unwrap();
         state
             .db
-            .with_conn(move |conn| crate::db::discussion_sessions::set_session_status(conn, pk, "paused"))
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::set_session_status(conn, pk, "paused")
+            })
             .await
             .unwrap();
 
         let live = state
             .db
-            .with_conn(move |conn| crate::db::discussion_sessions::count_live_participants(conn, disc))
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::count_live_participants(conn, disc)
+            })
             .await
             .unwrap();
-        assert_eq!(live, 0, "paused agent is not a live responder → Kronn would still answer");
+        assert_eq!(
+            live, 0,
+            "paused agent is not a live responder → Kronn would still answer"
+        );
     }
 
     /// A run that dies in make_agent_stream's
@@ -419,7 +480,10 @@ mod tests {
 
         let resp = run_agent(State(state.clone()), Path(disc.to_string())).await;
         let body = sse_body_to_string(resp).await;
-        assert!(body.contains("error"), "re-lock preflight must fail, got: {body}");
+        assert!(
+            body.contains("error"),
+            "re-lock preflight must fail, got: {body}"
+        );
 
         let awaiting: i64 = state
             .db
@@ -432,7 +496,10 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(awaiting, 0, "failed preflight must not leave the disc marked as owed a run");
+        assert_eq!(
+            awaiting, 0,
+            "failed preflight must not leave the disc marked as owed a run"
+        );
     }
 
     /// A BATCH child is pre-marked awaiting_agent=1 at enqueue
@@ -472,7 +539,10 @@ mod tests {
 
         let resp = run_agent(State(state.clone()), Path(disc.to_string())).await;
         let body = sse_body_to_string(resp).await;
-        assert!(body.contains("error"), "re-lock preflight must fail, got: {body}");
+        assert!(
+            body.contains("error"),
+            "re-lock preflight must fail, got: {body}"
+        );
 
         let (awaiting, batch_failed): (i64, i64) = state
             .db
@@ -491,8 +561,14 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(awaiting, 0, "enqueue-time marker must be cleared on preflight failure");
-        assert_eq!(batch_failed, 1, "the child must count as failed so the batch can finish");
+        assert_eq!(
+            awaiting, 0,
+            "enqueue-time marker must be cleared on preflight failure"
+        );
+        assert_eq!(
+            batch_failed, 1,
+            "the child must count as failed so the batch can finish"
+        );
 
         let msgs = state
             .db
@@ -500,7 +576,8 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            msgs.iter().any(|m| m.role == MessageRole::System && m.content.starts_with("Erreur:")),
+            msgs.iter()
+                .any(|m| m.role == MessageRole::System && m.content.starts_with("Erreur:")),
             "the preflight error must be persisted in the thread (fire-and-forget child)"
         );
     }

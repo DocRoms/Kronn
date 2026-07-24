@@ -75,12 +75,18 @@ pub async fn disc_create(
     // open, return its disc rather than creating a duplicate. This is
     // what makes `disc_create` safe to call on every CLI session
     // bootstrap.
-    if let (Some(src_agent), Some(src_sess)) = (req.source_agent.as_deref(), req.source_session_id.as_deref()) {
+    if let (Some(src_agent), Some(src_sess)) = (
+        req.source_agent.as_deref(),
+        req.source_session_id.as_deref(),
+    ) {
         let src_agent = src_agent.to_string();
         let src_sess = src_sess.to_string();
-        let lookup = state.db.with_conn(move |conn| {
-            crate::db::disc_source::find_disc_by_source_session(conn, &src_agent, &src_sess)
-        }).await;
+        let lookup = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::disc_source::find_disc_by_source_session(conn, &src_agent, &src_sess)
+            })
+            .await;
         if let Ok(Some(disc_id)) = lookup {
             return Json(ApiResponse::ok(DiscCreateResponse {
                 disc_id,
@@ -102,7 +108,8 @@ pub async fn disc_create(
         language,
         participants: vec![agent],
         messages: vec![],
-        message_count: 0, non_system_message_count: 0,
+        message_count: 0,
+        non_system_message_count: 0,
         skill_ids: vec![],
         profile_ids: vec![],
         directive_ids: vec![],
@@ -128,10 +135,13 @@ pub async fn disc_create(
     };
 
     let disc_for_insert = disc.clone();
-    let inserted = state.db.with_conn(move |conn| {
-        crate::db::discussions::insert_discussion(conn, &disc_for_insert)?;
-        Ok::<_, anyhow::Error>(())
-    }).await;
+    let inserted = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::insert_discussion(conn, &disc_for_insert)?;
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
     if let Err(e) = inserted {
         return Json(ApiResponse::err(format!("DB error inserting disc: {}", e)));
     }
@@ -139,11 +149,16 @@ pub async fn disc_create(
     // Bind to source if requested. Failure to bind is fatal because
     // the caller is going to rely on `find_by_session` to find this
     // disc next time — silent skip would leave them orphaned.
-    if let (Some(src_agent), Some(src_sess)) = (req.source_agent.clone(), req.source_session_id.clone()) {
+    if let (Some(src_agent), Some(src_sess)) =
+        (req.source_agent.clone(), req.source_session_id.clone())
+    {
         let disc_for_bind = disc_id.clone();
-        let bind_result = state.db.with_conn(move |conn| {
-            crate::db::disc_source::bind_to_source(conn, &disc_for_bind, &src_agent, &src_sess)
-        }).await;
+        let bind_result = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::disc_source::bind_to_source(conn, &disc_for_bind, &src_agent, &src_sess)
+            })
+            .await;
         if let Err(e) = bind_result {
             return Json(ApiResponse::err(format!("DB error binding source: {}", e)));
         }
@@ -218,9 +233,10 @@ pub async fn disc_append(
     Json(req): Json<DiscAppendRequest>,
 ) -> Json<ApiResponse<DiscAppendResponse>> {
     let did = req.disc_id.clone();
-    let exists = state.db.with_conn(move |conn| {
-        crate::db::discussions::get_discussion(conn, &did)
-    }).await;
+    let exists = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await;
     let disc = match exists {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
@@ -232,30 +248,43 @@ pub async fn disc_append(
     // Read the column directly so we can warn the caller their import
     // is landing on a user-edited disc.
     let did_div = req.disc_id.clone();
-    let diverged = state.db.with_conn(move |conn| {
-        crate::db::disc_source::get_diverged_at(conn, &did_div)
-    }).await.ok().flatten().is_some();
+    let diverged = state
+        .db
+        .with_conn(move |conn| crate::db::disc_source::get_diverged_at(conn, &did_div))
+        .await
+        .ok()
+        .flatten()
+        .is_some();
     // Lint-on-append (contract 2026-07-13): ONLY a live single Agent append
     // is linted — bulk imports, User/System messages and project-less discs
     // are exempt — and the insert is NEVER blocked. The full report rides the
     // stored message (UI badge); the summary rides the response (tool result)
     // so the posting agent can self-correct.
-    let live_agent_append = req.messages.len() == 1
-        && matches!(req.messages[0].role, MessageRole::Agent);
+    let live_agent_append =
+        req.messages.len() == 1 && matches!(req.messages[0].role, MessageRole::Agent);
     let mut live_lint_report: Option<crate::core::anti_halluc::LintReport> = None;
     let mut lint_summary: Option<AppendLintSummary> = None;
     if live_agent_append && crate::core::anti_halluc::current_mode().is_active() {
         if let Some(pid) = disc.project_id.clone() {
-            let roots = state.db.with_conn(move |conn| {
-                let p = crate::db::projects::get_project(conn, &pid)?;
-                Ok(p.map(|p| {
-                    let linked = p.linked_repos.iter()
-                        .map(|lr| lr.location.clone())
-                        .filter(|loc| !loc.starts_with("http://") && !loc.starts_with("https://"))
-                        .collect::<Vec<_>>();
-                    (p.path, linked)
-                }))
-            }).await.ok().flatten();
+            let roots = state
+                .db
+                .with_conn(move |conn| {
+                    let p = crate::db::projects::get_project(conn, &pid)?;
+                    Ok(p.map(|p| {
+                        let linked = p
+                            .linked_repos
+                            .iter()
+                            .map(|lr| lr.location.clone())
+                            .filter(|loc| {
+                                !loc.starts_with("http://") && !loc.starts_with("https://")
+                            })
+                            .collect::<Vec<_>>();
+                        (p.path, linked)
+                    }))
+                })
+                .await
+                .ok()
+                .flatten();
             if let Some((project_path, linked)) = roots.filter(|(p, _)| !p.is_empty()) {
                 live_lint_report = crate::core::anti_halluc::finalize_lint_report(
                     &req.messages[0].content,
@@ -290,9 +319,17 @@ pub async fn disc_append(
     for incoming in req.messages.iter() {
         let did_check = did_for_loop.clone();
         let src_id_check = incoming.source_msg_id.clone();
-        let already = state.db.with_conn(move |conn| {
-            crate::db::disc_source::message_exists_for_source_id(conn, &did_check, &src_id_check)
-        }).await.unwrap_or(false);
+        let already = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::disc_source::message_exists_for_source_id(
+                    conn,
+                    &did_check,
+                    &src_id_check,
+                )
+            })
+            .await
+            .unwrap_or(false);
         if already {
             skipped += 1;
             continue;
@@ -322,13 +359,19 @@ pub async fn disc_append(
         };
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
-        let insert_result = state.db.with_conn(move |conn| {
-            crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
-        }).await;
+        let insert_result = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
+            })
+            .await;
         match insert_result {
             Ok(sort_order) => last_sort_order = Some(sort_order),
             Err(e) => {
-                return Json(ApiResponse::err(format!("DB error appending message: {}", e)))
+                return Json(ApiResponse::err(format!(
+                    "DB error appending message: {}",
+                    e
+                )))
             }
         }
         inserted_msgs.push(msg);
@@ -384,7 +427,9 @@ pub async fn disc_append(
                         })
                         .await
                     {
-                        tracing::warn!("disc_append: failed to bump heartbeat / clear activity: {e}");
+                        tracing::warn!(
+                            "disc_append: failed to bump heartbeat / clear activity: {e}"
+                        );
                     }
                 }
             }
@@ -413,9 +458,17 @@ pub async fn disc_link(
     State(state): State<AppState>,
     Json(req): Json<DiscLinkRequest>,
 ) -> Json<ApiResponse<bool>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::disc_source::bind_to_source(conn, &req.disc_id, &req.source_agent, &req.source_session_id)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::disc_source::bind_to_source(
+                conn,
+                &req.disc_id,
+                &req.source_agent,
+                &req.source_session_id,
+            )
+        })
+        .await;
     match result {
         Ok(_) => Json(ApiResponse::ok(true)),
         Err(e) => Json(ApiResponse::err(format!("DB error linking: {}", e))),
@@ -433,9 +486,10 @@ pub async fn disc_unlink(
     State(state): State<AppState>,
     Json(req): Json<DiscUnlinkRequest>,
 ) -> Json<ApiResponse<bool>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::disc_source::unbind_from_source(conn, &req.disc_id)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::disc_source::unbind_from_source(conn, &req.disc_id))
+        .await;
     match result {
         Ok(closed) => Json(ApiResponse::ok(closed)),
         Err(e) => Json(ApiResponse::err(format!("DB error unlinking: {}", e))),
@@ -461,9 +515,16 @@ pub async fn disc_find_by_session(
     State(state): State<AppState>,
     Query(q): Query<DiscFindBySessionQuery>,
 ) -> Json<ApiResponse<DiscFindBySessionResponse>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::disc_source::find_disc_by_source_session(conn, &q.source_agent, &q.source_session_id)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::disc_source::find_disc_by_source_session(
+                conn,
+                &q.source_agent,
+                &q.source_session_id,
+            )
+        })
+        .await;
     match result {
         Ok(disc_id) => Json(ApiResponse::ok(DiscFindBySessionResponse { disc_id })),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -487,9 +548,10 @@ pub async fn disc_search(
         return Json(ApiResponse::err("query string `q` must not be empty"));
     }
     let limit = q.limit.unwrap_or(20);
-    let result = state.db.with_conn(move |conn| {
-        crate::db::disc_source::search_discussions(conn, &q.q, limit)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::disc_source::search_discussions(conn, &q.q, limit))
+        .await;
     match result {
         Ok(hits) => Json(ApiResponse::ok(hits)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -544,9 +606,10 @@ pub struct DiscLoadOtherResponse {
 pub async fn list_source_bindings(
     State(state): State<AppState>,
 ) -> Json<ApiResponse<Vec<crate::db::disc_source::DiscSourceBinding>>> {
-    let result = state.db.with_conn(|conn| {
-        crate::db::disc_source::list_all_source_bindings(conn)
-    }).await;
+    let result = state
+        .db
+        .with_conn(|conn| crate::db::disc_source::list_all_source_bindings(conn))
+        .await;
     match result {
         Ok(bindings) => Json(ApiResponse::ok(bindings)),
         Err(e) => Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -572,15 +635,19 @@ pub async fn disc_source_detail(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Json<ApiResponse<DiscSourceDetail>> {
     let id_for_bindings = id.clone();
-    let bindings = state.db.with_conn(move |conn| {
-        crate::db::disc_source::list_all_source_bindings(conn)
-    }).await.unwrap_or_default();
+    let bindings = state
+        .db
+        .with_conn(move |conn| crate::db::disc_source::list_all_source_bindings(conn))
+        .await
+        .unwrap_or_default();
     let current = bindings.into_iter().find(|b| b.disc_id == id_for_bindings);
 
     let id_for_hist = id.clone();
-    let history = state.db.with_conn(move |conn| {
-        crate::db::disc_source::list_source_history(conn, &id_for_hist)
-    }).await.unwrap_or_default();
+    let history = state
+        .db
+        .with_conn(move |conn| crate::db::disc_source::list_source_history(conn, &id_for_hist))
+        .await
+        .unwrap_or_default();
     Json(ApiResponse::ok(DiscSourceDetail { current, history }))
 }
 
@@ -593,16 +660,19 @@ pub async fn disc_load_other(
     Query(q): Query<DiscLoadOtherQuery>,
 ) -> Json<ApiResponse<DiscLoadOtherResponse>> {
     let did = q.disc_id.clone();
-    let result = state.db.with_conn(move |conn| {
-        crate::db::discussions::get_discussion(conn, &did)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await;
     let disc = match result {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
-    let non_system: Vec<&DiscussionMessage> = disc.messages.iter()
+    let non_system: Vec<&DiscussionMessage> = disc
+        .messages
+        .iter()
         .filter(|m| !matches!(m.role, MessageRole::System))
         .collect();
     let total = non_system.len() as u32;
@@ -614,32 +684,43 @@ pub async fn disc_load_other(
     // message can carry the files pinned to it (0.8.8). list_context_files is
     // a single indexed query — cheaper than one query per message.
     let did_files = q.disc_id.clone();
-    let files = state.db.with_conn(move |conn| {
-        crate::db::discussions::list_context_files(conn, &did_files).map_err(|e| anyhow::anyhow!(e))
-    }).await.unwrap_or_default();
-    let mut by_msg: std::collections::HashMap<String, Vec<crate::api::disc_introspection::MessageAttachment>> =
-        std::collections::HashMap::new();
+    let files = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::list_context_files(conn, &did_files)
+                .map_err(|e| anyhow::anyhow!(e))
+        })
+        .await
+        .unwrap_or_default();
+    let mut by_msg: std::collections::HashMap<
+        String,
+        Vec<crate::api::disc_introspection::MessageAttachment>,
+    > = std::collections::HashMap::new();
     for f in files {
         if let Some(mid) = f.message_id.clone() {
-            by_msg.entry(mid).or_default().push(crate::api::disc_introspection::MessageAttachment {
-                id: f.id,
-                filename: f.filename,
-                mime_type: f.mime_type,
-                disk_path: f.disk_path,
-            });
+            by_msg.entry(mid).or_default().push(
+                crate::api::disc_introspection::MessageAttachment {
+                    id: f.id,
+                    filename: f.filename,
+                    mime_type: f.mime_type,
+                    disk_path: f.disk_path,
+                },
+            );
         }
     }
 
-    let msgs = non_system[(from as usize)..(to as usize)].iter().enumerate().map(|(rel, m)| {
-        DiscLoadOtherMessage {
+    let msgs = non_system[(from as usize)..(to as usize)]
+        .iter()
+        .enumerate()
+        .map(|(rel, m)| DiscLoadOtherMessage {
             idx: from + rel as u32,
             role: m.role.clone(),
             content: m.content.clone(),
             agent_type: m.agent_type.clone(),
             timestamp: m.timestamp.to_rfc3339(),
             attachments: by_msg.get(&m.id).cloned().unwrap_or_default(),
-        }
-    }).collect();
+        })
+        .collect();
 
     Json(ApiResponse::ok(DiscLoadOtherResponse {
         disc_id: q.disc_id,
@@ -687,7 +768,10 @@ mod tests {
             Ok(())
         }).await.unwrap();
         let cfg = Arc::new(RwLock::new(crate::core::config::default_config()));
-        (crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS), tmp)
+        (
+            crate::AppState::new_defaults(cfg, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS),
+            tmp,
+        )
     }
 
     fn agent_msg(id: &str, content: &str) -> DiscAppendMessage {
@@ -802,8 +886,14 @@ mod tests {
         let first = append(&state, vec![agent_msg("s1", "un")]).await;
         let a = first.last_sort_order.expect("appended → position present");
 
-        let second = append(&state, vec![agent_msg("s2", "deux"), agent_msg("s3", "trois")]).await;
-        let b = second.last_sort_order.expect("batch → position of the LAST message");
+        let second = append(
+            &state,
+            vec![agent_msg("s2", "deux"), agent_msg("s3", "trois")],
+        )
+        .await;
+        let b = second
+            .last_sort_order
+            .expect("batch → position of the LAST message");
         assert_eq!(b, a + 2, "two more rows after the first");
 
         // Pure duplicate: nothing appended → no position (the caller keeps
@@ -818,15 +908,27 @@ mod tests {
     async fn live_agent_append_with_fabricated_source_carries_lint() {
         crate::core::anti_halluc::set_mode("warn");
         let (state, _tmp) = lint_state(true).await;
-        let out = append(&state, vec![agent_msg("m1",
-            "Confirmed the bug. [src: file: src/does-not-exist.rs:42]")]).await;
+        let out = append(
+            &state,
+            vec![agent_msg(
+                "m1",
+                "Confirmed the bug. [src: file: src/does-not-exist.rs:42]",
+            )],
+        )
+        .await;
         assert_eq!(out.appended, 1, "insert is NEVER blocked");
-        let lint = out.lint.expect("fabricated citation must produce a summary");
+        let lint = out
+            .lint
+            .expect("fabricated citation must produce a summary");
         assert!(lint.fabricated_count >= 1, "{lint:?}");
         // The stored message carries the full report (UI badge).
-        let msg = state.db.with_conn(|conn| {
-            crate::db::discussions::list_messages(conn, "d-lint")
-        }).await.unwrap().pop().unwrap();
+        let msg = state
+            .db
+            .with_conn(|conn| crate::db::discussions::list_messages(conn, "d-lint"))
+            .await
+            .unwrap()
+            .pop()
+            .unwrap();
         assert!(msg.lint_report.is_some());
         crate::core::anti_halluc::set_mode("off");
     }
@@ -836,11 +938,17 @@ mod tests {
     async fn live_agent_append_with_valid_source_has_no_fabricated() {
         crate::core::anti_halluc::set_mode("warn");
         let (state, _tmp) = lint_state(true).await;
-        let out = append(&state, vec![agent_msg("m1",
-            "Verified. [src: file: src/real.rs:1]")]).await;
+        let out = append(
+            &state,
+            vec![agent_msg("m1", "Verified. [src: file: src/real.rs:1]")],
+        )
+        .await;
         assert_eq!(out.appended, 1);
         if let Some(l) = out.lint {
-            assert_eq!(l.fabricated_count, 0, "valid citation must not read as fabricated: {l:?}");
+            assert_eq!(
+                l.fabricated_count, 0,
+                "valid citation must not read as fabricated: {l:?}"
+            );
         }
         crate::core::anti_halluc::set_mode("off");
     }
@@ -851,10 +959,14 @@ mod tests {
         crate::core::anti_halluc::set_mode("warn");
         let (state, _tmp) = lint_state(true).await;
         // Bulk (2 messages) with a fabricated citation → no lint.
-        let out = append(&state, vec![
-            agent_msg("b1", "one [src: file: src/ghost.rs:1]"),
-            agent_msg("b2", "two"),
-        ]).await;
+        let out = append(
+            &state,
+            vec![
+                agent_msg("b1", "one [src: file: src/ghost.rs:1]"),
+                agent_msg("b2", "two"),
+            ],
+        )
+        .await;
         assert!(out.lint.is_none(), "bulk import must not lint");
         // Single USER message with a fabricated citation → no lint.
         let user = DiscAppendMessage {
@@ -874,33 +986,46 @@ mod tests {
         // Project-less disc: no roots → no lint, no false fabricated.
         crate::core::anti_halluc::set_mode("warn");
         let (state, _tmp) = lint_state(false).await;
-        let out = append(&state, vec![agent_msg("m1", "x [src: file: src/ghost.rs:1]")]).await;
+        let out = append(
+            &state,
+            vec![agent_msg("m1", "x [src: file: src/ghost.rs:1]")],
+        )
+        .await;
         assert!(out.lint.is_none(), "no project → no lint");
         // Mode off: bound project but lint disabled.
         crate::core::anti_halluc::set_mode("off");
         let (state2, _tmp2) = lint_state(true).await;
-        let out = append(&state2, vec![agent_msg("m1", "x [src: file: src/ghost.rs:1]")]).await;
+        let out = append(
+            &state2,
+            vec![agent_msg("m1", "x [src: file: src/ghost.rs:1]")],
+        )
+        .await;
         assert!(out.lint.is_none(), "mode off → no lint");
     }
-
 
     #[test]
     fn disc_create_request_deserializes_with_optional_source_binding() {
         // Without source binding — pure local create.
-        let minimal: DiscCreateRequest = serde_json::from_str(r#"{
+        let minimal: DiscCreateRequest = serde_json::from_str(
+            r#"{
             "title": "test",
             "agent": "ClaudeCode"
-        }"#).expect("minimal create body must parse");
+        }"#,
+        )
+        .expect("minimal create body must parse");
         assert_eq!(minimal.title, "test");
         assert!(minimal.source_agent.is_none());
 
         // With source binding — CLI-initiated import.
-        let bound: DiscCreateRequest = serde_json::from_str(r#"{
+        let bound: DiscCreateRequest = serde_json::from_str(
+            r#"{
             "title": "imported",
             "agent": "ClaudeCode",
             "source_agent": "ClaudeCode",
             "source_session_id": "abc-123"
-        }"#).expect("bound create body must parse");
+        }"#,
+        )
+        .expect("bound create body must parse");
         assert_eq!(bound.source_agent.as_deref(), Some("ClaudeCode"));
         assert_eq!(bound.source_session_id.as_deref(), Some("abc-123"));
     }
@@ -910,10 +1035,15 @@ mod tests {
         // The dedup pass depends on `source_msg_id` being present —
         // missing it is a programmer error, not a runtime fallback.
         // serde_json refuses to deserialize without it.
-        let bad = serde_json::from_str::<DiscAppendMessage>(r#"{
+        let bad = serde_json::from_str::<DiscAppendMessage>(
+            r#"{
             "role": "User",
             "content": "no id"
-        }"#);
-        assert!(bad.is_err(), "missing source_msg_id must fail deser (dedup invariant)");
+        }"#,
+        );
+        assert!(
+            bad.is_err(),
+            "missing source_msg_id must fail deser (dedup invariant)"
+        );
     }
 }

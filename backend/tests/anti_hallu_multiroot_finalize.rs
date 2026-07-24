@@ -22,9 +22,7 @@
 //! tests in THIS binary, every off/warn flip lives SEQUENTIALLY inside one test
 //! fn that restores `warn` before it returns, and it is marked `#[serial]`.
 
-use kronn::core::anti_halluc::{
-    set_mode, verify_source_marker, SourceStatus,
-};
+use kronn::core::anti_halluc::{set_mode, verify_source_marker, SourceStatus};
 use serial_test::serial;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -133,7 +131,10 @@ fn single_root_traversal_never_verified() {
         "a ../ traversal must NEVER come back Verified"
     );
     assert!(
-        matches!(status, SourceStatus::OutsideProject | SourceStatus::NotFound),
+        matches!(
+            status,
+            SourceStatus::OutsideProject | SourceStatus::NotFound
+        ),
         "traversal must be OutsideProject (or NotFound), got {status:?}"
     );
     cleanup(&root);
@@ -146,7 +147,7 @@ fn single_root_traversal_never_verified() {
 fn single_root_escape_to_real_sibling_is_outside_not_verified() {
     let root_a = temp_project();
     let root_b = temp_project(); // a real sibling dir with a real src/foo.rs
-    // Build a relative path from A that climbs out to B's real foo.rs.
+                                 // Build a relative path from A that climbs out to B's real foo.rs.
     let rel = format!(
         "../{}/src/foo.rs",
         root_b.file_name().unwrap().to_string_lossy()
@@ -345,7 +346,10 @@ fn finalize_empty_workspace_string_ignored() {
     let report = finalize_lint_report(text, Some(""), &project.to_string_lossy())
         .expect("citation present → report");
     assert_eq!(report.fabricated_count, 0, "{report:?}");
-    assert!(report.verified_count() >= 1, "empty workspace must be ignored, project root used: {report:?}");
+    assert!(
+        report.verified_count() >= 1,
+        "empty workspace must be ignored, project root used: {report:?}"
+    );
     set_mode("warn");
     cleanup(&project);
 }
@@ -377,7 +381,10 @@ fn finalize_empty_text_is_none_no_panic() {
     let project = temp_project();
     for t in ["", "   ", "\n\t  \n"] {
         let report = finalize_lint_report(t, None, &project.to_string_lossy());
-        assert!(report.is_none(), "empty/whitespace text must be None, t={t:?}");
+        assert!(
+            report.is_none(),
+            "empty/whitespace text must be None, t={t:?}"
+        );
     }
     set_mode("warn");
     cleanup(&project);

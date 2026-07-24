@@ -3,8 +3,8 @@
 //! Handles: prompt rendering, per-step MCPs, stall detection, retry,
 //! and on_result condition evaluation.
 
-use std::time::Instant;
 use anyhow::Result;
+use std::time::Instant;
 use tokio::time::{timeout, Duration};
 
 use crate::agents::runner::{self, OutputMode, StreamJsonEvent};
@@ -68,7 +68,9 @@ pub(crate) fn build_step_prompt(
             prompt.push_str(crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS);
         }
         crate::models::StepOutputFormat::TypedSchema { schema, .. } => {
-            prompt.push_str(&crate::workflows::template::build_typed_schema_instruction(schema));
+            prompt.push_str(&crate::workflows::template::build_typed_schema_instruction(
+                schema,
+            ));
         }
         crate::models::StepOutputFormat::FreeText => {}
     }
@@ -154,37 +156,57 @@ pub async fn execute_step(
     // produce a `---STEP_OUTPUT---` envelope. Sending the literal `{{...}}`
     // to the agent wastes tokens and surfaces as a cryptic agent error —
     // better to abort here with a message the user can act on.
-    if let Some(outcome) = fail_fast_on_unresolved(&step.name, &prompt, start.elapsed().as_millis() as u64) {
+    if let Some(outcome) =
+        fail_fast_on_unresolved(&step.name, &prompt, start.elapsed().as_millis() as u64)
+    {
         return outcome;
     }
 
     // Auto-inject on_result signal instructions into the prompt
-    let valid_rules: Vec<_> = step.on_result.iter().filter(|r| !r.contains.is_empty()).collect();
+    let valid_rules: Vec<_> = step
+        .on_result
+        .iter()
+        .filter(|r| !r.contains.is_empty())
+        .collect();
     if !valid_rules.is_empty() {
         // Reconcile with the Structured/TypedSchema envelope instruction, which
         // says the `---STEP_OUTPUT---` block "must be the LAST thing". A step
         // that is BOTH structured AND branches on a signal would otherwise get
         // two contradictory "must be last" rules. Spell out the exact order:
         // envelope first, then the signal as the only trailing line.
-        let structured = !matches!(step.output_format, crate::models::StepOutputFormat::FreeText);
+        let structured = !matches!(
+            step.output_format,
+            crate::models::StepOutputFormat::FreeText
+        );
         if structured {
             prompt.push_str("\n\n---\nIMPORTANT — output order: FIRST emit the ---STEP_OUTPUT--- envelope exactly as described above, THEN a single signal line as the VERY LAST line (the signal line is the only thing allowed after the envelope).\n");
         } else {
-            prompt.push_str("\n\n---\nIMPORTANT — After your response, you MUST end with a signal line.\n");
+            prompt.push_str(
+                "\n\n---\nIMPORTANT — After your response, you MUST end with a signal line.\n",
+            );
         }
-        prompt.push_str("The signal MUST be the very last line of your response, in this exact format:\n\n");
+        prompt.push_str(
+            "The signal MUST be the very last line of your response, in this exact format:\n\n",
+        );
         for rule in &valid_rules {
             let action_label = match &rule.action {
-                ConditionAction::Stop => "the workflow will stop (no further steps needed)".to_string(),
+                ConditionAction::Stop => {
+                    "the workflow will stop (no further steps needed)".to_string()
+                }
                 ConditionAction::Skip => "the next step will be skipped".to_string(),
-                ConditionAction::Goto { step_name, .. } => format!("the workflow will jump to step '{}'", step_name),
+                ConditionAction::Goto { step_name, .. } => {
+                    format!("the workflow will jump to step '{}'", step_name)
+                }
             };
             prompt.push_str(&format!(
                 "  [SIGNAL: {}]  — use this if {} — {}\n",
-                rule.contains, condition_description(&rule.contains), action_label
+                rule.contains,
+                condition_description(&rule.contains),
+                action_label
             ));
         }
-        prompt.push_str("  [SIGNAL: CONTINUE]  — use this if none of the above apply (default)\n\n");
+        prompt
+            .push_str("  [SIGNAL: CONTINUE]  — use this if none of the above apply (default)\n\n");
         prompt.push_str("You MUST include exactly one [SIGNAL: ...] as the very last line. Do NOT mention or repeat signal names anywhere else in your response.\n");
     }
 
@@ -201,11 +223,28 @@ pub async fn execute_step(
             // 90s) gives a per-minute limit time to clear without stalling a
             // legitimate transient retry for minutes.
             let delay = Duration::from_secs((15 * attempt as u64).min(90));
-            tracing::info!("Step '{}' retry {}/{} after {:?}", step.name, attempt, max_attempts - 1, delay);
+            tracing::info!(
+                "Step '{}' retry {}/{} after {:?}",
+                step.name,
+                attempt,
+                max_attempts - 1,
+                delay
+            );
             tokio::time::sleep(delay).await;
         }
 
-        match run_agent_with_timeout(step, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, progress_tx.as_ref()).await {
+        match run_agent_with_timeout(
+            step,
+            project_path,
+            work_dir,
+            &prompt,
+            tokens_config,
+            full_access,
+            model_tiers,
+            progress_tx.as_ref(),
+        )
+        .await
+        {
             Ok(agent_output) => {
                 let duration_ms = start.elapsed().as_millis() as u64;
                 let mut final_output = agent_output.text.clone();
@@ -224,11 +263,14 @@ pub async fn execute_step(
                 if needs_envelope {
                     let envelope = crate::workflows::template::extract_step_envelope(&final_output);
                     let validation_error = match (&step.output_format, &envelope) {
-                        (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
-                            crate::workflows::template::validate_envelope_against_schema(
-                                &env.data_json, schema,
-                            ).err()
-                        }
+                        (
+                            crate::models::StepOutputFormat::TypedSchema { schema, .. },
+                            Some(env),
+                        ) => crate::workflows::template::validate_envelope_against_schema(
+                            &env.data_json,
+                            schema,
+                        )
+                        .err(),
                         _ => None,
                     };
                     if envelope.is_none() || validation_error.is_some() {
@@ -259,7 +301,17 @@ pub async fn execute_step(
                         );
                         let mut final_validation_error: Option<String> = validation_error.clone();
                         let mut repair_valid = false;
-                        let repair_res = run_agent_with_timeout(step, project_path, work_dir, &repair_prompt, tokens_config, full_access, model_tiers, None).await;
+                        let repair_res = run_agent_with_timeout(
+                            step,
+                            project_path,
+                            work_dir,
+                            &repair_prompt,
+                            tokens_config,
+                            full_access,
+                            model_tiers,
+                            None,
+                        )
+                        .await;
                         if let Err(ref e) = repair_res {
                             // The repair RUN itself failed (spawn/timeout) —
                             // distinct from "repair produced invalid output".
@@ -267,16 +319,22 @@ pub async fn execute_step(
                         }
                         if let Ok(repair_output) = repair_res {
                             total_tokens += repair_output.tokens_used;
-                            let repaired_env = crate::workflows::template::extract_step_envelope(&repair_output.text);
+                            let repaired_env = crate::workflows::template::extract_step_envelope(
+                                &repair_output.text,
+                            );
                             let repaired_error = match (&step.output_format, &repaired_env) {
-                                (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
-                                    crate::workflows::template::validate_envelope_against_schema(
-                                        &env.data_json, schema,
-                                    ).err()
-                                }
+                                (
+                                    crate::models::StepOutputFormat::TypedSchema { schema, .. },
+                                    Some(env),
+                                ) => crate::workflows::template::validate_envelope_against_schema(
+                                    &env.data_json,
+                                    schema,
+                                )
+                                .err(),
                                 _ => None,
                             };
-                            repair_valid = matches!((&repaired_env, &repaired_error), (Some(_), None));
+                            repair_valid =
+                                matches!((&repaired_env, &repaired_error), (Some(_), None));
                             if repair_valid {
                                 final_output = repair_output.text;
                                 tracing::info!("Step '{}': repair succeeded", step.name);
@@ -288,7 +346,8 @@ pub async fn execute_step(
                                 if let Some(err) = repaired_error {
                                     final_validation_error = Some(err);
                                 } else if repaired_env.is_none() {
-                                    final_validation_error = Some("missing envelope after repair".into());
+                                    final_validation_error =
+                                        Some("missing envelope after repair".into());
                                 }
                             }
                         }
@@ -303,7 +362,10 @@ pub async fn execute_step(
                         // validate against) that ran on Ollama.
                         if !repair_valid
                             && step.agent == crate::models::AgentType::Ollama
-                            && matches!(step.output_format, crate::models::StepOutputFormat::TypedSchema { .. })
+                            && matches!(
+                                step.output_format,
+                                crate::models::StepOutputFormat::TypedSchema { .. }
+                            )
                         {
                             tracing::warn!(
                                 target: "kronn::ollama::escalation",
@@ -311,7 +373,17 @@ pub async fn execute_step(
                                 "local schema validation failed after repair — escalating to Claude"
                             );
                             let escalated = escalation_step(step);
-                            let esc_res = run_agent_with_timeout(&escalated, project_path, work_dir, &prompt, tokens_config, full_access, model_tiers, None).await;
+                            let esc_res = run_agent_with_timeout(
+                                &escalated,
+                                project_path,
+                                work_dir,
+                                &prompt,
+                                tokens_config,
+                                full_access,
+                                model_tiers,
+                                None,
+                            )
+                            .await;
                             if let Err(ref e) = esc_res {
                                 tracing::warn!(
                                     target: "kronn::ollama::escalation",
@@ -322,7 +394,8 @@ pub async fn execute_step(
                             }
                             if let Ok(esc) = esc_res {
                                 total_tokens += esc.tokens_used;
-                                let esc_env = crate::workflows::template::extract_step_envelope(&esc.text);
+                                let esc_env =
+                                    crate::workflows::template::extract_step_envelope(&esc.text);
                                 let esc_error = match (&step.output_format, &esc_env) {
                                     (crate::models::StepOutputFormat::TypedSchema { schema, .. }, Some(env)) => {
                                         crate::workflows::template::validate_envelope_against_schema(&env.data_json, schema).err()
@@ -346,11 +419,18 @@ pub async fn execute_step(
                         // `Continue` (0.7.0 behavior: warn + raw output).
                         if !repair_valid {
                             if let crate::models::StepOutputFormat::TypedSchema {
-                                on_invalid: crate::models::OnInvalid::Fail, ..
-                            } = &step.output_format {
-                                let err_msg = final_validation_error
-                                    .unwrap_or_else(|| "TypedSchema validation failed and repair did not fix it".into());
-                                tracing::warn!("Step '{}': failing run (on_invalid=Fail) — {}", step.name, err_msg);
+                                on_invalid: crate::models::OnInvalid::Fail,
+                                ..
+                            } = &step.output_format
+                            {
+                                let err_msg = final_validation_error.unwrap_or_else(|| {
+                                    "TypedSchema validation failed and repair did not fix it".into()
+                                });
+                                tracing::warn!(
+                                    "Step '{}': failing run (on_invalid=Fail) — {}",
+                                    step.name,
+                                    err_msg
+                                );
                                 return StepOutcome {
                                     result: StepResult {
                                         step_name: step.name.clone(),
@@ -437,7 +517,9 @@ pub async fn execute_step(
                         | crate::models::StepOutputFormat::TypedSchema { .. }
                 );
                 if condition_action.is_none() && envelope_aware {
-                    if let Some(env) = crate::workflows::template::extract_step_envelope(&final_output) {
+                    if let Some(env) =
+                        crate::workflows::template::extract_step_envelope(&final_output)
+                    {
                         if env.status == "NO_RESULTS" {
                             // Honor the action the author DECLARED on the
                             // matching rule (a NO_RESULTS → Goto("handle_empty")
@@ -462,7 +544,11 @@ pub async fn execute_step(
                 // Record whether the structured contract was actually met.
                 // Downstream code (UI badge, SuccessDegraded status, health
                 // checks) can branch on this without re-parsing the output.
-                let envelope_detected = if matches!(step.output_format, crate::models::StepOutputFormat::Structured | crate::models::StepOutputFormat::TypedSchema { .. }) {
+                let envelope_detected = if matches!(
+                    step.output_format,
+                    crate::models::StepOutputFormat::Structured
+                        | crate::models::StepOutputFormat::TypedSchema { .. }
+                ) {
                     Some(crate::workflows::template::extract_step_envelope(&final_output).is_some())
                 } else {
                     None
@@ -491,7 +577,12 @@ pub async fn execute_step(
             }
             Err(e) => {
                 last_error = format!("{}", e);
-                tracing::warn!("Step '{}' attempt {} failed: {}", step.name, attempt + 1, last_error);
+                tracing::warn!(
+                    "Step '{}' attempt {} failed: {}",
+                    step.name,
+                    attempt + 1,
+                    last_error
+                );
             }
         }
     }
@@ -598,7 +689,9 @@ fn format_tool_input_suffix(raw_input: &str) -> String {
 /// keep the streaming, prompt-injection path. Ollama-only: consumed solely by
 /// `AgentStartConfig.ollama_format`; other agents get their schema via the
 /// prompt (see the output_format addendum near the top of this module).
-fn ollama_envelope_format(output_format: &crate::models::StepOutputFormat) -> Option<serde_json::Value> {
+fn ollama_envelope_format(
+    output_format: &crate::models::StepOutputFormat,
+) -> Option<serde_json::Value> {
     match output_format {
         crate::models::StepOutputFormat::TypedSchema { schema, .. } => Some(serde_json::json!({
             "type": "object",
@@ -654,7 +747,8 @@ async fn run_agent_with_timeout(
     // steps on real tickets routinely run 20-30 min — the older 10 min
     // default cut them short. Per-step `stall_timeout_secs` overrides this
     // when a step needs more (cf. wizard wf-label `wiz.stallTimeout`).
-    let stall_timeout = step.stall_timeout_secs
+    let stall_timeout = step
+        .stall_timeout_secs
         .map(Duration::from_secs)
         .unwrap_or(Duration::from_secs(1800));
 
@@ -668,16 +762,23 @@ async fn run_agent_with_timeout(
         skill_ids: &step.skill_ids,
         directive_ids: &step.directive_ids,
         profile_ids: &step.profile_ids,
-        tier: step.agent_settings.as_ref()
+        tier: step
+            .agent_settings
+            .as_ref()
             .and_then(|s| s.tier)
             .unwrap_or_default(),
         model_tiers,
         ollama_format: ollama_format.as_ref(),
         // Explicit per-step model (from the wizard's model picker) — now
         // actually consumed at run time, not just stamped for display.
-        model_override: step.agent_settings.as_ref().and_then(|s| s.model.as_deref()),
+        model_override: step
+            .agent_settings
+            .as_ref()
+            .and_then(|s| s.model.as_deref()),
         ..runner::AgentStartConfig::new(&step.agent, project_path, prompt, tokens_config)
-    }).await.map_err(|e| anyhow::anyhow!(e))?;
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
 
     // 0.8.8 — the post-spawn consumption loop + finalize is extracted into
     // `drive_agent_to_output` (generic over `runner::AgentIo`) so it's
@@ -688,7 +789,8 @@ async fn run_agent_with_timeout(
         stall_timeout,
         &step.agent,
         &step.name,
-    ).await
+    )
+    .await
 }
 
 /// 2026-06-10 — format a useful error when an agent process fails with an
@@ -752,7 +854,11 @@ async fn drive_agent_to_output(
                                 let _ = tx.send(text).await;
                             }
                         }
-                        StreamJsonEvent::Usage { input_tokens, output_tokens, .. } => {
+                        StreamJsonEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            ..
+                        } => {
                             stream_json_tokens = input_tokens + output_tokens;
                         }
                         StreamJsonEvent::ToolStart(name) => {
@@ -775,7 +881,9 @@ async fn drive_agent_to_output(
                             // input field (cf. format_tool_input_suffix).
                             if current_tool.take().is_some() {
                                 if let Some(tx) = progress_tx {
-                                    let _ = tx.send(format_tool_input_suffix(&current_tool_input)).await;
+                                    let _ = tx
+                                        .send(format_tool_input_suffix(&current_tool_input))
+                                        .await;
                                 }
                             }
                             current_tool_input.clear();
@@ -801,8 +909,11 @@ async fn drive_agent_to_output(
             }
             Err(_) => {
                 // Stall timeout — kill the process
-                tracing::warn!("Step '{}' stalled (no output for {:?}), killing agent",
-                    step_name, stall_timeout);
+                tracing::warn!(
+                    "Step '{}' stalled (no output for {:?}), killing agent",
+                    step_name,
+                    stall_timeout
+                );
                 process.kill().await;
                 anyhow::bail!("Agent stalled (no output for {}s)", stall_timeout.as_secs());
             }
@@ -832,7 +943,12 @@ async fn drive_agent_to_output(
         // full backtrace; older lines rarely add signal once we've seen
         // the message.
         let tail: Vec<&String> = stderr_lines.iter().rev().take(20).collect();
-        let stderr_tail = tail.iter().rev().map(|s| s.as_str()).collect::<Vec<_>>().join("\n");
+        let stderr_tail = tail
+            .iter()
+            .rev()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
         if !stderr_tail.is_empty() {
             anyhow::bail!("Agent exited with {}:\n{}", exit_desc, stderr_tail);
         }
@@ -846,7 +962,10 @@ async fn drive_agent_to_output(
         //     reply, a rate-limit line, a "context too long" message right
         //     before it died. Surface its tail.
         let killed_by_signal = matches!(status, Some(ref s) if s.code.is_none());
-        anyhow::bail!("{}", format_silent_exit_error(&exit_desc, killed_by_signal, &output));
+        anyhow::bail!(
+            "{}",
+            format_silent_exit_error(&exit_desc, killed_by_signal, &output)
+        );
     }
 
     // Extract token usage — same logic as discussions:
@@ -864,7 +983,11 @@ async fn drive_agent_to_output(
         count
     };
 
-    tracing::info!("Step '{}' finished — {} tokens used", step_name, tokens_used);
+    tracing::info!(
+        "Step '{}' finished — {} tokens used",
+        step_name,
+        tokens_used
+    );
 
     Ok(AgentOutput {
         text: output,
@@ -897,7 +1020,12 @@ async fn run_multi_agent_debate(
     progress_tx: Option<&ProgressSender>,
 ) -> Result<(String, u64)> {
     let max_rounds = cfg.max_rounds.unwrap_or(3).clamp(1, 5);
-    let approved = |t: &str| t.lines().rev().take(4).any(|l| l.contains("[CONSENSUS: APPROVED]"));
+    let approved = |t: &str| {
+        t.lines()
+            .rev()
+            .take(4)
+            .any(|l| l.contains("[CONSENSUS: APPROVED]"))
+    };
 
     let mut transcript = format!(
         "=== PLAN / OUTPUT (authored by {:?}) ===\n{}",
@@ -915,7 +1043,10 @@ async fn run_multi_agent_debate(
         s.on_result = vec![];
         s.output_format = crate::models::StepOutputFormat::FreeText;
         s.agent_settings = Some(AgentSettings {
-            model: None, tier: cfg.reviewer_tier, reasoning_effort: None, max_tokens: None,
+            model: None,
+            tier: cfg.reviewer_tier,
+            reasoning_effort: None,
+            max_tokens: None,
         });
         s
     };
@@ -937,11 +1068,29 @@ async fn run_multi_agent_debate(
              You are the REVIEWER (round {n}/{max}). Read the relevant project files, then challenge the plan/output above on relevance, completeness, correctness and scope. Be concrete and actionable — do NOT rewrite it yourself. If, and ONLY if, you genuinely judge it ready, end your reply with a line containing exactly [CONSENSUS: APPROVED].",
             debate = cfg.debate_prompt, transcript = transcript, n = round + 1, max = max_rounds
         );
-        let rev = run_agent_with_timeout(&reviewer_step, project_path, work_dir, &rprompt, tokens_config, full_access, model_tiers, progress_tx).await?;
+        let rev = run_agent_with_timeout(
+            &reviewer_step,
+            project_path,
+            work_dir,
+            &rprompt,
+            tokens_config,
+            full_access,
+            model_tiers,
+            progress_tx,
+        )
+        .await?;
         tokens += rev.tokens_used;
-        transcript.push_str(&format!("\n\n=== REVIEWER ({:?}, round {}) ===\n{}", cfg.reviewer_agent, round + 1, rev.text));
+        transcript.push_str(&format!(
+            "\n\n=== REVIEWER ({:?}, round {}) ===\n{}",
+            cfg.reviewer_agent,
+            round + 1,
+            rev.text
+        ));
         if approved(&rev.text) {
-            tracing::info!("multi_agent_review: reviewer approved at round {}", round + 1);
+            tracing::info!(
+                "multi_agent_review: reviewer approved at round {}",
+                round + 1
+            );
             break;
         }
 
@@ -951,10 +1100,12 @@ async fn run_multi_agent_debate(
         // a raw prompt), so the author re-emits a valid envelope — otherwise
         // the envelope-safety guard would discard the refinement.
         let envelope_addendum = match &step.output_format {
-            crate::models::StepOutputFormat::Structured =>
-                crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS.to_string(),
-            crate::models::StepOutputFormat::TypedSchema { schema, .. } =>
-                crate::workflows::template::build_typed_schema_instruction(schema),
+            crate::models::StepOutputFormat::Structured => {
+                crate::workflows::template::STRUCTURED_OUTPUT_INSTRUCTIONS.to_string()
+            }
+            crate::models::StepOutputFormat::TypedSchema { schema, .. } => {
+                crate::workflows::template::build_typed_schema_instruction(schema)
+            }
             crate::models::StepOutputFormat::FreeText => String::new(),
         };
         let aprompt = format!(
@@ -962,12 +1113,30 @@ async fn run_multi_agent_debate(
              You are the PLAN AUTHOR ({author:?}). Address the reviewer's critique above: revise your plan/output accordingly. Re-emit your COMPLETE updated output in the SAME format you used originally. If you have addressed everything and now agree the result is ready, additionally end with a line containing exactly [CONSENSUS: APPROVED].{addendum}",
             transcript = transcript, author = step.agent, addendum = envelope_addendum
         );
-        let auth = run_agent_with_timeout(&author_step, project_path, work_dir, &aprompt, tokens_config, full_access, model_tiers, progress_tx).await?;
+        let auth = run_agent_with_timeout(
+            &author_step,
+            project_path,
+            work_dir,
+            &aprompt,
+            tokens_config,
+            full_access,
+            model_tiers,
+            progress_tx,
+        )
+        .await?;
         tokens += auth.tokens_used;
-        transcript.push_str(&format!("\n\n=== AUTHOR ({:?}, round {}) ===\n{}", step.agent, round + 1, auth.text));
+        transcript.push_str(&format!(
+            "\n\n=== AUTHOR ({:?}, round {}) ===\n{}",
+            step.agent,
+            round + 1,
+            auth.text
+        ));
         converged = auth.text.clone();
         if approved(&auth.text) {
-            tracing::info!("multi_agent_review: author+reviewer converged at round {}", round + 1);
+            tracing::info!(
+                "multi_agent_review: author+reviewer converged at round {}",
+                round + 1
+            );
             break;
         }
     }
@@ -990,7 +1159,10 @@ async fn run_multi_agent_debate(
 /// *quotes* `[SIGNAL: ERROR]` in the MIDDLE of a sentence in the last 5
 /// lines no longer triggers a false Stop/Goto. (`contains` did; strict
 /// equality would have regressed content-then-signal lines.)
-pub(crate) fn evaluate_conditions(rules: &[StepConditionRule], output: &str) -> Option<ConditionAction> {
+pub(crate) fn evaluate_conditions(
+    rules: &[StepConditionRule],
+    output: &str,
+) -> Option<ConditionAction> {
     // Look at the last 5 lines for a signal
     let tail: Vec<&str> = output.lines().rev().take(5).collect();
     for rule in rules {
@@ -1019,7 +1191,11 @@ fn fail_fast_on_unresolved(step_name: &str, prompt: &str, elapsed_ms: u64) -> Op
     let first = &unresolved[0];
     let rest_count = unresolved.len().saturating_sub(1);
     let extra = if rest_count > 0 {
-        format!(" (+{} autre{})", rest_count, if rest_count > 1 { "s" } else { "" })
+        format!(
+            " (+{} autre{})",
+            rest_count,
+            if rest_count > 1 { "s" } else { "" }
+        )
     } else {
         String::new()
     };
@@ -1065,7 +1241,10 @@ mod tests {
     use crate::models::{ConditionAction, StepConditionRule};
 
     fn rule(contains: &str, action: ConditionAction) -> StepConditionRule {
-        StepConditionRule { contains: contains.to_string(), action }
+        StepConditionRule {
+            contains: contains.to_string(),
+            action,
+        }
     }
 
     // ─── #8 — stall detection + on_timeout routing ────────────────────────
@@ -1079,16 +1258,27 @@ mod tests {
 
     #[test]
     fn timeout_routing_routes_a_stall_when_on_timeout_is_set() {
-        let goto = Some(ConditionAction::Goto { step_name: "note_failed".into(), max_iterations: None });
-        let (output, cond, action) = timeout_routing(true, &goto, 1, "Agent stalled (no output for 900s)");
-        assert!(matches!(action, Some(ConditionAction::Goto { ref step_name, .. }) if step_name == "note_failed"));
+        let goto = Some(ConditionAction::Goto {
+            step_name: "note_failed".into(),
+            max_iterations: None,
+        });
+        let (output, cond, action) =
+            timeout_routing(true, &goto, 1, "Agent stalled (no output for 900s)");
+        assert!(
+            matches!(action, Some(ConditionAction::Goto { ref step_name, .. }) if step_name == "note_failed")
+        );
         assert_eq!(cond.as_deref(), Some("on_timeout"));
         assert!(output.contains("Routed via on_timeout"), "output: {output}");
     }
 
     #[test]
     fn timeout_routing_supports_stop_action() {
-        let (_, cond, action) = timeout_routing(true, &Some(ConditionAction::Stop), 2, "Agent stalled (no output for 60s)");
+        let (_, cond, action) = timeout_routing(
+            true,
+            &Some(ConditionAction::Stop),
+            2,
+            "Agent stalled (no output for 60s)",
+        );
         assert!(matches!(action, Some(ConditionAction::Stop)));
         assert_eq!(cond.as_deref(), Some("on_timeout"));
     }
@@ -1096,18 +1286,26 @@ mod tests {
     #[test]
     fn timeout_routing_fails_normally_without_on_timeout() {
         // A stall but no on_timeout declared → plain failure (rollback path).
-        let (output, cond, action) = timeout_routing(true, &None, 3, "Agent stalled (no output for 300s)");
+        let (output, cond, action) =
+            timeout_routing(true, &None, 3, "Agent stalled (no output for 300s)");
         assert!(action.is_none());
         assert!(cond.is_none());
-        assert!(output.contains("Failed after 3 attempts"), "output: {output}");
+        assert!(
+            output.contains("Failed after 3 attempts"),
+            "output: {output}"
+        );
     }
 
     #[test]
     fn timeout_routing_ignores_on_timeout_for_non_stall_failures() {
         // A crash (not a stall) must NOT consume on_timeout — it fails normally
         // so the real error surfaces / rollback fires.
-        let goto = Some(ConditionAction::Goto { step_name: "x".into(), max_iterations: None });
-        let (output, cond, action) = timeout_routing(false, &goto, 1, "Agent exited with exit code 1");
+        let goto = Some(ConditionAction::Goto {
+            step_name: "x".into(),
+            max_iterations: None,
+        });
+        let (output, cond, action) =
+            timeout_routing(false, &goto, 1, "Agent exited with exit code 1");
         assert!(action.is_none());
         assert!(cond.is_none());
         assert!(output.contains("Failed after"), "output: {output}");
@@ -1115,7 +1313,7 @@ mod tests {
 
     #[test]
     fn ollama_envelope_format_wraps_typed_schema_data() {
-        use crate::models::{StepOutputFormat, OnInvalid};
+        use crate::models::{OnInvalid, StepOutputFormat};
         let data_schema = serde_json::json!({
             "type": "object",
             "properties": { "score": { "type": "integer" } },
@@ -1131,8 +1329,12 @@ mod tests {
         assert_eq!(wrapped["properties"]["data"], data_schema);
         assert_eq!(wrapped["properties"]["status"]["type"], "string");
         assert_eq!(wrapped["properties"]["summary"]["type"], "string");
-        let required: Vec<&str> = wrapped["required"].as_array().unwrap()
-            .iter().map(|v| v.as_str().unwrap()).collect();
+        let required: Vec<&str> = wrapped["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
         assert!(required.contains(&"data") && required.contains(&"status"));
     }
 
@@ -1154,9 +1356,16 @@ mod tests {
             max_tokens: None,
         });
         let esc = escalation_step(&local);
-        assert_eq!(esc.agent, crate::models::AgentType::ClaudeCode, "escalate to Claude");
+        assert_eq!(
+            esc.agent,
+            crate::models::AgentType::ClaudeCode,
+            "escalate to Claude"
+        );
         let s = esc.agent_settings.expect("settings present");
-        assert_eq!(s.model, None, "pinned local model cleared → tier resolution");
+        assert_eq!(
+            s.model, None,
+            "pinned local model cleared → tier resolution"
+        );
         assert_eq!(s.tier, Some(crate::models::ModelTier::Reasoning));
         assert_eq!(esc.prompt_template, "summarize {{x}}", "task preserved");
     }
@@ -1179,10 +1388,18 @@ mod tests {
 
     #[test]
     fn test_contains_goto() {
-        let rules = vec![rule("GO_NEXT", ConditionAction::Goto { step_name: "step_b".to_string(), max_iterations: None })];
+        let rules = vec![rule(
+            "GO_NEXT",
+            ConditionAction::Goto {
+                step_name: "step_b".to_string(),
+                max_iterations: None,
+            },
+        )];
         let output = "Some output\n[SIGNAL: GO_NEXT]";
         let action = evaluate_conditions(&rules, output);
-        assert!(matches!(action, Some(ConditionAction::Goto { step_name, .. }) if step_name == "step_b"));
+        assert!(
+            matches!(action, Some(ConditionAction::Goto { step_name, .. }) if step_name == "step_b")
+        );
     }
 
     #[test]
@@ -1299,8 +1516,10 @@ mod tests {
         let step = make_step("Hello world");
         let ctx = TemplateContext::new();
         let prompt = build_step_prompt(&step, &ctx, "").expect("must render");
-        assert_eq!(prompt, "Hello world",
-            "empty extra_context must not leak any header into the prompt");
+        assert_eq!(
+            prompt, "Hello world",
+            "empty extra_context must not leak any header into the prompt"
+        );
     }
 
     #[test]
@@ -1314,19 +1533,27 @@ mod tests {
         let ctx = TemplateContext::new();
         let extra = "\n\n## Linked repositories (companion repos)\n- **front_africanews** — `/r/front_africanews`\n";
         let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
-        assert!(prompt.starts_with("Do the thing."),
-            "rendered template must lead the prompt");
-        assert!(prompt.contains("## Linked repositories (companion repos)"),
-            "extra_context header must be present in final prompt — wiring regression");
-        assert!(prompt.contains("front_africanews"),
-            "concrete companion entries must reach the prompt");
+        assert!(
+            prompt.starts_with("Do the thing."),
+            "rendered template must lead the prompt"
+        );
+        assert!(
+            prompt.contains("## Linked repositories (companion repos)"),
+            "extra_context header must be present in final prompt — wiring regression"
+        );
+        assert!(
+            prompt.contains("front_africanews"),
+            "concrete companion entries must reach the prompt"
+        );
         // Order matters: extra_context must come AFTER the rendered
         // template (so the trailing addenda below — output_format /
         // triage — anchor the END of the prompt).
         let user_idx = prompt.find("Do the thing.").unwrap();
         let extra_idx = prompt.find("## Linked repositories").unwrap();
-        assert!(user_idx < extra_idx,
-            "extra_context must be appended AFTER the rendered template, not prepended");
+        assert!(
+            user_idx < extra_idx,
+            "extra_context must be appended AFTER the rendered template, not prepended"
+        );
     }
 
     #[test]
@@ -1345,7 +1572,9 @@ mod tests {
         let prompt = build_step_prompt(&step, &ctx, extra).expect("must render");
         let template_idx = prompt.find("Triage this ticket").unwrap();
         let extra_idx = prompt.find("## Linked repositories").unwrap();
-        let triage_idx = prompt.find("TRIAGE MODE").expect("triage addendum must be appended");
+        let triage_idx = prompt
+            .find("TRIAGE MODE")
+            .expect("triage addendum must be appended");
         assert!(template_idx < extra_idx && extra_idx < triage_idx,
             "order must be: template → extra_context → triage addendum; got idx {template_idx}/{extra_idx}/{triage_idx}");
     }
@@ -1414,27 +1643,29 @@ mod tests {
 
     #[test]
     fn fail_fast_on_steps_data_placeholder() {
-        let outcome = fail_fast_on_unresolved(
-            "analyze",
-            "Use {{steps.main.data}} to proceed.",
-            5,
-        ).expect("Must return a failed outcome");
+        let outcome = fail_fast_on_unresolved("analyze", "Use {{steps.main.data}} to proceed.", 5)
+            .expect("Must return a failed outcome");
         assert_eq!(outcome.result.status, RunStatus::Failed);
         assert_eq!(outcome.result.step_name, "analyze");
-        assert!(outcome.result.output.contains("steps.main.data"),
-            "Error message must name the offending placeholder");
-        assert!(outcome.result.output.contains("Structured"),
-            "Error message must hint at the fix (output_format: Structured)");
-        assert_eq!(outcome.result.tokens_used, 0, "No tokens spent on failed fail-fast");
+        assert!(
+            outcome.result.output.contains("steps.main.data"),
+            "Error message must name the offending placeholder"
+        );
+        assert!(
+            outcome.result.output.contains("Structured"),
+            "Error message must hint at the fix (output_format: Structured)"
+        );
+        assert_eq!(
+            outcome.result.tokens_used, 0,
+            "No tokens spent on failed fail-fast"
+        );
     }
 
     #[test]
     fn fail_fast_on_previous_step_summary() {
-        let outcome = fail_fast_on_unresolved(
-            "step2",
-            "Previous summary: {{previous_step.summary}}",
-            0,
-        ).expect("Must return a failed outcome");
+        let outcome =
+            fail_fast_on_unresolved("step2", "Previous summary: {{previous_step.summary}}", 0)
+                .expect("Must return a failed outcome");
         assert!(outcome.result.output.contains("previous_step.summary"));
     }
 
@@ -1444,24 +1675,30 @@ mod tests {
             "s",
             "{{steps.a.data}} and {{steps.b.summary}} and {{previous_step.status}}",
             0,
-        ).expect("Must fail-fast");
+        )
+        .expect("Must fail-fast");
         // Names the first + flags the count of extras so the user knows it's
         // not a one-off; exact wording is asserted to catch regressions.
-        assert!(outcome.result.output.contains("+2 autres"),
-            "Got: {}", outcome.result.output);
+        assert!(
+            outcome.result.output.contains("+2 autres"),
+            "Got: {}",
+            outcome.result.output
+        );
     }
 
     #[test]
     fn fail_fast_single_extra_uses_singular() {
-        let outcome = fail_fast_on_unresolved(
-            "s",
-            "{{steps.a.data}} {{steps.b.summary}}",
-            0,
-        ).expect("Must fail-fast");
-        assert!(outcome.result.output.contains("+1 autre"),
-            "Expected singular 'autre', got: {}", outcome.result.output);
-        assert!(!outcome.result.output.contains("+1 autres"),
-            "Must not pluralize when only 1 extra");
+        let outcome = fail_fast_on_unresolved("s", "{{steps.a.data}} {{steps.b.summary}}", 0)
+            .expect("Must fail-fast");
+        assert!(
+            outcome.result.output.contains("+1 autre"),
+            "Expected singular 'autre', got: {}",
+            outcome.result.output
+        );
+        assert!(
+            !outcome.result.output.contains("+1 autres"),
+            "Must not pluralize when only 1 extra"
+        );
     }
 
     #[test]
@@ -1477,13 +1714,17 @@ mod tests {
 
     #[test]
     fn tool_suffix_extracts_file_path() {
-        let s = format_tool_input_suffix(r#"{"file_path": "src/foo.rs", "old_string": "x", "new_string": "y"}"#);
+        let s = format_tool_input_suffix(
+            r#"{"file_path": "src/foo.rs", "old_string": "x", "new_string": "y"}"#,
+        );
         assert_eq!(s, " · src/foo.rs\n");
     }
 
     #[test]
     fn tool_suffix_extracts_command_for_bash() {
-        let s = format_tool_input_suffix(r#"{"command": "cargo test --lib", "description": "run tests"}"#);
+        let s = format_tool_input_suffix(
+            r#"{"command": "cargo test --lib", "description": "run tests"}"#,
+        );
         assert_eq!(s, " · cargo test --lib\n");
     }
 
@@ -1497,7 +1738,8 @@ mod tests {
 
     #[test]
     fn tool_suffix_extracts_url_for_webfetch() {
-        let s = format_tool_input_suffix(r#"{"url": "https://example.com/foo", "prompt": "summary"}"#);
+        let s =
+            format_tool_input_suffix(r#"{"url": "https://example.com/foo", "prompt": "summary"}"#);
         assert_eq!(s, " · https://example.com/foo\n");
     }
 
@@ -1558,23 +1800,41 @@ mod drive_agent_to_output_tests {
         let msg = format_silent_exit_error("exit code None", true, "");
         assert!(msg.contains("SIGNAL"), "signal kill must be named: {msg}");
         assert!(msg.contains("OOM"), "OOM hint expected: {msg}");
-        assert!(msg.contains("atomic"), "atomicity remediation expected: {msg}");
+        assert!(
+            msg.contains("atomic"),
+            "atomicity remediation expected: {msg}"
+        );
     }
 
     #[test]
     fn silent_exit_surfaces_stdout_tail_when_stderr_empty() {
-        let stdout = (1..=30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let stdout = (1..=30)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let msg = format_silent_exit_error("exit code Some(1)", false, &stdout);
         // Tail (last 15 lines) is surfaced; an early line is dropped.
-        assert!(msg.contains("line 30"), "must surface the stdout tail: {msg}");
-        assert!(msg.contains("last stdout"), "must label the stdout block: {msg}");
-        assert!(!msg.contains("line 1\n"), "old lines beyond the 15-tail are trimmed: {msg}");
+        assert!(
+            msg.contains("line 30"),
+            "must surface the stdout tail: {msg}"
+        );
+        assert!(
+            msg.contains("last stdout"),
+            "must label the stdout block: {msg}"
+        );
+        assert!(
+            !msg.contains("line 1\n"),
+            "old lines beyond the 15-tail are trimmed: {msg}"
+        );
     }
 
     #[test]
     fn silent_exit_no_output_at_all_is_explicit() {
         let msg = format_silent_exit_error("exit code Some(1)", false, "   \n  ");
-        assert!(msg.contains("NO output at all"), "blank stdout must be called out: {msg}");
+        assert!(
+            msg.contains("NO output at all"),
+            "blank stdout must be called out: {msg}"
+        );
     }
 
     fn text_delta(s: &str) -> String {
@@ -1609,7 +1869,10 @@ mod drive_agent_to_output_tests {
             .await
             .expect("clean exit");
         assert_eq!(out.text, "Hello world");
-        assert_eq!(out.tokens_used, 150, "tokens come from the stream-json Usage event");
+        assert_eq!(
+            out.tokens_used, 150,
+            "tokens come from the stream-json Usage event"
+        );
     }
 
     #[tokio::test]
@@ -1627,20 +1890,24 @@ mod drive_agent_to_output_tests {
         // A ToolStart must surface a `🔧 <name>` breadcrumb on progress_tx so
         // the workflow run view shows a sign of life during tool loops.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(100);
-        let proc = ScriptedProcess::stream_json([
-            text_delta("thinking"),
-            tool_start("Edit"),
-        ]);
+        let proc = ScriptedProcess::stream_json([text_delta("thinking"), tool_start("Edit")]);
         let out = drive_agent_to_output(proc, Some(&tx), LONG, &AgentType::ClaudeCode, "s")
             .await
             .expect("clean exit");
         drop(tx);
         assert_eq!(out.text, "thinking");
         let mut msgs = Vec::new();
-        while let Ok(m) = rx.try_recv() { msgs.push(m); }
-        assert!(msgs.iter().any(|m| m == "thinking"), "text streamed to progress_tx");
-        assert!(msgs.iter().any(|m| m.contains("🔧") && m.contains("Edit")),
-            "tool-start breadcrumb streamed: {msgs:?}");
+        while let Ok(m) = rx.try_recv() {
+            msgs.push(m);
+        }
+        assert!(
+            msgs.iter().any(|m| m == "thinking"),
+            "text streamed to progress_tx"
+        );
+        assert!(
+            msgs.iter().any(|m| m.contains("🔧") && m.contains("Edit")),
+            "tool-start breadcrumb streamed: {msgs:?}"
+        );
     }
 
     #[tokio::test]
@@ -1653,18 +1920,23 @@ mod drive_agent_to_output_tests {
             .expect_err("non-zero exit must bail");
         let msg = err.to_string();
         assert!(msg.contains("Agent exited"), "got: {msg}");
-        assert!(msg.contains("rate limit reached"), "stderr tail should surface: {msg}");
+        assert!(
+            msg.contains("rate limit reached"),
+            "stderr tail should surface: {msg}"
+        );
     }
 
     #[tokio::test]
     async fn failed_exit_no_stderr_gives_actionable_message() {
-        let proc = ScriptedProcess::stream_json(Vec::<String>::new())
-            .with_exit(false, Some(137)); // SIGKILL-ish, no stderr
+        let proc = ScriptedProcess::stream_json(Vec::<String>::new()).with_exit(false, Some(137)); // SIGKILL-ish, no stderr
         let err = drive_agent_to_output(proc, None, LONG, &AgentType::ClaudeCode, "killed")
             .await
             .expect_err("non-zero exit must bail");
         let msg = err.to_string();
-        assert!(msg.contains("no stderr"), "should hint at signal/sandbox: {msg}");
+        assert!(
+            msg.contains("no stderr"),
+            "should hint at signal/sandbox: {msg}"
+        );
     }
 
     #[tokio::test]

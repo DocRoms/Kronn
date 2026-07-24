@@ -126,7 +126,11 @@ fn check_drift_detects_change() {
     write_checksums_file(&dir, &mappings).unwrap();
 
     // Modify the source file
-    fs::write(src_dir.join("main.rs"), "fn main() { println!(\"changed\"); }").unwrap();
+    fs::write(
+        src_dir.join("main.rs"),
+        "fn main() { println!(\"changed\"); }",
+    )
+    .unwrap();
 
     // Check drift — should detect the change
     let result = check_drift(&dir);
@@ -206,7 +210,11 @@ fn check_drift_detects_deleted_file() {
     // Check drift — deleted file should make the section stale
     let result = check_drift(&dir);
     assert!(result.audit_date.is_some());
-    assert_eq!(result.stale_sections.len(), 1, "deleted file should trigger stale");
+    assert_eq!(
+        result.stale_sections.len(),
+        1,
+        "deleted file should trigger stale"
+    );
     assert_eq!(result.total_sections, 1);
 
     let _ = fs::remove_dir_all(&dir);
@@ -219,7 +227,10 @@ fn compute_step_checksums_ignores_missing_files() {
 
     // Call with patterns for files that don't exist
     let checksums = compute_step_checksums(&dir, &["nonexistent/*.rs", "also_missing.txt"]);
-    assert!(checksums.is_empty(), "missing files should produce empty checksums");
+    assert!(
+        checksums.is_empty(),
+        "missing files should produce empty checksums"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -227,7 +238,10 @@ fn compute_step_checksums_ignores_missing_files() {
 #[test]
 fn compute_step_checksums_handles_git_head() {
     // Use the Kronn repo root (works both locally and in CI)
-    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let checksums = compute_step_checksums(&kronn_root, &["__GIT_HEAD__"]);
     assert!(
         checksums.contains_key("__GIT_HEAD__"),
@@ -240,7 +254,10 @@ fn compute_step_checksums_handles_git_head() {
 
 #[test]
 fn compute_step_checksums_handles_git_ls_files() {
-    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let checksums = compute_step_checksums(&kronn_root, &["__GIT_LS_FILES__"]);
     assert!(
         !checksums.is_empty(),
@@ -255,24 +272,43 @@ fn is_kronn_generated_path_is_tight() {
     // hashing so user rules count), and a project whose docs live in `docs/`
     // keeps a real `ai/` source dir counted.
     for kronn in [
-        "docs/AGENTS.md", "docs/checksums.json", "docs/tech-debt/TD-1.md",
-        ".kronn.json", ".kronn.lock", ".kronn/state",
+        "docs/AGENTS.md",
+        "docs/checksums.json",
+        "docs/tech-debt/TD-1.md",
+        ".kronn.json",
+        ".kronn.lock",
+        ".kronn/state",
     ] {
-        assert!(is_kronn_generated_path(kronn, "docs"), "{kronn} must be excluded");
+        assert!(
+            is_kronn_generated_path(kronn, "docs"),
+            "{kronn} must be excluded"
+        );
     }
     for source in [
-        "src/main.rs", "package.json", "Dockerfile", ".github/workflows/ci.yml",
-        "docsite/index.html", "README.md", "src/docs.rs",
-        "ai/model.py",                       // real source when docs dir = docs/
-        "CLAUDE.md", "AGENTS.md",            // normalized elsewhere, not excluded
+        "src/main.rs",
+        "package.json",
+        "Dockerfile",
+        ".github/workflows/ci.yml",
+        "docsite/index.html",
+        "README.md",
+        "src/docs.rs",
+        "ai/model.py", // real source when docs dir = docs/
+        "CLAUDE.md",
+        "AGENTS.md", // normalized elsewhere, not excluded
         ".github/copilot-instructions.md",
-        "sub/checksums.json",                // someone else's file, not ours
+        "sub/checksums.json", // someone else's file, not ours
     ] {
-        assert!(!is_kronn_generated_path(source, "docs"), "{source} must stay counted");
+        assert!(
+            !is_kronn_generated_path(source, "docs"),
+            "{source} must stay counted"
+        );
     }
     // Legacy layout: ai/ IS the detected docs dir → excluded there.
     assert!(is_kronn_generated_path("ai/AGENTS.md", "ai"));
-    assert!(!is_kronn_generated_path("docsx/file.md", "docs"), "prefix must not over-match");
+    assert!(
+        !is_kronn_generated_path("docsx/file.md", "docs"),
+        "prefix must not over-match"
+    );
 }
 
 #[test]
@@ -298,8 +334,14 @@ fn strip_kronn_regions_removes_managed_blocks_keeps_user_content() {
 }
 
 fn git(dir: &std::path::Path, args: &[&str]) {
-    let ok = super::sync_cmd("git").arg("-C").arg(dir).args(args)
-        .output().expect("git runs").status.success();
+    let ok = super::sync_cmd("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .expect("git runs")
+        .status
+        .success();
     assert!(ok, "git {args:?} failed");
 }
 
@@ -324,45 +366,66 @@ fn source_tree_fingerprint_ignores_kronn_output_commits_but_not_source() {
     fs::create_dir_all(dir.join("docs/tech-debt")).unwrap();
     fs::write(dir.join("docs/AGENTS.md"), "# audited").unwrap();
     fs::write(dir.join("docs/checksums.json"), "{}").unwrap();
-    fs::write(dir.join("CLAUDE.md"), format!(
-        "{}\n> Kronn context pointer\n{}\n",
-        super::super::root_agent_files::KRONN_BLOCK_START,
-        super::super::root_agent_files::KRONN_BLOCK_END,
-    )).unwrap();
+    fs::write(
+        dir.join("CLAUDE.md"),
+        format!(
+            "{}\n> Kronn context pointer\n{}\n",
+            super::super::root_agent_files::KRONN_BLOCK_START,
+            super::super::root_agent_files::KRONN_BLOCK_END,
+        ),
+    )
+    .unwrap();
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "audit output"]);
-    assert_eq!(git_source_tree_fingerprint(&dir).as_deref(), Some(fp_initial.as_str()),
-        "committing docs/ + a block-only CLAUDE.md must NOT move the fingerprint (F27)");
+    assert_eq!(
+        git_source_tree_fingerprint(&dir).as_deref(),
+        Some(fp_initial.as_str()),
+        "committing docs/ + a block-only CLAUDE.md must NOT move the fingerprint (F27)"
+    );
 
     // USER rules added to CLAUDE.md are source — fingerprint must move
     // (worktree-read: no commit needed).
-    fs::write(dir.join("CLAUDE.md"), format!(
-        "{}\n> Kronn context pointer\n{}\n# House rules\nnever use lib X\n",
-        super::super::root_agent_files::KRONN_BLOCK_START,
-        super::super::root_agent_files::KRONN_BLOCK_END,
-    )).unwrap();
+    fs::write(
+        dir.join("CLAUDE.md"),
+        format!(
+            "{}\n> Kronn context pointer\n{}\n# House rules\nnever use lib X\n",
+            super::super::root_agent_files::KRONN_BLOCK_START,
+            super::super::root_agent_files::KRONN_BLOCK_END,
+        ),
+    )
+    .unwrap();
     let fp_with_rules = git_source_tree_fingerprint(&dir).expect("fingerprint");
-    assert_ne!(fp_with_rules, fp_initial,
-        "user-authored rules in a root agent file must count as source");
+    assert_ne!(
+        fp_with_rules, fp_initial,
+        "user-authored rules in a root agent file must count as source"
+    );
 
     // UNCOMMITTED source change — the audit reads the worktree, so drift
     // must flag before any commit (Codex round 4: HEAD-only missed this).
     fs::write(dir.join("app.js"), "console.log(2)").unwrap();
     let fp_dirty = git_source_tree_fingerprint(&dir).expect("fingerprint");
-    assert_ne!(fp_dirty, fp_with_rules,
-        "an uncommitted tracked modification must move the fingerprint");
+    assert_ne!(
+        fp_dirty, fp_with_rules,
+        "an uncommitted tracked modification must move the fingerprint"
+    );
 
     // Committing that same content is a no-op on the print (records are
     // content-derived): stable across add+commit, no re-flag after commit.
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "real change"]);
-    assert_eq!(git_source_tree_fingerprint(&dir).as_deref(), Some(fp_dirty.as_str()),
-        "committing unchanged content must NOT move the fingerprint");
+    assert_eq!(
+        git_source_tree_fingerprint(&dir).as_deref(),
+        Some(fp_dirty.as_str()),
+        "committing unchanged content must NOT move the fingerprint"
+    );
 
     // A brand-new untracked source file counts too (the next audit reads it).
     fs::write(dir.join("new-module.js"), "export {}").unwrap();
-    assert_ne!(git_source_tree_fingerprint(&dir).as_deref(), Some(fp_dirty.as_str()),
-        "an untracked (non-ignored) source file must move the fingerprint");
+    assert_ne!(
+        git_source_tree_fingerprint(&dir).as_deref(),
+        Some(fp_dirty.as_str()),
+        "an untracked (non-ignored) source file must move the fingerprint"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -389,7 +452,10 @@ fn source_tree_fingerprint_survives_hostile_paths_and_tracks_mode() {
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "weird change"]);
     let fp_weird = git_source_tree_fingerprint(&dir).expect("fingerprint");
-    assert_ne!(fp_weird, fp_base, "a newline-named file's change must be tracked");
+    assert_ne!(
+        fp_weird, fp_base,
+        "a newline-named file's change must be tracked"
+    );
 
     // chmod +x: same blob, different mode — must move the print too.
     let mut perms = fs::metadata(dir.join("app.sh")).unwrap().permissions();
@@ -423,16 +489,24 @@ fn source_tree_fingerprint_keeps_non_utf8_paths() {
     fs::write(dir.join(name), "v2").unwrap();
     git(&dir, &["add", "-A"]);
     git(&dir, &["commit", "-qm", "change"]);
-    assert_ne!(git_source_tree_fingerprint(&dir).unwrap(), fp1,
-        "a non-UTF-8 path's change must be tracked");
+    assert_ne!(
+        git_source_tree_fingerprint(&dir).unwrap(),
+        fp1,
+        "a non-UTF-8 path's change must be tracked"
+    );
     let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn compute_step_checksums_handles_source_tree_sentinel() {
-    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+    let kronn_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let checksums = compute_step_checksums(&kronn_root, &["__GIT_SOURCE_TREE__"]);
-    let fp = checksums.get("__GIT_SOURCE_TREE__").expect("source-tree key present");
+    let fp = checksums
+        .get("__GIT_SOURCE_TREE__")
+        .expect("source-tree key present");
     assert_eq!(fp.len(), 64, "SHA-256 hex is 64 chars");
     assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
 }
@@ -461,11 +535,8 @@ fn mapping_reuses_frozen_source_tree_without_rescanning() {
     let current = git_source_tree_fingerprint(&dir).unwrap();
     assert_ne!(current, frozen);
 
-    let checksums = compute_step_checksums_from_snapshot(
-        &dir,
-        &["__GIT_SOURCE_TREE__"],
-        Some(&frozen),
-    );
+    let checksums =
+        compute_step_checksums_from_snapshot(&dir, &["__GIT_SOURCE_TREE__"], Some(&frozen));
 
     assert_eq!(checksums.get("__GIT_SOURCE_TREE__"), Some(&frozen));
     assert_ne!(checksums.get("__GIT_SOURCE_TREE__"), Some(&current));
@@ -494,12 +565,11 @@ fn post_publish_mutation_restores_previous_baseline_byte_exact() {
         checksums: BTreeMap::from([("__GIT_SOURCE_TREE__".into(), frozen.clone())]),
     }];
 
-    let error = write_checksums_file_fail_closed_test_hook(
-        &dir,
-        &replacement,
-        Some(&frozen),
-        || fs::write(dir.join("src.rs"), "mutated-after-publish").unwrap(),
-    ).unwrap_err();
+    let error =
+        write_checksums_file_fail_closed_test_hook(&dir, &replacement, Some(&frozen), || {
+            fs::write(dir.join("src.rs"), "mutated-after-publish").unwrap()
+        })
+        .unwrap_err();
 
     assert!(error.contains("previous baseline restored"));
     assert_eq!(fs::read(&path).unwrap(), previous);
@@ -520,15 +590,12 @@ fn post_publish_mutation_never_clobbers_a_concurrent_baseline_writer() {
     }];
     let path = dir.join("docs/checksums.json");
 
-    let error = write_checksums_file_fail_closed_test_hook(
-        &dir,
-        &replacement,
-        Some(&frozen),
-        || {
+    let error =
+        write_checksums_file_fail_closed_test_hook(&dir, &replacement, Some(&frozen), || {
             fs::write(dir.join("src.rs"), "mutated-after-publish").unwrap();
             fs::write(&path, "concurrent-writer").unwrap();
-        },
-    ).unwrap_err();
+        })
+        .unwrap_err();
 
     assert!(error.contains("rollback failed"));
     assert_eq!(fs::read_to_string(&path).unwrap(), "concurrent-writer");
@@ -541,7 +608,10 @@ fn empty_sources_returns_empty_checksums() {
     fs::create_dir_all(&dir).unwrap();
 
     let checksums = compute_step_checksums(&dir, &[]);
-    assert!(checksums.is_empty(), "empty sources should return empty BTreeMap");
+    assert!(
+        checksums.is_empty(),
+        "empty sources should return empty BTreeMap"
+    );
 
     let _ = fs::remove_dir_all(&dir);
 }
@@ -573,7 +643,10 @@ fn sha256_of_bytes_unicode_does_not_panic() {
     // hash treats text as bytes, not code points.
     let hex = sha256_of_bytes("éèàç中".as_bytes());
     assert_eq!(hex.len(), 64, "SHA-256 hex is always 64 chars");
-    assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "all hex chars must be valid");
+    assert!(
+        hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "all hex chars must be valid"
+    );
 }
 
 #[test]
@@ -585,7 +658,10 @@ fn sha256_of_bytes_one_byte_diff_changes_hash() {
     // At least 20 hex chars must differ — looser than the strict ~32 for
     // avalanche but safely above the "single-char change" floor.
     let diff = a.chars().zip(b.chars()).filter(|(x, y)| x != y).count();
-    assert!(diff > 20, "avalanche should change many hex chars, got diff={diff}");
+    assert!(
+        diff > 20,
+        "avalanche should change many hex chars, got diff={diff}"
+    );
 }
 
 // ── matches_simple_glob — pin pattern matching contract ─────────────────
@@ -619,7 +695,10 @@ fn glob_single_star_in_middle() {
 fn glob_prefix_and_suffix() {
     // `TD-*.md` — prefix + suffix.
     assert!(matches_simple_glob("TD-*.md", "TD-001.md"));
-    assert!(matches_simple_glob("TD-*.md", "TD-.md"), "zero-char middle still matches");
+    assert!(
+        matches_simple_glob("TD-*.md", "TD-.md"),
+        "zero-char middle still matches"
+    );
     assert!(!matches_simple_glob("TD-*.md", "001.md"));
     assert!(!matches_simple_glob("TD-*.md", "TD-001"));
 }
@@ -639,7 +718,10 @@ fn glob_multiple_stars_falls_back_to_exact_match() {
     // The current impl only handles 0 or 1 `*`. Multi-star patterns fall
     // back to exact-match — pinning this behaviour so the fallback path
     // isn't silently broken.
-    assert!(matches_simple_glob("a*b*c", "a*b*c"), "fallback is exact match on multi-star");
+    assert!(
+        matches_simple_glob("a*b*c", "a*b*c"),
+        "fallback is exact match on multi-star"
+    );
     assert!(!matches_simple_glob("a*b*c", "aXbYc"));
 }
 
@@ -668,13 +750,19 @@ fn failed_checksums_write_preserves_the_previous_manifest() {
     perms.set_mode(0o555);
     fs::set_permissions(&docs, perms).unwrap();
     let err = write_checksums_file(&dir, &[mapping]).unwrap_err();
-    assert!(err.contains("temp") || err.contains("denied") || err.contains("write"), "{err}");
+    assert!(
+        err.contains("temp") || err.contains("denied") || err.contains("write"),
+        "{err}"
+    );
 
     let mut restore = fs::metadata(&docs).unwrap().permissions();
     restore.set_mode(0o755);
     fs::set_permissions(&docs, restore).unwrap();
-    assert_eq!(fs::read(docs.join("checksums.json")).unwrap(), before,
-        "the previous valid manifest must survive byte-for-byte");
+    assert_eq!(
+        fs::read(docs.join("checksums.json")).unwrap(),
+        before,
+        "the previous valid manifest must survive byte-for-byte"
+    );
     assert!(read_checksums_file(&dir).is_some(), "and still parse");
     let _ = fs::remove_dir_all(&dir);
 }

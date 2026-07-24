@@ -38,9 +38,7 @@ use std::collections::HashMap;
 use ts_rs::TS;
 
 use crate::models::*;
-use crate::workflows::api_call_executor::{
-    execute_api_call_step_with_db, SecurityPolicy,
-};
+use crate::workflows::api_call_executor::{execute_api_call_step_with_db, SecurityPolicy};
 use crate::workflows::template::TemplateContext;
 use crate::AppState;
 
@@ -149,7 +147,10 @@ fn normalize_body(b: serde_json::Value) -> serde_json::Value {
         if let Ok(parsed @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
             serde_json::from_str::<serde_json::Value>(s)
         {
-            tracing::debug!("agent-api: unwrapped a stringified JSON body ({} chars)", s.len());
+            tracing::debug!(
+                "agent-api: unwrapped a stringified JSON body ({} chars)",
+                s.len()
+            );
             return parsed;
         }
     }
@@ -220,7 +221,9 @@ pub async fn agent_api_call(
                 )));
             }
             Err(e) => {
-                return Json(ApiResponse::err(format!("DB error resolving discussion `{did}`: {e}")));
+                return Json(ApiResponse::err(format!(
+                    "DB error resolving discussion `{did}`: {e}"
+                )));
             }
         }
     } else if let Some(cid) = req.api_config_id.clone() {
@@ -234,7 +237,7 @@ pub async fn agent_api_call(
             .await
         {
             Ok(Some(cfg)) => cfg.project_ids.into_iter().next(),
-            Ok(None) => None,  // executor will surface a clean "config not found" error
+            Ok(None) => None, // executor will surface a clean "config not found" error
             Err(_) => None,
         }
     } else {
@@ -248,8 +251,7 @@ pub async fn agent_api_call(
     let has_qa_ref = req.quick_api_id.is_some();
     if !has_plugin_pair && !has_qa_ref {
         return Json(ApiResponse::err(
-            "Either (api_plugin_slug + api_config_id) OR quick_api_id is required."
-                .to_string(),
+            "Either (api_plugin_slug + api_config_id) OR quick_api_id is required.".to_string(),
         ));
     }
 
@@ -323,8 +325,8 @@ pub async fn agent_api_call(
                 // an object as `{...}`). Parse it back to a Value so
                 // the response surfaces structured data, not a
                 // double-encoded string.
-                let data_value: serde_json::Value = serde_json::from_str(&e.data_json)
-                    .unwrap_or(serde_json::Value::Null);
+                let data_value: serde_json::Value =
+                    serde_json::from_str(&e.data_json).unwrap_or(serde_json::Value::Null);
                 serde_json::json!({
                     "data": data_value,
                     "status": e.status,
@@ -400,36 +402,49 @@ pub async fn agent_api_call(
     // response, so we just `tracing::warn!` and move on.
     {
         use crate::db::api_call_logs::{self, ApiCallSource, ApiCallStatus, NewApiCallLog};
-        let plugin = req.api_plugin_slug.clone().unwrap_or_else(|| "quick-api".to_string());
+        let plugin = req
+            .api_plugin_slug
+            .clone()
+            .unwrap_or_else(|| "quick-api".to_string());
         let project_for_log = project_id.clone();
         let disc_for_log = req.disc_id.clone();
         let endpoint = req.endpoint_path.clone();
         let method = req.method.clone().unwrap_or_else(|| "GET".to_string());
         let body_excerpt = req.body.as_ref().map(|v| v.to_string());
         let outcome_output = raw_output_for_log;
-        let outcome_status = if success { ApiCallStatus::Ok } else { ApiCallStatus::Error };
+        let outcome_status = if success {
+            ApiCallStatus::Ok
+        } else {
+            ApiCallStatus::Error
+        };
         let duration_ms = outcome.result.duration_ms;
         let cfg_id = req.api_config_id.clone();
-        let _ = state.db.with_conn(move |conn| {
-            api_call_logs::record(conn, NewApiCallLog {
-                source: ApiCallSource::AgentBroker,
-                project_id: project_for_log.as_deref(),
-                run_id: None,
-                disc_id: disc_for_log.as_deref(),
-                agent: None,
-                plugin_slug: &plugin,
-                config_id: cfg_id.as_deref(),
-                endpoint_path: &endpoint,
-                method: &method,
-                http_status,
-                status: outcome_status,
-                duration_ms,
-                request_excerpt: body_excerpt.as_deref(),
-                response_excerpt: Some(&outcome_output),
-                error_message: if success { None } else { Some(&outcome_output) },
+        let _ = state
+            .db
+            .with_conn(move |conn| {
+                api_call_logs::record(
+                    conn,
+                    NewApiCallLog {
+                        source: ApiCallSource::AgentBroker,
+                        project_id: project_for_log.as_deref(),
+                        run_id: None,
+                        disc_id: disc_for_log.as_deref(),
+                        agent: None,
+                        plugin_slug: &plugin,
+                        config_id: cfg_id.as_deref(),
+                        endpoint_path: &endpoint,
+                        method: &method,
+                        http_status,
+                        status: outcome_status,
+                        duration_ms,
+                        request_excerpt: body_excerpt.as_deref(),
+                        response_excerpt: Some(&outcome_output),
+                        error_message: if success { None } else { Some(&outcome_output) },
+                    },
+                )
+                .map_err(|e| anyhow::anyhow!("api_call_logs::record failed: {e}"))
             })
-            .map_err(|e| anyhow::anyhow!("api_call_logs::record failed: {e}"))
-        }).await
+            .await
             .map_err(|e| tracing::warn!("api_call_logs.record (broker): {e}"));
     }
 
@@ -574,10 +589,7 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(json_part).expect("strip-then-parse should succeed");
 
-        assert_eq!(
-            parsed.get("status").and_then(|v| v.as_str()),
-            Some("OK")
-        );
+        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("OK"));
         assert_eq!(
             parsed.pointer("/data/key").and_then(|v| v.as_str()),
             Some("EW-1")
@@ -613,8 +625,8 @@ mod tests {
         // `data_json` is the JSON-serialised form — parse back to Value
         // to inspect the structured array (same path the route uses
         // to build `AgentApiCallResponse.data`).
-        let data_value: serde_json::Value = serde_json::from_str(&envelope.data_json)
-            .expect("data_json must round-trip parse");
+        let data_value: serde_json::Value =
+            serde_json::from_str(&envelope.data_json).expect("data_json must round-trip parse");
         let data_arr = data_value.as_array().expect("data is array");
         assert_eq!(data_arr.len(), 1);
         assert_eq!(
@@ -632,14 +644,8 @@ mod tests {
         let output = "{\"data\":{\"x\":1},\"status\":\"OK\",\"summary\":\"\"}\n[SIGNAL: OK]";
         let json_part = output.split("\n[SIGNAL:").next().unwrap();
         let parsed: serde_json::Value = serde_json::from_str(json_part).unwrap();
-        assert_eq!(
-            parsed.get("status").and_then(|v| v.as_str()),
-            Some("OK")
-        );
-        assert_eq!(
-            parsed.pointer("/data/x").and_then(|v| v.as_i64()),
-            Some(1)
-        );
+        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("OK"));
+        assert_eq!(parsed.pointer("/data/x").and_then(|v| v.as_i64()), Some(1));
     }
 
     #[test]
@@ -659,7 +665,10 @@ mod tests {
     fn normalize_body_unwraps_stringified_object() {
         let b = serde_json::Value::String(r#"{"title":"X","data":"<section/>"}"#.into());
         let out = super::normalize_body(b);
-        assert_eq!(out["title"], "X", "stringified object must be unwrapped: {out}");
+        assert_eq!(
+            out["title"], "X",
+            "stringified object must be unwrapped: {out}"
+        );
     }
 
     #[test]
@@ -691,16 +700,24 @@ mod tests {
     #[test]
     fn json_body_error_flags_malformed_object_string() {
         // The exact EW-7403 shape: one extra trailing brace.
-        let b = Some(serde_json::Value::String(r#"{"fields":{"description":"x"}}}"#.into()));
+        let b = Some(serde_json::Value::String(
+            r#"{"fields":{"description":"x"}}}"#.into(),
+        ));
         let err = super::json_body_error(&b).expect("malformed JSON object must be rejected");
         assert!(err.contains("not valid JSON"), "{err}");
-        assert!(err.contains("NOT truncated"), "must dispel the truncation red herring: {err}");
+        assert!(
+            err.contains("NOT truncated"),
+            "must dispel the truncation red herring: {err}"
+        );
     }
 
     #[test]
     fn json_body_error_flags_malformed_array_string() {
         let b = Some(serde_json::Value::String(r#"[{"a":1},]"#.into())); // trailing comma
-        assert!(super::json_body_error(&b).is_some(), "malformed JSON array must be rejected");
+        assert!(
+            super::json_body_error(&b).is_some(),
+            "malformed JSON array must be rejected"
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! - Tracker: polls issue tracker API, reconciles processed issues
 //! - Manual: always returns false (triggered via API only)
 
-use std::str::FromStr;
 use chrono::{DateTime, Utc};
+use std::str::FromStr;
 
 use crate::models::*;
 
@@ -61,7 +61,11 @@ mod tests {
     #[test]
     fn manual_trigger_never_fires() {
         let now = Utc::now();
-        assert!(!should_fire(&WorkflowTrigger::Manual, now - Duration::seconds(30), now));
+        assert!(!should_fire(
+            &WorkflowTrigger::Manual,
+            now - Duration::seconds(30),
+            now
+        ));
     }
 
     // ─── Cron trigger ────────────────────────────────────────────────────
@@ -83,10 +87,18 @@ mod tests {
         // Deterministic: pick a fixed occurrence and build windows around it.
         // "0 0 7 * * *" = every day at 07:00:00.
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        assert!(fires("0 0 7 * * *", occ - Duration::seconds(30), occ),
-            "occurrence exactly at `now` fires (window is right-inclusive)");
-        assert!(fires("0 0 7 * * *", occ - Duration::seconds(10), occ + Duration::seconds(20)),
-            "occurrence strictly inside the window fires");
+        assert!(
+            fires("0 0 7 * * *", occ - Duration::seconds(30), occ),
+            "occurrence exactly at `now` fires (window is right-inclusive)"
+        );
+        assert!(
+            fires(
+                "0 0 7 * * *",
+                occ - Duration::seconds(10),
+                occ + Duration::seconds(20)
+            ),
+            "occurrence strictly inside the window fires"
+        );
     }
 
     #[test]
@@ -97,8 +109,8 @@ mod tests {
         // (since, now] so adjacent windows partition time.
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
         let tick1_start = occ - Duration::milliseconds(30_400); // occ − 30.4s
-        let tick1_end = tick1_start + Duration::seconds(30);    // occ − 0.4s
-        let tick2_end = tick1_end + Duration::seconds(30);      // occ + 29.6s
+        let tick1_end = tick1_start + Duration::seconds(30); // occ − 0.4s
+        let tick2_end = tick1_end + Duration::seconds(30); // occ + 29.6s
         let in_first = fires("0 0 7 * * *", tick1_start, tick1_end);
         let in_second = fires("0 0 7 * * *", tick1_end, tick2_end);
         assert!(!in_first, "occurrence is after the first window's end");
@@ -110,13 +122,21 @@ mod tests {
         // Tick starvation (slow tracker poll): the next evaluation happens
         // 90s late — the occurrence must STILL fire (old logic skipped it).
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        assert!(fires("0 0 7 * * *", occ - Duration::seconds(30), occ + Duration::seconds(90)));
+        assert!(fires(
+            "0 0 7 * * *",
+            occ - Duration::seconds(30),
+            occ + Duration::seconds(90)
+        ));
     }
 
     #[test]
     fn no_occurrence_in_window_does_not_fire() {
         let occ = "2026-07-09T07:00:00Z".parse::<DateTime<Utc>>().unwrap();
-        assert!(!fires("0 0 7 * * *", occ + Duration::seconds(1), occ + Duration::seconds(31)));
+        assert!(!fires(
+            "0 0 7 * * *",
+            occ + Duration::seconds(1),
+            occ + Duration::seconds(31)
+        ));
     }
 
     #[test]
@@ -137,7 +157,9 @@ mod tests {
     #[test]
     fn should_fire_cron_invalid_returns_false() {
         let now = Utc::now();
-        let trigger = WorkflowTrigger::Cron { schedule: "invalid cron".into() };
+        let trigger = WorkflowTrigger::Cron {
+            schedule: "invalid cron".into(),
+        };
         assert!(!should_fire(&trigger, now - Duration::seconds(30), now));
     }
 
@@ -155,7 +177,10 @@ mod tests {
         };
         assert!(should_fire(&trigger, now - Duration::seconds(61), now));
         let invalid = WorkflowTrigger::Tracker {
-            source: TrackerSourceConfig::GitHub { owner: "o".into(), repo: "r".into() },
+            source: TrackerSourceConfig::GitHub {
+                owner: "o".into(),
+                repo: "r".into(),
+            },
             query: "".into(),
             labels: vec![],
             interval: "invalid".into(),

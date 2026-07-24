@@ -194,10 +194,7 @@ pub async fn peer_join(
                 rusqlite::params![&disc_id],
                 |r| r.get(0),
             )?;
-            let peer_count = db::discussion_sessions::count_active_participants(
-                conn,
-                &disc_id,
-            )?;
+            let peer_count = db::discussion_sessions::count_active_participants(conn, &disc_id)?;
 
             // Step 3 — recent messages (last 10, trimmed). Newest last
             // so the agent can read top→bottom.
@@ -211,8 +208,7 @@ pub async fn peer_join(
             let mut rows: Vec<RecentMessagePreview> = stmt
                 .query_map(rusqlite::params![&disc_id], |r| {
                     let content: String = r.get(3)?;
-                    let preview: String =
-                        content.chars().take(400).collect();
+                    let preview: String = content.chars().take(400).collect();
                     Ok(RecentMessagePreview {
                         sort_order: r.get(0)?,
                         role: r.get(1)?,
@@ -479,14 +475,18 @@ pub async fn peer_leave(
     let res = state
         .db
         .with_conn(move |conn| {
-            let row =
-                db::discussion_sessions::find_active_session(conn, &agent_type, &session_id)?;
+            let row = db::discussion_sessions::find_active_session(conn, &agent_type, &session_id)?;
             let Some(s) = row else {
                 return Ok(PeerLeaveResponse { left: false });
             };
             db::discussion_sessions::mark_session_left(conn, s.id)?;
             // 0.8.12 PR B — a departed agent keeps no activity placeholder.
-            db::discussion_sessions::clear_session_activity(conn, &s.disc_id, &agent_type, s.session_id.as_deref())?;
+            db::discussion_sessions::clear_session_activity(
+                conn,
+                &s.disc_id,
+                &agent_type,
+                s.session_id.as_deref(),
+            )?;
             Ok(PeerLeaveResponse { left: true })
         })
         .await;
@@ -831,9 +831,7 @@ pub async fn list_participants(
 ) -> Json<ApiResponse<Vec<db::discussion_sessions::DiscussionSession>>> {
     let res = state
         .db
-        .with_conn(move |conn| {
-            db::discussion_sessions::list_sessions(conn, &disc_id, false)
-        })
+        .with_conn(move |conn| db::discussion_sessions::list_sessions(conn, &disc_id, false))
         .await;
     match res {
         Ok(list) => Json(ApiResponse::ok(list)),
@@ -868,9 +866,7 @@ pub async fn invite_peer(
                 )
                 .ok();
             if exists.is_none() {
-                return Err(anyhow::anyhow!(
-                    "discussion `{disc_id_for_db}` not found"
-                ));
+                return Err(anyhow::anyhow!("discussion `{disc_id_for_db}` not found"));
             }
             db::discussion_sessions::create_invite_token(conn, &disc_id_for_db)
         })
@@ -952,10 +948,14 @@ pub async fn claim_by_token(
                 caller = %pseudo, status = %status, route = "claim-by-token",
                 "invite-code auth refused — contact is not accepted"
             );
-            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"));
+            return Json(ApiResponse::err(
+                "unknown peer (invite code not in contacts)",
+            ));
         }
         Ok(crate::db::contacts::InviteAuth::Unknown) => {
-            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"))
+            return Json(ApiResponse::err(
+                "unknown peer (invite code not in contacts)",
+            ))
         }
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
     };
@@ -995,7 +995,12 @@ pub async fn claim_by_token(
             if !shared_with.contains(&cid) {
                 shared_with.push(cid.clone());
             }
-            crate::db::discussions::update_discussion_sharing(conn, &did, &shared_id, &shared_with)?;
+            crate::db::discussions::update_discussion_sharing(
+                conn,
+                &did,
+                &shared_id,
+                &shared_with,
+            )?;
             Ok::<_, anyhow::Error>((shared_id, disc.title))
         })
         .await;
@@ -1080,10 +1085,14 @@ pub async fn fetch_file(
                 caller = %pseudo, status = %status, route = "fetch-file",
                 "invite-code auth refused — contact is not accepted"
             );
-            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"));
+            return Json(ApiResponse::err(
+                "unknown peer (invite code not in contacts)",
+            ));
         }
         Ok(crate::db::contacts::InviteAuth::Unknown) => {
-            return Json(ApiResponse::err("unknown peer (invite code not in contacts)"))
+            return Json(ApiResponse::err(
+                "unknown peer (invite code not in contacts)",
+            ))
         }
         Err(e) => return Json(ApiResponse::err(format!("contact lookup error: {e}"))),
     };
@@ -1091,7 +1100,9 @@ pub async fn fetch_file(
     let file_id = req.file_id.clone();
     let cf = match state
         .db
-        .with_conn(move |conn| crate::db::discussions::get_context_file(conn, &file_id).map_err(|e| anyhow::anyhow!(e)))
+        .with_conn(move |conn| {
+            crate::db::discussions::get_context_file(conn, &file_id).map_err(|e| anyhow::anyhow!(e))
+        })
         .await
     {
         Ok(Some(cf)) => cf,
@@ -1200,45 +1211,79 @@ mod tests {
         let blob = tmp.path().join("doc.pdf");
         std::fs::write(&blob, b"BYTES").unwrap();
         let blob_str = blob.to_string_lossy().to_string();
-        state.db.with_conn(move |conn| {
-            crate::db::contacts::insert_contact(conn, &crate::models::Contact {
-                id: "c-1".into(),
-                pseudo: "peer".into(),
-                avatar_email: None,
-                kronn_url: "http://peer.local".into(),
-                invite_code: "kr-inv-abc".into(),
-                status: "accepted".into(),
-                created_at: chrono::Utc::now(),
-                updated_at: chrono::Utc::now(),
-            })?;
-            crate::db::discussions::insert_federated_context_file(
-                conn, "f-1", "d-fetch-1", "m-1", "doc.pdf", "application/pdf", 5, &blob_str,
-            ).map_err(|e| anyhow::anyhow!(e))?;
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::contacts::insert_contact(
+                    conn,
+                    &crate::models::Contact {
+                        id: "c-1".into(),
+                        pseudo: "peer".into(),
+                        avatar_email: None,
+                        kronn_url: "http://peer.local".into(),
+                        invite_code: "kr-inv-abc".into(),
+                        status: "accepted".into(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                    },
+                )?;
+                crate::db::discussions::insert_federated_context_file(
+                    conn,
+                    "f-1",
+                    "d-fetch-1",
+                    "m-1",
+                    "doc.pdf",
+                    "application/pdf",
+                    5,
+                    &blob_str,
+                )
+                .map_err(|e| anyhow::anyhow!(e))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         // Known contact, but the discussion is NOT shared with it → found: false.
-        let resp = fetch_file(State(state.clone()), Json(FetchFileRequest {
-            file_id: "f-1".into(),
-            from_invite_code: "kr-inv-abc".into(),
-        })).await;
+        let resp = fetch_file(
+            State(state.clone()),
+            Json(FetchFileRequest {
+                file_id: "f-1".into(),
+                from_invite_code: "kr-inv-abc".into(),
+            }),
+        )
+        .await;
         let body = resp.0.data.expect("ok envelope (no existence oracle)");
         assert!(!body.found, "unshared discussion must not leak files");
         assert!(body.data_base64.is_none());
 
         // Share the discussion with that contact → the bytes flow.
-        state.db.with_conn(|conn| {
-            crate::db::discussions::update_discussion_sharing(conn, "d-fetch-1", "sh-1", &["c-1".to_string()]).map(|_| ())
-        }).await.unwrap();
-        let resp = fetch_file(State(state.clone()), Json(FetchFileRequest {
-            file_id: "f-1".into(),
-            from_invite_code: "kr-inv-abc".into(),
-        })).await;
+        state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussions::update_discussion_sharing(
+                    conn,
+                    "d-fetch-1",
+                    "sh-1",
+                    &["c-1".to_string()],
+                )
+                .map(|_| ())
+            })
+            .await
+            .unwrap();
+        let resp = fetch_file(
+            State(state.clone()),
+            Json(FetchFileRequest {
+                file_id: "f-1".into(),
+                from_invite_code: "kr-inv-abc".into(),
+            }),
+        )
+        .await;
         let body = resp.0.data.unwrap();
         assert!(body.found);
         use base64::Engine as _;
         let bytes = base64::engine::general_purpose::STANDARD
-            .decode(body.data_base64.unwrap()).unwrap();
+            .decode(body.data_base64.unwrap())
+            .unwrap();
         assert_eq!(bytes, b"BYTES");
     }
 
@@ -1248,31 +1293,42 @@ mod tests {
         // invite code but must NOT pass the auth-exempt P2P routes, and the
         // refusal must be indistinguishable from an unknown code (no oracle).
         let state = make_state_with_disc("d-auth-1").await;
-        state.db.with_conn(|conn| {
-            for (id, code, status) in [
-                ("c-pend", "kr-inv-pend", "pending"),
-                ("c-ref", "kr-inv-ref", "refused"),
-            ] {
-                crate::db::contacts::insert_contact(conn, &crate::models::Contact {
-                    id: id.into(),
-                    pseudo: format!("peer-{status}"),
-                    avatar_email: None,
-                    kronn_url: "http://peer.local".into(),
-                    invite_code: code.into(),
-                    status: status.into(),
-                    created_at: chrono::Utc::now(),
-                    updated_at: chrono::Utc::now(),
-                })?;
-            }
-            Ok(())
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(|conn| {
+                for (id, code, status) in [
+                    ("c-pend", "kr-inv-pend", "pending"),
+                    ("c-ref", "kr-inv-ref", "refused"),
+                ] {
+                    crate::db::contacts::insert_contact(
+                        conn,
+                        &crate::models::Contact {
+                            id: id.into(),
+                            pseudo: format!("peer-{status}"),
+                            avatar_email: None,
+                            kronn_url: "http://peer.local".into(),
+                            invite_code: code.into(),
+                            status: status.into(),
+                            created_at: chrono::Utc::now(),
+                            updated_at: chrono::Utc::now(),
+                        },
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
 
         for code in ["kr-inv-pend", "kr-inv-ref", "kr-inv-ghost"] {
             // fetch-file: same error string for pending, refused and unknown.
-            let resp = fetch_file(State(state.clone()), Json(FetchFileRequest {
-                file_id: "f-any".into(),
-                from_invite_code: code.into(),
-            })).await;
+            let resp = fetch_file(
+                State(state.clone()),
+                Json(FetchFileRequest {
+                    file_id: "f-any".into(),
+                    from_invite_code: code.into(),
+                }),
+            )
+            .await;
             assert_eq!(
                 resp.0.error.as_deref(),
                 Some("unknown peer (invite code not in contacts)"),
@@ -1280,10 +1336,14 @@ mod tests {
             );
 
             // claim-by-token: same contract.
-            let resp = claim_by_token(State(state.clone()), Json(ClaimByTokenRequest {
-                token: "kr-join-whatever".into(),
-                from_invite_code: code.into(),
-            })).await;
+            let resp = claim_by_token(
+                State(state.clone()),
+                Json(ClaimByTokenRequest {
+                    token: "kr-join-whatever".into(),
+                    from_invite_code: code.into(),
+                }),
+            )
+            .await;
             assert_eq!(
                 resp.0.error.as_deref(),
                 Some("unknown peer (invite code not in contacts)"),
@@ -1301,10 +1361,7 @@ mod tests {
         let data = body.data.expect("data present on success");
         assert!(data.token.starts_with("kr-join-"));
         assert_eq!(data.disc_id, "d-invite-1");
-        assert_eq!(
-            data.ttl_seconds,
-            db::discussion_sessions::INVITE_TTL_SECS
-        );
+        assert_eq!(data.ttl_seconds, db::discussion_sessions::INVITE_TTL_SECS);
         assert!(data.instruction_text.contains(&data.token));
         assert!(data.instruction_text.contains("disc_join"));
     }
@@ -1327,8 +1384,7 @@ mod tests {
         let state = make_state_with_disc("d-join-1").await;
         // Mint an invite token via the regular endpoint first — full
         // round-trip from invite to join, no DB shortcuts.
-        let invite_resp =
-            invite_peer(State(state.clone()), Path("d-join-1".to_string())).await;
+        let invite_resp = invite_peer(State(state.clone()), Path("d-join-1".to_string())).await;
         let token = invite_resp.0.data.unwrap().token;
 
         let join_resp = peer_join(
@@ -1351,8 +1407,14 @@ mod tests {
         assert_eq!(data.recent_messages.len(), 0, "empty disc → no previews");
         // Empty disc ⇒ cold at the cap (no anchors). The HOT proof that
         // pacing is really computed lives in the dedicated test below.
-        assert_eq!(data.pacing.regime, crate::api::disc_introspection::PacingRegime::Cold);
-        assert_eq!(data.pacing.next_delay_seconds, data.poll_policy.max_delay_seconds);
+        assert_eq!(
+            data.pacing.regime,
+            crate::api::disc_introspection::PacingRegime::Cold
+        );
+        assert_eq!(
+            data.pacing.next_delay_seconds,
+            data.poll_policy.max_delay_seconds
+        );
     }
 
     #[tokio::test]
@@ -1416,9 +1478,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "replay".into(),
                 resume_token: joined.resume_token,
-                next_resume_token: Some(
-                    "kr-resume-22222222222222222222222222222222".into(),
-                ),
+                next_resume_token: Some("kr-resume-22222222222222222222222222222222".into()),
             }),
         )
         .await
@@ -1483,14 +1543,15 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "valid".into(),
                 resume_token: joined.resume_token,
-                next_resume_token: Some(
-                    "kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
-                ),
+                next_resume_token: Some("kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
             }),
         )
         .await
         .0;
-        assert!(valid.success, "validation failure must not consume current token");
+        assert!(
+            valid.success,
+            "validation failure must not consume current token"
+        );
     }
 
     #[tokio::test]
@@ -1515,8 +1576,7 @@ mod tests {
             .await
             .unwrap();
 
-        let invite_resp =
-            invite_peer(State(state.clone()), Path("d-join-pace".to_string())).await;
+        let invite_resp = invite_peer(State(state.clone()), Path("d-join-pace".to_string())).await;
         let token = invite_resp.0.data.unwrap().token;
         let join_resp = peer_join(
             State(state.clone()),
@@ -1528,9 +1588,18 @@ mod tests {
         )
         .await;
         let data = join_resp.0.data.expect("join must succeed");
-        assert_eq!(data.pacing.regime, crate::api::disc_introspection::PacingRegime::Hot);
-        assert_eq!(data.pacing.next_delay_seconds, data.poll_policy.hot_poll_seconds);
-        assert!(data.pacing.attention_until.is_some(), "hot carries the lease end");
+        assert_eq!(
+            data.pacing.regime,
+            crate::api::disc_introspection::PacingRegime::Hot
+        );
+        assert_eq!(
+            data.pacing.next_delay_seconds,
+            data.poll_policy.hot_poll_seconds
+        );
+        assert!(
+            data.pacing.attention_until.is_some(),
+            "hot carries the lease end"
+        );
     }
 
     #[tokio::test]
@@ -1564,7 +1633,11 @@ mod tests {
         .await;
         let meta = resp.0.data.expect("meta must succeed");
         let pacing = meta.pacing.expect("meta carries pacing");
-        assert_eq!(pacing.regime, crate::api::disc_introspection::PacingRegime::Hot, "reception clock renews the lease");
+        assert_eq!(
+            pacing.regime,
+            crate::api::disc_introspection::PacingRegime::Hot,
+            "reception clock renews the lease"
+        );
         assert!(pacing.attention_until.is_some());
     }
 
@@ -1618,8 +1691,7 @@ mod tests {
         // the whole multi-agent room (3 agents = 1 invite instead
         // of 3).
         let state = make_state_with_disc("d-join-4").await;
-        let invite =
-            invite_peer(State(state.clone()), Path("d-join-4".to_string())).await;
+        let invite = invite_peer(State(state.clone()), Path("d-join-4".to_string())).await;
         let token = invite.0.data.unwrap().token;
 
         for (agent, sess) in [
@@ -1697,8 +1769,7 @@ mod tests {
         let state = make_state_with_disc("d-e2e").await;
 
         // ── Step 2: agent A (ClaudeCode) joins via invite #1 ──
-        let inv1 =
-            invite_peer(State(state.clone()), Path("d-e2e".to_string())).await;
+        let inv1 = invite_peer(State(state.clone()), Path("d-e2e".to_string())).await;
         let token_a = inv1.0.data.unwrap().token;
         let join_a = peer_join(
             State(state.clone()),
@@ -1709,23 +1780,33 @@ mod tests {
             }),
         )
         .await;
-        assert!(join_a.0.success, "agent A join failed: {:?}", join_a.0.error);
+        assert!(
+            join_a.0.success,
+            "agent A join failed: {:?}",
+            join_a.0.error
+        );
         let join_a_data = join_a.0.data.unwrap();
         assert_eq!(join_a_data.peer_count, 1);
 
         // Header shows 1 active participant : agent A.
-        let parts1 =
-            list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
+        let parts1 = list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
         let p1 = parts1.0.data.unwrap();
         assert_eq!(p1.len(), 1);
         assert_eq!(p1[0].agent_type, "ClaudeCode");
 
         // ── Step 3: agent A writes a message ──
-        insert_message(&state, "d-e2e", "msg-1", 1, "ClaudeCode", "hello, anyone here ?").await;
+        insert_message(
+            &state,
+            "d-e2e",
+            "msg-1",
+            1,
+            "ClaudeCode",
+            "hello, anyone here ?",
+        )
+        .await;
 
         // ── Step 4: agent B (Codex) joins via invite #2 ──
-        let inv2 =
-            invite_peer(State(state.clone()), Path("d-e2e".to_string())).await;
+        let inv2 = invite_peer(State(state.clone()), Path("d-e2e".to_string())).await;
         let token_b = inv2.0.data.unwrap().token;
         let join_b = peer_join(
             State(state.clone()),
@@ -1736,7 +1817,11 @@ mod tests {
             }),
         )
         .await;
-        assert!(join_b.0.success, "agent B join failed: {:?}", join_b.0.error);
+        assert!(
+            join_b.0.success,
+            "agent B join failed: {:?}",
+            join_b.0.error
+        );
         let join_b_data = join_b.0.data.unwrap();
         assert_eq!(join_b_data.peer_count, 2, "both A and B now active");
         // join() returns recent_messages — agent B sees agent A's hello.
@@ -1744,8 +1829,7 @@ mod tests {
         assert!(join_b_data.recent_messages[0].preview.contains("hello"));
 
         // Header now shows 2 active participants.
-        let parts2 =
-            list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
+        let parts2 = list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
         let p2 = parts2.0.data.unwrap();
         assert_eq!(p2.len(), 2);
         let types: Vec<&str> = p2.iter().map(|s| s.agent_type.as_str()).collect();
@@ -1805,8 +1889,7 @@ mod tests {
         )
         .await;
         assert!(leave_a.0.data.unwrap().left);
-        let parts3 =
-            list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
+        let parts3 = list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
         let p3 = parts3.0.data.unwrap();
         assert_eq!(p3.len(), 1);
         assert_eq!(p3[0].agent_type, "Codex");
@@ -1821,8 +1904,7 @@ mod tests {
         )
         .await;
         assert!(leave_b.0.data.unwrap().left);
-        let parts4 =
-            list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
+        let parts4 = list_participants(State(state.clone()), Path("d-e2e".to_string())).await;
         assert_eq!(parts4.0.data.unwrap().len(), 0);
     }
 
@@ -1836,11 +1918,7 @@ mod tests {
         let state = make_state_with_disc("d-e2e-multi").await;
         let mut joined = 0;
         for (agent, sess) in [("ClaudeCode", "s1"), ("Codex", "s2"), ("GeminiCli", "s3")] {
-            let inv = invite_peer(
-                State(state.clone()),
-                Path("d-e2e-multi".to_string()),
-            )
-            .await;
+            let inv = invite_peer(State(state.clone()), Path("d-e2e-multi".to_string())).await;
             let token = inv.0.data.unwrap().token;
             let join = peer_join(
                 State(state.clone()),
@@ -1851,12 +1929,15 @@ mod tests {
                 }),
             )
             .await;
-            assert!(join.0.success, "agent {} could not join: {:?}", agent, join.0.error);
+            assert!(
+                join.0.success,
+                "agent {} could not join: {:?}",
+                agent, join.0.error
+            );
             joined += 1;
         }
         assert_eq!(joined, 3);
-        let parts =
-            list_participants(State(state), Path("d-e2e-multi".to_string())).await;
+        let parts = list_participants(State(state), Path("d-e2e-multi".to_string())).await;
         assert_eq!(parts.0.data.unwrap().len(), 3);
     }
 
@@ -1865,8 +1946,7 @@ mod tests {
     #[tokio::test]
     async fn peer_leave_marks_active_session_left_and_is_idempotent() {
         let state = make_state_with_disc("d-leave-1").await;
-        let invite =
-            invite_peer(State(state.clone()), Path("d-leave-1".to_string())).await;
+        let invite = invite_peer(State(state.clone()), Path("d-leave-1".to_string())).await;
         let token = invite.0.data.unwrap().token;
         let _ = peer_join(
             State(state.clone()),
@@ -1903,8 +1983,7 @@ mod tests {
         assert!(!r2.0.data.unwrap().left);
 
         // Header view no longer lists this peer.
-        let parts =
-            list_participants(State(state), Path("d-leave-1".to_string())).await;
+        let parts = list_participants(State(state), Path("d-leave-1".to_string())).await;
         assert_eq!(parts.0.data.unwrap().len(), 0);
     }
 
@@ -2065,8 +2144,13 @@ mod tests {
         state
             .db
             .with_conn(|conn| {
-                crate::db::discussion_sessions::join_disc_session(conn, "d-act-1", "ClaudeCode", "s-act")
-                    .map(|_| ())
+                crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-act-1",
+                    "ClaudeCode",
+                    "s-act",
+                )
+                .map(|_| ())
             })
             .await
             .unwrap();
@@ -2207,8 +2291,13 @@ mod tests {
         state
             .db
             .with_conn(|conn| {
-                crate::db::discussion_sessions::join_disc_session(conn, "d-act-2", "ClaudeCode", "s-act2")
-                    .map(|_| ())?;
+                crate::db::discussion_sessions::join_disc_session(
+                    conn,
+                    "d-act-2",
+                    "ClaudeCode",
+                    "s-act2",
+                )
+                .map(|_| ())?;
                 let now = chrono::Utc::now().to_rfc3339();
                 conn.execute(
                     "INSERT INTO messages
@@ -2244,7 +2333,9 @@ mod tests {
             "the non-optional TypeScript field must be serialized as null, never omitted",
         );
         assert_eq!(
-            activity_of(&state, "d-act-2", "ClaudeCode").await.as_deref(),
+            activity_of(&state, "d-act-2", "ClaudeCode")
+                .await
+                .as_deref(),
             Some("reading"),
             "a delivering wait flips the placeholder to reading",
         );
@@ -2275,7 +2366,12 @@ mod tests {
         assert_eq!(WAIT_TIMEOUT_MAX_SECS, 90);
         assert_eq!(WAIT_POLL_INTERVAL_MS, 1000);
         // Default is within the [1, MAX] clamp range.
-        const { assert!(WAIT_TIMEOUT_DEFAULT_SECS >= 1 && WAIT_TIMEOUT_DEFAULT_SECS <= WAIT_TIMEOUT_MAX_SECS) };
+        const {
+            assert!(
+                WAIT_TIMEOUT_DEFAULT_SECS >= 1
+                    && WAIT_TIMEOUT_DEFAULT_SECS <= WAIT_TIMEOUT_MAX_SECS
+            )
+        };
     }
 
     // ─── list_participants — header rendering source ────────────
@@ -2297,8 +2393,7 @@ mod tests {
         // list with role='peer' + status='active'. End-to-end through
         // invite → join → list.
         let state = make_state_with_disc("d-active").await;
-        let invite =
-            invite_peer(State(state.clone()), Path("d-active".to_string())).await;
+        let invite = invite_peer(State(state.clone()), Path("d-active".to_string())).await;
         let token = invite.0.data.unwrap().token;
         let _ = peer_join(
             State(state.clone()),

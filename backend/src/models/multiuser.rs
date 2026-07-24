@@ -200,18 +200,14 @@ pub enum WsMessage {
     /// "interrupted" footer — the frontend refetches those discs + toasts
     /// the user so they don't resend their prompt on top of a silently
     /// recovered conversation.
-    PartialResponseRecovered {
-        discussion_ids: Vec<String>,
-    },
+    PartialResponseRecovered { discussion_ids: Vec<String> },
     /// Broadcast once at backend boot when `reconcile_awaiting_agents`
     /// found discussions that were owed an agent run which never started before
     /// a restart (queued batch child, or an auto-reply never spawned). Each id
     /// got an "interrupted" notice message — NOT a re-spawn (an interruption
     /// may be deliberate). The frontend refetches those discs + toasts the user
     /// so they can relaunch if they want.
-    AgentRunsInterrupted {
-        discussion_ids: Vec<String>,
-    },
+    AgentRunsInterrupted { discussion_ids: Vec<String> },
     /// Broadcast when an audit pipeline reaches its end, whatever the
     /// outcome. The audit may have been launched from another page or from
     /// the MCP bridge — without this the UI goes quiet and the user can't
@@ -304,8 +300,10 @@ mod tests {
         assert!(!presence("kronn:a@h:1").is_peer_relayable());
         assert!(!WsMessage::Ping { timestamp: 0 }.is_peer_relayable());
         assert!(!WsMessage::Pong { timestamp: 0 }.is_peer_relayable());
-        assert!(!WsMessage::PartialResponseRecovered { discussion_ids: vec![] }
-            .is_peer_relayable());
+        assert!(!WsMessage::PartialResponseRecovered {
+            discussion_ids: vec![]
+        }
+        .is_peer_relayable());
         assert!(!WsMessage::BatchRunChildStarted {
             run_id: "r".into(),
             discussion_id: "d".into(),
@@ -349,7 +347,10 @@ mod tests {
 
         let back: WsMessage = serde_json::from_value(j).expect("round-trip");
         match back {
-            WsMessage::BatchRunChildStarted { run_id, discussion_id } => {
+            WsMessage::BatchRunChildStarted {
+                run_id,
+                discussion_id,
+            } => {
                 assert_eq!(run_id, "run-1");
                 assert_eq!(discussion_id, "disc-1");
             }
@@ -361,25 +362,39 @@ mod tests {
     fn batch_run_child_queued_and_agent_runs_interrupted_serialize_snake_case() {
         // The frontend matches these exact snake_case tags.
         let q = serde_json::to_value(WsMessage::BatchRunChildQueued {
-            run_id: "r".into(), discussion_id: "d".into(),
-        }).unwrap();
+            run_id: "r".into(),
+            discussion_id: "d".into(),
+        })
+        .unwrap();
         assert_eq!(q["type"], "batch_run_child_queued");
         assert_eq!(q["discussion_id"], "d");
 
         let i = serde_json::to_value(WsMessage::AgentRunsInterrupted {
             discussion_ids: vec!["d1".into(), "d2".into()],
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(i["type"], "agent_runs_interrupted");
         assert_eq!(i["discussion_ids"][1], "d2");
 
         // Neither is peer-relayable (local UI signals).
-        assert!(!WsMessage::BatchRunChildQueued { run_id: "r".into(), discussion_id: "d".into() }.is_peer_relayable());
-        assert!(!WsMessage::AgentRunsInterrupted { discussion_ids: vec![] }.is_peer_relayable());
+        assert!(!WsMessage::BatchRunChildQueued {
+            run_id: "r".into(),
+            discussion_id: "d".into()
+        }
+        .is_peer_relayable());
+        assert!(!WsMessage::AgentRunsInterrupted {
+            discussion_ids: vec![]
+        }
+        .is_peer_relayable());
         assert!(!WsMessage::AuditFinished {
-            project_id: "p".into(), status: "interrupted".into(),
-            last_completed_step: 9, total_steps: 9, warned_steps: vec![1],
+            project_id: "p".into(),
+            status: "interrupted".into(),
+            last_completed_step: 9,
+            total_steps: 9,
+            warned_steps: vec![1],
             discussion_id: None,
-        }.is_peer_relayable());
+        }
+        .is_peer_relayable());
     }
 
     #[test]
@@ -391,7 +406,8 @@ mod tests {
             total_steps: 9,
             warned_steps: vec![],
             discussion_id: Some("d1".into()),
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(v["type"], "audit_finished");
         assert_eq!(v["project_id"], "p1");
         assert_eq!(v["status"], "complete");

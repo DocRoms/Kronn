@@ -36,9 +36,16 @@ pub struct McpServer {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub enum McpTransport {
-    Stdio { command: String, args: Vec<String> },
-    Sse { url: String },
-    Streamable { url: String },
+    Stdio {
+        command: String,
+        args: Vec<String>,
+    },
+    Sse {
+        url: String,
+    },
+    Streamable {
+        url: String,
+    },
     /// Plugin has no MCP transport — it's API-only. The sync code MUST skip
     /// these when writing `.mcp.json`; capability metadata lives in
     /// `api_spec` and authenticated execution goes through the API broker.
@@ -80,7 +87,10 @@ pub enum ApiAuthKind {
     /// API key passed as a query parameter, e.g. `?apikey=...` (Chartbeat).
     ApiKeyQuery { param_name: String, env_key: String },
     /// API key passed as a header, e.g. `X-API-Key: ...`.
-    ApiKeyHeader { header_name: String, env_key: String },
+    ApiKeyHeader {
+        header_name: String,
+        env_key: String,
+    },
     /// Bearer token in `Authorization: Bearer ...`.
     Bearer { env_key: String },
     /// HTTP Basic — `Authorization: Basic <base64(user:password)>`. Used by
@@ -88,7 +98,10 @@ pub enum ApiAuthKind {
     /// vendor that ships a "user + secret" token pair. Both halves come
     /// from the encrypted config env so Kronn never stores them in
     /// plaintext.
-    Basic { user_env: String, password_env: String },
+    Basic {
+        user_env: String,
+        password_env: String,
+    },
     /// HTTP Basic with the API key as the username and an empty password
     /// — `Authorization: Basic <base64(API_KEY:)>`. The flavor used by
     /// SpeedCurve, Stripe, and a few other API-key-only providers that
@@ -168,8 +181,12 @@ pub enum ApiAuthKind {
     None,
 }
 
-fn default_token_exchange_method() -> String { "POST".to_string() }
-fn default_token_exchange_ttl() -> u64 { 3600 }
+fn default_token_exchange_method() -> String {
+    "POST".to_string()
+}
+fn default_token_exchange_ttl() -> u64 {
+    3600
+}
 
 /// 0.8.6 — Body serialization format for `TokenExchange`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS, PartialEq)]
@@ -289,7 +306,9 @@ pub struct McpConfig {
     pub host_sync: HostSyncMode,
 }
 
-fn default_host_sync() -> HostSyncMode { HostSyncMode::None }
+fn default_host_sync() -> HostSyncMode {
+    HostSyncMode::None
+}
 
 /// Display-safe version of McpConfig (secrets masked)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

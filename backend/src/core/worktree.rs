@@ -3,8 +3,8 @@
 //! Each isolated discussion gets its own git worktree so agents can make
 //! changes without interfering with the main working tree or other discussions.
 
-use std::path::{Path, PathBuf};
 use super::cmd::sync_cmd;
+use std::path::{Path, PathBuf};
 
 /// Fix worktree cross-references so they work from the host, not just inside Docker.
 ///
@@ -35,7 +35,11 @@ fn fix_worktree_paths(repo_path: &Path, worktree_path: &Path) {
     }
 
     // 2. Fix <repo>/.git/worktrees/<name>/gitdir — point back to worktree
-    let gitdir_file = repo_path.join(".git").join("worktrees").join(&wt_name).join("gitdir");
+    let gitdir_file = repo_path
+        .join(".git")
+        .join("worktrees")
+        .join(&wt_name)
+        .join("gitdir");
     if gitdir_file.exists() {
         let content = format!(".kronn/worktrees/{}/.git\n", wt_name);
         if let Err(e) = std::fs::write(&gitdir_file, &content) {
@@ -114,7 +118,13 @@ fn slugify(s: &str) -> String {
     let raw: String = s
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
         .split('-')
         .filter(|s| !s.is_empty())
@@ -191,7 +201,8 @@ pub fn create_discussion_worktree(
         // Already in a worktree (e.g. .kronn/worktrees/) — reuse it
         tracing::info!(
             "Branch {} already checked out at {}, reusing",
-            branch, existing_path.display()
+            branch,
+            existing_path.display()
         );
         return Ok(WorktreeInfo {
             path: existing_path.to_string_lossy().to_string(),
@@ -212,10 +223,22 @@ pub fn create_discussion_worktree(
     // Mark repo as safe directory (needed in Docker where mount owner differs)
     if crate::core::env::is_docker() {
         let _ = sync_cmd("git")
-            .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
+            .args([
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                &repo_path.to_string_lossy(),
+            ])
             .output();
         let _ = sync_cmd("git")
-            .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
+            .args([
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                &worktree_path.to_string_lossy(),
+            ])
             .output();
     }
 
@@ -340,10 +363,22 @@ pub fn reattach_worktree(
 
     if crate::core::env::is_docker() {
         let _ = sync_cmd("git")
-            .args(["config", "--global", "--add", "safe.directory", &repo_path.to_string_lossy()])
+            .args([
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                &repo_path.to_string_lossy(),
+            ])
             .output();
         let _ = sync_cmd("git")
-            .args(["config", "--global", "--add", "safe.directory", &worktree_path.to_string_lossy()])
+            .args([
+                "config",
+                "--global",
+                "--add",
+                "safe.directory",
+                &worktree_path.to_string_lossy(),
+            ])
             .output();
     }
 
@@ -398,8 +433,7 @@ fn find_branch_for_worktree(repo_path: &Path, worktree_path: &str) -> Option<Str
     let mut found = false;
     for line in text.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {
-            found = path == worktree_path
-                || path.ends_with(&wt_dir_name);
+            found = path == worktree_path || path.ends_with(&wt_dir_name);
         } else if found && line.starts_with("branch refs/heads/") {
             return Some(line.trim_start_matches("branch refs/heads/").to_string());
         } else if found && line.is_empty() {
@@ -424,7 +458,8 @@ pub fn remove_discussion_worktree(
 
     // Remove the worktree via git (try absolute path, then relative)
     let wt_abs = Path::new(worktree_path);
-    let wt_relative = wt_abs.strip_prefix(repo_path)
+    let wt_relative = wt_abs
+        .strip_prefix(repo_path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_default();
 
@@ -490,7 +525,11 @@ pub fn list_project_worktrees(repo_path: &Path) -> Vec<WorktreeInfo> {
         } else if line.is_empty() {
             if let (Some(path), Some(branch)) = (current_path.take(), current_branch.take()) {
                 if branch.starts_with("kronn/") {
-                    worktrees.push(WorktreeInfo { path, branch, is_main_repo: false });
+                    worktrees.push(WorktreeInfo {
+                        path,
+                        branch,
+                        is_main_repo: false,
+                    });
                 }
             }
         }
@@ -499,7 +538,11 @@ pub fn list_project_worktrees(repo_path: &Path) -> Vec<WorktreeInfo> {
     // Handle last entry (no trailing empty line)
     if let (Some(path), Some(branch)) = (current_path, current_branch) {
         if branch.starts_with("kronn/") {
-            worktrees.push(WorktreeInfo { path, branch, is_main_repo: false });
+            worktrees.push(WorktreeInfo {
+                path,
+                branch,
+                is_main_repo: false,
+            });
         }
     }
 
@@ -604,7 +647,10 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
         .output()
         .map_err(|e| format!("git symbolic-ref failed: {}", e))?;
     let (current_branch, is_detached) = if sym.status.success() {
-        (String::from_utf8_lossy(&sym.stdout).trim().to_string(), false)
+        (
+            String::from_utf8_lossy(&sym.stdout).trim().to_string(),
+            false,
+        )
     } else {
         (String::new(), true)
     };
@@ -622,7 +668,11 @@ pub fn main_repo_state(repo_path: &Path) -> Result<MainRepoState, String> {
         ));
     }
     let dirty_files = parse_porcelain(&String::from_utf8_lossy(&status.stdout));
-    Ok(MainRepoState { current_branch, is_detached, dirty_files })
+    Ok(MainRepoState {
+        current_branch,
+        is_detached,
+        dirty_files,
+    })
 }
 
 /// `git checkout <branch>` in the main repo.
@@ -698,11 +748,13 @@ pub fn stash_pop_by_message(repo_path: &Path, message: &str) -> Result<(), Strin
         .lines()
         .find(|l| l.contains(message))
         .and_then(|l| l.split(':').next())
-        .ok_or_else(|| format!(
-            "stash '{}' not found — was it dropped manually? \
+        .ok_or_else(|| {
+            format!(
+                "stash '{}' not found — was it dropped manually? \
              Run `git stash list` to inspect, then `git stash pop <ref>`.",
-            message
-        ))?;
+                message
+            )
+        })?;
 
     let output = sync_cmd("git")
         .args(["stash", "pop", stash_ref])
@@ -739,7 +791,10 @@ mod tests {
     }
 
     fn make_test_repo(name: &str) -> tempfile::TempDir {
-        let dir = tempfile::Builder::new().prefix(&format!("kronn-wt-{}", name)).tempdir().unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(&format!("kronn-wt-{}", name))
+            .tempdir()
+            .unwrap();
         std::process::Command::new("git")
             .args(["init", "-b", "main"])
             .current_dir(dir.path())
@@ -813,7 +868,11 @@ mod tests {
         // A 200-char input must be capped to MAX_SLUG_LEN (60).
         let long = "a".repeat(200);
         let result = slugify(&long);
-        assert!(result.len() <= MAX_SLUG_LEN, "slug must be <= MAX_SLUG_LEN, got {}", result.len());
+        assert!(
+            result.len() <= MAX_SLUG_LEN,
+            "slug must be <= MAX_SLUG_LEN, got {}",
+            result.len()
+        );
         assert_eq!(result.len(), MAX_SLUG_LEN);
     }
 
@@ -823,7 +882,11 @@ mod tests {
         let s = format!("{}-{}", "a".repeat(30), "b".repeat(30));
         let result = slugify(&s);
         assert!(result.len() <= MAX_SLUG_LEN);
-        assert!(!result.ends_with('-'), "truncated slug must not end with a dash, got {:?}", result);
+        assert!(
+            !result.ends_with('-'),
+            "truncated slug must not end with a dash, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -868,12 +931,22 @@ mod tests {
     fn test_create_discussion_worktree_creates_branch_and_dir() {
         let repo = make_test_repo("create");
         let result = create_discussion_worktree(repo.path(), "myproject", "fix-bug", "main");
-        assert!(result.is_ok(), "create_discussion_worktree failed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "create_discussion_worktree failed: {:?}",
+            result.err()
+        );
         let info = result.unwrap();
         assert_eq!(info.branch, "kronn/fix-bug");
         assert!(!info.is_main_repo);
-        assert!(Path::new(&info.path).exists(), "Worktree directory should exist");
-        assert!(Path::new(&info.path).join(".git").exists(), "Worktree .git file should exist");
+        assert!(
+            Path::new(&info.path).exists(),
+            "Worktree directory should exist"
+        );
+        assert!(
+            Path::new(&info.path).join(".git").exists(),
+            "Worktree .git file should exist"
+        );
     }
 
     #[test]
@@ -881,7 +954,9 @@ mod tests {
         let repo = make_test_repo("basedir");
         let result = create_discussion_worktree(repo.path(), "proj", "feat", "main").unwrap();
         let expected_base = repo.path().join(".kronn/worktrees");
-        assert!(result.path.starts_with(&expected_base.to_string_lossy().to_string()));
+        assert!(result
+            .path
+            .starts_with(&expected_base.to_string_lossy().to_string()));
     }
 
     #[test]
@@ -901,8 +976,13 @@ mod tests {
         // Verify reverse gitdir uses relative path
         let wt_name = wt_path.file_name().unwrap().to_string_lossy();
         let gitdir_content = fs::read_to_string(
-            repo.path().join(".git").join("worktrees").join(wt_name.as_ref()).join("gitdir")
-        ).unwrap();
+            repo.path()
+                .join(".git")
+                .join("worktrees")
+                .join(wt_name.as_ref())
+                .join("gitdir"),
+        )
+        .unwrap();
         assert!(
             gitdir_content.contains(".kronn/worktrees/"),
             "Expected relative gitdir back-reference, got: {}",
@@ -919,7 +999,10 @@ mod tests {
 
         let result = remove_discussion_worktree(repo.path(), &wt_path, false);
         assert!(result.is_ok());
-        assert!(!Path::new(&wt_path).exists(), "Worktree directory should be removed");
+        assert!(
+            !Path::new(&wt_path).exists(),
+            "Worktree directory should be removed"
+        );
     }
 
     #[test]
@@ -936,7 +1019,10 @@ mod tests {
             .output()
             .unwrap();
         let branches = String::from_utf8_lossy(&output.stdout);
-        assert!(branches.contains("kronn/keep-me"), "Branch should still exist after remove with delete_branch=false");
+        assert!(
+            branches.contains("kronn/keep-me"),
+            "Branch should still exist after remove with delete_branch=false"
+        );
     }
 
     #[test]
@@ -952,13 +1038,17 @@ mod tests {
             .output()
             .unwrap();
         let branches = String::from_utf8_lossy(&output.stdout);
-        assert!(!branches.contains("kronn/delete-me"), "Branch should be deleted");
+        assert!(
+            !branches.contains("kronn/delete-me"),
+            "Branch should be deleted"
+        );
     }
 
     #[test]
     fn test_reattach_worktree_after_remove() {
         let repo = make_test_repo("reattach");
-        let info = create_discussion_worktree(repo.path(), "proj", "reattach-test", "main").unwrap();
+        let info =
+            create_discussion_worktree(repo.path(), "proj", "reattach-test", "main").unwrap();
         let branch = info.branch.clone();
 
         // Remove worktree but keep branch
@@ -984,9 +1074,16 @@ mod tests {
             .unwrap();
 
         let result = create_discussion_worktree(repo.path(), "proj", "blocked-test", "main");
-        assert!(result.is_err(), "Should fail when branch is checked out in main repo");
+        assert!(
+            result.is_err(),
+            "Should fail when branch is checked out in main repo"
+        );
         let err = result.unwrap_err();
-        assert!(err.contains("checked out"), "Error should mention 'checked out': {}", err);
+        assert!(
+            err.contains("checked out"),
+            "Error should mention 'checked out': {}",
+            err
+        );
     }
 
     #[test]
@@ -998,7 +1095,12 @@ mod tests {
             .output()
             .unwrap();
 
-        let result = reattach_worktree(repo.path(), "proj", "reattach-blocked", "kronn/reattach-blocked");
+        let result = reattach_worktree(
+            repo.path(),
+            "proj",
+            "reattach-blocked",
+            "kronn/reattach-blocked",
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("checked out"));
     }
@@ -1040,7 +1142,13 @@ mod tests {
     fn test_parse_porcelain_basic_shapes() {
         // Explicit \n join — a multi-line literal with `"\` would let the
         // line-continuation escape eat the leading space on the " M" line.
-        let out = [" M src/lib.rs", "?? newfile.txt", "A  staged.rs", "R  old.rs -> new.rs"].join("\n");
+        let out = [
+            " M src/lib.rs",
+            "?? newfile.txt",
+            "A  staged.rs",
+            "R  old.rs -> new.rs",
+        ]
+        .join("\n");
         let files = parse_porcelain(&out);
         assert_eq!(files.len(), 4);
         assert_eq!(files[0].status, " M");
@@ -1086,11 +1194,15 @@ mod tests {
         // Move HEAD to the commit SHA directly → detached HEAD state.
         let sha_out = std::process::Command::new("git")
             .args(["rev-parse", "HEAD"])
-            .current_dir(repo.path()).output().unwrap();
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
         let sha = String::from_utf8_lossy(&sha_out.stdout).trim().to_string();
         std::process::Command::new("git")
             .args(["checkout", &sha])
-            .current_dir(repo.path()).output().unwrap();
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
         let state = main_repo_state(repo.path()).unwrap();
         assert!(state.is_detached, "should report detached HEAD");
         assert_eq!(state.current_branch, "");
@@ -1111,10 +1223,14 @@ mod tests {
         // Create a second branch and switch back to main.
         std::process::Command::new("git")
             .args(["checkout", "-b", "feat/x"])
-            .current_dir(repo.path()).output().unwrap();
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
         std::process::Command::new("git")
             .args(["checkout", "main"])
-            .current_dir(repo.path()).output().unwrap();
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
 
         assert!(checkout_branch(repo.path(), "feat/x").is_ok());
         let state = main_repo_state(repo.path()).unwrap();
@@ -1127,7 +1243,8 @@ mod tests {
         let err = checkout_branch(repo.path(), "does/not/exist").unwrap_err();
         assert!(
             err.contains("checkout") && err.contains("does/not/exist"),
-            "error should mention the failed checkout + branch: {}", err
+            "error should mention the failed checkout + branch: {}",
+            err
         );
     }
 
@@ -1160,6 +1277,10 @@ mod tests {
     fn test_stash_pop_by_message_missing_stash_returns_clear_error() {
         let repo = make_test_repo("stash-missing");
         let err = stash_pop_by_message(repo.path(), "kronn:not-there").unwrap_err();
-        assert!(err.contains("not found"), "error should be user-friendly: {}", err);
+        assert!(
+            err.contains("not found"),
+            "error should be user-friendly: {}",
+            err
+        );
     }
 }

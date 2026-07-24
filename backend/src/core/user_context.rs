@@ -73,7 +73,10 @@ pub fn read_user_context() -> String {
             let path = e.path();
             let name = e.file_name().to_string_lossy().to_string();
             // Markdown only; skip README and any dot-prefixed file.
-            if !name.ends_with(".md") || name.eq_ignore_ascii_case("README.md") || name.starts_with('.') {
+            if !name.ends_with(".md")
+                || name.eq_ignore_ascii_case("README.md")
+                || name.starts_with('.')
+            {
                 return None;
             }
             Some((name, path))
@@ -109,10 +112,7 @@ fn ensure_dir_with_readme(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     let readme = dir.join("README.md");
     if !readme.exists() {
-        std::fs::write(
-            &readme,
-            DEFAULT_README,
-        )?;
+        std::fs::write(&readme, DEFAULT_README)?;
     }
     Ok(())
 }
@@ -199,7 +199,10 @@ mod tests {
         let result = read_user_context();
         assert!(result.is_empty(), "no files yet → empty");
         assert!(dir.exists(), "bootstrap created the directory");
-        assert!(dir.join("README.md").is_file(), "bootstrap created README.md");
+        assert!(
+            dir.join("README.md").is_file(),
+            "bootstrap created README.md"
+        );
         std::env::remove_var("KRONN_USER_CONTEXT_DIR");
     }
 
@@ -214,7 +217,9 @@ mod tests {
             assert!(!result.contains("should be excluded"));
             // Files appear in alphabetical order with their names as headers.
             let pos_about = result.find("01-about-me.md").expect("about-me missing");
-            let pos_conv = result.find("02-conventions.md").expect("conventions missing");
+            let pos_conv = result
+                .find("02-conventions.md")
+                .expect("conventions missing");
             assert!(pos_about < pos_conv, "alphabetical ordering");
             assert!(result.contains("I am Alice."));
             assert!(result.contains("Use pnpm not npm."));
@@ -264,8 +269,10 @@ mod tests {
         with_temp_dir(|dir| {
             std::fs::write(dir.join("README.md"), "# only readme").unwrap();
             let result = read_user_context();
-            assert!(result.is_empty(),
-                "no user content yet → returns empty so we don't inject the seed README");
+            assert!(
+                result.is_empty(),
+                "no user content yet → returns empty so we don't inject the seed README"
+            );
         });
     }
 
@@ -285,7 +292,13 @@ mod tests {
         // these, agents stop knowing where to write. Each subfolder must
         // appear by name.
         let prelude = build_memory_prelude_prompt();
-        for sub in &["architecture", "conventions", "gotchas", "operations", "people"] {
+        for sub in &[
+            "architecture",
+            "conventions",
+            "gotchas",
+            "operations",
+            "people",
+        ] {
             assert!(
                 prelude.contains(sub),
                 "memory prelude must mention `{}/` so agents know to write there",
@@ -304,19 +317,31 @@ mod tests {
         // were removed. Only `docs/AGENTS.md` remains as the curated
         // off-limits target.
         let prelude = build_memory_prelude_prompt();
-        assert!(prelude.contains("docs/AGENTS.md"), "must explicitly forbid editing docs/AGENTS.md");
-        assert!(!prelude.contains("docs/templates/"),
-            "docs/templates/ was removed in 0.8.3 (obsolete since cross-agent discussions)");
+        assert!(
+            prelude.contains("docs/AGENTS.md"),
+            "must explicitly forbid editing docs/AGENTS.md"
+        );
+        assert!(
+            !prelude.contains("docs/templates/"),
+            "docs/templates/ was removed in 0.8.3 (obsolete since cross-agent discussions)"
+        );
     }
 
     #[test]
     fn memory_prelude_warns_about_secrets() {
         let prelude = build_memory_prelude_prompt();
-        assert!(prelude.to_lowercase().contains("secret"), "must warn about secrets");
+        assert!(
+            prelude.to_lowercase().contains("secret"),
+            "must warn about secrets"
+        );
         // Concrete patterns: at least one of the major secret prefixes
         // must be named so agents recognize the rejection class.
-        let mentions_pattern = prelude.contains("sk-") || prelude.contains("ghp_") || prelude.contains("AKIA");
-        assert!(mentions_pattern, "must name at least one secret pattern Kronn rejects");
+        let mentions_pattern =
+            prelude.contains("sk-") || prelude.contains("ghp_") || prelude.contains("AKIA");
+        assert!(
+            mentions_pattern,
+            "must name at least one secret pattern Kronn rejects"
+        );
     }
 
     #[test]
@@ -324,14 +349,19 @@ mod tests {
         // Existing Kronn-managed projects use ai/ until migrated. Agents
         // must keep working there without confusion.
         let prelude = build_memory_prelude_prompt();
-        assert!(prelude.contains("ai/"), "must acknowledge the legacy ai/ fallback");
+        assert!(
+            prelude.contains("ai/"),
+            "must acknowledge the legacy ai/ fallback"
+        );
     }
 
     #[test]
     fn memory_prelude_recommends_markdown_links() {
         let prelude = build_memory_prelude_prompt();
         // Must mention markdown link syntax to keep Obsidian graph clean.
-        assert!(prelude.contains("[name](path.md)") || prelude.contains("markdown links"),
-            "must recommend markdown link syntax for cross-refs");
+        assert!(
+            prelude.contains("[name](path.md)") || prelude.contains("markdown links"),
+            "must recommend markdown link syntax for cross-refs"
+        );
     }
 }

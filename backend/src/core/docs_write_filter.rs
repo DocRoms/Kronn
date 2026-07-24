@@ -64,10 +64,16 @@ impl SecretRejection {
     pub fn explain(&self) -> String {
         match self {
             SecretRejection::TooLarge { bytes } => {
-                format!("write rejected: {} bytes exceeds the {}-byte memory cap", bytes, MAX_ENTRY_BYTES)
+                format!(
+                    "write rejected: {} bytes exceeds the {}-byte memory cap",
+                    bytes, MAX_ENTRY_BYTES
+                )
             }
             SecretRejection::DenylistPattern { pattern } => {
-                format!("write rejected: content matches secret pattern {:?}", pattern)
+                format!(
+                    "write rejected: content matches secret pattern {:?}",
+                    pattern
+                )
             }
             SecretRejection::HighEntropyRun { snippet } => {
                 format!(
@@ -91,7 +97,9 @@ pub fn check_docs_write(
     sensitive_substrings: &SensitiveSubstrings,
 ) -> Result<(), SecretRejection> {
     if content.len() > MAX_ENTRY_BYTES {
-        return Err(SecretRejection::TooLarge { bytes: content.len() });
+        return Err(SecretRejection::TooLarge {
+            bytes: content.len(),
+        });
     }
     if let Some(pattern) = match_denylist(content) {
         return Err(SecretRejection::DenylistPattern { pattern });
@@ -113,16 +121,31 @@ pub(crate) fn match_denylist(content: &str) -> Option<&'static str> {
         ("ghp_/gho_/ghu_/ghs_/ghr_", r"\bgh[opusr]_[A-Za-z0-9]{30,}"),
         ("AKIA (AWS)", r"\bAKIA[0-9A-Z]{16}\b"),
         ("Slack xox[bapr]-", r"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
-        ("Stripe rk_/sk_live", r"\b(rk_live_|sk_live_)[A-Za-z0-9]{20,}"),
+        (
+            "Stripe rk_/sk_live",
+            r"\b(rk_live_|sk_live_)[A-Za-z0-9]{20,}",
+        ),
         ("Atlassian ATATT", r"\bATATT[A-Za-z0-9_=\-]{30,}"),
         // Generic credential keywords with a value attached.
-        ("api_key=...", r#"(?i)api[_-]?key\s*[:=]\s*["'][A-Za-z0-9_\-]{8,}"#),
+        (
+            "api_key=...",
+            r#"(?i)api[_-]?key\s*[:=]\s*["'][A-Za-z0-9_\-]{8,}"#,
+        ),
         ("password=...", r#"(?i)password\s*[:=]\s*["'][^"']{4,}"#),
-        ("token=...", r#"(?i)\btoken\s*[:=]\s*["'][A-Za-z0-9_\-\.]{16,}"#),
-        ("secret=...", r#"(?i)\bsecret\s*[:=]\s*["'][A-Za-z0-9_\-]{8,}"#),
+        (
+            "token=...",
+            r#"(?i)\btoken\s*[:=]\s*["'][A-Za-z0-9_\-\.]{16,}"#,
+        ),
+        (
+            "secret=...",
+            r#"(?i)\bsecret\s*[:=]\s*["'][A-Za-z0-9_\-]{8,}"#,
+        ),
         ("bearer ...", r"(?i)bearer\s+[A-Za-z0-9_\-\.]{20,}"),
         // Structural markers — JWT, PEM, RSA private key.
-        ("JWT body", r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}"),
+        (
+            "JWT body",
+            r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}",
+        ),
         ("PEM private key", r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
         ("OpenSSH private", r"-----BEGIN OPENSSH PRIVATE KEY-----"),
     ];
@@ -143,7 +166,12 @@ pub(crate) fn find_high_entropy_run(content: &str) -> Option<String> {
     let bytes = content.as_bytes();
     let mut start: Option<usize> = None;
     for (i, &b) in bytes.iter().enumerate() {
-        let is_token_char = b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'/' || b == b'+' || b == b'=';
+        let is_token_char = b.is_ascii_alphanumeric()
+            || b == b'_'
+            || b == b'-'
+            || b == b'/'
+            || b == b'+'
+            || b == b'=';
         if is_token_char {
             if start.is_none() {
                 start = Some(i);
@@ -206,7 +234,9 @@ pub struct SensitiveSubstrings {
 
 impl SensitiveSubstrings {
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Add a substring associated with a source path.
@@ -259,7 +289,11 @@ pub fn scan_sensitive_files(worktree: &Path) -> SensitiveSubstrings {
     let mut visited: HashSet<std::path::PathBuf> = HashSet::new();
 
     walk_worktree(worktree, &mut visited, &mut |path: &Path| {
-        let rel = path.strip_prefix(worktree).unwrap_or(path).to_string_lossy().to_string();
+        let rel = path
+            .strip_prefix(worktree)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .to_string();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let is_sensitive = name.starts_with(".env")
             || name.ends_with(".pem")
@@ -391,11 +425,7 @@ async fn revert_or_delete(worktree: &Path, path: &str) {
 /// Recursively walk a directory, calling `cb` on each FILE. Skips
 /// `.git/`, `node_modules/`, `target/`, `vendor/` to keep scanning
 /// fast on large repos.
-fn walk_worktree(
-    dir: &Path,
-    visited: &mut HashSet<std::path::PathBuf>,
-    cb: &mut dyn FnMut(&Path),
-) {
+fn walk_worktree(dir: &Path, visited: &mut HashSet<std::path::PathBuf>, cb: &mut dyn FnMut(&Path)) {
     if !visited.insert(dir.to_path_buf()) {
         return;
     }
@@ -455,35 +485,50 @@ mod tests {
     fn rejects_anthropic_style_sk_token() {
         let content = "API key: sk-ant-api03-abcdefghijklmnopqrstuvwxyz1234567890";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::DenylistPattern { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+        ));
     }
 
     #[test]
     fn rejects_github_personal_access_token() {
         let content = "Token: ghp_abcdefghij1234567890ABCDEFGHIJKLMNOPQR";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::DenylistPattern { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+        ));
     }
 
     #[test]
     fn rejects_aws_access_key() {
         let content = "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::DenylistPattern { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+        ));
     }
 
     #[test]
     fn rejects_pem_private_key_header() {
         let content = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA...\n-----END OPENSSH PRIVATE KEY-----";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::DenylistPattern { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+        ));
     }
 
     #[test]
     fn rejects_jwt_shape() {
         let content = "Auth: eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::DenylistPattern { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+        ));
     }
 
     #[test]
@@ -491,16 +536,21 @@ mod tests {
         let content = "JIRA_API_TOKEN=ATATT3xFfGF0vYP6UlRp1OlyjoMRdzPOFx_DT8J974jJsLCiOOQNlDOy45fwxxDLJ8dAHL6VTsbeNq1jN_st6Y3";
         let result = check_docs_write(content, &empty_subs());
         // Hits both ATATT and entropy run; either rejection is acceptable.
-        assert!(matches!(result,
-            Err(SecretRejection::DenylistPattern { .. }) |
-            Err(SecretRejection::HighEntropyRun { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+                | Err(SecretRejection::HighEntropyRun { .. })
+        ));
     }
 
     #[test]
     fn rejects_password_assignment() {
         let content = "config has password=\"verysecretpassword\"";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::DenylistPattern { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::DenylistPattern { .. })
+        ));
     }
 
     #[test]
@@ -513,7 +563,8 @@ mod tests {
     #[test]
     fn passes_when_password_keyword_is_part_of_prose() {
         // No `password=value` shape — just discussion.
-        let content = "The login flow validates a password against bcrypt hashes stored in the users table.";
+        let content =
+            "The login flow validates a password against bcrypt hashes stored in the users table.";
         assert!(check_docs_write(content, &empty_subs()).is_ok());
     }
 
@@ -524,7 +575,10 @@ mod tests {
         // 32+ alphanumeric chars with healthy digit/letter mix.
         let content = "Saw this in the logs: aB3xZ9pQ7mK2vN4tL5fH6gJ8wR1sY0uT9oI2";
         let result = check_docs_write(content, &empty_subs());
-        assert!(matches!(result, Err(SecretRejection::HighEntropyRun { .. })));
+        assert!(matches!(
+            result,
+            Err(SecretRejection::HighEntropyRun { .. })
+        ));
     }
 
     #[test]
@@ -582,7 +636,9 @@ mod tests {
 
     #[test]
     fn explain_returns_human_message() {
-        let r = SecretRejection::DenylistPattern { pattern: "AKIA (AWS)" };
+        let r = SecretRejection::DenylistPattern {
+            pattern: "AKIA (AWS)",
+        };
         assert!(r.explain().contains("AKIA"));
         let r = SecretRejection::TooLarge { bytes: 9999 };
         assert!(r.explain().contains("9999"));
@@ -596,9 +652,14 @@ mod tests {
         std::fs::write(
             tmp.path().join(".env"),
             "DB_PASSWORD=actuallySecretValue123\nAPI_KEY=anothersecretkey4567\n# COMMENT=ignored\n",
-        ).unwrap();
+        )
+        .unwrap();
         let subs = scan_sensitive_files(tmp.path());
-        assert!(subs.len() >= 2, "expected at least 2 substrings, got {}", subs.len());
+        assert!(
+            subs.len() >= 2,
+            "expected at least 2 substrings, got {}",
+            subs.len()
+        );
         // Substring should be matchable now.
         let content = "Note: this contains actuallySecretValue123 by accident.";
         assert!(matches!(
@@ -614,7 +675,8 @@ mod tests {
         std::fs::write(
             tmp.path().join("node_modules/.env"),
             "FAKE_KEY=this_should_be_ignored_long_enough",
-        ).unwrap();
+        )
+        .unwrap();
         let subs = scan_sensitive_files(tmp.path());
         assert_eq!(subs.len(), 0, "node_modules/.env must not be scanned");
     }
@@ -627,6 +689,9 @@ mod tests {
             "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwgg\n-----END PRIVATE KEY-----",
         ).unwrap();
         let subs = scan_sensitive_files(tmp.path());
-        assert!(!subs.is_empty(), "expected to capture at least one pem line");
+        assert!(
+            !subs.is_empty(),
+            "expected to capture at least one pem line"
+        );
     }
 }

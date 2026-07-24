@@ -58,10 +58,14 @@ pub fn host_os_label() -> String {
     }
 
     #[cfg(target_os = "macos")]
-    { "macOS".into() }
+    {
+        "macOS".into()
+    }
 
     #[cfg(target_os = "windows")]
-    { "Windows".into() }
+    {
+        "Windows".into()
+    }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     "Unknown".into()
@@ -78,7 +82,11 @@ mod tests {
         let old = std::env::var("KRONN_IN_DOCKER").ok();
         std::env::set_var("KRONN_IN_DOCKER", "1");
         assert!(is_docker());
-        if let Some(v) = old { std::env::set_var("KRONN_IN_DOCKER", v); } else { std::env::remove_var("KRONN_IN_DOCKER"); }
+        if let Some(v) = old {
+            std::env::set_var("KRONN_IN_DOCKER", v);
+        } else {
+            std::env::remove_var("KRONN_IN_DOCKER");
+        }
     }
 
     #[test]
@@ -96,7 +104,9 @@ mod tests {
         {
             assert!(!is_docker(), "data-dir override alone must not mean docker");
         }
-        if let Some(v) = old_marker { std::env::set_var("KRONN_IN_DOCKER", v); }
+        if let Some(v) = old_marker {
+            std::env::set_var("KRONN_IN_DOCKER", v);
+        }
         match old_data {
             Some(v) => std::env::set_var("KRONN_DATA_DIR", v),
             None => std::env::remove_var("KRONN_DATA_DIR"),
@@ -109,7 +119,11 @@ mod tests {
         let old = std::env::var("KRONN_IN_DOCKER").ok();
         std::env::set_var("KRONN_IN_DOCKER", "1");
         assert!(!auth_on_by_default(), "Docker → auth must default OFF (localhost bypass can't see the real client behind NAT)");
-        if let Some(v) = old { std::env::set_var("KRONN_IN_DOCKER", v); } else { std::env::remove_var("KRONN_IN_DOCKER"); }
+        if let Some(v) = old {
+            std::env::set_var("KRONN_IN_DOCKER", v);
+        } else {
+            std::env::remove_var("KRONN_IN_DOCKER");
+        }
     }
 
     #[test]
@@ -120,9 +134,14 @@ mod tests {
         if !std::path::Path::new("/.dockerenv").exists()
             && !std::path::Path::new("/run/.containerenv").exists()
         {
-            assert!(auth_on_by_default(), "Native (Tauri/CLI) → auth defaults ON; localhost bypass keeps it transparent");
+            assert!(
+                auth_on_by_default(),
+                "Native (Tauri/CLI) → auth defaults ON; localhost bypass keeps it transparent"
+            );
         }
-        if let Some(v) = old { std::env::set_var("KRONN_IN_DOCKER", v); }
+        if let Some(v) = old {
+            std::env::set_var("KRONN_IN_DOCKER", v);
+        }
     }
 
     #[test]
@@ -131,7 +150,11 @@ mod tests {
         let old = std::env::var("KRONN_HOST_OS").ok();
         std::env::set_var("KRONN_HOST_OS", "macOS");
         assert_eq!(host_os_label(), "macOS");
-        if let Some(v) = old { std::env::set_var("KRONN_HOST_OS", v); } else { std::env::remove_var("KRONN_HOST_OS"); }
+        if let Some(v) = old {
+            std::env::set_var("KRONN_HOST_OS", v);
+        } else {
+            std::env::remove_var("KRONN_HOST_OS");
+        }
     }
 
     #[test]
@@ -140,8 +163,15 @@ mod tests {
         let old = std::env::var("KRONN_HOST_OS").ok();
         std::env::set_var("KRONN_HOST_OS", "");
         let label = host_os_label();
-        assert!(!label.is_empty(), "Should fall through to platform detection");
-        if let Some(v) = old { std::env::set_var("KRONN_HOST_OS", v); } else { std::env::remove_var("KRONN_HOST_OS"); }
+        assert!(
+            !label.is_empty(),
+            "Should fall through to platform detection"
+        );
+        if let Some(v) = old {
+            std::env::set_var("KRONN_HOST_OS", v);
+        } else {
+            std::env::remove_var("KRONN_HOST_OS");
+        }
     }
 
     #[test]
@@ -152,8 +182,16 @@ mod tests {
         std::env::remove_var("KRONN_HOST_OS");
         std::env::set_var("WSL_DISTRO_NAME", "Ubuntu");
         let label = host_os_label();
-        if let Some(v) = old_os { std::env::set_var("KRONN_HOST_OS", v); } else { std::env::remove_var("KRONN_HOST_OS"); }
-        if let Some(v) = old_wsl { std::env::set_var("WSL_DISTRO_NAME", v); } else { std::env::remove_var("WSL_DISTRO_NAME"); }
+        if let Some(v) = old_os {
+            std::env::set_var("KRONN_HOST_OS", v);
+        } else {
+            std::env::remove_var("KRONN_HOST_OS");
+        }
+        if let Some(v) = old_wsl {
+            std::env::set_var("WSL_DISTRO_NAME", v);
+        } else {
+            std::env::remove_var("WSL_DISTRO_NAME");
+        }
         #[cfg(target_os = "linux")]
         assert_eq!(label, "WSL");
         #[cfg(not(target_os = "linux"))]
@@ -164,6 +202,10 @@ mod tests {
     fn host_os_label_returns_known_platform() {
         let label = host_os_label();
         let known = ["Linux", "WSL", "macOS", "Windows", "Unknown"];
-        assert!(known.contains(&label.as_str()), "Unexpected platform: {}", label);
+        assert!(
+            known.contains(&label.as_str()),
+            "Unexpected platform: {}",
+            label
+        );
     }
 }

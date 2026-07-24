@@ -18,7 +18,11 @@ pub async fn audit_info(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<AuditInfo>> {
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &id)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &id))
+        .await
+    {
         Ok(Some(p)) => p,
         Ok(None) => return Json(ApiResponse::err("Project not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -27,9 +31,13 @@ pub async fn audit_info(
     let project_path_str = project.path.clone();
 
     // Run filesystem I/O on blocking thread pool to avoid blocking the async runtime
-    let result = tokio::task::spawn_blocking(move || {
-        compute_audit_info_sync(&project_path_str)
-    }).await.unwrap_or_else(|_| AuditInfo { files: vec![], todos: vec![], tech_debt_items: vec![] });
+    let result = tokio::task::spawn_blocking(move || compute_audit_info_sync(&project_path_str))
+        .await
+        .unwrap_or_else(|_| AuditInfo {
+            files: vec![],
+            todos: vec![],
+            tech_debt_items: vec![],
+        });
 
     Json(ApiResponse::ok(result))
 }

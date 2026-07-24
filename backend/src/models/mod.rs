@@ -122,17 +122,32 @@ pub struct ApiResponse<T: Serialize> {
 
 impl<T: Serialize> ApiResponse<T> {
     pub fn ok(data: T) -> Self {
-        Self { success: true, data: Some(data), error: None, error_code: None }
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+            error_code: None,
+        }
     }
 
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(msg.into()), error_code: None }
+        Self {
+            success: false,
+            data: None,
+            error: Some(msg.into()),
+            error_code: None,
+        }
     }
 
     /// Error response with a machine-readable category. Prefer this over `err`
     /// in new/updated handlers so the frontend + MCP can branch on the kind.
     pub fn err_coded(code: ApiErrorCode, msg: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(msg.into()), error_code: Some(code.as_str().to_string()) }
+        Self {
+            success: false,
+            data: None,
+            error: Some(msg.into()),
+            error_code: Some(code.as_str().to_string()),
+        }
     }
 }
 
@@ -162,7 +177,9 @@ pub struct PaginationQuery {
     pub per_page: u32,
 }
 
-fn default_per_page() -> u32 { 50 }
+fn default_per_page() -> u32 {
+    50
+}
 
 // ─── Context Files (uploaded file context for discussions) ────────────────
 

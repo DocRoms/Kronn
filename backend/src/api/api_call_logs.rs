@@ -10,8 +10,8 @@ use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::Deserialize;
 
-use crate::models::ApiResponse;
 use crate::db::api_call_logs::{self, ApiCallLog, ApiCallSource, ApiCallStatus, ListFilter};
+use crate::models::ApiResponse;
 use crate::AppState;
 
 #[derive(Debug, Deserialize)]
@@ -118,16 +118,28 @@ mod tests {
 
     #[test]
     fn parse_source_recognises_all_known_kinds() {
-        assert!(matches!(parse_source("workflow"), Some(ApiCallSource::Workflow)));
-        assert!(matches!(parse_source("agent_broker"), Some(ApiCallSource::AgentBroker)));
-        assert!(matches!(parse_source("manual_test"), Some(ApiCallSource::ManualTest)));
+        assert!(matches!(
+            parse_source("workflow"),
+            Some(ApiCallSource::Workflow)
+        ));
+        assert!(matches!(
+            parse_source("agent_broker"),
+            Some(ApiCallSource::AgentBroker)
+        ));
+        assert!(matches!(
+            parse_source("manual_test"),
+            Some(ApiCallSource::ManualTest)
+        ));
     }
 
     #[test]
     fn parse_source_rejects_unknown_variants() {
         assert!(parse_source("").is_none());
         assert!(parse_source("Workflow").is_none(), "case-sensitive match");
-        assert!(parse_source("agent-broker").is_none(), "hyphen ≠ underscore");
+        assert!(
+            parse_source("agent-broker").is_none(),
+            "hyphen ≠ underscore"
+        );
         assert!(parse_source("garbage").is_none());
     }
 
@@ -135,8 +147,14 @@ mod tests {
     fn parse_status_recognises_all_known_variants() {
         assert!(matches!(parse_status("OK"), Some(ApiCallStatus::Ok)));
         assert!(matches!(parse_status("ERROR"), Some(ApiCallStatus::Error)));
-        assert!(matches!(parse_status("RateLimited"), Some(ApiCallStatus::RateLimited)));
-        assert!(matches!(parse_status("TimedOut"), Some(ApiCallStatus::TimedOut)));
+        assert!(matches!(
+            parse_status("RateLimited"),
+            Some(ApiCallStatus::RateLimited)
+        ));
+        assert!(matches!(
+            parse_status("TimedOut"),
+            Some(ApiCallStatus::TimedOut)
+        ));
     }
 
     #[test]
@@ -144,7 +162,10 @@ mod tests {
         assert!(parse_status("").is_none());
         assert!(parse_status("ok").is_none(), "case-sensitive match");
         assert!(parse_status("error").is_none());
-        assert!(parse_status("Pending").is_none(), "no Pending variant — must be skipped");
+        assert!(
+            parse_status("Pending").is_none(),
+            "no Pending variant — must be skipped"
+        );
     }
 
     #[test]

@@ -80,7 +80,8 @@ pub async fn generate_pdf(
             "html": req.html,
             "page_size": req.page_size,
         }),
-    ).await
+    )
+    .await
 }
 
 // ─── DOCX — HTML input (same shape as PDF) ────────────────────────────
@@ -107,7 +108,8 @@ pub async fn generate_docx(
         "docx",
         "docx",
         serde_json::json!({ "html": req.html }),
-    ).await
+    )
+    .await
 }
 
 // ─── XLSX — structured JSON (sheets × rows) ───────────────────────────
@@ -136,7 +138,8 @@ pub async fn generate_xlsx(
         "xlsx",
         "xlsx",
         serde_json::json!({ "sheets": req.sheets }),
-    ).await
+    )
+    .await
 }
 
 // ─── CSV — flat row dump ──────────────────────────────────────────────
@@ -166,7 +169,8 @@ pub async fn generate_csv(
             "rows": req.rows,
             "delimiter": req.delimiter,
         }),
-    ).await
+    )
+    .await
 }
 
 // ─── PPTX — slide deck ────────────────────────────────────────────────
@@ -194,7 +198,8 @@ pub async fn generate_pptx(
         "pptx",
         "pptx",
         serde_json::json!({ "slides": req.slides }),
-    ).await
+    )
+    .await
 }
 
 // ─── Shared proxy helper ──────────────────────────────────────────────
@@ -317,7 +322,11 @@ pub async fn download_file(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     if !resolved.starts_with(&root_canonical) {
-        return (StatusCode::FORBIDDEN, "path escapes generated root".to_string()).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            "path escapes generated root".to_string(),
+        )
+            .into_response();
     }
 
     let bytes = match tokio::fs::read(&resolved).await {
@@ -406,7 +415,11 @@ fn sanitize_filename(hint: &str, extension: &str) -> String {
         }
         out.trim_matches('-').trim().to_string()
     };
-    let base = if collapsed.is_empty() { "kronn-doc".to_string() } else { collapsed };
+    let base = if collapsed.is_empty() {
+        "kronn-doc".to_string()
+    } else {
+        collapsed
+    };
     let suffix = &Uuid::new_v4().to_string()[..8];
     format!("{base}-{suffix}.{extension}")
 }
@@ -423,7 +436,10 @@ fn default_filename(extension: &str) -> String {
 /// download handler's Content-Type header so browsers know what to do
 /// with the file.
 fn guess_mime(filename: &str) -> &'static str {
-    let ext = Path::new(filename).extension().and_then(|e| e.to_str()).unwrap_or("");
+    let ext = Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     match ext.to_ascii_lowercase().as_str() {
         "pdf" => "application/pdf",
         "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -446,7 +462,10 @@ mod tests {
         assert!(!got.contains('/'), "no slashes allowed: {got}");
         assert!(!got.contains(".."), "no dot sequences: {got}");
         assert!(got.ends_with(".pdf"), "extension must be pdf: {got}");
-        assert!(got.starts_with("etc-passwd"), "payload stripped to safe core: {got}");
+        assert!(
+            got.starts_with("etc-passwd"),
+            "payload stripped to safe core: {got}"
+        );
     }
 
     #[test]
@@ -468,7 +487,10 @@ mod tests {
     #[test]
     fn default_filename_has_timestamp_and_extension() {
         let got = default_filename("xlsx");
-        assert!(got.starts_with("kronn-doc-2026-") || got.starts_with("kronn-doc-20"), "timestamp prefix: {got}");
+        assert!(
+            got.starts_with("kronn-doc-2026-") || got.starts_with("kronn-doc-20"),
+            "timestamp prefix: {got}"
+        );
         assert!(got.ends_with(".xlsx"));
     }
 
@@ -482,9 +504,18 @@ mod tests {
     #[test]
     fn guess_mime_covers_five_formats() {
         assert_eq!(guess_mime("x.pdf"), "application/pdf");
-        assert_eq!(guess_mime("x.docx"), "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
-        assert_eq!(guess_mime("x.xlsx"), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-        assert_eq!(guess_mime("x.pptx"), "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+        assert_eq!(
+            guess_mime("x.docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(
+            guess_mime("x.xlsx"),
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        assert_eq!(
+            guess_mime("x.pptx"),
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        );
         assert_eq!(guess_mime("x.csv"), "text/csv");
         assert_eq!(guess_mime("x.unknown"), "application/octet-stream");
     }

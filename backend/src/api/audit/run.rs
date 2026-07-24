@@ -59,9 +59,10 @@ pub async fn audit_latest(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::audit_runs::latest_completed(conn, &id)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::latest_completed(conn, &id))
+        .await;
     match result {
         Ok(row) => Json(ApiResponse::ok(row)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
@@ -76,12 +77,11 @@ pub async fn audit_latest(
 ///
 /// Boot-time reconcile (30-min threshold) is automatic in
 /// `Database::open`. This endpoint is the manual escape hatch.
-pub async fn audit_runs_cleanup(
-    State(state): State<AppState>,
-) -> Json<ApiResponse<u64>> {
-    let result = state.db.with_conn(|conn| {
-        crate::db::audit_runs::reconcile_all_running(conn)
-    }).await;
+pub async fn audit_runs_cleanup(State(state): State<AppState>) -> Json<ApiResponse<u64>> {
+    let result = state
+        .db
+        .with_conn(|conn| crate::db::audit_runs::reconcile_all_running(conn))
+        .await;
     match result {
         Ok(n) => Json(ApiResponse::ok(n)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
@@ -97,9 +97,10 @@ pub async fn audit_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Vec<crate::models::AuditRun>>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::audit_runs::list_recent(conn, &id, 20)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::list_recent(conn, &id, 20))
+        .await;
     match result {
         Ok(runs) => Json(ApiResponse::ok(runs)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
@@ -119,9 +120,10 @@ pub async fn audit_run_steps(
     State(state): State<AppState>,
     Path(run_id): Path<String>,
 ) -> Json<ApiResponse<Vec<crate::models::AuditRunStep>>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::audit_runs::list_audit_steps(conn, &run_id)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::list_audit_steps(conn, &run_id))
+        .await;
     match result {
         Ok(steps) => Json(ApiResponse::ok(steps)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),
@@ -137,9 +139,10 @@ pub async fn audit_latest_resumable(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<Option<crate::models::AuditRun>>> {
-    let result = state.db.with_conn(move |conn| {
-        crate::db::audit_runs::latest_resumable(conn, &id)
-    }).await;
+    let result = state
+        .db
+        .with_conn(move |conn| crate::db::audit_runs::latest_resumable(conn, &id))
+        .await;
     match result {
         Ok(row) => Json(ApiResponse::ok(row)),
         Err(e) => Json(ApiResponse::err(format!("db: {e}"))),

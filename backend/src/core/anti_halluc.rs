@@ -85,7 +85,10 @@ pub const DEFAULT_MODE_STR: &str = "warn";
 /// Whether a raw string is one of the three accepted modes (used by the API
 /// validator so an invalid value is rejected instead of silently coerced).
 pub fn is_valid_mode(s: &str) -> bool {
-    matches!(s.trim().to_ascii_lowercase().as_str(), "off" | "warn" | "enforce")
+    matches!(
+        s.trim().to_ascii_lowercase().as_str(),
+        "off" | "warn" | "enforce"
+    )
 }
 
 static MODE: OnceLock<RwLock<AntiHallucMode>> = OnceLock::new();
@@ -360,11 +363,29 @@ const MIN_SENTENCE_CHARS: usize = 25;
 /// detection) deferred to 0.8.8 with proper telemetry.
 const CLAIM_CUES: &[&str] = &[
     // ── English — code / config (original list) ──
-    "is located", "is defined", "is implemented", "lives in", "is stored",
-    "is configured", "defaults to", "the default is", "returns ", "is handled",
-    "the function", "the method", "the endpoint", "the route", "the table",
-    "the column", "the config", "the parameter", "the flag", "the option",
-    "the api", "is set in", "is declared",
+    "is located",
+    "is defined",
+    "is implemented",
+    "lives in",
+    "is stored",
+    "is configured",
+    "defaults to",
+    "the default is",
+    "returns ",
+    "is handled",
+    "the function",
+    "the method",
+    "the endpoint",
+    "the route",
+    "the table",
+    "the column",
+    "the config",
+    "the parameter",
+    "the flag",
+    "the option",
+    "the api",
+    "is set in",
+    "is declared",
     // ── English — security / CVE / version (0.8.7 patch) ──
     //
     // Kept high-precision on purpose : broader cues like "added in" /
@@ -374,15 +395,34 @@ const CLAIM_CUES: &[&str] = &[
     // below are tight verb-frames ("is vulnerable", "fixed in",
     // "patched in") or explicit version-state framings ("the latest
     // version is …") that don't collide with everyday prose.
-    "is vulnerable", "is affected by", "patched in", "fixed in",
-    "deprecated in version", "affected version", "affected versions",
-    "the latest version is", "the installed version is",
+    "is vulnerable",
+    "is affected by",
+    "patched in",
+    "fixed in",
+    "deprecated in version",
+    "affected version",
+    "affected versions",
+    "the latest version is",
+    "the installed version is",
     "cve-",
     // ── French — code / config (original list) ──
-    "se trouve", "est défini", "est implémenté", "est stocké", "est configuré",
-    "par défaut", "renvoie", "la fonction", "la méthode", "la route",
-    "la table", "la colonne", "le paramètre", "l'option", "l'endpoint",
-    "est déclaré", "est géré",
+    "se trouve",
+    "est défini",
+    "est implémenté",
+    "est stocké",
+    "est configuré",
+    "par défaut",
+    "renvoie",
+    "la fonction",
+    "la méthode",
+    "la route",
+    "la table",
+    "la colonne",
+    "le paramètre",
+    "l'option",
+    "l'endpoint",
+    "est déclaré",
+    "est géré",
     // ── French — security / CVE / version (0.8.7 patch) ──
     //
     // Same precision discipline as the English block above. "ajouté dans"
@@ -390,9 +430,15 @@ const CLAIM_CUES: &[&str] = &[
     // here — they collide with generic prose. The cues below are tight
     // verb-frames ("est vulnérable", "corrigé dans", "patché dans") or
     // explicit version-state framings ("la dernière version est …").
-    "est vulnérable", "est affecté par", "patché dans", "corrigé dans",
-    "déprécié dans la version", "version affectée", "versions affectées",
-    "la dernière version est", "la version installée est",
+    "est vulnérable",
+    "est affecté par",
+    "patché dans",
+    "corrigé dans",
+    "déprécié dans la version",
+    "version affectée",
+    "versions affectées",
+    "la dernière version est",
+    "la version installée est",
     // ── Spanish — code / config (0.8.8 — closes the ES recall gap) ──
     //
     // Kronn is FR/EN/ES; before this block a genuine Spanish code claim
@@ -401,26 +447,75 @@ const CLAIM_CUES: &[&str] = &[
     // discipline as the FR/EN blocks: tight verb-frames + state framings, no
     // generic prose. The matcher is accent-insensitive (normalize_match) so
     // "está" matches whether or not the accent survives.
-    "se encuentra", "está definido", "está definida", "está implementado",
-    "está almacenado", "está configurado", "está configurada", "por defecto",
-    "devuelve", "la función", "el método", "la ruta", "la tabla", "la columna",
-    "el parámetro", "la opción", "está declarado", "está gestionado",
-    "es vulnerable", "está afectado por", "corregido en", "parcheado en",
-    "versión afectada", "versiones afectadas", "la última versión es",
+    "se encuentra",
+    "está definido",
+    "está definida",
+    "está implementado",
+    "está almacenado",
+    "está configurado",
+    "está configurada",
+    "por defecto",
+    "devuelve",
+    "la función",
+    "el método",
+    "la ruta",
+    "la tabla",
+    "la columna",
+    "el parámetro",
+    "la opción",
+    "está declarado",
+    "está gestionado",
+    "es vulnerable",
+    "está afectado por",
+    "corregido en",
+    "parcheado en",
+    "versión afectada",
+    "versiones afectadas",
+    "la última versión es",
 ];
 
 /// Hedges (EN + FR + ES). Their presence suppresses a flag — the agent is
 /// already signalling uncertainty, which is exactly the behaviour we want.
 const HEDGES: &[&str] = &[
-    "i think", "i believe", "i'm not sure", "im not sure", "not sure",
-    "maybe", "probably", "might be", "i should check", "unverified",
-    "to verify", "let me check", "i'll check", "appears to", "seems to",
-    "je pense", "je crois", "peut-être", "peut etre", "probablement",
-    "il semble", "à vérifier", "a verifier", "je vérifie", "je verifie",
-    "sans certitude", "je ne suis pas sûr", "je ne suis pas sur",
+    "i think",
+    "i believe",
+    "i'm not sure",
+    "im not sure",
+    "not sure",
+    "maybe",
+    "probably",
+    "might be",
+    "i should check",
+    "unverified",
+    "to verify",
+    "let me check",
+    "i'll check",
+    "appears to",
+    "seems to",
+    "je pense",
+    "je crois",
+    "peut-être",
+    "peut etre",
+    "probablement",
+    "il semble",
+    "à vérifier",
+    "a verifier",
+    "je vérifie",
+    "je verifie",
+    "sans certitude",
+    "je ne suis pas sûr",
+    "je ne suis pas sur",
     // ── Spanish ──
-    "creo que", "quizás", "quizas", "tal vez", "probablemente", "no estoy seguro",
-    "parece que", "debería revisar", "por verificar", "sin certeza",
+    "creo que",
+    "quizás",
+    "quizas",
+    "tal vez",
+    "probablemente",
+    "no estoy seguro",
+    "parece que",
+    "debería revisar",
+    "por verificar",
+    "sin certeza",
 ];
 
 /// Does the sentence carry a verifiable anchor (so it's NOT flagged)?
@@ -450,9 +545,8 @@ fn has_anchor(lower: &str, original: &str) -> bool {
 /// `.html.twig` (and any double extension) needs NO special case: matching is
 /// `ends_with`, and `foo.html.twig` ends with `.twig`.
 const SOURCE_EXTS: &[&str] = &[
-    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".toml", ".json", ".sql",
-    ".md", ".yml", ".yaml", ".css", ".html", ".sh", ".php", ".go", ".java",
-    ".rb", ".vue", ".svelte", ".c", ".cpp", ".h",
+    ".rs", ".ts", ".tsx", ".js", ".jsx", ".py", ".toml", ".json", ".sql", ".md", ".yml", ".yaml",
+    ".css", ".html", ".sh", ".php", ".go", ".java", ".rb", ".vue", ".svelte", ".c", ".cpp", ".h",
     // Web / template / i18n project files (Symfony, Laravel, Sass, XLIFF…).
     ".twig", ".xlf", ".scss", ".less",
 ];
@@ -536,17 +630,46 @@ fn normalize_match(s: &str) -> String {
 /// reasoning or recommending, not asserting a checkable fact — suppress the flag.
 const OPINION_CUES: &[&str] = &[
     // ── French ──
-    "peut etre", "pourrait etre", "n'est pas toujours", "pas forcement",
-    "pas necessairement", "anti pattern", "il vaut mieux", "il faudrait",
-    "on devrait", "tu devrais", "vous devriez", "devrait", "je recommande",
-    "je recommanderais", "je suggere", "a mon avis", "selon moi",
-    "ce serait mieux", "ferait mieux", "il serait preferable",
+    "peut etre",
+    "pourrait etre",
+    "n'est pas toujours",
+    "pas forcement",
+    "pas necessairement",
+    "anti pattern",
+    "il vaut mieux",
+    "il faudrait",
+    "on devrait",
+    "tu devrais",
+    "vous devriez",
+    "devrait",
+    "je recommande",
+    "je recommanderais",
+    "je suggere",
+    "a mon avis",
+    "selon moi",
+    "ce serait mieux",
+    "ferait mieux",
+    "il serait preferable",
     // ── English ──
-    "i recommend", "i suggest", "should be", "would be better",
-    "in my opinion", "not always", "we should", "you should", "it would be",
+    "i recommend",
+    "i suggest",
+    "should be",
+    "would be better",
+    "in my opinion",
+    "not always",
+    "we should",
+    "you should",
+    "it would be",
     // ── Spanish (0.8.8 — precision guard for the new ES claim cues) ──
-    "deberia", "seria mejor", "es preferible", "recomiendo", "sugiero",
-    "en mi opinion", "a mi juicio", "no siempre", "mejor seria",
+    "deberia",
+    "seria mejor",
+    "es preferible",
+    "recomiendo",
+    "sugiero",
+    "en mi opinion",
+    "a mi juicio",
+    "no siempre",
+    "mejor seria",
 ];
 
 /// Conditional / hypothetical openers (bare tokens — matched at word boundaries
@@ -554,11 +677,27 @@ const OPINION_CUES: &[&str] = &[
 /// "ver**si**on"). A claim cue that sits AFTER one of these in the same sentence
 /// is hypothetical ("si X est géré par le DOM, …"), not an assertion.
 const CONDITIONAL_OPENERS: &[&str] = &[
-    "si", "s'il", "lorsque", "lorsqu'", "quand", "des que", "tant que",
-    "a condition", "au cas ou", "supposons", "imaginons",
-    "if", "when", "whenever", "assuming", "suppose",
+    "si",
+    "s'il",
+    "lorsque",
+    "lorsqu'",
+    "quand",
+    "des que",
+    "tant que",
+    "a condition",
+    "au cas ou",
+    "supposons",
+    "imaginons",
+    "if",
+    "when",
+    "whenever",
+    "assuming",
+    "suppose",
     // ── Spanish ── ("si" already shared with FR)
-    "cuando", "mientras", "en caso de", "supongamos",
+    "cuando",
+    "mientras",
+    "en caso de",
+    "supongamos",
 ];
 
 /// First (earliest) needle hit in `haystack_norm`, with both sides normalised
@@ -618,10 +757,28 @@ fn is_heading_or_imperative(s: &str) -> bool {
     let stripped = t.trim_start_matches(['-', '*', '•', ' ']);
     let first = stripped.split_whitespace().next().unwrap_or("");
     const IMPERATIVES: &[&str] = &[
-        "specifier", "verifier", "ajouter", "creer", "definir", "configurer",
-        "mettre", "faire", "voir", "utiliser", "remplacer", "supprimer",
-        "add", "verify", "create", "define", "configure", "use", "replace",
-        "remove", "check", "ensure",
+        "specifier",
+        "verifier",
+        "ajouter",
+        "creer",
+        "definir",
+        "configurer",
+        "mettre",
+        "faire",
+        "voir",
+        "utiliser",
+        "remplacer",
+        "supprimer",
+        "add",
+        "verify",
+        "create",
+        "define",
+        "configure",
+        "use",
+        "replace",
+        "remove",
+        "check",
+        "ensure",
     ];
     IMPERATIVES.contains(&normalize_match(first).as_str())
 }
@@ -680,8 +837,7 @@ pub(crate) fn strip_fenced_code(text: &str) -> String {
                 // Closer suffix: spaces/tabs ONLY — Unicode whitespace must
                 // not promote a content line into a closer.
                 Some((run, suffix))
-                    if run >= *open_run
-                        && suffix.chars().all(|c| c == ' ' || c == '\t') =>
+                    if run >= *open_run && suffix.chars().all(|c| c == ' ' || c == '\t') =>
                 {
                     fence = None; // valid closer: the withheld block is code — drop it
                 }
@@ -852,10 +1008,11 @@ pub fn lint_assertions(text: &str) -> LintReport {
         }
         let lower = sentence.to_ascii_lowercase();
         let nmatch = normalize_match(&sentence); // accent/hyphen-folded
-        // Hedged OR opinion/recommendation frame → the agent is signalling
-        // uncertainty or reasoning, not asserting a checkable fact. Good.
-        // Opinion cues use word-boundary matching (some are short tokens).
-        if find_first(&nmatch, HEDGES).is_some() || find_first_word(&nmatch, OPINION_CUES).is_some() {
+                                                 // Hedged OR opinion/recommendation frame → the agent is signalling
+                                                 // uncertainty or reasoning, not asserting a checkable fact. Good.
+                                                 // Opinion cues use word-boundary matching (some are short tokens).
+        if find_first(&nmatch, HEDGES).is_some() || find_first_word(&nmatch, OPINION_CUES).is_some()
+        {
             continue;
         }
         // Anchored → self-sourcing.
@@ -972,15 +1129,33 @@ fn classify_source(raw: &str) -> (SourceKind, String) {
     // keyword-boundary check means a real file named `user_service.rs`,
     // `api_client.rs`, `commit_log.rs`… is NOT misclassified (it falls through
     // to File). Order: most specific first.
-    if let Some(r) = match_type_keyword(s, "training-data") { return (SourceKind::TrainingData, r); }
-    if let Some(r) = match_type_keyword(s, "code-comment") { return (SourceKind::CodeComment, r); }
-    if let Some(r) = match_type_keyword(s, "inferred") { return (SourceKind::Inferred, r); }
-    if let Some(r) = match_type_keyword(s, "hypothesis") { return (SourceKind::Hypothesis, r); }
-    if let Some(r) = match_type_keyword(s, "commit") { return (SourceKind::Commit, r); }
-    if let Some(r) = match_type_keyword(s, "api") { return (SourceKind::Api, r); }
-    if let Some(r) = match_type_keyword(s, "url") { return (SourceKind::Url, r); }
-    if let Some(r) = match_type_keyword(s, "user") { return (SourceKind::User, r); }
-    if let Some(r) = match_type_keyword(s, "file") { return (SourceKind::File, r); }
+    if let Some(r) = match_type_keyword(s, "training-data") {
+        return (SourceKind::TrainingData, r);
+    }
+    if let Some(r) = match_type_keyword(s, "code-comment") {
+        return (SourceKind::CodeComment, r);
+    }
+    if let Some(r) = match_type_keyword(s, "inferred") {
+        return (SourceKind::Inferred, r);
+    }
+    if let Some(r) = match_type_keyword(s, "hypothesis") {
+        return (SourceKind::Hypothesis, r);
+    }
+    if let Some(r) = match_type_keyword(s, "commit") {
+        return (SourceKind::Commit, r);
+    }
+    if let Some(r) = match_type_keyword(s, "api") {
+        return (SourceKind::Api, r);
+    }
+    if let Some(r) = match_type_keyword(s, "url") {
+        return (SourceKind::Url, r);
+    }
+    if let Some(r) = match_type_keyword(s, "user") {
+        return (SourceKind::User, r);
+    }
+    if let Some(r) = match_type_keyword(s, "file") {
+        return (SourceKind::File, r);
+    }
     (SourceKind::File, s.to_string())
 }
 
@@ -1082,29 +1257,41 @@ pub fn verify_source_marker_roots(raw: &str, roots: &[&Path]) -> SourceCheck {
     let (kind, reference) = classify_source(raw);
 
     let status_detail = match kind {
-        SourceKind::Url | SourceKind::Api => {
-            (SourceStatus::Unchecked, "URL/API — not network-checked (SSRF-safe)".to_string())
-        }
-        SourceKind::Commit => (SourceStatus::Unchecked, "commit ref — not verified".to_string()),
-        SourceKind::User => {
-            (SourceStatus::Unchecked, "user-declared — not machine-verifiable".to_string())
-        }
-        SourceKind::Inferred => {
-            (SourceStatus::Unchecked, "inferred — a derived guess, not a verifiable fact".to_string())
-        }
-        SourceKind::Hypothesis => {
-            (SourceStatus::Unchecked, "hypothesis — unverified, confirm before acting".to_string())
-        }
-        SourceKind::TrainingData => {
-            (SourceStatus::Rejected, "training-data is not a citable source — refused".to_string())
-        }
-        SourceKind::Other => {
-            (SourceStatus::Unchecked, "unknown source type — not verified".to_string())
-        }
+        SourceKind::Url | SourceKind::Api => (
+            SourceStatus::Unchecked,
+            "URL/API — not network-checked (SSRF-safe)".to_string(),
+        ),
+        SourceKind::Commit => (
+            SourceStatus::Unchecked,
+            "commit ref — not verified".to_string(),
+        ),
+        SourceKind::User => (
+            SourceStatus::Unchecked,
+            "user-declared — not machine-verifiable".to_string(),
+        ),
+        SourceKind::Inferred => (
+            SourceStatus::Unchecked,
+            "inferred — a derived guess, not a verifiable fact".to_string(),
+        ),
+        SourceKind::Hypothesis => (
+            SourceStatus::Unchecked,
+            "hypothesis — unverified, confirm before acting".to_string(),
+        ),
+        SourceKind::TrainingData => (
+            SourceStatus::Rejected,
+            "training-data is not a citable source — refused".to_string(),
+        ),
+        SourceKind::Other => (
+            SourceStatus::Unchecked,
+            "unknown source type — not verified".to_string(),
+        ),
         // A code comment still gets existence-verified, but is flagged LOW trust.
         SourceKind::CodeComment => {
             let (st, detail) = verify_file_ref(&reference, roots);
-            (st, format!("code comment (not authoritative — verify): {}", detail))
+            (
+                st,
+                format!("code comment (not authoritative — verify): {}", detail),
+            )
         }
         SourceKind::File => verify_file_ref(&reference, roots),
     };
@@ -1138,7 +1325,10 @@ fn clean_reference(reference: &str) -> &str {
 }
 
 /// Line-bounds verdict for an existing candidate file.
-fn line_bounds_status(candidate: &Path, line_spec: Option<(usize, usize)>) -> (SourceStatus, String) {
+fn line_bounds_status(
+    candidate: &Path,
+    line_spec: Option<(usize, usize)>,
+) -> (SourceStatus, String) {
     match line_spec {
         None => (SourceStatus::Verified, "file exists".into()),
         Some((start, end)) => match count_lines_capped(candidate) {
@@ -1148,7 +1338,10 @@ fn line_bounds_status(candidate: &Path, line_spec: Option<(usize, usize)>) -> (S
             ),
             Some(total) => {
                 if end <= total {
-                    (SourceStatus::Verified, format!("lines {}-{} within {} lines", start, end, total))
+                    (
+                        SourceStatus::Verified,
+                        format!("lines {}-{} within {} lines", start, end, total),
+                    )
                 } else {
                     (
                         SourceStatus::OutOfBounds,
@@ -1166,8 +1359,17 @@ fn line_bounds_status(candidate: &Path, line_spec: Option<(usize, usize)>) -> (S
 /// without it every basename looks ambiguous — the exact false-ambiguity that
 /// masked the real unique file in front_euronews (11 copies, 1 real).
 const BASENAME_WALK_SKIP_DIRS: &[&str] = &[
-    "node_modules", "vendor", "target", ".git", "dist", "build", ".next",
-    ".kronn", ".kronn-worktrees", ".venv", "__pycache__",
+    "node_modules",
+    "vendor",
+    "target",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    ".kronn",
+    ".kronn-worktrees",
+    ".venv",
+    "__pycache__",
 ];
 
 /// Outcome of walking the tree for a bare basename (no path separator).
@@ -1195,17 +1397,15 @@ fn resolve_unique_basename(basename: &str, roots: &[&Path]) -> BasenameResolutio
         let mut count = 0usize;
         let mut scanned = 0usize;
         let mut capped = false;
-        let walker = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_entry(|e| {
-                // Prune skip dirs by name (depth > 0 so the root itself stays).
-                if e.depth() > 0 && e.file_type().is_dir() {
-                    if let Some(name) = e.file_name().to_str() {
-                        return !BASENAME_WALK_SKIP_DIRS.contains(&name);
-                    }
+        let walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
+            // Prune skip dirs by name (depth > 0 so the root itself stays).
+            if e.depth() > 0 && e.file_type().is_dir() {
+                if let Some(name) = e.file_name().to_str() {
+                    return !BASENAME_WALK_SKIP_DIRS.contains(&name);
                 }
-                true
-            });
+            }
+            true
+        });
         for entry in walker.filter_map(|e| e.ok()) {
             scanned += 1;
             if scanned > MAX_WALK_ENTRIES {
@@ -1239,7 +1439,8 @@ fn path_has_segment_suffix(full: &str, needle: &str) -> bool {
     if full == needle {
         return true;
     }
-    full.strip_suffix(needle).is_some_and(|rest| rest.ends_with('/'))
+    full.strip_suffix(needle)
+        .is_some_and(|rest| rest.ends_with('/'))
 }
 
 /// Resolve a MULTI-SEGMENT relative citation to a UNIQUE file by segment-aligned
@@ -1266,16 +1467,14 @@ fn resolve_unique_path_suffix(needle: &str, roots: &[&Path]) -> BasenameResoluti
         let mut count = 0usize;
         let mut scanned = 0usize;
         let mut capped = false;
-        let walker = walkdir::WalkDir::new(root)
-            .into_iter()
-            .filter_entry(|e| {
-                if e.depth() > 0 && e.file_type().is_dir() {
-                    if let Some(name) = e.file_name().to_str() {
-                        return !BASENAME_WALK_SKIP_DIRS.contains(&name);
-                    }
+        let walker = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
+            if e.depth() > 0 && e.file_type().is_dir() {
+                if let Some(name) = e.file_name().to_str() {
+                    return !BASENAME_WALK_SKIP_DIRS.contains(&name);
                 }
-                true
-            });
+            }
+            true
+        });
         for entry in walker.filter_map(|e| e.ok()) {
             scanned += 1;
             if scanned > MAX_WALK_ENTRIES {
@@ -1347,7 +1546,10 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
     if path.is_absolute() {
         let candidate = crate::core::scanner::resolve_host_path(path_str);
         if !candidate.exists() {
-            return (SourceStatus::NotFound, format!("file not found: {}", path_str));
+            return (
+                SourceStatus::NotFound,
+                format!("file not found: {}", path_str),
+            );
         }
         return line_bounds_status(&candidate, line_spec);
     }
@@ -1401,12 +1603,17 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
                     .find_map(|r| found.strip_prefix(r).ok())
                     .unwrap_or(found.as_path())
                     .display();
-                return (status, format!("{detail} — resolved by unique basename → {shown}"));
+                return (
+                    status,
+                    format!("{detail} — resolved by unique basename → {shown}"),
+                );
             }
             BasenameResolution::Ambiguous(n) => {
                 return (
                     SourceStatus::NotFound,
-                    format!("bare name `{path_str}` matches {n} files — ambiguous, cite the full path"),
+                    format!(
+                        "bare name `{path_str}` matches {n} files — ambiguous, cite the full path"
+                    ),
                 );
             }
             BasenameResolution::NotFound => {}
@@ -1425,7 +1632,10 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
                     .find_map(|r| found.strip_prefix(r).ok())
                     .unwrap_or(found.as_path())
                     .display();
-                return (status, format!("{detail} — resolved by unique path suffix → {shown}"));
+                return (
+                    status,
+                    format!("{detail} — resolved by unique path suffix → {shown}"),
+                );
             }
             BasenameResolution::Ambiguous(n) => {
                 return (
@@ -1437,7 +1647,10 @@ fn verify_file_ref(reference: &str, roots: &[&Path]) -> (SourceStatus, String) {
         }
     }
 
-    (SourceStatus::NotFound, format!("file not found: {}", path_str))
+    (
+        SourceStatus::NotFound,
+        format!("file not found: {}", path_str),
+    )
 }
 
 /// Full P2 analysis: niveau 0 heuristic + niveau 1 mechanical source
@@ -1521,7 +1734,10 @@ pub fn analyze_roots(text: &str, roots: &[&Path]) -> LintReport {
     let mut unverified = 0u32;
     let mut sources = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for raw in extract_source_markers(text).into_iter().take(MAX_SOURCES_VERIFIED) {
+    for raw in extract_source_markers(text)
+        .into_iter()
+        .take(MAX_SOURCES_VERIFIED)
+    {
         let check = verify_source_marker_roots(&raw, roots);
         if check.status.is_fabricated() {
             fabricated += 1;
@@ -1538,7 +1754,10 @@ pub fn analyze_roots(text: &str, roots: &[&Path]) -> LintReport {
     // Niveau 1.5 — natural backticked path anchors. Resolve → verified (green);
     // don't resolve → surfaced honestly as "unverified" (soft amber), NOT red.
     if !roots.is_empty() {
-        for anchor in extract_inline_file_anchors(text).into_iter().take(MAX_SOURCES_VERIFIED) {
+        for anchor in extract_inline_file_anchors(text)
+            .into_iter()
+            .take(MAX_SOURCES_VERIFIED)
+        {
             let key = file_path_key(&anchor);
             if seen.contains(&key) {
                 continue;
@@ -1702,16 +1921,29 @@ mod tests {
     #[test]
     fn mode_parse_is_lenient_and_defaults_to_warn() {
         assert_eq!(AntiHallucMode::from_str_lenient("off"), AntiHallucMode::Off);
-        assert_eq!(AntiHallucMode::from_str_lenient("WARN"), AntiHallucMode::Warn);
-        assert_eq!(AntiHallucMode::from_str_lenient(" Enforce "), AntiHallucMode::Enforce);
+        assert_eq!(
+            AntiHallucMode::from_str_lenient("WARN"),
+            AntiHallucMode::Warn
+        );
+        assert_eq!(
+            AntiHallucMode::from_str_lenient(" Enforce "),
+            AntiHallucMode::Enforce
+        );
         // Unknown / empty → warn (rollout default).
-        assert_eq!(AntiHallucMode::from_str_lenient("bogus"), AntiHallucMode::Warn);
+        assert_eq!(
+            AntiHallucMode::from_str_lenient("bogus"),
+            AntiHallucMode::Warn
+        );
         assert_eq!(AntiHallucMode::from_str_lenient(""), AntiHallucMode::Warn);
     }
 
     #[test]
     fn mode_round_trips_and_active_flag() {
-        for m in [AntiHallucMode::Off, AntiHallucMode::Warn, AntiHallucMode::Enforce] {
+        for m in [
+            AntiHallucMode::Off,
+            AntiHallucMode::Warn,
+            AntiHallucMode::Enforce,
+        ] {
             assert_eq!(AntiHallucMode::from_str_lenient(m.as_str()), m);
         }
         assert!(!AntiHallucMode::Off.is_active());
@@ -1725,15 +1957,35 @@ mod tests {
     fn auto_attach_doc_author_only_in_enforce_with_agents_md() {
         let none: Vec<String> = vec![];
         // Enforce + project has AGENTS.md + not already attached → attach.
-        assert!(should_auto_attach_doc_author(AntiHallucMode::Enforce, &none, true));
+        assert!(should_auto_attach_doc_author(
+            AntiHallucMode::Enforce,
+            &none,
+            true
+        ));
         // Wrong mode → never.
-        assert!(!should_auto_attach_doc_author(AntiHallucMode::Warn, &none, true));
-        assert!(!should_auto_attach_doc_author(AntiHallucMode::Off, &none, true));
+        assert!(!should_auto_attach_doc_author(
+            AntiHallucMode::Warn,
+            &none,
+            true
+        ));
+        assert!(!should_auto_attach_doc_author(
+            AntiHallucMode::Off,
+            &none,
+            true
+        ));
         // No docs/AGENTS.md → never (nothing to discipline against).
-        assert!(!should_auto_attach_doc_author(AntiHallucMode::Enforce, &none, false));
+        assert!(!should_auto_attach_doc_author(
+            AntiHallucMode::Enforce,
+            &none,
+            false
+        ));
         // Idempotent: already attached → don't duplicate.
         let attached = vec!["rust".to_string(), "kronn-doc-author".to_string()];
-        assert!(!should_auto_attach_doc_author(AntiHallucMode::Enforce, &attached, true));
+        assert!(!should_auto_attach_doc_author(
+            AntiHallucMode::Enforce,
+            &attached,
+            true
+        ));
     }
 
     #[test]
@@ -1800,8 +2052,14 @@ mod tests {
         // mechanically verified by `verify_source_marker` ; the others
         // ship the format reference inline so an agent that hasn't
         // loaded AGENTS.md yet still knows how to cite.
-        assert!(PREAMBLE.contains("[src: file:"), "[src: file:] grammar missing");
-        assert!(PREAMBLE.contains("[src: url:"), "[src: url:] grammar missing");
+        assert!(
+            PREAMBLE.contains("[src: file:"),
+            "[src: file:] grammar missing"
+        );
+        assert!(
+            PREAMBLE.contains("[src: url:"),
+            "[src: url:] grammar missing"
+        );
         // Honesty discipline — fabrication = path/line that doesn't
         // resolve or escapes the project root.
         assert!(
@@ -1823,18 +2081,15 @@ mod tests {
 
     #[test]
     fn flags_unsourced_technical_claim() {
-        let r = lint_assertions(
-            "The retry logic is implemented with an exponential backoff loop.",
-        );
+        let r = lint_assertions("The retry logic is implemented with an exponential backoff loop.");
         assert_eq!(r.unsourced_count, 1);
         assert_eq!(r.flagged_spans.len(), 1);
     }
 
     #[test]
     fn flags_french_unsourced_claim() {
-        let r = lint_assertions(
-            "La fonction de cache se trouve dans le coeur du serveur résilient.",
-        );
+        let r =
+            lint_assertions("La fonction de cache se trouve dans le coeur du serveur résilient.");
         assert_eq!(r.unsourced_count, 1, "report: {:?}", r);
     }
 
@@ -1861,7 +2116,11 @@ mod tests {
         let r = lint_assertions(
             "The default is resolved by `config::default_model_tier()` at startup.",
         );
-        assert_eq!(r.unsourced_count, 0, "backtick code ref anchors it: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "backtick code ref anchors it: {:?}",
+            r
+        );
     }
 
     #[test]
@@ -1882,9 +2141,7 @@ mod tests {
 
     #[test]
     fn does_not_flag_src_annotated_claim() {
-        let r = lint_assertions(
-            "The default is a 30 minute window [src: backend session config].",
-        );
+        let r = lint_assertions("The default is a 30 minute window [src: backend session config].");
         assert_eq!(r.unsourced_count, 0);
     }
 
@@ -1898,30 +2155,46 @@ mod tests {
     #[test]
     fn flags_french_security_vulnerability_claim() {
         let r = lint_assertions("La version 7.3.6 est vulnérable à une faille de PATH_INFO.");
-        assert!(r.unsourced_count >= 1, "expected vulnérable to flag: {:?}", r);
+        assert!(
+            r.unsourced_count >= 1,
+            "expected vulnérable to flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn flags_french_affected_versions_claim() {
         let r = lint_assertions("Les versions affectées vont de 6.0 à 7.3.6 d'après l'avis.");
-        assert!(r.unsourced_count >= 1, "expected versions affectées to flag: {:?}", r);
+        assert!(
+            r.unsourced_count >= 1,
+            "expected versions affectées to flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn flags_french_fixed_in_claim() {
         let r = lint_assertions("La faille est corrigé dans la release 7.3.7 publiée hier.");
-        assert!(r.unsourced_count >= 1, "expected corrigé dans to flag: {:?}", r);
+        assert!(
+            r.unsourced_count >= 1,
+            "expected corrigé dans to flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn flags_english_cve_id_claim() {
-        let r = lint_assertions("CVE-2025-64500 is a high-severity issue in Symfony's PATH_INFO handling.");
+        let r = lint_assertions(
+            "CVE-2025-64500 is a high-severity issue in Symfony's PATH_INFO handling.",
+        );
         assert!(r.unsourced_count >= 1, "expected cve- to flag: {:?}", r);
     }
 
     #[test]
     fn flags_english_fixed_in_claim() {
-        let r = lint_assertions("The bug is fixed in version 7.3.7 according to the upstream changelog.");
+        let r = lint_assertions(
+            "The bug is fixed in version 7.3.7 according to the upstream changelog.",
+        );
         assert!(r.unsourced_count >= 1, "expected fixed in to flag: {:?}", r);
     }
 
@@ -1930,13 +2203,21 @@ mod tests {
         let r = lint_assertions(
             "CVE-2025-64500 affects 7.3.6 [src: https://symfony.com/blog/cve-2025-64500].",
         );
-        assert_eq!(r.unsourced_count, 0, "anchored CVE claim must not flag: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "anchored CVE claim must not flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn hedged_cve_claim_is_not_flagged() {
         let r = lint_assertions("I think CVE-2025-64500 might be the relevant one, let me check.");
-        assert_eq!(r.unsourced_count, 0, "hedged CVE claim must not flag: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "hedged CVE claim must not flag: {:?}",
+            r
+        );
     }
 
     // ── Anti-FP regression : the broader cues we explicitly REJECTED
@@ -1950,13 +2231,21 @@ mod tests {
         // "added in" is intentionally NOT a cue — too broad, fires on
         // build-log / changelog prose that's already self-anchoring.
         let r = lint_assertions("We added in a new dropdown for the user picker last sprint.");
-        assert_eq!(r.unsourced_count, 0, "generic 'added in' must not flag: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "generic 'added in' must not flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn does_not_flag_generic_available_in_phrase() {
         let r = lint_assertions("That feature is available in the documentation we just shipped.");
-        assert_eq!(r.unsourced_count, 0, "generic 'available in' must not flag: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "generic 'available in' must not flag: {:?}",
+            r
+        );
     }
 
     #[test]
@@ -1964,19 +2253,32 @@ mod tests {
         // "the current version" alone is too generic — keep the FP risk
         // off the table unless it's framed as "the current version is …".
         let r = lint_assertions("Reviewing the current version of the layout before we ship.");
-        assert_eq!(r.unsourced_count, 0, "generic 'current version' must not flag: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "generic 'current version' must not flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn does_not_flag_generic_disponible_dans() {
-        let r = lint_assertions("Cette fonctionnalité est disponible dans la doc mise à jour hier.");
-        assert_eq!(r.unsourced_count, 0, "generic 'disponible dans' must not flag: {:?}", r);
+        let r =
+            lint_assertions("Cette fonctionnalité est disponible dans la doc mise à jour hier.");
+        assert_eq!(
+            r.unsourced_count, 0,
+            "generic 'disponible dans' must not flag: {:?}",
+            r
+        );
     }
 
     #[test]
     fn does_not_flag_generic_ajoute_dans() {
         let r = lint_assertions("On a ajouté dans la sidebar un raccourci vers les paramètres.");
-        assert_eq!(r.unsourced_count, 0, "generic 'ajouté dans' must not flag: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "generic 'ajouté dans' must not flag: {:?}",
+            r
+        );
     }
 
     // ── Anti-FP for the 3 historical categories (0.8.7 R2 — note from
@@ -2044,8 +2346,7 @@ mod tests {
         // entry's `expected_unsourced` field accordingly.
         let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/anti_halluc_corpus.jsonl");
-        let content = std::fs::read_to_string(&fixture_path)
-            .expect("fixture must exist");
+        let content = std::fs::read_to_string(&fixture_path).expect("fixture must exist");
 
         let mut total = 0usize;
         let mut false_positives = 0usize;
@@ -2058,7 +2359,9 @@ mod tests {
             let entry: serde_json::Value = serde_json::from_str(line)
                 .unwrap_or_else(|e| panic!("bad JSONL line: {line}\n{e}"));
             let text = entry["text"].as_str().expect("text field");
-            let expected = entry["expected_unsourced"].as_u64().expect("expected_unsourced field") as u32;
+            let expected = entry["expected_unsourced"]
+                .as_u64()
+                .expect("expected_unsourced field") as u32;
             let category = entry["category"].as_str().unwrap_or("?");
 
             let report = lint_assertions(text);
@@ -2092,7 +2395,11 @@ mod tests {
         let txt = "Here is the impl:\n```rust\nlet the_endpoint = returns_default();\n```\nDone.";
         let r = lint_assertions(txt);
         // The claim-cue-looking tokens are inside the fence → ignored.
-        assert_eq!(r.unsourced_count, 0, "fenced code must not be linted: {:?}", r);
+        assert_eq!(
+            r.unsourced_count, 0,
+            "fenced code must not be linted: {:?}",
+            r
+        );
     }
 
     #[test]
@@ -2174,7 +2481,10 @@ mod tests {
     #[test]
     fn extract_ignores_a_syntax_mention_in_backticks() {
         let txt = "la citation `[src:]` est obligatoire dans la doc.";
-        assert!(extract_source_markers(txt).is_empty(), "quoted syntax is a mention, not a citation");
+        assert!(
+            extract_source_markers(txt).is_empty(),
+            "quoted syntax is a mention, not a citation"
+        );
     }
 
     #[test]
@@ -2242,8 +2552,14 @@ mod tests {
     #[test]
     fn split_path_and_lines_variants() {
         assert_eq!(split_path_and_lines("foo.rs"), ("foo.rs", None));
-        assert_eq!(split_path_and_lines("foo.rs:42"), ("foo.rs", Some((42, 42))));
-        assert_eq!(split_path_and_lines("a/b/foo.rs:10-20"), ("a/b/foo.rs", Some((10, 20))));
+        assert_eq!(
+            split_path_and_lines("foo.rs:42"),
+            ("foo.rs", Some((42, 42)))
+        );
+        assert_eq!(
+            split_path_and_lines("a/b/foo.rs:10-20"),
+            ("a/b/foo.rs", Some((10, 20)))
+        );
         // A non-numeric tail is part of the path, not a line spec.
         assert_eq!(split_path_and_lines("weird:name"), ("weird:name", None));
         // Reversed range is rejected → treated as no line spec.
@@ -2256,7 +2572,10 @@ mod tests {
     fn classify_detects_kinds() {
         assert_eq!(classify_source("https://x.com").0, SourceKind::Url);
         assert_eq!(classify_source("url: https://x.com").0, SourceKind::Url);
-        assert_eq!(classify_source("user-confirmed 2026-05-25").0, SourceKind::User);
+        assert_eq!(
+            classify_source("user-confirmed 2026-05-25").0,
+            SourceKind::User
+        );
         assert_eq!(classify_source("commit: abc123").0, SourceKind::Commit);
         assert_eq!(classify_source("file: src/a.rs:1").0, SourceKind::File);
         // Bare path defaults to File, prefix stripped.
@@ -2267,11 +2586,20 @@ mod tests {
 
     #[test]
     fn classify_full_provenance_gradient() {
-        assert_eq!(classify_source("training-data: anything").0, SourceKind::TrainingData);
+        assert_eq!(
+            classify_source("training-data: anything").0,
+            SourceKind::TrainingData
+        );
         assert_eq!(classify_source("training-data").0, SourceKind::TrainingData);
-        assert_eq!(classify_source("inferred: backend/src/api/").0, SourceKind::Inferred);
+        assert_eq!(
+            classify_source("inferred: backend/src/api/").0,
+            SourceKind::Inferred
+        );
         assert_eq!(classify_source("hypothesis").0, SourceKind::Hypothesis);
-        assert_eq!(classify_source("code-comment: GptLoader.ts:36").0, SourceKind::CodeComment);
+        assert_eq!(
+            classify_source("code-comment: GptLoader.ts:36").0,
+            SourceKind::CodeComment
+        );
         assert_eq!(classify_source("api: log#9").0, SourceKind::Api);
     }
 
@@ -2279,7 +2607,12 @@ mod tests {
     fn classify_does_not_misclassify_files_starting_with_type_names() {
         // Real files whose names begin with a type keyword stay File (the
         // token-boundary check) — regression guard for the `user_service.rs` bug.
-        for path in ["user_service.rs:10", "api_client.rs:1", "commit_log.rs", "filer.rs"] {
+        for path in [
+            "user_service.rs:10",
+            "api_client.rs:1",
+            "commit_log.rs",
+            "filer.rs",
+        ] {
             assert_eq!(classify_source(path).0, SourceKind::File, "{path}");
         }
     }
@@ -2290,7 +2623,10 @@ mod tests {
         let c = verify_source_marker("training-data: I recall that…", Some(Path::new("/tmp")));
         assert_eq!(c.kind, SourceKind::TrainingData);
         assert_eq!(c.status, SourceStatus::Rejected);
-        assert!(c.status.is_fabricated(), "rejected must count toward fabricated_count");
+        assert!(
+            c.status.is_fabricated(),
+            "rejected must count toward fabricated_count"
+        );
     }
 
     #[test]
@@ -2312,7 +2648,11 @@ mod tests {
         let ok = verify_source_marker("code-comment: src/foo.rs:2", Some(&root));
         assert_eq!(ok.kind, SourceKind::CodeComment);
         assert_eq!(ok.status, SourceStatus::Verified);
-        assert!(ok.detail.contains("not authoritative"), "detail: {}", ok.detail);
+        assert!(
+            ok.detail.contains("not authoritative"),
+            "detail: {}",
+            ok.detail
+        );
         // A code-comment citing a missing file is still flagged fabricated.
         let bad = verify_source_marker("code-comment: src/ghost.rs:1", Some(&root));
         assert_eq!(bad.status, SourceStatus::NotFound);
@@ -2342,12 +2682,27 @@ mod tests {
     #[test]
     fn verify_line_in_and_out_of_bounds() {
         let root = temp_project();
-        assert_eq!(verify_source_marker("src/foo.rs:3", Some(&root)).status, SourceStatus::Verified);
-        assert_eq!(verify_source_marker("src/foo.rs:5", Some(&root)).status, SourceStatus::Verified);
-        assert_eq!(verify_source_marker("src/foo.rs:6", Some(&root)).status, SourceStatus::OutOfBounds);
+        assert_eq!(
+            verify_source_marker("src/foo.rs:3", Some(&root)).status,
+            SourceStatus::Verified
+        );
+        assert_eq!(
+            verify_source_marker("src/foo.rs:5", Some(&root)).status,
+            SourceStatus::Verified
+        );
+        assert_eq!(
+            verify_source_marker("src/foo.rs:6", Some(&root)).status,
+            SourceStatus::OutOfBounds
+        );
         // Range
-        assert_eq!(verify_source_marker("src/foo.rs:2-4", Some(&root)).status, SourceStatus::Verified);
-        assert_eq!(verify_source_marker("src/foo.rs:4-9", Some(&root)).status, SourceStatus::OutOfBounds);
+        assert_eq!(
+            verify_source_marker("src/foo.rs:2-4", Some(&root)).status,
+            SourceStatus::Verified
+        );
+        assert_eq!(
+            verify_source_marker("src/foo.rs:4-9", Some(&root)).status,
+            SourceStatus::OutOfBounds
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2453,7 +2808,10 @@ mod tests {
         let report = analyze_roots("See `Widget.ts:2` for the logic.", &[&root]);
         assert_eq!(report.unverified_count, 0, "should not be a soft-amber FP");
         assert!(
-            report.sources.iter().any(|s| s.status == SourceStatus::Verified),
+            report
+                .sources
+                .iter()
+                .any(|s| s.status == SourceStatus::Verified),
             "the inline anchor must resolve to a Verified source: {:?}",
             report.sources
         );
@@ -2497,7 +2855,9 @@ mod tests {
         let sibling = std::env::temp_dir().join(format!(
             "kronn-lint-test-sibling-{}",
             std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         std::fs::create_dir_all(sibling.join("src")).unwrap();
         std::fs::write(sibling.join("src/data.yml"), "hello: world\n").unwrap();
@@ -2537,10 +2897,8 @@ mod tests {
 
         let root = temp_project();
         // Create a directory OUTSIDE the project root that holds a secret.
-        let outside = std::env::temp_dir().join(format!(
-            "kronn_antihalluc_outside_{}",
-            uuid::Uuid::new_v4()
-        ));
+        let outside =
+            std::env::temp_dir().join(format!("kronn_antihalluc_outside_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("secret.txt"), "leaked\n").unwrap();
         // Plant a symlink INSIDE the project root that points at the
@@ -2590,9 +2948,15 @@ mod tests {
     #[test]
     fn verify_empty_ref_and_no_root() {
         let root = temp_project();
-        assert_eq!(verify_source_marker("file:", Some(&root)).status, SourceStatus::EmptyRef);
+        assert_eq!(
+            verify_source_marker("file:", Some(&root)).status,
+            SourceStatus::EmptyRef
+        );
         // No project root → can't resolve a file path → Unchecked, not fabricated.
-        assert_eq!(verify_source_marker("src/foo.rs:1", None).status, SourceStatus::Unchecked);
+        assert_eq!(
+            verify_source_marker("src/foo.rs:1", None).status,
+            SourceStatus::Unchecked
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -2631,7 +2995,12 @@ mod tests {
         // The real-world false positive: an opinion inside a conditional.
         let t = "- La conformité DI n'est pas toujours une amélioration — si le \
                  cycle de vie est géré par le DOM, DI peut être un anti-pattern ici";
-        assert_eq!(lint_assertions(t).unsourced_count, 0, "{:?}", lint_assertions(t));
+        assert_eq!(
+            lint_assertions(t).unsourced_count,
+            0,
+            "{:?}",
+            lint_assertions(t)
+        );
     }
 
     #[test]
@@ -2659,17 +3028,25 @@ mod tests {
     fn conditional_si_does_not_match_inside_version() {
         // Regression: "si" must NOT match inside "version" and wrongly suppress.
         let t = "La version 7.3.6 est vulnérable à une faille de désérialisation";
-        assert!(lint_assertions(t).unsourced_count >= 1, "{:?}", lint_assertions(t));
+        assert!(
+            lint_assertions(t).unsourced_count >= 1,
+            "{:?}",
+            lint_assertions(t)
+        );
     }
 
     #[test]
     fn question_and_heading_not_flagged() {
         assert_eq!(
-            lint_assertions("Quand tu dis que le VCL est configuré, tu veux dire quoi exactement ?").unsourced_count,
+            lint_assertions(
+                "Quand tu dis que le VCL est configuré, tu veux dire quoi exactement ?"
+            )
+            .unsourced_count,
             0
         );
         assert_eq!(
-            lint_assertions("### Problème 3 — où la route est définie côté backend").unsourced_count,
+            lint_assertions("### Problème 3 — où la route est définie côté backend")
+                .unsourced_count,
             0
         );
     }
@@ -2677,11 +3054,13 @@ mod tests {
     #[test]
     fn opinion_recommendation_not_flagged() {
         assert_eq!(
-            lint_assertions("Le paramètre devrait être configuré côté infra plutôt qu'ici").unsourced_count,
+            lint_assertions("Le paramètre devrait être configuré côté infra plutôt qu'ici")
+                .unsourced_count,
             0
         );
         assert_eq!(
-            lint_assertions("Je recommande que la route soit gérée par un middleware dédié").unsourced_count,
+            lint_assertions("Je recommande que la route soit gérée par un middleware dédié")
+                .unsourced_count,
             0
         );
     }
@@ -2691,11 +3070,17 @@ mod tests {
     #[test]
     fn verified_only_report_has_signal_green() {
         let root = temp_project();
-        let r = analyze("The retry logic is implemented [src: file: src/foo.rs:2].", Some(&root));
+        let r = analyze(
+            "The retry logic is implemented [src: file: src/foo.rs:2].",
+            Some(&root),
+        );
         assert_eq!(r.fabricated_count, 0);
         assert_eq!(r.unsourced_count, 0);
         assert!(r.verified_count() >= 1, "sources: {:?}", r.sources);
-        assert!(r.has_signal(), "all-verified report must carry a signal (green)");
+        assert!(
+            r.has_signal(),
+            "all-verified report must carry a signal (green)"
+        );
         assert!(!r.is_empty());
         std::fs::remove_dir_all(&root).ok();
     }
@@ -2704,12 +3089,18 @@ mod tests {
     fn unchecked_only_report_has_signal_option_b() {
         // Option B (2026-05-30): a bare URL can't be machine-verified, but we
         // still SURFACE it (neutral "unverifiable" pill) — warn about everything.
-        let r = analyze("See the upstream docs [src: url: https://example.com/x].", None);
+        let r = analyze(
+            "See the upstream docs [src: url: https://example.com/x].",
+            None,
+        );
         assert_eq!(r.fabricated_count, 0);
         assert_eq!(r.unsourced_count, 0);
         assert_eq!(r.verified_count(), 0, "sources: {:?}", r.sources);
         assert!(!r.sources.is_empty(), "the url source must be listed");
-        assert!(r.has_signal(), "Option B: an unchecked-only report still has a signal");
+        assert!(
+            r.has_signal(),
+            "Option B: an unchecked-only report still has a signal"
+        );
         assert!(!r.is_empty());
     }
 
@@ -2726,7 +3117,10 @@ mod tests {
     fn inline_backticked_anchor_auto_verified_green() {
         let root = temp_project();
         // No [src:] marker — just a natural backticked `path:line` anchor.
-        let r = analyze("The retry path lives in `src/foo.rs:3`, see there.", Some(&root));
+        let r = analyze(
+            "The retry path lives in `src/foo.rs:3`, see there.",
+            Some(&root),
+        );
         assert_eq!(r.fabricated_count, 0);
         assert!(r.verified_count() >= 1, "sources: {:?}", r.sources);
         assert!(r.has_signal());
@@ -2768,8 +3162,13 @@ mod tests {
         // 1. Mode off → always None, even with a perfectly-verified citation.
         set_mode("off");
         assert!(
-            finalize_lint_report("Implemented [src: file: src/foo.rs:2].", None, root.to_str().unwrap(), &[])
-                .is_none(),
+            finalize_lint_report(
+                "Implemented [src: file: src/foo.rs:2].",
+                None,
+                root.to_str().unwrap(),
+                &[]
+            )
+            .is_none(),
             "off mode must not produce a report"
         );
 
@@ -2821,7 +3220,13 @@ mod tests {
     #[test]
     fn verify_tolerates_backticks_quotes_punct() {
         let root = temp_project();
-        for raw in ["`src/foo.rs:2`", "\"src/foo.rs\"", "'src/foo.rs'", "(src/foo.rs)", "src/foo.rs."] {
+        for raw in [
+            "`src/foo.rs:2`",
+            "\"src/foo.rs\"",
+            "'src/foo.rs'",
+            "(src/foo.rs)",
+            "src/foo.rs.",
+        ] {
             let c = verify_source_marker(raw, Some(&root));
             assert_eq!(c.status, SourceStatus::Verified, "raw={raw} -> {c:?}");
         }
@@ -2868,7 +3273,10 @@ mod tests {
     #[test]
     fn path_segment_suffix_is_aligned() {
         assert!(path_has_segment_suffix("apps/x.php", "apps/x.php")); // equal
-        assert!(path_has_segment_suffix("/r/application/apps/x.php", "apps/x.php"));
+        assert!(path_has_segment_suffix(
+            "/r/application/apps/x.php",
+            "apps/x.php"
+        ));
         assert!(!path_has_segment_suffix("/r/myapps/x.php", "apps/x.php")); // not segment-aligned
         assert!(!path_has_segment_suffix("/r/apps/xx.php", "apps/x.php")); // filename differs
     }
@@ -2880,7 +3288,11 @@ mod tests {
     fn verify_resolves_app_subdir_relative_by_suffix() {
         let root = temp_project();
         std::fs::create_dir_all(root.join("application/apps/website/src")).unwrap();
-        std::fs::write(root.join("application/apps/website/src/Justin.php"), "a\nb\nc\n").unwrap();
+        std::fs::write(
+            root.join("application/apps/website/src/Justin.php"),
+            "a\nb\nc\n",
+        )
+        .unwrap();
         let c = verify_source_marker("apps/website/src/Justin.php:2", Some(&root));
         assert_eq!(c.status, SourceStatus::Verified, "{c:?}");
         assert!(c.detail.contains("unique path suffix"), "{c:?}");
@@ -2898,7 +3310,11 @@ mod tests {
         std::fs::write(root.join("a/dir/Same.php"), "x\n").unwrap();
         std::fs::write(root.join("b/dir/Same.php"), "x\n").unwrap();
         let c = verify_source_marker("dir/Same.php", Some(&root));
-        assert_eq!(c.status, SourceStatus::NotFound, "ambiguous suffix must not verify: {c:?}");
+        assert_eq!(
+            c.status,
+            SourceStatus::NotFound,
+            "ambiguous suffix must not verify: {c:?}"
+        );
         assert!(c.detail.contains("ambiguous"), "{c:?}");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -2933,10 +3349,7 @@ mod tests {
         let worktree = temp_project();
         let main = std::env::temp_dir().join(format!("kronn_main_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&main).unwrap(); // empty: no src/foo.rs
-        let c = verify_source_marker_roots(
-            "src/foo.rs:1",
-            &[worktree.as_path(), main.as_path()],
-        );
+        let c = verify_source_marker_roots("src/foo.rs:1", &[worktree.as_path(), main.as_path()]);
         assert_eq!(c.status, SourceStatus::Verified, "{c:?}");
         std::fs::remove_dir_all(&worktree).ok();
         std::fs::remove_dir_all(&main).ok();
@@ -2967,7 +3380,10 @@ mod tests {
     #[test]
     fn preamble_blesses_natural_anchors_and_opinion_convention() {
         // The new wording must tell agents natural backticked paths count …
-        assert!(PREAMBLE.contains("backticked"), "PREAMBLE must bless natural anchors");
+        assert!(
+            PREAMBLE.contains("backticked"),
+            "PREAMBLE must bless natural anchors"
+        );
         // … and give them a way to mark opinions/guesses.
         assert!(
             PREAMBLE.contains("recommendation") || PREAMBLE.contains("recommande"),
@@ -3093,13 +3509,22 @@ mod tests {
         // retains a terminating `?`/`!` on the flushed sentence, so a cued
         // question (incl. the French "… ?" with the standard space-before-?)
         // is now correctly suppressed. These two no longer flag:
-        ("Où est-ce que le paramètre de timeout est configuré dans ce projet ?", false),
-        ("Est-ce que la fonction handleAuth est définie côté serveur ou client ?", false),
+        (
+            "Où est-ce que le paramètre de timeout est configuré dans ce projet ?",
+            false,
+        ),
+        (
+            "Est-ce que la fonction handleAuth est définie côté serveur ou client ?",
+            false,
+        ),
         // WEAKNESS #2 — an ownership attribution ("X est géré par l'équipe
         // Y") carries the "est géré" cue and is flagged. Defensible as a
         // genuine unsourced claim, but it reads to a human as a scoping
         // disclaimer, so it is borderline rather than a clean FP:
-        ("Ce point est géré par l'équipe infra, pas dans ce repo applicatif côté nous", true),
+        (
+            "Ce point est géré par l'équipe infra, pas dans ce repo applicatif côté nous",
+            true,
+        ),
     ];
 
     // ── HEURISTIC WEAKNESSES (found while building this corpus) ────────
@@ -3171,7 +3596,10 @@ mod tests {
             if r.unsourced_count != 0 {
                 offenders.push(format!(
                     "[cue={}] \"{}\"",
-                    r.flagged_spans.first().map(|f| f.reason.as_str()).unwrap_or("?"),
+                    r.flagged_spans
+                        .first()
+                        .map(|f| f.reason.as_str())
+                        .unwrap_or("?"),
                     s,
                 ));
             }
@@ -3190,7 +3618,8 @@ mod tests {
         // case slipped in — move it to a documented borderline list above
         // rather than silently tolerating drift.
         assert_eq!(
-            fp, 0,
+            fp,
+            0,
             "expected zero false positives on the curated corpus, got {fp}:\n  {}",
             offenders.join("\n  "),
         );
@@ -3217,17 +3646,41 @@ mod tests {
                 // by the bare-URL substring check FIRST (before prefix
                 // stripping), so the whole string is kept as the reference.
                 // This is fine — Url is Unchecked, the reference is display-only.
-                ("url: https://x.io/p", SourceKind::Url, "url: https://x.io/p"),
+                (
+                    "url: https://x.io/p",
+                    SourceKind::Url,
+                    "url: https://x.io/p",
+                ),
                 // A `url:`-prefixed value WITHOUT a scheme falls through to the
                 // keyword branch and DOES get stripped.
                 ("url: docs/guide", SourceKind::Url, "docs/guide"),
-                ("user: 2026-05-25: standup note", SourceKind::User, "2026-05-25: standup note"),
+                (
+                    "user: 2026-05-25: standup note",
+                    SourceKind::User,
+                    "2026-05-25: standup note",
+                ),
                 ("api: GET /widgets#3", SourceKind::Api, "GET /widgets#3"),
                 ("commit: deadbeef99", SourceKind::Commit, "deadbeef99"),
-                ("code-comment: src/a.rs:4", SourceKind::CodeComment, "src/a.rs:4"),
-                ("inferred: from the pattern", SourceKind::Inferred, "from the pattern"),
-                ("hypothesis: maybe a cache", SourceKind::Hypothesis, "maybe a cache"),
-                ("training-data: i recall", SourceKind::TrainingData, "i recall"),
+                (
+                    "code-comment: src/a.rs:4",
+                    SourceKind::CodeComment,
+                    "src/a.rs:4",
+                ),
+                (
+                    "inferred: from the pattern",
+                    SourceKind::Inferred,
+                    "from the pattern",
+                ),
+                (
+                    "hypothesis: maybe a cache",
+                    SourceKind::Hypothesis,
+                    "maybe a cache",
+                ),
+                (
+                    "training-data: i recall",
+                    SourceKind::TrainingData,
+                    "i recall",
+                ),
             ];
             for (raw, kind, reference) in cases {
                 let (k, r) = classify_source(raw);
@@ -3241,7 +3694,10 @@ mod tests {
             // `match_type_keyword` accepts `<keyword><space>` as a boundary too.
             assert_eq!(classify_source("file src/a.rs").0, SourceKind::File);
             assert_eq!(classify_source("commit deadbeef").0, SourceKind::Commit);
-            assert_eq!(classify_source("inferred the design").0, SourceKind::Inferred);
+            assert_eq!(
+                classify_source("inferred the design").0,
+                SourceKind::Inferred
+            );
             // …and the bare keyword on its own → empty remainder.
             let (k, r) = classify_source("hypothesis");
             assert_eq!(k, SourceKind::Hypothesis);
@@ -3253,15 +3709,27 @@ mod tests {
             assert_eq!(classify_source("https://example.com/a").0, SourceKind::Url);
             assert_eq!(classify_source("http://example.com/a").0, SourceKind::Url);
             // URL embedded after some prose still detected (substring match).
-            assert_eq!(classify_source("see https://example.com here").0, SourceKind::Url);
+            assert_eq!(
+                classify_source("see https://example.com here").0,
+                SourceKind::Url
+            );
         }
 
         #[test]
         fn user_confirmed_phrase_both_forms() {
-            assert_eq!(classify_source("user-confirmed 2026-05-25").0, SourceKind::User);
-            assert_eq!(classify_source("user confirmed by the lead").0, SourceKind::User);
+            assert_eq!(
+                classify_source("user-confirmed 2026-05-25").0,
+                SourceKind::User
+            );
+            assert_eq!(
+                classify_source("user confirmed by the lead").0,
+                SourceKind::User
+            );
             // Case-insensitive.
-            assert_eq!(classify_source("User-Confirmed yesterday").0, SourceKind::User);
+            assert_eq!(
+                classify_source("User-Confirmed yesterday").0,
+                SourceKind::User
+            );
         }
 
         #[test]
@@ -3310,7 +3778,10 @@ mod tests {
         fn api_keyword_does_not_swallow_url_prefix() {
             // `url:` and `api:` are distinct keywords. A `url:` whose value
             // happens to contain "api" stays Url.
-            assert_eq!(classify_source("url: https://api.example.com").0, SourceKind::Url);
+            assert_eq!(
+                classify_source("url: https://api.example.com").0,
+                SourceKind::Url
+            );
         }
     }
 
@@ -3321,29 +3792,44 @@ mod tests {
         #[test]
         fn verified_exists_single_line_in_bounds() {
             let root = temp_project();
-            assert_eq!(verify_source_marker("src/foo.rs:1", Some(&root)).status, SourceStatus::Verified);
+            assert_eq!(
+                verify_source_marker("src/foo.rs:1", Some(&root)).status,
+                SourceStatus::Verified
+            );
             std::fs::remove_dir_all(&root).ok();
         }
 
         #[test]
         fn verified_range_fully_in_bounds() {
             let root = temp_project();
-            assert_eq!(verify_source_marker("src/foo.rs:1-5", Some(&root)).status, SourceStatus::Verified);
+            assert_eq!(
+                verify_source_marker("src/foo.rs:1-5", Some(&root)).status,
+                SourceStatus::Verified
+            );
             std::fs::remove_dir_all(&root).ok();
         }
 
         #[test]
         fn not_found_relative_missing_file() {
             let root = temp_project();
-            assert_eq!(verify_source_marker("src/missing.rs", Some(&root)).status, SourceStatus::NotFound);
+            assert_eq!(
+                verify_source_marker("src/missing.rs", Some(&root)).status,
+                SourceStatus::NotFound
+            );
             std::fs::remove_dir_all(&root).ok();
         }
 
         #[test]
         fn out_of_bounds_single_line_and_range() {
             let root = temp_project(); // foo.rs has 5 lines
-            assert_eq!(verify_source_marker("src/foo.rs:99", Some(&root)).status, SourceStatus::OutOfBounds);
-            assert_eq!(verify_source_marker("src/foo.rs:3-50", Some(&root)).status, SourceStatus::OutOfBounds);
+            assert_eq!(
+                verify_source_marker("src/foo.rs:99", Some(&root)).status,
+                SourceStatus::OutOfBounds
+            );
+            assert_eq!(
+                verify_source_marker("src/foo.rs:3-50", Some(&root)).status,
+                SourceStatus::OutOfBounds
+            );
             std::fs::remove_dir_all(&root).ok();
         }
 
@@ -3374,7 +3860,10 @@ mod tests {
         fn unchecked_soft_and_network_tiers() {
             let root = temp_project();
             // No root → Unchecked.
-            assert_eq!(verify_source_marker("src/foo.rs:1", None).status, SourceStatus::Unchecked);
+            assert_eq!(
+                verify_source_marker("src/foo.rs:1", None).status,
+                SourceStatus::Unchecked
+            );
             // URL / api / commit / user / inferred / hypothesis are never
             // file-verified — Unchecked regardless of root.
             let unchecked = [
@@ -3388,7 +3877,10 @@ mod tests {
             for raw in unchecked {
                 let c = verify_source_marker(raw, Some(&root));
                 assert_eq!(c.status, SourceStatus::Unchecked, "raw={raw}");
-                assert!(!c.status.is_fabricated(), "raw={raw} must not be fabricated");
+                assert!(
+                    !c.status.is_fabricated(),
+                    "raw={raw} must not be fabricated"
+                );
             }
             std::fs::remove_dir_all(&root).ok();
         }
@@ -3565,7 +4057,8 @@ mod tests {
         fn escape_in_all_roots_is_outside_project() {
             let r1 = temp_project();
             let r2 = temp_project();
-            let c = verify_source_marker_roots("../../../../etc/passwd", &[r1.as_path(), r2.as_path()]);
+            let c =
+                verify_source_marker_roots("../../../../etc/passwd", &[r1.as_path(), r2.as_path()]);
             assert_eq!(c.status, SourceStatus::OutsideProject, "{c:?}");
             std::fs::remove_dir_all(&r1).ok();
             std::fs::remove_dir_all(&r2).ok();
@@ -3585,9 +4078,8 @@ mod tests {
         #[test]
         fn every_supported_extension_is_an_anchor() {
             const EXTS: &[&str] = &[
-                "rs", "ts", "tsx", "js", "jsx", "py", "toml", "json", "sql",
-                "md", "yml", "yaml", "css", "html", "sh", "php", "go", "java",
-                "rb", "vue", "svelte", "c", "cpp", "h",
+                "rs", "ts", "tsx", "js", "jsx", "py", "toml", "json", "sql", "md", "yml", "yaml",
+                "css", "html", "sh", "php", "go", "java", "rb", "vue", "svelte", "c", "cpp", "h",
             ];
             for ext in EXTS {
                 let path = format!("src/dir/file.{ext}");
@@ -3639,7 +4131,9 @@ mod tests {
             // Symfony / web-project files. A 4-persona forensic re-pass found
             // EVERY `.twig` / `.xlf` citation went unverified because these were
             // missing from the allowlist (the central files of a Symfony repo).
-            assert!(looks_like_file_anchor("templates/pages/projets.html.twig:82"));
+            assert!(looks_like_file_anchor(
+                "templates/pages/projets.html.twig:82"
+            ));
             assert!(looks_like_file_anchor("templates/menu/header.html.twig"));
             assert!(looks_like_file_anchor("translations/messages.it.xlf"));
             assert!(looks_like_file_anchor("assets/styles/app.scss:10"));
@@ -3661,7 +4155,10 @@ mod tests {
                 // A path token with this ext + a separator reads as a niveau-0
                 // anchor (so the citing sentence isn't flagged unsourced).
                 let s = format!("voir `dir/file{ext}` pour les détails");
-                assert!(contains_code_anchor(&s), "contains_code_anchor missed {ext}");
+                assert!(
+                    contains_code_anchor(&s),
+                    "contains_code_anchor missed {ext}"
+                );
             }
         }
 
@@ -3671,12 +4168,21 @@ mod tests {
             // line 82 exact on disk). Before the fix: dropped. Now: green.
             let root = temp_project();
             std::fs::create_dir_all(root.join("templates/pages")).unwrap();
-            std::fs::write(root.join("templates/pages/projets.html.twig"), "l1\nl2\nl3\n").unwrap();
+            std::fs::write(
+                root.join("templates/pages/projets.html.twig"),
+                "l1\nl2\nl3\n",
+            )
+            .unwrap();
             let r = analyze(
                 "La section va dans `templates/pages/projets.html.twig:2`.",
                 Some(&root),
             );
-            assert_eq!(r.verified_count(), 1, "twig anchor must verify green: {:?}", r.sources);
+            assert_eq!(
+                r.verified_count(),
+                1,
+                "twig anchor must verify green: {:?}",
+                r.sources
+            );
             assert_eq!(r.fabricated_count, 0);
             std::fs::remove_dir_all(&root).ok();
         }
@@ -3690,9 +4196,20 @@ mod tests {
             let root = temp_project();
             std::fs::create_dir_all(root.join("templates/home")).unwrap();
             std::fs::write(root.join("templates/home/projets.html.twig"), "a\nb\nc\n").unwrap();
-            let r = analyze("Voir `templates/home/projets.html.twig:97-116`.", Some(&root));
-            assert_eq!(r.verified_count(), 0, "out-of-bounds line must NOT be green");
-            assert_eq!(r.unverified_count, 1, "must surface as soft-amber: {:?}", r.sources);
+            let r = analyze(
+                "Voir `templates/home/projets.html.twig:97-116`.",
+                Some(&root),
+            );
+            assert_eq!(
+                r.verified_count(),
+                0,
+                "out-of-bounds line must NOT be green"
+            );
+            assert_eq!(
+                r.unverified_count, 1,
+                "must surface as soft-amber: {:?}",
+                r.sources
+            );
             std::fs::remove_dir_all(&root).ok();
         }
 
@@ -3723,7 +4240,12 @@ mod tests {
             let root = temp_project();
             let txt = "Logic [src: file: src/foo.rs:2] sits in `src/foo.rs:4`.";
             let r = analyze(txt, Some(&root));
-            assert_eq!(r.verified_count(), 1, "must not double-count: {:?}", r.sources);
+            assert_eq!(
+                r.verified_count(),
+                1,
+                "must not double-count: {:?}",
+                r.sources
+            );
             std::fs::remove_dir_all(&root).ok();
         }
 
@@ -3772,23 +4294,34 @@ mod tests {
             // 0.8.8 — the ES recall gap is CLOSED: native Spanish claim cues
             // ("la función", "se encuentra", "está definido"…) now exist, so a
             // pure-Spanish code claim flags WITHOUT relying on a shared token.
-            let pure_es = "La función de autenticación se encuentra en el servidor principal del sistema.";
+            let pure_es =
+                "La función de autenticación se encuentra en el servidor principal del sistema.";
             assert!(
                 lint_assertions(pure_es).unsourced_count >= 1,
                 "pure Spanish code claim must now flag (gap closed): {:?}",
                 lint_assertions(pure_es),
             );
-            let es_cve = "El sistema es vulnerable: CVE-2025-12345 afecta al parser principal del backend.";
-            assert!(lint_assertions(es_cve).unsourced_count >= 1, "ES CVE claim must flag");
+            let es_cve =
+                "El sistema es vulnerable: CVE-2025-12345 afecta al parser principal del backend.";
+            assert!(
+                lint_assertions(es_cve).unsourced_count >= 1,
+                "ES CVE claim must flag"
+            );
             // Precision kept: an ES OPINION must still NOT flag.
             let es_opinion = "En mi opinión, sería preferible mover esa lógica a un servicio dedicado y reutilizable.";
             assert_eq!(
-                lint_assertions(es_opinion).unsourced_count, 0,
-                "ES opinion must not flag: {:?}", lint_assertions(es_opinion),
+                lint_assertions(es_opinion).unsourced_count,
+                0,
+                "ES opinion must not flag: {:?}",
+                lint_assertions(es_opinion),
             );
             // And an ES hedge suppresses.
             let es_hedge = "Creo que la función de login está definida en el controlador, pero no estoy seguro.";
-            assert_eq!(lint_assertions(es_hedge).unsourced_count, 0, "ES hedge must suppress");
+            assert_eq!(
+                lint_assertions(es_hedge).unsourced_count,
+                0,
+                "ES hedge must suppress"
+            );
         }
 
         // ----- MUST NOT flag: suppressors -----
@@ -3802,7 +4335,11 @@ mod tests {
                 "À mon avis le paramètre devrait être configuré ailleurs.",
             ];
             for o in opinions {
-                assert_eq!(lint_assertions(o).unsourced_count, 0, "opinion must not flag: {o}");
+                assert_eq!(
+                    lint_assertions(o).unsourced_count,
+                    0,
+                    "opinion must not flag: {o}"
+                );
             }
         }
 
@@ -3815,7 +4352,11 @@ mod tests {
                 "When the route is handled upstream, the gateway returns early for callers.",
             ];
             for c in conds {
-                assert_eq!(lint_assertions(c).unsourced_count, 0, "conditional must not flag: {c}");
+                assert_eq!(
+                    lint_assertions(c).unsourced_count,
+                    0,
+                    "conditional must not flag: {c}"
+                );
             }
         }
 
@@ -3826,7 +4367,11 @@ mod tests {
                 "Est-ce que la route est vraiment gérée par le middleware dédié ?",
             ];
             for q in qs {
-                assert_eq!(lint_assertions(q).unsourced_count, 0, "question must not flag: {q}");
+                assert_eq!(
+                    lint_assertions(q).unsourced_count,
+                    0,
+                    "question must not flag: {q}"
+                );
             }
         }
 
@@ -3838,7 +4383,11 @@ mod tests {
                 "The endpoint returns a paginated list of widgets for the caller**",
             ];
             for h in headings {
-                assert_eq!(lint_assertions(h).unsourced_count, 0, "heading must not flag: {h}");
+                assert_eq!(
+                    lint_assertions(h).unsourced_count,
+                    0,
+                    "heading must not flag: {h}"
+                );
             }
         }
 
@@ -3850,7 +4399,11 @@ mod tests {
                 "Ajouter le paramètre qui est configuré pour tout le cluster ici",
             ];
             for b in bullets {
-                assert_eq!(lint_assertions(b).unsourced_count, 0, "imperative must not flag: {b}");
+                assert_eq!(
+                    lint_assertions(b).unsourced_count,
+                    0,
+                    "imperative must not flag: {b}"
+                );
             }
         }
 
@@ -3864,7 +4417,11 @@ mod tests {
                 "I think the endpoint returns a cached value, but I should check first.",
             ];
             for h in hedged {
-                assert_eq!(lint_assertions(h).unsourced_count, 0, "hedge must not flag: {h}");
+                assert_eq!(
+                    lint_assertions(h).unsourced_count,
+                    0,
+                    "hedge must not flag: {h}"
+                );
             }
         }
 
@@ -3879,7 +4436,11 @@ mod tests {
             ];
             for a in anchored {
                 let r = analyze(a, Some(&root));
-                assert_eq!(r.unsourced_count, 0, "anchor must suppress: {a} -> {:?}", r.flagged_spans);
+                assert_eq!(
+                    r.unsourced_count, 0,
+                    "anchor must suppress: {a} -> {:?}",
+                    r.flagged_spans
+                );
             }
             std::fs::remove_dir_all(&root).ok();
         }
@@ -3889,14 +4450,23 @@ mod tests {
             // The canonical DI false-positive: opinion inside a conditional.
             let t = "- La conformité DI n'est pas toujours une amélioration — si le \
                      cycle de vie est géré par le DOM, DI peut être un anti-pattern ici";
-            assert_eq!(lint_assertions(t).unsourced_count, 0, "{:?}", lint_assertions(t));
+            assert_eq!(
+                lint_assertions(t).unsourced_count,
+                0,
+                "{:?}",
+                lint_assertions(t)
+            );
         }
 
         #[test]
         fn version_si_boundary_regression() {
             // "si" must NOT match inside "version" and wrongly suppress a real claim.
             let t = "La version 7.3.6 est vulnérable à une faille de désérialisation critique.";
-            assert!(lint_assertions(t).unsourced_count >= 1, "{:?}", lint_assertions(t));
+            assert!(
+                lint_assertions(t).unsourced_count >= 1,
+                "{:?}",
+                lint_assertions(t)
+            );
         }
 
         #[test]
@@ -3905,7 +4475,12 @@ mod tests {
             // the cue. A claim cue first, with a trailing conditional clause,
             // still flags (it's an assertion with a caveat, not a hypothesis).
             let t = "The auth token is stored in the session table, if you must know the detail.";
-            assert_eq!(lint_assertions(t).unsourced_count, 1, "{:?}", lint_assertions(t));
+            assert_eq!(
+                lint_assertions(t).unsourced_count,
+                1,
+                "{:?}",
+                lint_assertions(t)
+            );
         }
     }
 
@@ -3930,7 +4505,10 @@ mod tests {
 
         #[test]
         fn only_unchecked_has_signal_option_b() {
-            let r = analyze("Docs [src: url: https://x.io] and [src: commit: abc123].", None);
+            let r = analyze(
+                "Docs [src: url: https://x.io] and [src: commit: abc123].",
+                None,
+            );
             assert_eq!(r.fabricated_count, 0);
             assert_eq!(r.unsourced_count, 0);
             assert_eq!(r.verified_count(), 0);
@@ -3942,7 +4520,10 @@ mod tests {
         #[test]
         fn verified_only_is_green_signal() {
             let root = temp_project();
-            let r = analyze("Retry [src: file: src/foo.rs:2] and `src/foo.rs:3` again.", Some(&root));
+            let r = analyze(
+                "Retry [src: file: src/foo.rs:2] and `src/foo.rs:3` again.",
+                Some(&root),
+            );
             assert_eq!(r.fabricated_count, 0);
             assert_eq!(r.unsourced_count, 0);
             assert_eq!(r.verified_count(), 1, "deduped to one: {:?}", r.sources);
@@ -4042,7 +4623,7 @@ mod tests {
         /// file so "multiple verified sources" is expressible.
         fn temp_project_multi() -> PathBuf {
             let root = temp_project(); // src/foo.rs = 5 lines
-            // A 3-line file at src/bar.ts.
+                                       // A 3-line file at src/bar.ts.
             std::fs::write(root.join("src/bar.ts"), "x\ny\nz\n").unwrap();
             root
         }
@@ -4073,7 +4654,9 @@ mod tests {
             assert_eq!(r.unverified_count, 0);
             assert!(r.has_signal());
             assert!(
-                r.sources[0].detail.contains("inline anchor (auto-verified)"),
+                r.sources[0]
+                    .detail
+                    .contains("inline anchor (auto-verified)"),
                 "{:?}",
                 r.sources[0],
             );
@@ -4166,8 +4749,14 @@ mod tests {
             );
             assert_eq!(r.fabricated_count, 2, "{:?}", r.sources);
             let statuses: Vec<_> = r.sources.iter().map(|s| s.status).collect();
-            assert!(statuses.contains(&SourceStatus::OutOfBounds), "{statuses:?}");
-            assert!(statuses.contains(&SourceStatus::OutsideProject), "{statuses:?}");
+            assert!(
+                statuses.contains(&SourceStatus::OutOfBounds),
+                "{statuses:?}"
+            );
+            assert!(
+                statuses.contains(&SourceStatus::OutsideProject),
+                "{statuses:?}"
+            );
             assert!(r.sources.iter().all(|s| s.status.is_fabricated()));
             assert_eq!(r.verified_count(), 0);
             std::fs::remove_dir_all(&root).ok();
@@ -4176,7 +4765,10 @@ mod tests {
         #[test]
         fn fabricated_training_data_is_rejected_red() {
             let root = temp_project();
-            let r = analyze("This is well known [src: training-data: GPT prior].", Some(&root));
+            let r = analyze(
+                "This is well known [src: training-data: GPT prior].",
+                Some(&root),
+            );
             assert_eq!(r.fabricated_count, 1, "{:?}", r.sources);
             assert_eq!(r.sources[0].kind, SourceKind::TrainingData);
             assert_eq!(r.sources[0].status, SourceStatus::Rejected);
@@ -4230,7 +4822,10 @@ mod tests {
             assert_eq!(r.unverified_count, 2, "{:?}", r.sources);
             assert_eq!(r.fabricated_count, 0);
             assert_eq!(r.verified_count(), 0);
-            assert!(r.sources.iter().all(|s| s.status == SourceStatus::Unchecked));
+            assert!(r
+                .sources
+                .iter()
+                .all(|s| s.status == SourceStatus::Unchecked));
             std::fs::remove_dir_all(&root).ok();
         }
 
@@ -4239,7 +4834,10 @@ mod tests {
         #[test]
         fn no_signal_plain_prose_is_empty() {
             let root = temp_project();
-            let r = analyze("Voilà, c'est terminé pour aujourd'hui. Bonne soirée à tous.", Some(&root));
+            let r = analyze(
+                "Voilà, c'est terminé pour aujourd'hui. Bonne soirée à tous.",
+                Some(&root),
+            );
             assert!(!r.has_signal());
             assert!(r.is_empty());
             assert_eq!(r.unsourced_count, 0);
@@ -4252,7 +4850,10 @@ mod tests {
         #[test]
         fn no_signal_english_smalltalk_is_empty() {
             let root = temp_project();
-            let r = analyze("Thanks, that all looks good to me. Have a great weekend!", Some(&root));
+            let r = analyze(
+                "Thanks, that all looks good to me. Have a great weekend!",
+                Some(&root),
+            );
             assert!(!r.has_signal());
             assert!(r.is_empty());
             std::fs::remove_dir_all(&root).ok();
@@ -4290,10 +4891,16 @@ mod tests {
             assert_eq!(r.verified_count(), 0);
             assert_eq!(r.unverified_count, 0);
             assert_eq!(r.unsourced_count, 0);
-            assert!(r.has_signal(), "Option B: unchecked-only is surfaced (neutral pill)");
+            assert!(
+                r.has_signal(),
+                "Option B: unchecked-only is surfaced (neutral pill)"
+            );
             // The sources ARE listed for drawer transparency.
             assert_eq!(r.sources.len(), 2, "{:?}", r.sources);
-            assert!(r.sources.iter().all(|s| s.status == SourceStatus::Unchecked));
+            assert!(r
+                .sources
+                .iter()
+                .all(|s| s.status == SourceStatus::Unchecked));
             std::fs::remove_dir_all(&root).ok();
         }
 
@@ -4312,14 +4919,20 @@ mod tests {
             let kinds: Vec<_> = r.sources.iter().map(|s| s.kind).collect();
             assert!(kinds.contains(&SourceKind::Inferred), "{kinds:?}");
             assert!(kinds.contains(&SourceKind::Commit), "{kinds:?}");
-            assert!(r.sources.iter().all(|s| s.status == SourceStatus::Unchecked));
+            assert!(r
+                .sources
+                .iter()
+                .all(|s| s.status == SourceStatus::Unchecked));
             std::fs::remove_dir_all(&root).ok();
         }
 
         #[test]
         fn unchecked_hypothesis_only_no_signal() {
             let root = temp_project();
-            let r = analyze("It may be [src: hypothesis: the cache is invalidated on write].", Some(&root));
+            let r = analyze(
+                "It may be [src: hypothesis: the cache is invalidated on write].",
+                Some(&root),
+            );
             assert_eq!(r.sources.len(), 1, "{:?}", r.sources);
             assert_eq!(r.sources[0].kind, SourceKind::Hypothesis);
             assert_eq!(r.sources[0].status, SourceStatus::Unchecked);

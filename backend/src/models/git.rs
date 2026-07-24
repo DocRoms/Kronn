@@ -20,7 +20,7 @@ pub struct GitStatusResponse {
     pub ahead: u32,
     pub behind: u32,
     pub has_upstream: bool,
-    pub provider: String,  // "github", "gitlab", or "unknown"
+    pub provider: String, // "github", "gitlab", or "unknown"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
 }
@@ -98,7 +98,9 @@ pub struct CreatePrRequest {
     pub base: String,
 }
 
-fn default_pr_base() -> String { "main".into() }
+fn default_pr_base() -> String {
+    "main".into()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ExecRequest {
@@ -112,4 +114,3 @@ pub struct ExecResponse {
     pub stderr: String,
     pub exit_code: i32,
 }
-

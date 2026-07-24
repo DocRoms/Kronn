@@ -50,35 +50,89 @@ struct BuiltinProfile {
 
 const BUILTIN_PROFILES: &[BuiltinProfile] = &[
     // Technical
-    BuiltinProfile { id: "architect", content: include_str!("../profiles/architect.md") },
-    BuiltinProfile { id: "tech-lead", content: include_str!("../profiles/tech-lead.md") },
-    BuiltinProfile { id: "qa-engineer", content: include_str!("../profiles/qa-engineer.md") },
+    BuiltinProfile {
+        id: "architect",
+        content: include_str!("../profiles/architect.md"),
+    },
+    BuiltinProfile {
+        id: "tech-lead",
+        content: include_str!("../profiles/tech-lead.md"),
+    },
+    BuiltinProfile {
+        id: "qa-engineer",
+        content: include_str!("../profiles/qa-engineer.md"),
+    },
     // Business
-    BuiltinProfile { id: "product-owner", content: include_str!("../profiles/product-owner.md") },
-    BuiltinProfile { id: "scrum-master", content: include_str!("../profiles/scrum-master.md") },
-    BuiltinProfile { id: "technical-writer", content: include_str!("../profiles/technical-writer.md") },
+    BuiltinProfile {
+        id: "product-owner",
+        content: include_str!("../profiles/product-owner.md"),
+    },
+    BuiltinProfile {
+        id: "scrum-master",
+        content: include_str!("../profiles/scrum-master.md"),
+    },
+    BuiltinProfile {
+        id: "technical-writer",
+        content: include_str!("../profiles/technical-writer.md"),
+    },
     // Meta
-    BuiltinProfile { id: "devils-advocate", content: include_str!("../profiles/devils-advocate.md") },
-    BuiltinProfile { id: "mentor", content: include_str!("../profiles/mentor.md") },
+    BuiltinProfile {
+        id: "devils-advocate",
+        content: include_str!("../profiles/devils-advocate.md"),
+    },
+    BuiltinProfile {
+        id: "mentor",
+        content: include_str!("../profiles/mentor.md"),
+    },
     // Business
-    BuiltinProfile { id: "entrepreneur", content: include_str!("../profiles/entrepreneur.md") },
-    BuiltinProfile { id: "ux-designer", content: include_str!("../profiles/ux-designer.md") },
+    BuiltinProfile {
+        id: "entrepreneur",
+        content: include_str!("../profiles/entrepreneur.md"),
+    },
+    BuiltinProfile {
+        id: "ux-designer",
+        content: include_str!("../profiles/ux-designer.md"),
+    },
     // Technical
-    BuiltinProfile { id: "game-developer", content: include_str!("../profiles/game-developer.md") },
+    BuiltinProfile {
+        id: "game-developer",
+        content: include_str!("../profiles/game-developer.md"),
+    },
     // Data
-    BuiltinProfile { id: "data-analyst", content: include_str!("../profiles/data-analyst.md") },
-    BuiltinProfile { id: "data-engineer", content: include_str!("../profiles/data-engineer.md") },
+    BuiltinProfile {
+        id: "data-analyst",
+        content: include_str!("../profiles/data-analyst.md"),
+    },
+    BuiltinProfile {
+        id: "data-engineer",
+        content: include_str!("../profiles/data-engineer.md"),
+    },
     // Growth
-    BuiltinProfile { id: "seo-growth", content: include_str!("../profiles/seo-growth.md") },
+    BuiltinProfile {
+        id: "seo-growth",
+        content: include_str!("../profiles/seo-growth.md"),
+    },
     // Ops & Strategy
-    BuiltinProfile { id: "sre", content: include_str!("../profiles/sre.md") },
-    BuiltinProfile { id: "staff-engineer", content: include_str!("../profiles/staff-engineer.md") },
+    BuiltinProfile {
+        id: "sre",
+        content: include_str!("../profiles/sre.md"),
+    },
+    BuiltinProfile {
+        id: "staff-engineer",
+        content: include_str!("../profiles/staff-engineer.md"),
+    },
     // Communication
-    BuiltinProfile { id: "translator", content: include_str!("../profiles/translator.md") },
+    BuiltinProfile {
+        id: "translator",
+        content: include_str!("../profiles/translator.md"),
+    },
     // ── Secret / unlock-gated ──
     // Filtered out of the public profile list unless the operator
     // has unlocked the id via a secret code (see api/unlock.rs).
-    BuiltinProfile { id: "batman", content: include_str!("../profiles/batman.md") },
+    BuiltinProfile {
+        id: "batman",
+        content: include_str!("../profiles/batman.md"),
+    },
 ];
 
 /// IDs of built-in profiles that are NOT visible until unlocked via a
@@ -192,7 +246,10 @@ pub fn list_all_profiles() -> Vec<AgentProfile> {
                 for entry in entries.flatten() {
                     let path = entry.path();
                     if path.extension().and_then(|e| e.to_str()) == Some("md") {
-                        let id = format!("custom-{}", path.file_stem().unwrap_or_default().to_string_lossy());
+                        let id = format!(
+                            "custom-{}",
+                            path.file_stem().unwrap_or_default().to_string_lossy()
+                        );
                         if let Ok(content) = std::fs::read_to_string(&path) {
                             if let Some(profile) = parse_profile_markdown(&id, &content, false) {
                                 profiles.push(profile);
@@ -227,7 +284,8 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
         return String::new();
     }
 
-    let profiles: Vec<AgentProfile> = profile_ids.iter()
+    let profiles: Vec<AgentProfile> = profile_ids
+        .iter()
         .filter_map(|id| get_profile(id))
         .collect();
 
@@ -237,16 +295,25 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
 
     if profiles.len() == 1 {
         let p = &profiles[0];
-        return format!("=== Agent Profile: {} ({}) ===\n{}\n\n", p.name, p.role, p.persona_prompt);
+        return format!(
+            "=== Agent Profile: {} ({}) ===\n{}\n\n",
+            p.name, p.role, p.persona_prompt
+        );
     }
 
     // Multi-profile: structured discussion mode
     let mut prompt = String::from("=== Multi-Profile Discussion Mode ===\n\n");
-    prompt.push_str("You have multiple expert profiles active. You MUST respond as a structured discussion.\n");
-    prompt.push_str("Each profile speaks individually with their own voice, perspective, and expertise.\n\n");
+    prompt.push_str(
+        "You have multiple expert profiles active. You MUST respond as a structured discussion.\n",
+    );
+    prompt.push_str(
+        "Each profile speaks individually with their own voice, perspective, and expertise.\n\n",
+    );
     prompt.push_str("FORMAT — follow this EXACTLY:\n\n");
     prompt.push_str("1. For EACH profile below, write a response block using this format:\n");
-    prompt.push_str("   > **[Avatar] [FirstName] ([Role])** : [their response in their own voice]\n\n");
+    prompt.push_str(
+        "   > **[Avatar] [FirstName] ([Role])** : [their response in their own voice]\n\n",
+    );
     prompt.push_str("   Each profile MUST:\n");
     prompt.push_str("   - Speak from their specific expertise and role\n");
     prompt.push_str("   - Have a distinct opinion (agree, disagree, nuance — not all the same)\n");
@@ -261,8 +328,10 @@ pub fn build_profiles_prompt(profile_ids: &[String]) -> String {
 
     prompt.push_str("--- Active Profiles ---\n\n");
     for p in &profiles {
-        prompt.push_str(&format!("FirstName: {}\nAvatar: {}\nRole: {}\n{}\n\n",
-            p.persona_name, p.avatar, p.role, p.persona_prompt));
+        prompt.push_str(&format!(
+            "FirstName: {}\nAvatar: {}\nRole: {}\n{}\n\n",
+            p.persona_name, p.avatar, p.role, p.persona_prompt
+        ));
     }
 
     prompt
@@ -275,7 +344,8 @@ pub fn build_profiles_prompt_compact(profile_ids: &[String]) -> String {
         return String::new();
     }
 
-    let profiles: Vec<AgentProfile> = profile_ids.iter()
+    let profiles: Vec<AgentProfile> = profile_ids
+        .iter()
         .filter_map(|id| get_profile(id))
         .collect();
 
@@ -285,7 +355,11 @@ pub fn build_profiles_prompt_compact(profile_ids: &[String]) -> String {
 
     let mut prompt = String::from("=== Profiles ===\n");
     for p in &profiles {
-        prompt.push_str(&format!("[{} {} | {} | {}]\n", p.avatar, p.persona_name, p.role,
+        prompt.push_str(&format!(
+            "[{} {} | {} | {}]\n",
+            p.avatar,
+            p.persona_name,
+            p.role,
             // Extract first 2 sentences of persona_prompt for better context
             {
                 let sentences: Vec<&str> = p.persona_prompt.splitn(3, '.').collect();
@@ -328,7 +402,9 @@ pub fn save_custom_profile(data: &CustomProfileData) -> Result<String, String> {
     let dir = custom_profiles_dir().ok_or("Cannot determine config directory")?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create profiles dir: {}", e))?;
 
-    let slug: String = data.name.to_lowercase()
+    let slug: String = data
+        .name
+        .to_lowercase()
         .chars()
         .map(|c| if c.is_alphanumeric() { c } else { '-' })
         .collect::<String>()
@@ -347,7 +423,11 @@ pub fn save_custom_profile(data: &CustomProfileData) -> Result<String, String> {
         None => String::new(),
     };
 
-    let pn = if data.persona_name.is_empty() { data.name.chars().take(3).collect::<String>() } else { data.persona_name.to_string() };
+    let pn = if data.persona_name.is_empty() {
+        data.name.chars().take(3).collect::<String>()
+    } else {
+        data.persona_name.to_string()
+    };
 
     let file_content = format!(
         "---\nname: {}\npersona_name: {}\nrole: {}\navatar: {}\ncolor: \"{}\"\ncategory: {}\nbuiltin: false\n{}---\n{}",
@@ -384,7 +464,11 @@ mod tests {
     #[test]
     fn parse_builtin_profiles() {
         let profiles = list_all_profiles();
-        assert!(profiles.len() >= 17, "Expected at least 17 builtin profiles, got {}", profiles.len());
+        assert!(
+            profiles.len() >= 17,
+            "Expected at least 17 builtin profiles, got {}",
+            profiles.len()
+        );
 
         let architect = profiles.iter().find(|p| p.id == "architect").unwrap();
         assert_eq!(architect.name, "Architect");
@@ -401,7 +485,11 @@ mod tests {
         let profiles = list_all_profiles();
         for profile in &profiles {
             if !profile.id.starts_with("custom-") {
-                assert!(profile.is_builtin, "Profile '{}' should be builtin", profile.id);
+                assert!(
+                    profile.is_builtin,
+                    "Profile '{}' should be builtin",
+                    profile.id
+                );
             }
         }
     }
@@ -411,11 +499,31 @@ mod tests {
         let profiles = list_all_profiles();
         for profile in &profiles {
             if profile.is_builtin {
-                assert!(!profile.name.is_empty(), "Profile '{}' has empty name", profile.id);
-                assert!(!profile.role.is_empty(), "Profile '{}' has empty role", profile.id);
-                assert!(!profile.avatar.is_empty(), "Profile '{}' has empty avatar", profile.id);
-                assert!(!profile.color.is_empty(), "Profile '{}' has empty color", profile.id);
-                assert!(!profile.persona_prompt.is_empty(), "Profile '{}' has empty persona_prompt", profile.id);
+                assert!(
+                    !profile.name.is_empty(),
+                    "Profile '{}' has empty name",
+                    profile.id
+                );
+                assert!(
+                    !profile.role.is_empty(),
+                    "Profile '{}' has empty role",
+                    profile.id
+                );
+                assert!(
+                    !profile.avatar.is_empty(),
+                    "Profile '{}' has empty avatar",
+                    profile.id
+                );
+                assert!(
+                    !profile.color.is_empty(),
+                    "Profile '{}' has empty color",
+                    profile.id
+                );
+                assert!(
+                    !profile.persona_prompt.is_empty(),
+                    "Profile '{}' has empty persona_prompt",
+                    profile.id
+                );
             }
         }
     }
@@ -433,8 +541,12 @@ mod tests {
     #[test]
     fn all_three_categories_represented() {
         let profiles = list_all_profiles();
-        assert!(profiles.iter().any(|p| p.category == ProfileCategory::Technical));
-        assert!(profiles.iter().any(|p| p.category == ProfileCategory::Business));
+        assert!(profiles
+            .iter()
+            .any(|p| p.category == ProfileCategory::Technical));
+        assert!(profiles
+            .iter()
+            .any(|p| p.category == ProfileCategory::Business));
         assert!(profiles.iter().any(|p| p.category == ProfileCategory::Meta));
     }
 
@@ -449,7 +561,11 @@ mod tests {
             assert!(profile.is_some(), "Profile '{}' must exist", id);
             let p = profile.unwrap();
             assert_eq!(p.category, category, "Profile '{}' wrong category", id);
-            assert!(!p.persona_prompt.is_empty(), "Profile '{}' must have content", id);
+            assert!(
+                !p.persona_prompt.is_empty(),
+                "Profile '{}' must have content",
+                id
+            );
         }
     }
 
@@ -467,9 +583,21 @@ mod tests {
             assert!(profile.is_some(), "Profile '{}' must exist", id);
             let p = profile.unwrap();
             assert_eq!(p.category, category, "Profile '{}' wrong category", id);
-            assert_eq!(p.persona_name, expected_persona, "Profile '{}' wrong persona_name", id);
-            assert!(!p.persona_prompt.is_empty(), "Profile '{}' must have content", id);
-            assert!(p.default_engine.is_some(), "Profile '{}' must have default_engine", id);
+            assert_eq!(
+                p.persona_name, expected_persona,
+                "Profile '{}' wrong persona_name",
+                id
+            );
+            assert!(
+                !p.persona_prompt.is_empty(),
+                "Profile '{}' must have content",
+                id
+            );
+            assert!(
+                p.default_engine.is_some(),
+                "Profile '{}' must have default_engine",
+                id
+            );
         }
     }
 
@@ -489,15 +617,24 @@ mod tests {
         // This is a documentation test — the actual code is in api/projects.rs
         // but we verify the profile exists and is usable.
         let profile = get_profile("entrepreneur");
-        assert!(profile.is_some(), "entrepreneur profile must exist for bootstrap");
+        assert!(
+            profile.is_some(),
+            "entrepreneur profile must exist for bootstrap"
+        );
         assert_eq!(profile.unwrap().category, ProfileCategory::Business);
     }
 
     #[test]
     fn entrepreneur_has_unique_persona_and_engine() {
         let p = get_profile("entrepreneur").expect("entrepreneur must exist");
-        assert_eq!(p.persona_name, "Lea", "Entrepreneur persona should be Lea (not Max)");
-        assert!(p.default_engine.is_some(), "Entrepreneur must have default_engine");
+        assert_eq!(
+            p.persona_name, "Lea",
+            "Entrepreneur persona should be Lea (not Max)"
+        );
+        assert!(
+            p.default_engine.is_some(),
+            "Entrepreneur must have default_engine"
+        );
         // No other profile should share the name "Lea"
         let all = list_all_profiles();
         let lea_count = all.iter().filter(|p| p.persona_name == "Lea").count();
@@ -507,22 +644,34 @@ mod tests {
     #[test]
     fn game_developer_has_default_engine() {
         let p = get_profile("game-developer").expect("game-developer must exist");
-        assert!(p.default_engine.is_some(), "Game Developer must have default_engine");
+        assert!(
+            p.default_engine.is_some(),
+            "Game Developer must have default_engine"
+        );
     }
 
     #[test]
     fn qa_engineer_is_technical_category() {
         let p = get_profile("qa-engineer").expect("qa-engineer must exist");
-        assert_eq!(p.category, ProfileCategory::Technical,
-            "QA Engineer should be Technical, not Business");
+        assert_eq!(
+            p.category,
+            ProfileCategory::Technical,
+            "QA Engineer should be Technical, not Business"
+        );
     }
 
     #[test]
     fn multi_profile_synthesis_label_is_english() {
         // The synthesis label should be language-neutral (English)
         let prompt = build_profiles_prompt(&["architect".into(), "tech-lead".into()]);
-        assert!(prompt.contains("Synthesis"), "Multi-profile prompt should use 'Synthesis' (English)");
-        assert!(!prompt.contains("Synthese"), "Should NOT use French 'Synthese'");
+        assert!(
+            prompt.contains("Synthesis"),
+            "Multi-profile prompt should use 'Synthesis' (English)"
+        );
+        assert!(
+            !prompt.contains("Synthese"),
+            "Should NOT use French 'Synthese'"
+        );
     }
 
     #[test]
@@ -598,9 +747,16 @@ mod tests {
     #[test]
     fn build_profiles_prompt_compact_includes_persona_and_role() {
         let prompt = build_profiles_prompt_compact(&["translator".into()]);
-        assert!(!prompt.is_empty(), "compact prompt must not be empty for a known profile");
+        assert!(
+            !prompt.is_empty(),
+            "compact prompt must not be empty for a known profile"
+        );
         assert!(prompt.contains("Lin"), "persona_name missing: {}", prompt);
-        assert!(prompt.to_lowercase().contains("translator"), "role missing: {}", prompt);
+        assert!(
+            prompt.to_lowercase().contains("translator"),
+            "role missing: {}",
+            prompt
+        );
     }
 
     #[test]

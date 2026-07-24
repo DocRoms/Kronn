@@ -15,7 +15,10 @@
 //!   accident, or (b) the template added a new redirector (.windsurfrules
 //!   in 0.8.7 etc.) that legacy projects don't have.
 
-use axum::{extract::{Path, State}, Json};
+use axum::{
+    extract::{Path, State},
+    Json,
+};
 
 use crate::core::scanner;
 use crate::models::*;

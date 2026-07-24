@@ -88,7 +88,9 @@ fn read_codex_key() -> Option<String> {
     let content = std::fs::read_to_string(&path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
     let key = parsed.get("OPENAI_API_KEY")?.as_str()?;
-    if key.is_empty() { return None; }
+    if key.is_empty() {
+        return None;
+    }
     Some(key.to_string())
 }
 
@@ -98,7 +100,9 @@ fn read_gemini_key() -> Option<String> {
     let content = std::fs::read_to_string(&path).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
     let key = parsed.get("apiKey")?.as_str()?;
-    if key.is_empty() { return None; }
+    if key.is_empty() {
+        return None;
+    }
     Some(key.to_string())
 }
 
@@ -134,7 +138,8 @@ fn default_key_name() -> String {
     if let Ok(host_home) = std::env::var("KRONN_HOST_HOME") {
         // Extract the last path component, handling both / and \ separators
         // (Linux PathBuf doesn't parse backslashes, but Windows paths may contain them)
-        let name = host_home.rsplit(['/', '\\'])
+        let name = host_home
+            .rsplit(['/', '\\'])
             .find(|s| !s.is_empty())
             .unwrap_or("")
             .to_string();
@@ -196,7 +201,10 @@ pub fn write_gemini_key(key: Option<&str>) {
                 }
             };
             settings["apiKey"] = serde_json::Value::String(k.to_string());
-            match std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap()) {
+            match std::fs::write(
+                &settings_path,
+                serde_json::to_string_pretty(&settings).unwrap(),
+            ) {
                 Ok(_) => tracing::info!("Synced Google key to {}", settings_path.display()),
                 Err(e) => tracing::warn!("Failed to write {}: {}", settings_path.display(), e),
             }
@@ -207,9 +215,18 @@ pub fn write_gemini_key(key: Option<&str>) {
                 if let Ok(mut settings) = serde_json::from_str::<serde_json::Value>(&content) {
                     if let Some(obj) = settings.as_object_mut() {
                         obj.remove("apiKey");
-                        match std::fs::write(&settings_path, serde_json::to_string_pretty(&settings).unwrap()) {
-                            Ok(_) => tracing::info!("Removed Google key from {}", settings_path.display()),
-                            Err(e) => tracing::warn!("Failed to remove Google key from {}: {e}", settings_path.display()),
+                        match std::fs::write(
+                            &settings_path,
+                            serde_json::to_string_pretty(&settings).unwrap(),
+                        ) {
+                            Ok(_) => tracing::info!(
+                                "Removed Google key from {}",
+                                settings_path.display()
+                            ),
+                            Err(e) => tracing::warn!(
+                                "Failed to remove Google key from {}: {e}",
+                                settings_path.display()
+                            ),
                         }
                     }
                 }
@@ -245,12 +262,15 @@ mod tests {
         std::fs::write(
             tmp.join(".codex/auth.json"),
             r#"{"OPENAI_API_KEY":"sk-test-codex-key-456"}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let key = read_codex_key();
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
         assert_eq!(key, Some("sk-test-codex-key-456".to_string()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -261,15 +281,14 @@ mod tests {
     fn read_codex_key_ignores_empty_value() {
         let tmp = std::env::temp_dir().join("kronn-test-codex-empty");
         let _ = std::fs::create_dir_all(tmp.join(".codex"));
-        std::fs::write(
-            tmp.join(".codex/auth.json"),
-            r#"{"OPENAI_API_KEY":""}"#,
-        ).unwrap();
+        std::fs::write(tmp.join(".codex/auth.json"), r#"{"OPENAI_API_KEY":""}"#).unwrap();
 
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let key = read_codex_key();
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
         assert_eq!(key, None, "Empty key should return None");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -290,12 +309,15 @@ mod tests {
         std::fs::write(
             tmp.join(".gemini/settings.json"),
             r#"{"apiKey":"AIza-test-gemini-789","other":"stuff"}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let key = read_gemini_key();
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
         assert_eq!(key, Some("AIza-test-gemini-789".to_string()));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -307,14 +329,24 @@ mod tests {
         let tmp = std::env::temp_dir().join("kronn-test-vibe-quotes");
         let _ = std::fs::create_dir_all(tmp.join(".vibe"));
         // Double-quoted value
-        std::fs::write(tmp.join(".vibe/.env"), "MISTRAL_API_KEY=\"dbl-quoted-key\"\n").unwrap();
+        std::fs::write(
+            tmp.join(".vibe/.env"),
+            "MISTRAL_API_KEY=\"dbl-quoted-key\"\n",
+        )
+        .unwrap();
 
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let key = read_vibe_key();
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
-        assert_eq!(key, Some("dbl-quoted-key".to_string()), "Double quotes should be stripped");
+        assert_eq!(
+            key,
+            Some("dbl-quoted-key".to_string()),
+            "Double quotes should be stripped"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -323,15 +355,25 @@ mod tests {
     fn read_vibe_key_parses_env_file() {
         let tmp = std::env::temp_dir().join("kronn-test-vibe-key");
         let _ = std::fs::create_dir_all(tmp.join(".vibe"));
-        std::fs::write(tmp.join(".vibe/.env"), "# comment\nMISTRAL_API_KEY='test_key_123'\nOTHER=val\n").unwrap();
+        std::fs::write(
+            tmp.join(".vibe/.env"),
+            "# comment\nMISTRAL_API_KEY='test_key_123'\nOTHER=val\n",
+        )
+        .unwrap();
 
         // Temporarily override HOME
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         let key = read_vibe_key();
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
-        assert_eq!(key, Some("test_key_123".to_string()), "Should parse MISTRAL_API_KEY from .env with quotes stripped");
+        assert_eq!(
+            key,
+            Some("test_key_123".to_string()),
+            "Should parse MISTRAL_API_KEY from .env with quotes stripped"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -360,7 +402,9 @@ mod tests {
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         write_gemini_key(Some("AIza-new"));
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
@@ -377,18 +421,28 @@ mod tests {
         std::fs::write(
             tmp.join(".gemini/settings.json"),
             r#"{"apiKey":"old","theme":"dark","mcpServers":{"foo":{}}}"#,
-        ).unwrap();
+        )
+        .unwrap();
 
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         write_gemini_key(Some("AIza-new"));
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
         let v: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert_eq!(v["apiKey"].as_str(), Some("AIza-new"));
-        assert_eq!(v["theme"].as_str(), Some("dark"), "user settings must survive the sync");
-        assert!(v["mcpServers"]["foo"].is_object(), "mcpServers must survive the sync");
+        assert_eq!(
+            v["theme"].as_str(),
+            Some("dark"),
+            "user settings must survive the sync"
+        );
+        assert!(
+            v["mcpServers"]["foo"].is_object(),
+            "mcpServers must survive the sync"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -404,10 +458,15 @@ mod tests {
         let old_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &tmp);
         write_gemini_key(Some("AIza-new"));
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
 
         let content = std::fs::read_to_string(tmp.join(".gemini/settings.json")).unwrap();
-        assert_eq!(content, corrupt, "a corrupt settings.json must be left untouched, never replaced by {{apiKey}}");
+        assert_eq!(
+            content, corrupt,
+            "a corrupt settings.json must be left untouched, never replaced by {{apiKey}}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -422,8 +481,14 @@ mod tests {
         std::env::set_var("HOME", "/container/fake");
         let dir = home_dir();
         // Restore
-        if let Some(h) = old_host { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_host {
+            std::env::set_var("KRONN_HOST_HOME", h);
+        } else {
+            std::env::remove_var("KRONN_HOST_HOME");
+        }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
         assert_eq!(dir, Some(PathBuf::from("/host/real-user")));
     }
 
@@ -435,8 +500,12 @@ mod tests {
         std::env::remove_var("KRONN_HOST_HOME");
         std::env::set_var("HOME", "/home/testuser");
         let dir = home_dir();
-        if let Some(h) = old_host { std::env::set_var("KRONN_HOST_HOME", h); }
-        if let Some(h) = old_home { std::env::set_var("HOME", h); }
+        if let Some(h) = old_host {
+            std::env::set_var("KRONN_HOST_HOME", h);
+        }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        }
         assert_eq!(dir, Some(PathBuf::from("/home/testuser")));
     }
 
@@ -450,9 +519,19 @@ mod tests {
         std::env::remove_var("HOME");
         std::env::set_var("USERPROFILE", r"C:\Users\TestUser");
         let dir = home_dir();
-        if let Some(h) = old_host { std::env::set_var("KRONN_HOST_HOME", h); }
-        if let Some(h) = old_home { std::env::set_var("HOME", h); } else { std::env::remove_var("HOME"); }
-        if let Some(h) = old_up { std::env::set_var("USERPROFILE", h); } else { std::env::remove_var("USERPROFILE"); }
+        if let Some(h) = old_host {
+            std::env::set_var("KRONN_HOST_HOME", h);
+        }
+        if let Some(h) = old_home {
+            std::env::set_var("HOME", h);
+        } else {
+            std::env::remove_var("HOME");
+        }
+        if let Some(h) = old_up {
+            std::env::set_var("USERPROFILE", h);
+        } else {
+            std::env::remove_var("USERPROFILE");
+        }
         assert_eq!(dir, Some(PathBuf::from(r"C:\Users\TestUser")));
     }
 
@@ -464,7 +543,11 @@ mod tests {
         let old = std::env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", "/home/alice");
         let name = default_key_name();
-        if let Some(h) = old { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        if let Some(h) = old {
+            std::env::set_var("KRONN_HOST_HOME", h);
+        } else {
+            std::env::remove_var("KRONN_HOST_HOME");
+        }
         assert_eq!(name, "alice");
     }
 
@@ -474,7 +557,11 @@ mod tests {
         let old = std::env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", "C:/Users/Bob");
         let name = default_key_name();
-        if let Some(h) = old { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        if let Some(h) = old {
+            std::env::set_var("KRONN_HOST_HOME", h);
+        } else {
+            std::env::remove_var("KRONN_HOST_HOME");
+        }
         assert_eq!(name, "Bob");
     }
 
@@ -485,7 +572,11 @@ mod tests {
         let old = std::env::var("KRONN_HOST_HOME").ok();
         std::env::set_var("KRONN_HOST_HOME", r"C:\Users\Alice");
         let name = default_key_name();
-        if let Some(h) = old { std::env::set_var("KRONN_HOST_HOME", h); } else { std::env::remove_var("KRONN_HOST_HOME"); }
+        if let Some(h) = old {
+            std::env::set_var("KRONN_HOST_HOME", h);
+        } else {
+            std::env::remove_var("KRONN_HOST_HOME");
+        }
         assert_eq!(name, "Alice");
     }
 }

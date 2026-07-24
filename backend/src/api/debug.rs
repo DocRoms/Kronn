@@ -11,7 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::core::log_buffer::{LOG_BUFFER, DEFAULT_CAPACITY};
+use crate::core::log_buffer::{DEFAULT_CAPACITY, LOG_BUFFER};
 use crate::models::ApiResponse;
 use crate::AppState;
 
@@ -49,7 +49,10 @@ pub async fn get_logs(
     State(state): State<AppState>,
     Query(query): Query<LogsQuery>,
 ) -> Json<ApiResponse<LogsResponse>> {
-    let lines_requested = query.lines.unwrap_or(DEFAULT_TAIL_LINES).min(MAX_TAIL_LINES);
+    let lines_requested = query
+        .lines
+        .unwrap_or(DEFAULT_TAIL_LINES)
+        .min(MAX_TAIL_LINES);
     let lines = LOG_BUFFER.tail(lines_requested);
     let buffered = LOG_BUFFER.len();
     let debug_mode = state.config.read().await.server.debug_mode;

@@ -49,11 +49,11 @@ use tokio::sync::Semaphore;
 
 use crate::models::*;
 
-use super::steps::StepOutcome;
-use super::template::TemplateContext;
 use super::api_call_executor::{
     execute_api_call_step_with_db_as, ApiCallLogContext, SecurityPolicy,
 };
+use super::steps::StepOutcome;
+use super::template::TemplateContext;
 
 /// Default concurrent fan-out cap. HTTP can scale higher than agents (no
 /// LLM, just network), but providers rate-limit — Jira/GitHub typically
@@ -89,20 +89,25 @@ pub async fn execute_batch_apicall_step(
     // partager la même règle de per-field override entre BatchApiCall et
     // ApiCall single (cf. quick_api_hydrate.rs).
     let mut step = step.clone();
-    if let Err(e) = crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(
-        &mut step,
-        &state.db,
-    )
-    .await
+    if let Err(e) =
+        crate::workflows::quick_api_hydrate::hydrate_step_from_quick_api(&mut step, &state.db).await
     {
         return fail(&step, start, e);
     }
 
     if step.api_plugin_slug.is_none() || step.api_config_id.is_none() {
-        return fail(&step, start, "BatchApiCall step missing `api_plugin_slug` / `api_config_id`.");
+        return fail(
+            &step,
+            start,
+            "BatchApiCall step missing `api_plugin_slug` / `api_config_id`.",
+        );
     }
     if step.api_endpoint_path.is_none() {
-        return fail(&step, start, "BatchApiCall step missing `api_endpoint_path`.");
+        return fail(
+            &step,
+            start,
+            "BatchApiCall step missing `api_endpoint_path`.",
+        );
     }
 
     let concurrent_limit = step
@@ -114,7 +119,13 @@ pub async fn execute_batch_apicall_step(
     // ── Render items_from + parse JSON array of objects ────────────────
     let rendered = match ctx.render(items_from) {
         Ok(s) => s,
-        Err(e) => return fail(&step, start, format!("Template render error on items_from: {e}")),
+        Err(e) => {
+            return fail(
+                &step,
+                start,
+                format!("Template render error on items_from: {e}"),
+            )
+        }
     };
     let items = match parse_items_as_objects(&rendered) {
         Ok(items) => items,
@@ -136,10 +147,15 @@ pub async fn execute_batch_apicall_step(
         return empty_success(&step, start);
     }
     if items.len() > max_items as usize {
-        return fail(&step, start, format!(
-            "BatchApiCall: {} items exceeds max {} (raise `batch_max_items` to allow more).",
-            items.len(), max_items
-        ));
+        return fail(
+            &step,
+            start,
+            format!(
+                "BatchApiCall: {} items exceeds max {} (raise `batch_max_items` to allow more).",
+                items.len(),
+                max_items
+            ),
+        );
     }
 
     tracing::info!(
@@ -177,7 +193,8 @@ pub async fn execute_batch_apicall_step(
                 &child_ctx,
                 SecurityPolicy::production(),
                 log_ctx_clone,
-            ).await;
+            )
+            .await;
             (idx, item, outcome)
         }));
     }
@@ -198,7 +215,10 @@ pub async fn execute_batch_apicall_step(
                 item_results.push((
                     usize::MAX,
                     Value::Null,
-                    ItemOutcome::Failed { error: format!("internal panic: {join_err}"), http_status: None },
+                    ItemOutcome::Failed {
+                        error: format!("internal panic: {join_err}"),
+                        http_status: None,
+                    },
                 ));
             }
         }
@@ -210,30 +230,47 @@ pub async fn execute_batch_apicall_step(
 
     // ── Aggregate ──────────────────────────────────────────────────────
     let total = item_results.len();
-    let succeeded = item_results.iter().filter(|(_, _, io)| matches!(io, ItemOutcome::Ok { .. })).count();
+    let succeeded = item_results
+        .iter()
+        .filter(|(_, _, io)| matches!(io, ItemOutcome::Ok { .. }))
+        .count();
     let failed = total - succeeded;
 
-    let items_json: Vec<Value> = item_results.iter().map(|(_, input, io)| {
-        let mut m = Map::new();
-        m.insert("input".into(), input.clone());
-        match io {
-            ItemOutcome::Ok { response, http_status } => {
-                m.insert("status".into(), Value::String("OK".into()));
-                m.insert("response".into(), response.clone());
-                if let Some(s) = http_status { m.insert("http_status".into(), Value::Number((*s).into())); }
+    let items_json: Vec<Value> = item_results
+        .iter()
+        .map(|(_, input, io)| {
+            let mut m = Map::new();
+            m.insert("input".into(), input.clone());
+            match io {
+                ItemOutcome::Ok {
+                    response,
+                    http_status,
+                } => {
+                    m.insert("status".into(), Value::String("OK".into()));
+                    m.insert("response".into(), response.clone());
+                    if let Some(s) = http_status {
+                        m.insert("http_status".into(), Value::Number((*s).into()));
+                    }
+                }
+                ItemOutcome::Failed { error, http_status } => {
+                    m.insert("status".into(), Value::String("ERROR".into()));
+                    m.insert("error".into(), Value::String(error.clone()));
+                    if let Some(s) = http_status {
+                        m.insert("http_status".into(), Value::Number((*s).into()));
+                    }
+                }
             }
-            ItemOutcome::Failed { error, http_status } => {
-                m.insert("status".into(), Value::String("ERROR".into()));
-                m.insert("error".into(), Value::String(error.clone()));
-                if let Some(s) = http_status { m.insert("http_status".into(), Value::Number((*s).into())); }
-            }
-        }
-        Value::Object(m)
-    }).collect();
+            Value::Object(m)
+        })
+        .collect();
 
-    let aggregate_status = if failed == 0 { "OK" }
-        else if succeeded == 0 { "ERROR" }
-        else { "PARTIAL" };
+    let aggregate_status = if failed == 0 {
+        "OK"
+    } else if succeeded == 0 {
+        "ERROR"
+    } else {
+        "PARTIAL"
+    };
     let summary = format!("BatchApiCall: {succeeded}/{total} succeeded ({failed} failed)");
     // 0.8.5 — canonical envelope via shared formatter (markers + signal).
     // Signal name matches `aggregate_status` so `on_result.contains`
@@ -294,8 +331,14 @@ pub async fn execute_batch_apicall_step(
 
 /// Per-child outcome flattened to what the aggregate envelope needs.
 enum ItemOutcome {
-    Ok { response: Value, http_status: Option<u64> },
-    Failed { error: String, http_status: Option<u64> },
+    Ok {
+        response: Value,
+        http_status: Option<u64>,
+    },
+    Failed {
+        error: String,
+        http_status: Option<u64>,
+    },
 }
 
 impl ItemOutcome {
@@ -318,14 +361,21 @@ impl ItemOutcome {
                         .and_then(|v| v.get("data").cloned())
                 })
                 .unwrap_or(Value::Null);
-            ItemOutcome::Ok { response, http_status: None }
+            ItemOutcome::Ok {
+                response,
+                http_status: None,
+            }
         } else {
             // Failure path: output starts with "HTTP <status> on <method> <url> — <body>".
             // Try to extract the numeric status for richer downstream branching.
-            let http_status = raw.strip_prefix("HTTP ")
+            let http_status = raw
+                .strip_prefix("HTTP ")
                 .and_then(|rest| rest.split_whitespace().next())
                 .and_then(|s| s.parse::<u64>().ok());
-            ItemOutcome::Failed { error: raw.clone(), http_status }
+            ItemOutcome::Failed {
+                error: raw.clone(),
+                http_status,
+            }
         }
     }
 }
@@ -363,7 +413,10 @@ fn parse_items_as_objects(rendered: &str) -> Result<Vec<Value>> {
             }
             Err(anyhow::anyhow!("JSON object did not contain an array field; pass an array or `{{ data: [...] }}` envelope"))
         }
-        _ => Err(anyhow::anyhow!("expected a JSON array, got {}", value_kind(&parsed))),
+        _ => Err(anyhow::anyhow!(
+            "expected a JSON array, got {}",
+            value_kind(&parsed)
+        )),
     }
 }
 
@@ -427,7 +480,10 @@ fn inject_item_vars(ctx: &mut TemplateContext, item: &Value, idx: usize) {
             ctx.set("batch.item", s.clone());
         }
         _ => {
-            ctx.set("batch.item", serde_json::to_string(item).unwrap_or_default());
+            ctx.set(
+                "batch.item",
+                serde_json::to_string(item).unwrap_or_default(),
+            );
         }
     }
 }
@@ -566,7 +622,11 @@ mod tests {
         assert_eq!(outcome.result.status, RunStatus::Success);
         assert_eq!(outcome.result.step_name, "react");
         assert!(
-            outcome.result.output.lines().any(|l| l.trim() == "[SIGNAL: OK]"),
+            outcome
+                .result
+                .output
+                .lines()
+                .any(|l| l.trim() == "[SIGNAL: OK]"),
             "must emit a trailing [SIGNAL: OK] line, got:\n{}",
             outcome.result.output
         );
@@ -589,7 +649,10 @@ mod tests {
         };
         let outcome = empty_success(&step, std::time::Instant::now());
         assert_eq!(outcome.result.status, RunStatus::Success);
-        assert!(matches!(outcome.condition_action, Some(ConditionAction::Stop)));
+        assert!(matches!(
+            outcome.condition_action,
+            Some(ConditionAction::Stop)
+        ));
     }
 
     #[test]
@@ -626,7 +689,10 @@ mod tests {
         inject_item_vars(&mut ctx, &item, 0);
         assert_eq!(ctx.render("{{host}}").unwrap(), "fr.euronews.com");
         // The `batch.item.host` namespaced form still works (back-compat).
-        assert_eq!(ctx.render("{{batch.item.host}}").unwrap(), "fr.euronews.com");
+        assert_eq!(
+            ctx.render("{{batch.item.host}}").unwrap(),
+            "fr.euronews.com"
+        );
     }
 
     #[test]
@@ -656,10 +722,7 @@ mod tests {
         assert_eq!(value_kind(&Value::Number(1.into())), "number");
         assert_eq!(value_kind(&Value::String("x".into())), "string");
         assert_eq!(value_kind(&Value::Array(vec![])), "array");
-        assert_eq!(
-            value_kind(&Value::Object(serde_json::Map::new())),
-            "object"
-        );
+        assert_eq!(value_kind(&Value::Object(serde_json::Map::new())), "object");
     }
 
     #[test]
@@ -693,7 +756,10 @@ mod tests {
     #[test]
     fn parse_items_invalid_json_reports_parser_error() {
         let err = parse_items_as_objects("{not json").unwrap_err().to_string();
-        assert!(err.contains("expected a JSON array (or envelope)"), "got {err}");
+        assert!(
+            err.contains("expected a JSON array (or envelope)"),
+            "got {err}"
+        );
     }
 
     #[test]
@@ -785,7 +851,10 @@ mod tests {
         let canonical = "POST ok → object\n---STEP_OUTPUT---\n{\"data\":{\"number\":42},\"status\":\"OK\",\"summary\":\"created\"}\n---END_STEP_OUTPUT---\n[SIGNAL: OK]";
         match ItemOutcome::from_step(&mk(canonical)) {
             ItemOutcome::Ok { response, .. } => {
-                assert_eq!(response["number"], 42, "canonical envelope must yield real data, got {response}");
+                assert_eq!(
+                    response["number"], 42,
+                    "canonical envelope must yield real data, got {response}"
+                );
             }
             ItemOutcome::Failed { error, .. } => panic!("expected Ok, got Failed: {error}"),
         }

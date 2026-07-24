@@ -75,11 +75,11 @@ const TERMINAL_SIGNALS: &[&str] = &[
     "KRONN:REPO_READY",
     "KRONN:ARCHITECTURE_READY",
     "KRONN:PLAN_READY",
-    "KRONN:STRUCTURE_READY",  // alias for PLAN_READY — LLM hallucinates this when
-                              // Stage 2 produces a structural breakdown (modules,
-                              // chantiers) rather than an explicit "plan" header
-    "KRONN:ISSUES_READY",     // canonical (consistent with the *_READY family)
-    "KRONN:ISSUES_CREATED",   // legacy alias — LLMs sometimes invent one or the other
+    "KRONN:STRUCTURE_READY", // alias for PLAN_READY — LLM hallucinates this when
+    // Stage 2 produces a structural breakdown (modules,
+    // chantiers) rather than an explicit "plan" header
+    "KRONN:ISSUES_READY",   // canonical (consistent with the *_READY family)
+    "KRONN:ISSUES_CREATED", // legacy alias — LLMs sometimes invent one or the other
     "KRONN:VALIDATION_COMPLETE",
     "KRONN:WORKFLOW_READY",
     "KRONN:BOOTSTRAP_COMPLETE",
@@ -99,9 +99,7 @@ const TERMINAL_SIGNALS: &[&str] = &[
 pub(crate) fn signal_should_auto_archive(signal: &str) -> bool {
     matches!(
         signal,
-        "KRONN:VALIDATION_COMPLETE"
-            | "KRONN:BRIEFING_COMPLETE"
-            | "KRONN:BOOTSTRAP_COMPLETE"
+        "KRONN:VALIDATION_COMPLETE" | "KRONN:BRIEFING_COMPLETE" | "KRONN:BOOTSTRAP_COMPLETE"
     )
 }
 
@@ -125,7 +123,10 @@ pub(crate) fn detect_terminal_signal(text: &str) -> Option<&'static str> {
     }
     let tail = &text[tail_start..];
     let tail_upper = tail.to_uppercase();
-    TERMINAL_SIGNALS.iter().copied().find(|sig| tail_upper.contains(sig))
+    TERMINAL_SIGNALS
+        .iter()
+        .copied()
+        .find(|sig| tail_upper.contains(sig))
 }
 
 /// STRICT terminal-position check (Codex A5 v3): does `text`, once
@@ -165,7 +166,9 @@ pub(crate) fn truncate_after_signal(text: &str, signal: &str) -> String {
     let pos = haystack
         .windows(needle.len())
         .position(|w| w.eq_ignore_ascii_case(needle));
-    let Some(pos) = pos else { return text.to_string(); };
+    let Some(pos) = pos else {
+        return text.to_string();
+    };
     let end = pos + needle.len();
     // Defensive: end must land on a char boundary. Since the signal is pure
     // ASCII (KRONN:* / underscores / digits), if `pos` is on a char boundary
@@ -181,8 +184,7 @@ pub(crate) fn truncate_after_signal(text: &str, signal: &str) -> String {
 /// agent message. Extracted for testability — the async DB-touching wrapper
 /// `last_message_is_silent_crash` calls this.
 pub(crate) fn message_matches_silent_crash(content: &str) -> bool {
-    content.contains("[Agent exited with error]")
-        && content.contains("No output captured")
+    content.contains("[Agent exited with error]") && content.contains("No output captured")
 }
 
 /// Multiplexed event yielded by the agent runner pipeline. `streaming`
@@ -215,17 +217,26 @@ mod terminal_signal_tests {
         use super::ends_with_terminal_signal;
         const SIG: &str = "KRONN:VALIDATION_COMPLETE";
         // Positive: signal as the final line, trailing whitespace tolerated.
-        assert!(ends_with_terminal_signal("all done.\nKRONN:VALIDATION_COMPLETE", SIG));
-        assert!(ends_with_terminal_signal("done\n  kronn:validation_complete  \n\n", SIG));
+        assert!(ends_with_terminal_signal(
+            "all done.\nKRONN:VALIDATION_COMPLETE",
+            SIG
+        ));
+        assert!(ends_with_terminal_signal(
+            "done\n  kronn:validation_complete  \n\n",
+            SIG
+        ));
         // Negatives (Codex A5 v3): a quotation or instruction MENTIONING
         // the marker mid-text must never satisfy the gate.
         assert!(!ends_with_terminal_signal(
-            "quote KRONN:VALIDATION_COMPLETE then continue", SIG));
+            "quote KRONN:VALIDATION_COMPLETE then continue",
+            SIG
+        ));
         assert!(!ends_with_terminal_signal(
-            "when finished, emit KRONN:VALIDATION_COMPLETE on its own line.\nStill working…", SIG));
+            "when finished, emit KRONN:VALIDATION_COMPLETE on its own line.\nStill working…",
+            SIG
+        ));
         assert!(!ends_with_terminal_signal("", SIG));
     }
-
 
     use super::detect_terminal_signal;
 
@@ -397,7 +408,10 @@ mod terminal_signal_tests {
         // saved DB content has no orphan letter.
         let s = "Section 10 done.\n\n---\n\nKRONN:ARCHITECTURE_READY\n\nJ";
         let result = super::truncate_after_signal(s, "KRONN:ARCHITECTURE_READY");
-        assert_eq!(result, "Section 10 done.\n\n---\n\nKRONN:ARCHITECTURE_READY");
+        assert_eq!(
+            result,
+            "Section 10 done.\n\n---\n\nKRONN:ARCHITECTURE_READY"
+        );
     }
 
     #[test]
@@ -482,8 +496,12 @@ mod silent_crash_detector_tests {
         // Both substrings must be present — neither one alone is enough,
         // because legitimate diagnostics might mention "No output" without
         // the full silent-crash pattern.
-        assert!(!message_matches_silent_crash("[Agent exited with error] (exit code: Some(2))"));
-        assert!(!message_matches_silent_crash("⚠️ No output captured from the test runner."));
+        assert!(!message_matches_silent_crash(
+            "[Agent exited with error] (exit code: Some(2))"
+        ));
+        assert!(!message_matches_silent_crash(
+            "⚠️ No output captured from the test runner."
+        ));
     }
 
     #[test]
@@ -499,4 +517,3 @@ mod silent_crash_detector_tests {
         assert!(!message_matches_silent_crash(""));
     }
 }
-

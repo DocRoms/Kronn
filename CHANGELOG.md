@@ -84,8 +84,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, Claude terminal/project continuity across daemon/spare topology with logical-session fallback, session isolation, crash-safe token rotation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs.
 - Full suite: backend 4,274 passed / 4 ignored; frontend 2,619 passed; MCP
-  bridge 290 passed. Clippy, production build, ESLint (0 errors), i18n parity,
-  the frozen PDF/DOCX smoke test and Tauri `cargo check` also pass.
+  bridge 290 passed. Rustfmt, Clippy, production build, ESLint (0 errors), i18n
+  parity, the frozen PDF/DOCX smoke test and Tauri `cargo check` also pass.
 
 ## [0.8.12] - 2026-07-19
 

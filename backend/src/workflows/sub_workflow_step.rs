@@ -62,9 +62,20 @@ pub async fn execute_sub_workflow_step(
 ) -> StepOutcome {
     let start = Instant::now();
 
-    let target = match step.sub_workflow_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    let target = match step
+        .sub_workflow_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         Some(t) => t.to_string(),
-        None => return fail(step, start, "SubWorkflow step missing `sub_workflow_id`.".into()),
+        None => {
+            return fail(
+                step,
+                start,
+                "SubWorkflow step missing `sub_workflow_id`.".into(),
+            )
+        }
     };
 
     // Runtime depth backstop (save-validation caps statically; this guards a
@@ -82,11 +93,26 @@ pub async fn execute_sub_workflow_step(
     // item exposed to the child via `.kronn/current_task.json` in the SHARED
     // worktree. Sequential by design: no worktree race, no merge machinery —
     // the token gain comes from per-item scoped context, not parallelism.
-    if let Some(ff) = step.sub_workflow_foreach_file.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(ff) = step
+        .sub_workflow_foreach_file
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         return execute_foreach(
-            state, parent_run_id, child_depth, step, tokens_config, agents_config,
-            budget, parent_workspace, &target, ff, start,
-        ).await;
+            state,
+            parent_run_id,
+            child_depth,
+            step,
+            tokens_config,
+            agents_config,
+            budget,
+            parent_workspace,
+            &target,
+            ff,
+            start,
+        )
+        .await;
     }
 
     // Load the child workflow definition.
@@ -97,8 +123,20 @@ pub async fn execute_sub_workflow_step(
         .await
     {
         Ok(Some(w)) => w,
-        Ok(None) => return fail(step, start, format!("Sub-workflow `{target}` not found (deleted? wrong id?).")),
-        Err(e) => return fail(step, start, format!("DB error loading sub-workflow `{target}`: {e}")),
+        Ok(None) => {
+            return fail(
+                step,
+                start,
+                format!("Sub-workflow `{target}` not found (deleted? wrong id?)."),
+            )
+        }
+        Err(e) => {
+            return fail(
+                step,
+                start,
+                format!("DB error loading sub-workflow `{target}`: {e}"),
+            )
+        }
     };
 
     // Build + persist the child run. The depth marker rides in
@@ -137,7 +175,11 @@ pub async fn execute_sub_workflow_step(
         .with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert))
         .await
     {
-        return fail(step, start, format!("Failed to create sub-workflow run row: {e}"));
+        return fail(
+            step,
+            start,
+            format!("Failed to create sub-workflow run row: {e}"),
+        );
     }
 
     tracing::info!(
@@ -196,9 +238,8 @@ pub async fn execute_sub_workflow_step(
         "last_step": last.map(|s| s.step_name.clone()),
         "last_output": last.map(|s| s.output.clone()),
     });
-    let output = super::step_output_format::format_step_output(
-        data, status_str, &summary, None, &[signal],
-    );
+    let output =
+        super::step_output_format::format_step_output(data, status_str, &summary, None, &[signal]);
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
     let condition_result = condition_action.as_ref().map(|a| match a {
         crate::models::ConditionAction::Stop => "Stop".to_string(),
@@ -211,7 +252,11 @@ pub async fn execute_sub_workflow_step(
             step_name: step.name.clone(),
             // child Failed/StoppedByGuard/Cancelled → step Failed (parent's
             // on_result can branch on SUBWF_FAILED to retry/escalate).
-            status: if success { RunStatus::Success } else { RunStatus::Failed },
+            status: if success {
+                RunStatus::Success
+            } else {
+                RunStatus::Failed
+            },
             output,
             tokens_used: child_run.tokens_used, // aggregate child cost onto the step
             duration_ms: start.elapsed().as_millis() as u64,
@@ -239,12 +284,20 @@ const MAX_FOREACH_ITEMS: usize = 30;
 pub(crate) fn parse_foreach_items(content: &str) -> Result<Vec<serde_json::Value>, String> {
     let v: serde_json::Value = serde_json::from_str(content)
         .map_err(|e| format!("foreach file is not valid JSON: {e}"))?;
-    let arr = v.as_array().ok_or("foreach file must contain a JSON ARRAY of task items")?;
+    let arr = v
+        .as_array()
+        .ok_or("foreach file must contain a JSON ARRAY of task items")?;
     if arr.is_empty() {
-        return Err("foreach file contains an empty array — nothing to implement (upstream step misfired?)".into());
+        return Err(
+            "foreach file contains an empty array — nothing to implement (upstream step misfired?)"
+                .into(),
+        );
     }
     if arr.len() > MAX_FOREACH_ITEMS {
-        return Err(format!("foreach file has {} items — exceeds the cap of {MAX_FOREACH_ITEMS}", arr.len()));
+        return Err(format!(
+            "foreach file has {} items — exceeds the cap of {MAX_FOREACH_ITEMS}",
+            arr.len()
+        ));
     }
     Ok(arr.clone())
 }
@@ -269,19 +322,39 @@ pub(crate) fn tier_for_complexity(complexity: Option<&str>) -> Option<crate::mod
 ///   completeness contract still holds without an agent).
 ///
 /// Pure for tests.
-pub(crate) fn validate_mechanical_files(item: &serde_json::Value) -> Result<Vec<(String, String)>, String> {
-    let files = item.get("files").and_then(|f| f.as_array())
+pub(crate) fn validate_mechanical_files(
+    item: &serde_json::Value,
+) -> Result<Vec<(String, String)>, String> {
+    let files = item
+        .get("files")
+        .and_then(|f| f.as_array())
         .ok_or("mechanical item has no `files[]` payload")?;
-    if files.is_empty() { return Err("mechanical item has an empty `files[]`".into()); }
+    if files.is_empty() {
+        return Err("mechanical item has an empty `files[]`".into());
+    }
     let mut out = Vec::with_capacity(files.len());
     for f in files {
-        let path = f.get("path").and_then(|p| p.as_str()).unwrap_or("").trim().to_string();
-        let content = f.get("content").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        let path = f
+            .get("path")
+            .and_then(|p| p.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let content = f
+            .get("content")
+            .and_then(|c| c.as_str())
+            .unwrap_or("")
+            .to_string();
         if path.is_empty() || content.is_empty() {
             return Err("mechanical file entry missing `path` or `content`".into());
         }
-        if path.starts_with('/') || path.split('/').any(|seg| seg == "..") || path.starts_with(".git/") {
-            return Err(format!("mechanical file path rejected (absolute/traversal/.git): `{path}`"));
+        if path.starts_with('/')
+            || path.split('/').any(|seg| seg == "..")
+            || path.starts_with(".git/")
+        {
+            return Err(format!(
+                "mechanical file path rejected (absolute/traversal/.git): `{path}`"
+            ));
         }
         out.push((path, content));
     }
@@ -300,9 +373,13 @@ pub(crate) fn validate_mechanical_files(item: &serde_json::Value) -> Result<Vec<
 
 /// Phase 3b — aggregate per-item outcomes into (status, signal). Pure for tests.
 pub(crate) fn aggregate_foreach(succeeded: usize, failed: usize) -> (&'static str, &'static str) {
-    if failed == 0 { ("OK", "OK") }
-    else if succeeded == 0 { ("SUBWF_FAILED", "SUBWF_FAILED") }
-    else { ("PARTIAL", "PARTIAL") }
+    if failed == 0 {
+        ("OK", "OK")
+    } else if succeeded == 0 {
+        ("SUBWF_FAILED", "SUBWF_FAILED")
+    } else {
+        ("PARTIAL", "PARTIAL")
+    }
 }
 
 /// 2026-06-24 — expose the current foreach item to the CHILD's template engine
@@ -345,9 +422,11 @@ async fn record_foreach_done(
     entry: serde_json::Value,
 ) {
     let (rid, sname) = (parent_run_id.to_string(), step_name.to_string());
-    if let Err(e) = state.db.with_conn(move |conn| {
-        crate::db::workflows::append_foreach_done(conn, &rid, &sname, entry)
-    }).await {
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| crate::db::workflows::append_foreach_done(conn, &rid, &sname, entry))
+        .await
+    {
         tracing::warn!(target: "kronn::sub_workflow", "foreach done-set write failed: {e}");
     }
 }
@@ -375,7 +454,13 @@ async fn execute_foreach(
     let items_path = std::path::Path::new(&ws).join(foreach_file);
     let content = match std::fs::read_to_string(&items_path) {
         Ok(c) => c,
-        Err(e) => return fail(step, start, format!("Cannot read foreach file `{foreach_file}` in the worktree: {e}")),
+        Err(e) => {
+            return fail(
+                step,
+                start,
+                format!("Cannot read foreach file `{foreach_file}` in the worktree: {e}"),
+            )
+        }
     };
     let items = match parse_foreach_items(&content) {
         Ok(i) => i,
@@ -384,10 +469,26 @@ async fn execute_foreach(
 
     // Load the child workflow once (same definition for every item).
     let target_for_db = target.to_string();
-    let child_wf = match state.db.with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db)).await {
+    let child_wf = match state
+        .db
+        .with_conn(move |c| crate::db::workflows::get_workflow(c, &target_for_db))
+        .await
+    {
         Ok(Some(w)) => w,
-        Ok(None) => return fail(step, start, format!("Sub-workflow `{target}` not found (deleted? wrong id?).")),
-        Err(e) => return fail(step, start, format!("DB error loading sub-workflow `{target}`: {e}")),
+        Ok(None) => {
+            return fail(
+                step,
+                start,
+                format!("Sub-workflow `{target}` not found (deleted? wrong id?)."),
+            )
+        }
+        Err(e) => {
+            return fail(
+                step,
+                start,
+                format!("DB error loading sub-workflow `{target}`: {e}"),
+            )
+        }
     };
 
     // A2 resume reconciliation — three sources, trusted in this order:
@@ -410,16 +511,23 @@ async fn execute_foreach(
     let state_done: std::collections::HashSet<String> = {
         let pid = parent_run_id.to_string();
         let key = format!("__kronn.foreach_done.{}", step.name);
-        state.db.with_conn(move |c| crate::db::workflows::get_run(c, &pid)).await
-            .ok().flatten()
+        state
+            .db
+            .with_conn(move |c| crate::db::workflows::get_run(c, &pid))
+            .await
+            .ok()
+            .flatten()
             .and_then(|r| r.state.get(&key).cloned())
             .and_then(|doc| serde_json::from_str::<serde_json::Value>(&doc).ok())
-            .and_then(|d| d.get("items").and_then(|i| i.as_array()).map(|items| {
-                items.iter()
-                    .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(String::from))
-                    .filter(|i| !i.is_empty())
-                    .collect()
-            }))
+            .and_then(|d| {
+                d.get("items").and_then(|i| i.as_array()).map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|e| e.get("id").and_then(|i| i.as_str()).map(String::from))
+                        .filter(|i| !i.is_empty())
+                        .collect()
+                })
+            })
             .unwrap_or_default()
     };
 
@@ -433,15 +541,22 @@ async fn execute_foreach(
 
     for (idx, item) in items.iter().enumerate() {
         // Parent cancel between items — stop fan-out, keep what's done.
-        let cancelled = state.cancel_registry.lock()
-            .ok().and_then(|m| m.get(parent_run_id).map(|t| t.is_cancelled()))
+        let cancelled = state
+            .cancel_registry
+            .lock()
+            .ok()
+            .and_then(|m| m.get(parent_run_id).map(|t| t.is_cancelled()))
             .unwrap_or(false);
         if cancelled {
             tracing::info!(target: "kronn::sub_workflow", parent_run=%parent_run_id, "foreach cancelled at item {idx}");
             break;
         }
 
-        let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let item_id = item
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
 
         // 2026-06-12 (#3, in-run resume) — skip items ALREADY COMMITTED in
         // this worktree (commit subjects carry `[<id>]`): a Goto-retry of the
@@ -451,9 +566,16 @@ async fn execute_foreach(
         // scope (a new run gets a fresh worktree/branch).
         if !item_id.is_empty() {
             let git_done = crate::core::cmd::async_cmd("git")
-                .args(["log", "--oneline", "--fixed-strings", "--grep", &format!("[{item_id}]")])
+                .args([
+                    "log",
+                    "--oneline",
+                    "--fixed-strings",
+                    "--grep",
+                    &format!("[{item_id}]"),
+                ])
                 .current_dir(&ws)
-                .output().await
+                .output()
+                .await
                 .map(|o| o.status.success() && !o.stdout.is_empty())
                 .unwrap_or(false);
             if git_done || child_done.contains(&item_id) {
@@ -482,26 +604,57 @@ async fn execute_foreach(
                     let mut write_err = None;
                     for (rel, content) in &files {
                         let p = std::path::Path::new(&ws).join(rel);
-                        if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
-                        if let Err(e) = std::fs::write(&p, content) { write_err = Some(format!("{rel}: {e}")); break; }
+                        if let Some(parent) = p.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(e) = std::fs::write(&p, content) {
+                            write_err = Some(format!("{rel}: {e}"));
+                            break;
+                        }
                     }
                     if let Some(e) = write_err {
                         tracing::warn!(target: "kronn::sub_workflow", item_id=%item_id, "mechanical write failed ({e}) — falling back to agent");
                     } else {
                         // Journal + commit (deterministic, mirrors the child's commit step).
                         let what = item.get("what").and_then(|w| w.as_str()).unwrap_or("");
-                        let _ = std::fs::OpenOptions::new().create(true).append(true)
+                        let _ = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
                             .open(std::path::Path::new(&ws).join(".kronn/decisions.md"))
-                            .and_then(|mut f| { use std::io::Write; writeln!(f, "\n[{item_id}] engine-applied (mechanical): {what}") });
+                            .and_then(|mut f| {
+                                use std::io::Write;
+                                writeln!(f, "\n[{item_id}] engine-applied (mechanical): {what}")
+                            });
                         let mut add = vec!["add".to_string(), ".kronn/decisions.md".to_string()];
                         add.extend(files.iter().map(|(p, _)| p.clone()));
-                        let _ = crate::core::cmd::async_cmd("git").args(add.iter().map(|s| s.as_str())).current_dir(&ws).output().await;
-                        let subject = format!("Kronn AutoPilot [{item_id}] — mechanical (engine-applied)");
-                        let body = files.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>().join("\n");
+                        let _ = crate::core::cmd::async_cmd("git")
+                            .args(add.iter().map(|s| s.as_str()))
+                            .current_dir(&ws)
+                            .output()
+                            .await;
+                        let subject =
+                            format!("Kronn AutoPilot [{item_id}] — mechanical (engine-applied)");
+                        let body = files
+                            .iter()
+                            .map(|(p, _)| p.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n");
                         let commit = crate::core::cmd::async_cmd("git")
-                            .args(["-c", "user.email=autopilot@kronn.local", "-c", "user.name=Kronn AutoPilot",
-                                   "commit", "--no-verify", "-m", &subject, "-m", &body])
-                            .current_dir(&ws).output().await;
+                            .args([
+                                "-c",
+                                "user.email=autopilot@kronn.local",
+                                "-c",
+                                "user.name=Kronn AutoPilot",
+                                "commit",
+                                "--no-verify",
+                                "-m",
+                                &subject,
+                                "-m",
+                                &body,
+                            ])
+                            .current_dir(&ws)
+                            .output()
+                            .await;
                         let committed = commit.map(|o| o.status.success()).unwrap_or(false);
                         if committed {
                             tracing::info!(target: "kronn::sub_workflow", item_id=%item_id, files=files.len(), "mechanical item engine-applied (0 tokens)");
@@ -521,7 +674,10 @@ async fn execute_foreach(
         }
 
         // Expose the item to the child via the shared worktree.
-        if let Err(e) = std::fs::write(&task_file, serde_json::to_string_pretty(item).unwrap_or_default()) {
+        if let Err(e) = std::fs::write(
+            &task_file,
+            serde_json::to_string_pretty(item).unwrap_or_default(),
+        ) {
             // A per-item infra hiccup (transient FS error on ONE item) must NOT
             // abort the whole sweep — record it as a failed item and move on so
             // the remaining items still get processed. Only a pre-loop
@@ -569,7 +725,11 @@ async fn execute_foreach(
             parent_run_started_at: None,
         };
         let to_insert = child_run.clone();
-        if let Err(e) = state.db.with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert)).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |c| crate::db::workflows::insert_run(c, &to_insert))
+            .await
+        {
             // Same rationale as the task-file write above: a per-item DB hiccup
             // skips THIS item, it doesn't kill the sweep.
             tracing::warn!(target: "kronn::sub_workflow", item=%idx, item_id=%item_id, "foreach: cannot create child run row ({e}) — skipping this item");
@@ -584,27 +744,47 @@ async fn execute_foreach(
         // overrides steps WITHOUT an explicit tier (author choice wins).
         let mut wf_for_item = child_wf.clone();
         if let Some(tier) = tier_for_complexity(item.get("complexity").and_then(|c| c.as_str())) {
-            for s in wf_for_item.steps.iter_mut().filter(|s| matches!(s.step_type, crate::models::StepType::Agent)) {
+            for s in wf_for_item
+                .steps
+                .iter_mut()
+                .filter(|s| matches!(s.step_type, crate::models::StepType::Agent))
+            {
                 match s.agent_settings.as_mut() {
                     Some(st) if st.tier.is_none() => st.tier = Some(tier),
-                    None => s.agent_settings = Some(crate::models::AgentSettings {
-                        model: None, tier: Some(tier), reasoning_effort: None, max_tokens: None,
-                    }),
+                    None => {
+                        s.agent_settings = Some(crate::models::AgentSettings {
+                            model: None,
+                            tier: Some(tier),
+                            reasoning_effort: None,
+                            max_tokens: None,
+                        })
+                    }
                     _ => {}
                 }
             }
         }
 
         let exec_res = Box::pin(crate::workflows::runner::execute_run(
-            state.clone(), &wf_for_item, &mut child_run, tokens_config, agents_config,
-            None, Some(budget.clone()), Some(ws.clone()),
-        )).await;
+            state.clone(),
+            &wf_for_item,
+            &mut child_run,
+            tokens_config,
+            agents_config,
+            None,
+            Some(budget.clone()),
+            Some(ws.clone()),
+        ))
+        .await;
         if let Err(e) = exec_res {
             tracing::warn!(target: "kronn::sub_workflow", child_run=%child_run.id, "foreach child errored: {e}");
         }
 
         let ok = matches!(child_run.status, RunStatus::Success);
-        if ok { succeeded += 1; } else { failed += 1; }
+        if ok {
+            succeeded += 1;
+        } else {
+            failed += 1;
+        }
         total_tokens += child_run.tokens_used;
         last_output = child_run.step_results.last().map(|s| s.output.clone());
         last_child_id = Some(child_run.id.clone());
@@ -640,7 +820,11 @@ async fn execute_foreach(
     let (status_str, signal) = aggregate_foreach(succeeded, failed);
     let summary = format!(
         "Sous-workflow « {} » × {} tâche(s) → {} ok / {} échec(s) ({} tokens)",
-        child_wf.name, results.len(), succeeded, failed, total_tokens,
+        child_wf.name,
+        results.len(),
+        succeeded,
+        failed,
+        total_tokens,
     );
     let data = json!({
         "mode": "foreach",
@@ -652,7 +836,8 @@ async fn execute_foreach(
         "child_run_id": last_child_id,
         "last_output": last_output,
     });
-    let output = super::step_output_format::format_step_output(data, status_str, &summary, None, &[signal]);
+    let output =
+        super::step_output_format::format_step_output(data, status_str, &summary, None, &[signal]);
     let condition_action = super::steps::evaluate_conditions(&step.on_result, &output);
     let condition_result = condition_action.as_ref().map(|a| match a {
         crate::models::ConditionAction::Stop => "Stop".to_string(),
@@ -668,7 +853,11 @@ async fn execute_foreach(
             // (run-4 live finding: 12/13 ok killed the whole run + lost the
             // draft). The PARTIAL signal stays branchable via on_result for
             // workflows that want to retry instead. All-failed stays Failed.
-            status: if succeeded > 0 { RunStatus::Success } else { RunStatus::Failed },
+            status: if succeeded > 0 {
+                RunStatus::Success
+            } else {
+                RunStatus::Failed
+            },
             output,
             tokens_used: total_tokens,
             duration_ms: start.elapsed().as_millis() as u64,
@@ -769,7 +958,12 @@ mod tests {
                 "json_data_payload": { "done": true },
             }))],
             actions: vec![],
-            safety: crate::models::WorkflowSafety { sandbox: false, max_files: None, max_lines: None, require_approval: false },
+            safety: crate::models::WorkflowSafety {
+                sandbox: false,
+                max_files: None,
+                max_lines: None,
+                require_approval: false,
+            },
             workspace_config: None,
             concurrency_limit: None,
             guards: None,
@@ -806,26 +1000,38 @@ mod tests {
         // FK: the parent run's workflow row must exist too.
         let mut parent_wf = child_wf.clone();
         parent_wf.id = "parent-wf".into();
-        state.db.with_conn(move |c| {
-            crate::db::workflows::insert_workflow(c, &child_wf)?;
-            crate::db::workflows::insert_workflow(c, &parent_wf)?;
-            crate::db::workflows::insert_run(c, &parent_run)
-        }).await.unwrap();
+        state
+            .db
+            .with_conn(move |c| {
+                crate::db::workflows::insert_workflow(c, &child_wf)?;
+                crate::db::workflows::insert_workflow(c, &parent_wf)?;
+                crate::db::workflows::insert_run(c, &parent_run)
+            })
+            .await
+            .unwrap();
 
         // Worktree stand-in: a real git repo with the items file.
         let ws = tempfile::TempDir::new().unwrap();
         let git = |args: &[&str]| {
             let out = std::process::Command::new("git")
                 .args(["-c", "user.email=t@t", "-c", "user.name=t"])
-                .args(args).current_dir(ws.path()).output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+                .args(args)
+                .current_dir(ws.path())
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         };
         git(&["init", "-q"]);
         std::fs::create_dir_all(ws.path().join(".kronn")).unwrap();
         std::fs::write(
             ws.path().join("tasks.json"),
             r#"[{"id":"T1","what":"a"},{"id":"T2","what":"b"}]"#,
-        ).unwrap();
+        )
+        .unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "init"]);
 
@@ -845,30 +1051,50 @@ mod tests {
         step: &crate::models::WorkflowStep,
     ) -> serde_json::Value {
         let outcome = super::execute_sub_workflow_step(
-            state, "parent-run", 0, step, tokens, agents,
+            state,
+            "parent-run",
+            0,
+            step,
+            tokens,
+            agents,
             crate::workflows::runner::SharedBudget::root(50),
             Some(ws.path().to_string_lossy().to_string()),
-        ).await;
-        assert_eq!(outcome.result.status, crate::models::RunStatus::Success,
-            "foreach must succeed: {}", outcome.result.output);
-        crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output)["data"].clone()
+        )
+        .await;
+        assert_eq!(
+            outcome.result.status,
+            crate::models::RunStatus::Success,
+            "foreach must succeed: {}",
+            outcome.result.output
+        );
+        crate::workflows::step_output_format::parse_envelope_for_test(&outcome.result.output)
+            ["data"]
+            .clone()
     }
 
     async fn child_rows_for(state: &crate::AppState, item_id: &str) -> usize {
         let iid = item_id.to_string();
-        state.db.with_conn(move |c| {
-            let mut stmt = c.prepare(
-                "SELECT trigger_context FROM workflow_runs WHERE parent_run_id = 'parent-run'",
-            )?;
-            let rows = stmt.query_map([], |r| r.get::<_, Option<String>>(0))?;
-            let mut n = 0;
-            for row in rows {
-                if row?.as_deref().map(|t| t.contains(&format!("\"{iid}\""))).unwrap_or(false) {
-                    n += 1;
+        state
+            .db
+            .with_conn(move |c| {
+                let mut stmt = c.prepare(
+                    "SELECT trigger_context FROM workflow_runs WHERE parent_run_id = 'parent-run'",
+                )?;
+                let rows = stmt.query_map([], |r| r.get::<_, Option<String>>(0))?;
+                let mut n = 0;
+                for row in rows {
+                    if row?
+                        .as_deref()
+                        .map(|t| t.contains(&format!("\"{iid}\"")))
+                        .unwrap_or(false)
+                    {
+                        n += 1;
+                    }
                 }
-            }
-            Ok(n)
-        }).await.unwrap()
+                Ok(n)
+            })
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
@@ -876,16 +1102,34 @@ mod tests {
         let (state, tokens, agents, ws, step) = foreach_fixture().await;
         // The crash happened after T1's commit landed.
         let out = std::process::Command::new("git")
-            .args(["-c", "user.email=t@t", "-c", "user.name=t",
-                   "commit", "-q", "--allow-empty", "-m", "Kronn AutoPilot [T1] done"])
-            .current_dir(ws.path()).output().unwrap();
+            .args([
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "Kronn AutoPilot [T1] done",
+            ])
+            .current_dir(ws.path())
+            .output()
+            .unwrap();
         assert!(out.status.success());
 
         let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
         let items = data["items"].as_array().unwrap();
-        assert_eq!(items[0]["status"], "SkippedAlreadyDone", "T1 confirmed by the ledger");
+        assert_eq!(
+            items[0]["status"], "SkippedAlreadyDone",
+            "T1 confirmed by the ledger"
+        );
         assert_eq!(items[1]["status"], "Success", "T2 ran its child");
-        assert_eq!(child_rows_for(&state, "T1").await, 0, "no duplicate child for T1");
+        assert_eq!(
+            child_rows_for(&state, "T1").await,
+            0,
+            "no duplicate child for T1"
+        );
         assert_eq!(child_rows_for(&state, "T2").await, 1);
     }
 
@@ -905,9 +1149,16 @@ mod tests {
 
         let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
         let items = data["items"].as_array().unwrap();
-        assert_eq!(items[0]["status"], "SkippedAlreadyDone", "T1 rebuilt from the child row");
+        assert_eq!(
+            items[0]["status"], "SkippedAlreadyDone",
+            "T1 rebuilt from the child row"
+        );
         assert_eq!(items[1]["status"], "Success");
-        assert_eq!(child_rows_for(&state, "T1").await, 1, "only the pre-crash child — no duplicate");
+        assert_eq!(
+            child_rows_for(&state, "T1").await,
+            1,
+            "only the pre-crash child — no duplicate"
+        );
     }
 
     #[tokio::test]
@@ -925,8 +1176,15 @@ mod tests {
 
         let data = run_foreach(&state, &tokens, &agents, &ws, &step).await;
         let items = data["items"].as_array().unwrap();
-        assert_eq!(items[0]["status"], "Success", "stale marker ignored — T1 re-ran");
-        assert_eq!(child_rows_for(&state, "T1").await, 1, "T1 got a real child this time");
+        assert_eq!(
+            items[0]["status"], "Success",
+            "stale marker ignored — T1 re-ran"
+        );
+        assert_eq!(
+            child_rows_for(&state, "T1").await,
+            1,
+            "T1 got a real child this time"
+        );
     }
 
     #[test]
@@ -934,7 +1192,7 @@ mod tests {
         // From depth 0 we can descend until the child reaches the cap.
         assert!(!child_depth_exceeds(0));
         assert!(!child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH - 1)); // child == cap, allowed
-        assert!(child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH));      // child == cap+1, refused
+        assert!(child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH)); // child == cap+1, refused
         assert!(child_depth_exceeds(MAX_SUBWORKFLOW_DEPTH + 5));
     }
 
@@ -949,7 +1207,10 @@ mod tests {
 
     #[test]
     fn parse_foreach_rejects_non_array_empty_and_oversized() {
-        assert!(parse_foreach_items(r#"{"id":"a"}"#).is_err(), "object is not a work-list");
+        assert!(
+            parse_foreach_items(r#"{"id":"a"}"#).is_err(),
+            "object is not a work-list"
+        );
         assert!(parse_foreach_items("not json").is_err());
         assert!(parse_foreach_items("[]").unwrap_err().contains("empty"));
         let big = format!("[{}]", vec!["{}"; 31].join(","));
@@ -969,8 +1230,9 @@ mod tests {
             "id": "pr-42", "number": 42, "draft": false,
             "title": "Fix bug", "labels": ["a", "b"], "meta": null,
         });
-        let vars: std::collections::HashMap<_, _> =
-            super::current_task_template_vars(&item).into_iter().collect();
+        let vars: std::collections::HashMap<_, _> = super::current_task_template_vars(&item)
+            .into_iter()
+            .collect();
         // scalar fields stringify so `{{current_task.number}}` resolves to "42"
         assert_eq!(vars["current_task.number"], "42");
         assert_eq!(vars["current_task.id"], "pr-42");
@@ -989,7 +1251,9 @@ mod tests {
         // a bare-scalar work-list item (e.g. `["EW-1","EW-2"]`) still yields
         // the whole-item var without panicking.
         let vars: std::collections::HashMap<_, _> =
-            super::current_task_template_vars(&serde_json::json!("EW-1")).into_iter().collect();
+            super::current_task_template_vars(&serde_json::json!("EW-1"))
+                .into_iter()
+                .collect();
         assert_eq!(vars["current_task"], "\"EW-1\"");
         assert!(!vars.keys().any(|k| k.starts_with("current_task.")));
     }
@@ -999,8 +1263,14 @@ mod tests {
     #[test]
     fn tier_for_complexity_maps_low_high_only() {
         use crate::models::ModelTier;
-        assert!(matches!(super::tier_for_complexity(Some("low")), Some(ModelTier::Economy)));
-        assert!(matches!(super::tier_for_complexity(Some("high")), Some(ModelTier::Reasoning)));
+        assert!(matches!(
+            super::tier_for_complexity(Some("low")),
+            Some(ModelTier::Economy)
+        ));
+        assert!(matches!(
+            super::tier_for_complexity(Some("high")),
+            Some(ModelTier::Reasoning)
+        ));
         assert!(super::tier_for_complexity(Some("med")).is_none());
         assert!(super::tier_for_complexity(None).is_none());
     }
@@ -1013,13 +1283,20 @@ mod tests {
         assert_eq!(super::validate_mechanical_files(&ok).unwrap().len(), 1);
         // decided item must embed its marker
         let dec = json!({"id":"a","chosen":"x","files":[{"path":"c.yaml","content":"no marker"}]});
-        assert!(super::validate_mechanical_files(&dec).unwrap_err().contains("marker"));
+        assert!(super::validate_mechanical_files(&dec)
+            .unwrap_err()
+            .contains("marker"));
         let dec_ok = json!({"id":"a","chosen":"x","files":[{"path":"c.yaml","content":"# KRONN-ASSUMED(a): x\nv: 1\n"}]});
         assert!(super::validate_mechanical_files(&dec_ok).is_ok());
         // path traversal / absolute / .git rejected
         for bad in ["../evil", "/etc/passwd", ".git/hooks/pre-commit"] {
             let item = json!({"id":"a","files":[{"path": bad, "content":"x"}]});
-            assert!(super::validate_mechanical_files(&item).unwrap_err().contains("rejected"), "{bad}");
+            assert!(
+                super::validate_mechanical_files(&item)
+                    .unwrap_err()
+                    .contains("rejected"),
+                "{bad}"
+            );
         }
         // missing files[] → fall back to agent (error string)
         assert!(super::validate_mechanical_files(&json!({"id":"a"})).is_err());

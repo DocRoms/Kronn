@@ -1,9 +1,6 @@
 //! Remote repository discovery — GitHub/GitLab integration.
 
-use axum::{
-    extract::State,
-    Json,
-};
+use axum::{extract::State, Json};
 
 use crate::models::*;
 use crate::AppState;
@@ -24,14 +21,18 @@ pub async fn discover_repos(
     let mut errors: Vec<crate::models::DiscoverSourceError> = vec![];
 
     // Get existing projects to check "already_cloned"
-    let existing = state.db.with_conn(crate::db::projects::list_projects).await.unwrap_or_default();
-    let existing_urls: std::collections::HashSet<String> = existing.iter()
+    let existing = state
+        .db
+        .with_conn(crate::db::projects::list_projects)
+        .await
+        .unwrap_or_default();
+    let existing_urls: std::collections::HashSet<String> = existing
+        .iter()
         .filter_map(|p| p.repo_url.as_ref())
         .map(|u| normalize_repo_url(u))
         .collect();
-    let existing_names: std::collections::HashSet<String> = existing.iter()
-        .map(|p| p.name.to_lowercase())
-        .collect();
+    let existing_names: std::collections::HashSet<String> =
+        existing.iter().map(|p| p.name.to_lowercase()).collect();
 
     // Get all available sources
     let all_sources = find_all_provider_sources(&state).await;
@@ -47,14 +48,23 @@ pub async fn discover_repos(
     let sources_to_use: Vec<&(RepoSource, String)> = if req.source_ids.is_empty() {
         all_sources.iter().collect()
     } else {
-        all_sources.iter().filter(|(s, _)| req.source_ids.contains(&s.id)).collect()
+        all_sources
+            .iter()
+            .filter(|(s, _)| req.source_ids.contains(&s.id))
+            .collect()
     };
 
     tracing::info!(
         "discover_repos: requested source_ids={:?}, available={:?}, using={:?}",
         req.source_ids,
-        available_sources.iter().map(|s| format!("{}({})", s.label, s.id)).collect::<Vec<_>>(),
-        sources_to_use.iter().map(|(s, _)| format!("{}({})", s.label, s.id)).collect::<Vec<_>>(),
+        available_sources
+            .iter()
+            .map(|s| format!("{}({})", s.label, s.id))
+            .collect::<Vec<_>>(),
+        sources_to_use
+            .iter()
+            .map(|(s, _)| format!("{}({})", s.label, s.id))
+            .collect::<Vec<_>>(),
     );
 
     // Deduplicate repos by full_name (in case multiple tokens see the same repo)
@@ -63,11 +73,23 @@ pub async fn discover_repos(
     for (source, token_data) in &sources_to_use {
         match source.provider.as_str() {
             "github" => {
-                let token_preview = if token_data.len() > 8 { &token_data[..8] } else { token_data };
-                tracing::info!("discover_repos: querying GitHub source '{}' with token {}...", source.label, token_preview);
+                let token_preview = if token_data.len() > 8 {
+                    &token_data[..8]
+                } else {
+                    token_data
+                };
+                tracing::info!(
+                    "discover_repos: querying GitHub source '{}' with token {}...",
+                    source.label,
+                    token_preview
+                );
                 match fetch_github_repos(token_data).await {
                     Ok(repos) => {
-                        tracing::info!("discover_repos: source '{}' returned {} repos", source.label, repos.len());
+                        tracing::info!(
+                            "discover_repos: source '{}' returned {} repos",
+                            source.label,
+                            repos.len()
+                        );
                         used_sources.push(source.label.clone());
                         for r in repos {
                             if !seen_full_names.insert(r.full_name.clone()) {
@@ -84,7 +106,11 @@ pub async fn discover_repos(
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        tracing::warn!("GitHub repo discovery failed for {}: {}", source.label, msg);
+                        tracing::warn!(
+                            "GitHub repo discovery failed for {}: {}",
+                            source.label,
+                            msg
+                        );
                         errors.push(crate::models::DiscoverSourceError {
                             source_id: source.id.clone(),
                             source_label: source.label.clone(),
@@ -115,7 +141,11 @@ pub async fn discover_repos(
                     }
                     Err(e) => {
                         let msg = e.to_string();
-                        tracing::warn!("GitLab repo discovery failed for {}: {}", source.label, msg);
+                        tracing::warn!(
+                            "GitLab repo discovery failed for {}: {}",
+                            source.label,
+                            msg
+                        );
                         errors.push(crate::models::DiscoverSourceError {
                             source_id: source.id.clone(),
                             source_label: source.label.clone(),
@@ -131,11 +161,17 @@ pub async fn discover_repos(
 
     // Sort: not-cloned first, then by updated_at descending
     all_repos.sort_by(|a, b| {
-        a.already_cloned.cmp(&b.already_cloned)
+        a.already_cloned
+            .cmp(&b.already_cloned)
             .then(b.updated_at.cmp(&a.updated_at))
     });
 
-    Json(ApiResponse::ok(DiscoverReposResponse { repos: all_repos, sources: used_sources, available_sources, errors }))
+    Json(ApiResponse::ok(DiscoverReposResponse {
+        repos: all_repos,
+        sources: used_sources,
+        available_sources,
+        errors,
+    }))
 }
 
 /// Find all available token sources from MCP configs and env vars.
@@ -150,9 +186,11 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<(RepoSour
     // Scan MCP configs for GitHub/GitLab tokens
     if let Some(secret) = &secret {
         let secret_clone = secret.clone();
-        let configs = state.db.with_conn(move |conn| {
-            crate::db::mcps::list_configs(conn)
-        }).await.unwrap_or_default();
+        let configs = state
+            .db
+            .with_conn(move |conn| crate::db::mcps::list_configs(conn))
+            .await
+            .unwrap_or_default();
 
         for cfg in configs {
             if cfg.env_encrypted.is_empty() {
@@ -165,11 +203,20 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<(RepoSour
 
             // GitHub MCP
             if cfg.server_id == "mcp-github" {
-                if let Some(token) = env.get("GITHUB_PERSONAL_ACCESS_TOKEN").filter(|v| !v.is_empty()) {
-                    let token_end = if token.len() > 4 { &token[token.len()-4..] } else { token };
+                if let Some(token) = env
+                    .get("GITHUB_PERSONAL_ACCESS_TOKEN")
+                    .filter(|v| !v.is_empty())
+                {
+                    let token_end = if token.len() > 4 {
+                        &token[token.len() - 4..]
+                    } else {
+                        token
+                    };
                     tracing::info!(
                         "discover: found GitHub MCP config '{}' (id={}) with token ...{}",
-                        cfg.label, cfg.id, token_end
+                        cfg.label,
+                        cfg.id,
+                        token_end
                     );
                     sources.push((
                         RepoSource {
@@ -184,8 +231,12 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<(RepoSour
 
             // GitLab MCP
             if cfg.server_id == "mcp-gitlab" {
-                if let Some(token) = env.get("GITLAB_PERSONAL_ACCESS_TOKEN").filter(|v| !v.is_empty()) {
-                    let api_url = env.get("GITLAB_API_URL")
+                if let Some(token) = env
+                    .get("GITLAB_PERSONAL_ACCESS_TOKEN")
+                    .filter(|v| !v.is_empty())
+                {
+                    let api_url = env
+                        .get("GITLAB_API_URL")
                         .filter(|v| !v.is_empty())
                         .cloned()
                         .unwrap_or_else(|| "https://gitlab.com".into());
@@ -222,7 +273,8 @@ pub(crate) async fn find_all_provider_sources(state: &AppState) -> Vec<(RepoSour
     if let Ok(token) = std::env::var("GITLAB_TOKEN") {
         let has_gl = sources.iter().any(|(s, _)| s.provider == "gitlab");
         if !has_gl {
-            let api_url = std::env::var("GITLAB_API_URL").unwrap_or_else(|_| "https://gitlab.com".into());
+            let api_url =
+                std::env::var("GITLAB_API_URL").unwrap_or_else(|_| "https://gitlab.com".into());
             sources.push((
                 RepoSource {
                     id: "env:gitlab".into(),
@@ -274,7 +326,9 @@ async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
             page
         );
         let repos = github_get_json_array(&client, &url, token).await?;
-        if repos.is_empty() { break; }
+        if repos.is_empty() {
+            break;
+        }
         let done = repos.len() < 100;
         for r in &repos {
             let full_name = r["full_name"].as_str().unwrap_or("").to_string();
@@ -282,12 +336,20 @@ async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
                 all_repos.push(parse_github_repo(r));
             }
         }
-        if done { break; }
+        if done {
+            break;
+        }
         page += 1;
     }
 
     // 2. Organization repos — covers org repos the token can see but /user/repos may miss
-    if let Ok(orgs) = github_get_json_array(&client, "https://api.github.com/user/orgs?per_page=100", token).await {
+    if let Ok(orgs) = github_get_json_array(
+        &client,
+        "https://api.github.com/user/orgs?per_page=100",
+        token,
+    )
+    .await
+    {
         for org in &orgs {
             let login = match org["login"].as_str() {
                 Some(l) => l,
@@ -303,11 +365,17 @@ async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
                 let repos = match github_get_json_array(&client, &url, token).await {
                     Ok(r) => r,
                     Err(e) => {
-                        tracing::warn!("discover_repos: failed to list repos for org '{}': {}", login, e);
+                        tracing::warn!(
+                            "discover_repos: failed to list repos for org '{}': {}",
+                            login,
+                            e
+                        );
                         break;
                     }
                 };
-                if repos.is_empty() { break; }
+                if repos.is_empty() {
+                    break;
+                }
                 let done = repos.len() < 100;
                 for r in &repos {
                     let full_name = r["full_name"].as_str().unwrap_or("").to_string();
@@ -315,7 +383,9 @@ async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
                         all_repos.push(parse_github_repo(r));
                     }
                 }
-                if done { break; }
+                if done {
+                    break;
+                }
                 page += 1;
             }
         }
@@ -325,8 +395,13 @@ async fn fetch_github_repos(token: &str) -> Result<Vec<RemoteRepo>, String> {
 }
 
 /// Helper: GET a JSON array from GitHub API with auth headers.
-async fn github_get_json_array(client: &reqwest::Client, url: &str, token: &str) -> Result<Vec<serde_json::Value>, String> {
-    let resp = client.get(url)
+async fn github_get_json_array(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let resp = client
+        .get(url)
         .header("Authorization", format!("Bearer {}", token))
         .header("User-Agent", "Kronn/0.1")
         .header("Accept", "application/vnd.github+json")
@@ -340,7 +415,8 @@ async fn github_get_json_array(client: &reqwest::Client, url: &str, token: &str)
         return Err(format!("GitHub API error {}: {}", status, body));
     }
 
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| format!("Failed to parse GitHub response: {}", e))
 }
 
@@ -368,21 +444,36 @@ async fn fetch_gitlab_repos(token: &str, api_url: &str) -> Result<Vec<RemoteRepo
     let mut seen = std::collections::HashSet::new();
 
     // 1. User-owned projects
-    gitlab_collect_projects(&client, token, &format!(
-        "{}/api/v4/projects?owned=true&per_page=100&order_by=updated_at", base
-    ), &mut all_repos, &mut seen).await?;
+    gitlab_collect_projects(
+        &client,
+        token,
+        &format!(
+            "{}/api/v4/projects?owned=true&per_page=100&order_by=updated_at",
+            base
+        ),
+        &mut all_repos,
+        &mut seen,
+    )
+    .await?;
 
     // 2. Projects from groups the user is a member of
-    if let Ok(groups) = gitlab_get_json_array(&client, &format!(
-        "{}/api/v4/groups?per_page=100&min_access_level=10", base
-    ), token).await {
+    if let Ok(groups) = gitlab_get_json_array(
+        &client,
+        &format!("{}/api/v4/groups?per_page=100&min_access_level=10", base),
+        token,
+    )
+    .await
+    {
         for g in &groups {
             let group_id = match g["id"].as_u64() {
                 Some(id) => id,
                 None => continue,
             };
             let group_name = g["full_path"].as_str().unwrap_or("?");
-            tracing::info!("discover_repos: fetching GitLab group '{}' projects", group_name);
+            tracing::info!(
+                "discover_repos: fetching GitLab group '{}' projects",
+                group_name
+            );
             if let Err(e) = gitlab_collect_projects(&client, token, &format!(
                 "{}/api/v4/groups/{}/projects?per_page=100&order_by=updated_at&include_subgroups=true", base, group_id
             ), &mut all_repos, &mut seen).await {
@@ -406,7 +497,9 @@ async fn gitlab_collect_projects(
     loop {
         let url = format!("{}&page={}", base_url, page);
         let repos = gitlab_get_json_array(client, &url, token).await?;
-        if repos.is_empty() { break; }
+        if repos.is_empty() {
+            break;
+        }
         let done = repos.len() < 100;
         for r in &repos {
             let full_name = r["path_with_namespace"].as_str().unwrap_or("").to_string();
@@ -414,15 +507,22 @@ async fn gitlab_collect_projects(
                 out.push(parse_gitlab_repo(r));
             }
         }
-        if done { break; }
+        if done {
+            break;
+        }
         page += 1;
     }
     Ok(())
 }
 
 /// Helper: GET a JSON array from GitLab API with auth headers.
-async fn gitlab_get_json_array(client: &reqwest::Client, url: &str, token: &str) -> Result<Vec<serde_json::Value>, String> {
-    let resp = client.get(url)
+async fn gitlab_get_json_array(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+) -> Result<Vec<serde_json::Value>, String> {
+    let resp = client
+        .get(url)
         .header("PRIVATE-TOKEN", token)
         .header("User-Agent", "Kronn/0.1")
         .send()
@@ -435,7 +535,8 @@ async fn gitlab_get_json_array(client: &reqwest::Client, url: &str, token: &str)
         return Err(format!("GitLab API error {}: {}", status, body));
     }
 
-    resp.json().await
+    resp.json()
+        .await
         .map_err(|e| format!("Failed to parse GitLab response: {}", e))
 }
 
@@ -446,7 +547,10 @@ fn parse_gitlab_repo(r: &serde_json::Value) -> RemoteRepo {
         full_name: r["path_with_namespace"].as_str().unwrap_or("").to_string(),
         clone_url: r["http_url_to_repo"].as_str().unwrap_or("").to_string(),
         ssh_url: r["ssh_url_to_repo"].as_str().unwrap_or("").to_string(),
-        description: r["description"].as_str().filter(|s| !s.is_empty()).map(|s| s.to_string()),
+        description: r["description"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
         language: None, // GitLab doesn't include language in list endpoint
         stargazers_count: r["star_count"].as_u64().unwrap_or(0) as u32,
         updated_at: r["last_activity_at"].as_str().unwrap_or("").to_string(),
@@ -524,7 +628,10 @@ mod tests {
         assert_eq!(parsed.full_name, "docroms/kronn");
         assert_eq!(parsed.clone_url, "https://github.com/docroms/kronn.git");
         assert_eq!(parsed.ssh_url, "git@github.com:docroms/kronn.git");
-        assert_eq!(parsed.description.as_deref(), Some("An agent orchestration tool"));
+        assert_eq!(
+            parsed.description.as_deref(),
+            Some("An agent orchestration tool")
+        );
         assert_eq!(parsed.language.as_deref(), Some("Rust"));
         assert_eq!(parsed.stargazers_count, 42);
         assert_eq!(parsed.updated_at, "2026-05-28T10:00:00Z");
@@ -597,7 +704,10 @@ mod tests {
             "last_activity_at": "",
         });
         let parsed = parse_gitlab_repo(&v);
-        assert!(parsed.description.is_none(), "empty string must be filtered to None");
+        assert!(
+            parsed.description.is_none(),
+            "empty string must be filtered to None"
+        );
     }
 
     #[test]

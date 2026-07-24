@@ -1,6 +1,6 @@
-use std::path::PathBuf;
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
+use std::path::PathBuf;
 use tokio::fs;
 
 use crate::models::{
@@ -39,8 +39,7 @@ pub async fn load() -> Result<Option<AppConfig>> {
         .await
         .context("Failed to read config file")?;
 
-    let mut config: AppConfig = toml::from_str(&content)
-        .context("Failed to parse config file")?;
+    let mut config: AppConfig = toml::from_str(&content).context("Failed to parse config file")?;
 
     let mut needs_save = false;
 
@@ -94,13 +93,15 @@ pub async fn load() -> Result<Option<AppConfig>> {
             config.tokens.openai = None;
             config.tokens.google = None;
             needs_save = true;
-            tracing::info!("Migrated {} legacy API key(s) to multi-key format", config.tokens.keys.len());
+            tracing::info!(
+                "Migrated {} legacy API key(s) to multi-key format",
+                config.tokens.keys.len()
+            );
         }
     }
 
     if needs_save {
-        let updated = toml::to_string_pretty(&config)
-            .context("Failed to serialize config")?;
+        let updated = toml::to_string_pretty(&config).context("Failed to serialize config")?;
         // Same atomic temp+fsync+rename path as save() — a plain fs::write
         // here could truncate-then-fail and lose the encryption_secret
         // (2026-06-30 incident class).
@@ -122,8 +123,7 @@ pub async fn save(config: &AppConfig) -> Result<()> {
     fs::create_dir_all(&dir).await?;
     restrict_permissions(&dir, true).await;
 
-    let content = toml::to_string_pretty(config)
-        .context("Failed to serialize config")?;
+    let content = toml::to_string_pretty(config).context("Failed to serialize config")?;
     let path = config_path()?;
 
     persist_atomic(dir, path.clone(), content).await?;
@@ -184,7 +184,12 @@ fn write_config_atomic(
 ) -> std::io::Result<()> {
     use std::io::Write;
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".{}.{}.{}.tmp", CONFIG_FILE, std::process::id(), seq));
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        CONFIG_FILE,
+        std::process::id(),
+        seq
+    ));
     {
         let mut f = std::fs::File::create(&tmp)?;
         f.write_all(content)?;
@@ -378,23 +383,40 @@ mod tests {
         let cfg = default_config();
         assert!(!cfg.server.host.is_empty(), "host must be non-empty");
         assert!(cfg.server.port > 0, "port must be > 0");
-        assert!(cfg.encryption_secret.is_some(), "encryption_secret must be set");
-        assert!(!cfg.encryption_secret.as_ref().unwrap().is_empty(), "encryption_secret must be non-empty");
+        assert!(
+            cfg.encryption_secret.is_some(),
+            "encryption_secret must be set"
+        );
+        assert!(
+            !cfg.encryption_secret.as_ref().unwrap().is_empty(),
+            "encryption_secret must be non-empty"
+        );
     }
 
     #[test]
     fn config_dir_returns_path() {
         // May fail in exotic CI environments without HOME, but works in normal setups
         let dir = config_dir();
-        assert!(dir.is_ok(), "config_dir() should return Ok: {:?}", dir.err());
+        assert!(
+            dir.is_ok(),
+            "config_dir() should return Ok: {:?}",
+            dir.err()
+        );
         let path = dir.unwrap();
-        assert!(!path.as_os_str().is_empty(), "config dir path must be non-empty");
+        assert!(
+            !path.as_os_str().is_empty(),
+            "config dir path must be non-empty"
+        );
     }
 
     #[test]
     fn config_path_ends_in_config_toml() {
         let path = config_path();
-        assert!(path.is_ok(), "config_path() should return Ok: {:?}", path.err());
+        assert!(
+            path.is_ok(),
+            "config_path() should return Ok: {:?}",
+            path.err()
+        );
         let p = path.unwrap();
         assert!(
             p.to_string_lossy().ends_with("config.toml"),
@@ -492,20 +514,26 @@ mod tests {
             "a second exclusive lock on the same data dir must be refused"
         );
         drop(g1); // releasing lets a later acquire succeed
-        // Retry briefly: under full-suite load the re-open can hit transient
-        // resource errors (EMFILE from parallel git/sqlite fds). A genuinely
-        // stuck lock still fails after the window — with the REAL error shown.
+                  // Retry briefly: under full-suite load the re-open can hit transient
+                  // resource errors (EMFILE from parallel git/sqlite fds). A genuinely
+                  // stuck lock still fails after the window — with the REAL error shown.
         let mut last_err = None;
         for _ in 0..20 {
             match acquire_lock_in(&dir) {
-                Ok(_) => { last_err = None; break; }
+                Ok(_) => {
+                    last_err = None;
+                    break;
+                }
                 Err(e) => {
                     last_err = Some(e);
                     std::thread::sleep(std::time::Duration::from_millis(10));
                 }
             }
         }
-        assert!(last_err.is_none(), "lock must be re-acquirable after release: {last_err:?}");
+        assert!(
+            last_err.is_none(),
+            "lock must be re-acquirable after release: {last_err:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -572,8 +600,12 @@ mod tests {
         let mut cfg = default_config();
         cfg.server.auth_token = Some("tok".into());
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
-        let injected = toml_str.replacen("[tokens]\n", "[tokens]\nanthropic = \"sk-ant-legacy\"\n", 1);
-        assert!(injected.contains("anthropic = \"sk-ant-legacy\""), "injection sanity");
+        let injected =
+            toml_str.replacen("[tokens]\n", "[tokens]\nanthropic = \"sk-ant-legacy\"\n", 1);
+        assert!(
+            injected.contains("anthropic = \"sk-ant-legacy\""),
+            "injection sanity"
+        );
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(config_path().unwrap(), injected).unwrap();
 
@@ -581,7 +613,10 @@ mod tests {
         assert_eq!(loaded.tokens.keys.len(), 1, "one legacy key must migrate");
         assert_eq!(loaded.tokens.keys[0].provider, "anthropic");
         assert_eq!(loaded.tokens.keys[0].value, "sk-ant-legacy");
-        assert!(loaded.tokens.anthropic.is_none(), "legacy field must be cleared");
+        assert!(
+            loaded.tokens.anthropic.is_none(),
+            "legacy field must be cleared"
+        );
 
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -608,7 +643,10 @@ mod tests {
         }
 
         // The payoff: the final file is always fully parseable (never torn).
-        let loaded = load().await.expect("load Ok").expect("Some after concurrent saves");
+        let loaded = load()
+            .await
+            .expect("load Ok")
+            .expect("Some after concurrent saves");
         assert!(
             loaded.encryption_secret.is_some(),
             "a complete config (with its secret) must be readable after concurrent saves"
@@ -638,7 +676,8 @@ mod tests {
 
         let mut cfg = default_config();
         cfg.unlocked_profiles.push("batman".into());
-        cfg.secret_themes.insert("matrix".into(), "some-local-code".into());
+        cfg.secret_themes
+            .insert("matrix".into(), "some-local-code".into());
         save(&cfg).await.expect("save must succeed");
 
         let reloaded = load().await.expect("load Ok").expect("Some after save");
@@ -714,10 +753,7 @@ mod tests {
         // touch the user's real ~/.config/kronn during tests.
         use std::os::unix::fs::PermissionsExt;
 
-        let tmp = std::env::temp_dir().join(format!(
-            "kronn-config-perms-{}",
-            std::process::id()
-        ));
+        let tmp = std::env::temp_dir().join(format!("kronn-config-perms-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
@@ -760,7 +796,10 @@ mod tests {
         std::env::set_var("KRONN_DATA_DIR", tmp.to_str().unwrap());
 
         let loaded = load().await.expect("load must succeed even with no file");
-        assert!(loaded.is_none(), "absent config file must return None, got {loaded:?}");
+        assert!(
+            loaded.is_none(),
+            "absent config file must return None, got {loaded:?}"
+        );
 
         std::env::remove_var("KRONN_DATA_DIR");
         let _ = std::fs::remove_dir_all(&tmp);
@@ -816,7 +855,14 @@ mod tests {
         // Default ignore list must roundtrip — these strings are checked
         // against during scans so a serialization drop would silently scan
         // node_modules / .git / target etc.
-        for needle in ["node_modules", ".git", "target", "dist", ".cache", ".rustup"] {
+        for needle in [
+            "node_modules",
+            ".git",
+            "target",
+            "dist",
+            ".cache",
+            ".rustup",
+        ] {
             assert!(
                 loaded.scan.ignore.iter().any(|s| s == needle),
                 "loaded scan.ignore must contain {needle:?} ; got {:?}",

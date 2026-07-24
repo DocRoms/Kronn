@@ -200,17 +200,29 @@ fn default_summary_strategy_off() -> crate::models::SummaryStrategy {
     crate::models::SummaryStrategy::Off
 }
 
-fn default_global_context_mode() -> String { "always".to_string() }
-fn default_anti_hallucination_mode() -> String { crate::core::anti_halluc::DEFAULT_MODE_STR.to_string() }
-fn default_max_agents() -> usize { 5 }
-fn default_agent_stall_timeout() -> u32 { 5 }
+fn default_global_context_mode() -> String {
+    "always".to_string()
+}
+fn default_anti_hallucination_mode() -> String {
+    crate::core::anti_halluc::DEFAULT_MODE_STR.to_string()
+}
+fn default_max_agents() -> usize {
+    5
+}
+fn default_agent_stall_timeout() -> u32 {
+    5
+}
 
 /// Default output language. Used by `AppConfig.language` AND by API
 /// request types deserialized from the frontend (where the user may
 /// omit the field). `pub(crate)` so other model sub-modules can keep
 /// the `default = "..."` attribute working after extraction.
-pub(crate) fn default_language() -> String { "fr".into() }
-pub(crate) fn default_ui_language() -> String { "fr".into() }
+pub(crate) fn default_language() -> String {
+    "fr".into()
+}
+pub(crate) fn default_ui_language() -> String {
+    "fr".into()
+}
 
 // ─── Tokens / API keys ────────────────────────────────────────────────────
 
@@ -234,7 +246,8 @@ pub struct TokensConfig {
 impl TokensConfig {
     /// Get the active key value for a provider, or None
     pub fn active_key_for(&self, provider: &str) -> Option<&str> {
-        self.keys.iter()
+        self.keys
+            .iter()
             .find(|k| k.provider == provider && k.active)
             .map(|k| k.value.as_str())
     }
@@ -305,7 +318,9 @@ pub struct ScanConfig {
     pub scan_depth: usize,
 }
 
-fn default_scan_depth() -> usize { 4 }
+fn default_scan_depth() -> usize {
+    4
+}
 
 // ─── Agents ───────────────────────────────────────────────────────────────
 
@@ -497,7 +512,9 @@ pub struct AgentDetection {
     pub runtime_warning: Option<String>,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS, Default)]
 #[ts(export)]

@@ -63,7 +63,11 @@ pub enum StreamJsonEvent {
     /// A text chunk to stream to the user
     Text(String),
     /// Token usage from a message_delta event (input_tokens, output_tokens, optional cost)
-    Usage { input_tokens: u64, output_tokens: u64, cost_usd: Option<f64> },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+        cost_usd: Option<f64>,
+    },
     /// Tool use started — name of the tool
     ToolStart(String),
     /// Partial JSON input for the current tool (accumulated to build full input)
@@ -125,10 +129,7 @@ impl AgentProcess {
     pub async fn captured_stderr_flushed(&mut self) -> Vec<String> {
         if let Some(handle) = self.stderr_task.take() {
             // Give stderr reader a brief window to finish after process exit
-            let _ = tokio::time::timeout(
-                std::time::Duration::from_secs(2),
-                handle,
-            ).await;
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         }
         self.stderr_capture.lock().unwrap().clone()
     }
@@ -157,7 +158,10 @@ pub struct AgentExit {
 
 impl AgentExit {
     fn from_status(status: std::process::ExitStatus) -> Self {
-        Self { success: status.success(), code: status.code() }
+        Self {
+            success: status.success(),
+            code: status.code(),
+        }
     }
 }
 
@@ -223,7 +227,11 @@ impl AgentIo for AgentProcess {
         // io::Result<Option<ExitStatus>> → Option<AgentExit> : both an error
         // and "still running" collapse to None (the caller treats both as
         // "not exited yet"), which matches the existing zombie-detector use.
-        self.child.try_wait().ok().flatten().map(AgentExit::from_status)
+        self.child
+            .try_wait()
+            .ok()
+            .flatten()
+            .map(AgentExit::from_status)
     }
     fn child_id(&self) -> Option<u32> {
         self.child.id()
@@ -262,7 +270,10 @@ impl ScriptedProcess {
         Self {
             lines: lines.into_iter().map(Into::into).collect(),
             output_mode: OutputMode::Text,
-            exit: AgentExit { success: true, code: Some(0) },
+            exit: AgentExit {
+                success: true,
+                code: Some(0),
+            },
             killed: false,
             stderr: Vec::new(),
         }
@@ -273,7 +284,10 @@ impl ScriptedProcess {
         Self {
             lines: lines.into_iter().map(Into::into).collect(),
             output_mode: OutputMode::StreamJson,
-            exit: AgentExit { success: true, code: Some(0) },
+            exit: AgentExit {
+                success: true,
+                code: Some(0),
+            },
             killed: false,
             stderr: Vec::new(),
         }
@@ -310,7 +324,11 @@ impl AgentIo for ScriptedProcess {
     fn try_wait(&mut self) -> Option<AgentExit> {
         // Mirror real semantics: "exited" only once the scripted stream is
         // drained ; otherwise "still running" (None).
-        if self.lines.is_empty() { Some(self.exit) } else { None }
+        if self.lines.is_empty() {
+            Some(self.exit)
+        } else {
+            None
+        }
     }
     fn child_id(&self) -> Option<u32> {
         None
@@ -337,8 +355,11 @@ pub fn fix_file_ownership(work_dir: &Path) {
 
     // Skip if container user already matches the desired UID (expected when
     // APP_UID build arg matches KRONN_HOST_UID — the normal case after the fix).
-    if let Ok(output) = sync_cmd("id").arg("-u")
-        .stdout(Stdio::piped()).stderr(Stdio::null()).output()
+    if let Ok(output) = sync_cmd("id")
+        .arg("-u")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
     {
         let current_uid = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if current_uid == uid {
@@ -457,7 +478,11 @@ impl<'a> AgentStartConfig<'a> {
 
 /// Resolve a ModelTier to a concrete --model flag value for a given agent.
 /// Returns None for Default tier or agents without --model support.
-pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overrides: Option<&ModelTiersConfig>) -> Option<String> {
+pub(crate) fn resolve_model_flag(
+    agent_type: &AgentType,
+    tier: ModelTier,
+    overrides: Option<&ModelTiersConfig>,
+) -> Option<String> {
     // Check user overrides first (all tiers including Default)
     if let Some(cfg) = overrides {
         let agent_cfg = match agent_type {
@@ -506,19 +531,19 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
     // Built-in defaults — explicit model for each tier so tiers are always distinct.
     // Default maps to the "standard" model, not "no flag" (which depends on user subscription).
     match (agent_type, tier) {
-        (AgentType::ClaudeCode, ModelTier::Economy)  => Some("haiku".into()),
-        (AgentType::ClaudeCode, ModelTier::Default)   => Some("sonnet".into()),
+        (AgentType::ClaudeCode, ModelTier::Economy) => Some("haiku".into()),
+        (AgentType::ClaudeCode, ModelTier::Default) => Some("sonnet".into()),
         (AgentType::ClaudeCode, ModelTier::Reasoning) => Some("opus".into()),
         // 2026-07: gpt-5.6 generation (sol=frontier, terra=balanced, luna=fast).
-        (AgentType::Codex, ModelTier::Economy)        => Some("gpt-5.6-luna".into()),
-        (AgentType::Codex, ModelTier::Default)        => None, // Codex default is fine
-        (AgentType::Codex, ModelTier::Reasoning)      => Some("gpt-5.6-sol".into()),
-        (AgentType::GeminiCli, ModelTier::Economy)    => Some("gemini-2.5-flash".into()),
-        (AgentType::GeminiCli, ModelTier::Default)    => None, // Gemini default is fine
-        (AgentType::GeminiCli, ModelTier::Reasoning)  => Some("gemini-3.1-pro-preview".into()),
-        (AgentType::CopilotCli, ModelTier::Economy)   => Some("gpt-4o-mini".into()),
-        (AgentType::CopilotCli, ModelTier::Default)    => None, // Copilot default is fine
-        (AgentType::CopilotCli, ModelTier::Reasoning)  => Some("o4-mini".into()),
+        (AgentType::Codex, ModelTier::Economy) => Some("gpt-5.6-luna".into()),
+        (AgentType::Codex, ModelTier::Default) => None, // Codex default is fine
+        (AgentType::Codex, ModelTier::Reasoning) => Some("gpt-5.6-sol".into()),
+        (AgentType::GeminiCli, ModelTier::Economy) => Some("gemini-2.5-flash".into()),
+        (AgentType::GeminiCli, ModelTier::Default) => None, // Gemini default is fine
+        (AgentType::GeminiCli, ModelTier::Reasoning) => Some("gemini-3.1-pro-preview".into()),
+        (AgentType::CopilotCli, ModelTier::Economy) => Some("gpt-4o-mini".into()),
+        (AgentType::CopilotCli, ModelTier::Default) => None, // Copilot default is fine
+        (AgentType::CopilotCli, ModelTier::Reasoning) => Some("o4-mini".into()),
         // Ollama: the user normally picks a model per tier via the OllamaCard
         // (override above). These are the pulled-tag fallbacks when none is set,
         // deliberately portability-first (NOT tuned for a beefy machine):
@@ -533,9 +558,9 @@ pub(crate) fn resolve_model_flag(agent_type: &AgentType, tier: ModelTier, overri
         // only heavy fallback (qwen3:30b-a3b MoE) — an explicit opt-in tier;
         // small machines should override it. Never bare tags like `qwen3` (not
         // pullable) or `llama3.2` (not pulled) → opaque Ollama 404.
-        (AgentType::Ollama, ModelTier::Default)        => Some("qwen3:8b".into()),
-        (AgentType::Ollama, ModelTier::Economy)        => Some("qwen3:8b".into()),
-        (AgentType::Ollama, ModelTier::Reasoning)      => Some("qwen3:30b-a3b".into()),
+        (AgentType::Ollama, ModelTier::Default) => Some("qwen3:8b".into()),
+        (AgentType::Ollama, ModelTier::Economy) => Some("qwen3:8b".into()),
+        (AgentType::Ollama, ModelTier::Reasoning) => Some("qwen3:30b-a3b".into()),
         // Kiro, Vibe: no --model flag support
         _ => None,
     }
@@ -569,7 +594,8 @@ pub async fn start_agent(
     start_agent_with_config(AgentStartConfig {
         full_access,
         ..AgentStartConfig::new(agent_type, project_path, prompt, tokens)
-    }).await
+    })
+    .await
 }
 
 /// Start an agent process with full configuration.
@@ -610,11 +636,16 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // `project_path` (unchanged behaviour). Additive: only creates missing
     // files, never removes others.
     let agent_cwd = config.work_dir.unwrap_or(config.project_path);
-    let native_sync_ok = if !agent_cwd.is_empty() && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty()) {
+    let native_sync_ok = if !agent_cwd.is_empty()
+        && (!config.skill_ids.is_empty() || !config.profile_ids.is_empty())
+    {
         let profile_ids_vec: Vec<String> = config.profile_ids.to_vec();
         crate::core::native_files::sync_project_native_files(
-            agent_cwd, config.skill_ids, &profile_ids_vec,
-        ).is_ok()
+            agent_cwd,
+            config.skill_ids,
+            &profile_ids_vec,
+        )
+        .is_ok()
     } else {
         false
     };
@@ -713,11 +744,30 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     if let Some(preamble) = crate::core::anti_halluc::preamble_if_active() {
         parts.push(preamble.to_string());
     }
-    if !user_context.is_empty() { parts.push(format!("=== USER CONTEXT (cross-project) ===\n\n{}", user_context)); }
-    if !profiles_prompt.is_empty() { parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt)); }
-    if !skills_prompt.is_empty() { parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt)); }
-    if !doc_author_prompt.is_empty() { parts.push(format!("=== DOC AUTHORING DISCIPLINE (enforce) ===\n\n{}", doc_author_prompt)); }
-    if !config.context_files_prompt.is_empty() { parts.push(format!("=== CONTEXT FILES ===\n\n{}", config.context_files_prompt)); }
+    if !user_context.is_empty() {
+        parts.push(format!(
+            "=== USER CONTEXT (cross-project) ===\n\n{}",
+            user_context
+        ));
+    }
+    if !profiles_prompt.is_empty() {
+        parts.push(format!("=== YOUR ROLE ===\n\n{}", profiles_prompt));
+    }
+    if !skills_prompt.is_empty() {
+        parts.push(format!("=== YOUR EXPERTISE ===\n\n{}", skills_prompt));
+    }
+    if !doc_author_prompt.is_empty() {
+        parts.push(format!(
+            "=== DOC AUTHORING DISCIPLINE (enforce) ===\n\n{}",
+            doc_author_prompt
+        ));
+    }
+    if !config.context_files_prompt.is_empty() {
+        parts.push(format!(
+            "=== CONTEXT FILES ===\n\n{}",
+            config.context_files_prompt
+        ));
+    }
     // Ollama runs over bare HTTP chat: no filesystem, no tool-execution loop.
     // Two consequences the other agents don't have:
     //  1. CLI agents read `docs/AGENTS.md` themselves from the project CWD —
@@ -734,9 +784,13 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                 const MAX_INLINE_DOC: usize = 24_000;
                 if doc.len() > MAX_INLINE_DOC {
                     let mut cut = MAX_INLINE_DOC;
-                    while !doc.is_char_boundary(cut) { cut -= 1; }
+                    while !doc.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
                     doc.truncate(cut);
-                    doc.push_str("\n\n[… truncated — full doc exceeds the inline context budget …]");
+                    doc.push_str(
+                        "\n\n[… truncated — full doc exceeds the inline context budget …]",
+                    );
                 }
                 // The doc INDEXES other files (docs/examples/*.md, …) the model
                 // cannot open — without this note it claims "all of docs/ is
@@ -761,12 +815,20 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     } else if !mcp_context.is_empty() {
         parts.push(format!("=== AVAILABLE TOOLS ===\n\n{}", mcp_context));
     }
-    if !directives_prompt.is_empty() { parts.push(format!("=== OUTPUT REQUIREMENTS ===\n\n{}", directives_prompt)); }
+    if !directives_prompt.is_empty() {
+        parts.push(format!(
+            "=== OUTPUT REQUIREMENTS ===\n\n{}",
+            directives_prompt
+        ));
+    }
     // The memory prelude tells agents to WRITE learnings back into docs/ —
     // meaningless for Ollama (no file access) and actively harmful: it made the
     // model claim "I can modify docs/ files" (observed 2026-07-01).
     if *config.agent_type != AgentType::Ollama {
-        parts.push(format!("=== PROJECT MEMORY (write back what you learn) ===\n\n{}", memory_prelude));
+        parts.push(format!(
+            "=== PROJECT MEMORY (write back what you learn) ===\n\n{}",
+            memory_prelude
+        ));
     }
     let extra_context = parts.join("\n\n");
 
@@ -795,20 +857,36 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     // doesn't confuse MCP context with the user's question, (2) token
     // counts in the response, (3) works without the ollama binary (Docker).
     if *config.agent_type == AgentType::Ollama {
-        let model_flag = effective_model_flag(config.model_override, config.agent_type, config.tier, config.model_tiers);
+        let model_flag = effective_model_flag(
+            config.model_override,
+            config.agent_type,
+            config.tier,
+            config.model_tiers,
+        );
         return start_ollama_http(
             config.prompt,
             &extra_context,
             model_flag.as_deref().unwrap_or("qwen3:8b"),
             config.ollama_format,
-        ).await;
+        )
+        .await;
     }
 
     // Resolve model: explicit per-step/per-QP override wins, else tier → model.
-    let model_flag = effective_model_flag(config.model_override, config.agent_type, config.tier, config.model_tiers);
+    let model_flag = effective_model_flag(
+        config.model_override,
+        config.agent_type,
+        config.tier,
+        config.model_tiers,
+    );
 
-    let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) =
-        agent_command(config.agent_type, config.prompt, config.full_access, &extra_context, model_flag.as_deref());
+    let (binary, npx_pkg, mut args, env_key, stderr_mode, output_mode) = agent_command(
+        config.agent_type,
+        config.prompt,
+        config.full_access,
+        &extra_context,
+        model_flag.as_deref(),
+    );
 
     // Use work_dir (or project_path) for the agent's CWD
     let effective_work_dir = config.work_dir.unwrap_or(config.project_path);
@@ -854,11 +932,17 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
 
             // Re-push --append-system-prompt and its value
             if let Some((flag, val)) = sys_prompt_val {
-                if let Some(f) = flag { args.push(f); }
-                if let Some(v) = val { args.push(v); }
+                if let Some(f) = flag {
+                    args.push(f);
+                }
+                if let Some(v) = val {
+                    args.push(v);
+                }
             }
             // Re-push prompt
-            if let Some(p) = prompt_arg { args.push(p); }
+            if let Some(p) = prompt_arg {
+                args.push(p);
+            }
         }
     }
 
@@ -893,7 +977,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     );
                     // Find a safe UTF-8 boundary at or below the cap.
                     let mut cut = MAX_SINGLE_ARG_BYTES;
-                    while cut > 0 && !val.is_char_boundary(cut) { cut -= 1; }
+                    while cut > 0 && !val.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
                     val.truncate(cut);
                     val.push_str("\n\n[... system prompt truncated by Kronn to fit ARG_MAX ...]");
                 }
@@ -905,12 +991,30 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
     };
 
     // Try direct binary first, then npx fallback
-    let mut child = match try_spawn(binary, None, &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref(), config.discussion_id) {
+    let mut child = match try_spawn(
+        binary,
+        None,
+        &args,
+        &work_dir,
+        env_key,
+        api_key.as_deref(),
+        stdin_prompt.as_deref(),
+        config.discussion_id,
+    ) {
         Ok(c) => c,
         Err(e) => {
             tracing::info!("Direct binary '{}' failed ({}), trying npx...", binary, e);
             if let Some(pkg) = npx_pkg {
-                try_spawn("npx", Some(pkg), &args, &work_dir, env_key, api_key.as_deref(), stdin_prompt.as_deref(), config.discussion_id)?
+                try_spawn(
+                    "npx",
+                    Some(pkg),
+                    &args,
+                    &work_dir,
+                    env_key,
+                    api_key.as_deref(),
+                    stdin_prompt.as_deref(),
+                    config.discussion_id,
+                )?
             } else {
                 return Err(e);
             }
@@ -932,7 +1036,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
             loop {
                 match lines.next_line().await {
                     Ok(Some(line)) => {
-                        if tx_out.send(line).await.is_err() { break; }
+                        if tx_out.send(line).await.is_err() {
+                            break;
+                        }
                     }
                     Ok(None) => break,
                     Err(e) => {
@@ -953,7 +1059,9 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                     loop {
                         match lines.next_line().await {
                             Ok(Some(line)) => {
-                                if tx_err.send(line).await.is_err() { break; }
+                                if tx_err.send(line).await.is_err() {
+                                    break;
+                                }
                             }
                             Ok(None) => break,
                             Err(e) => {
@@ -980,7 +1088,10 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
                             }
                             Ok(None) => break,
                             Err(e) => {
-                                tracing::warn!("agent stderr read error (capture truncated): {}", e);
+                                tracing::warn!(
+                                    "agent stderr read error (capture truncated): {}",
+                                    e
+                                );
                                 break;
                             }
                         }
@@ -990,7 +1101,15 @@ pub async fn start_agent_with_config(config: AgentStartConfig<'_>) -> Result<Age
         }
     }
 
-    Ok(AgentProcess { child, output_mode, work_dir, agent_type: config.agent_type.clone(), rx, stderr_capture, stderr_task: stderr_handle })
+    Ok(AgentProcess {
+        child,
+        output_mode,
+        work_dir,
+        agent_type: config.agent_type.clone(),
+        rx,
+        stderr_capture,
+        stderr_task: stderr_handle,
+    })
 }
 
 /// Ensure kiro-cli is available inside the container.
@@ -1058,7 +1177,10 @@ fn vibe_runner_path() -> String {
                 dir.join("scripts").join("vibe-runner.py"),
                 dir.join("..").join("scripts").join("vibe-runner.py"),
                 // macOS .app bundle: Contents/Resources/scripts/
-                dir.join("..").join("Resources").join("scripts").join("vibe-runner.py"),
+                dir.join("..")
+                    .join("Resources")
+                    .join("scripts")
+                    .join("vibe-runner.py"),
                 // Windows: alongside the .exe
                 dir.join("vibe-runner.py"),
             ];
@@ -1100,8 +1222,13 @@ pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
         if let Some(dir) = exe.parent() {
             let candidates = [
                 dir.join("scripts").join("disc-introspection-mcp.py"),
-                dir.join("..").join("scripts").join("disc-introspection-mcp.py"),
-                dir.join("..").join("Resources").join("scripts").join("disc-introspection-mcp.py"),
+                dir.join("..")
+                    .join("scripts")
+                    .join("disc-introspection-mcp.py"),
+                dir.join("..")
+                    .join("Resources")
+                    .join("scripts")
+                    .join("disc-introspection-mcp.py"),
                 dir.join("disc-introspection-mcp.py"),
             ];
             for c in &candidates {
@@ -1111,7 +1238,10 @@ pub(crate) fn disc_introspection_mcp_path() -> Option<String> {
             }
         }
     }
-    let dev_path = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/disc-introspection-mcp.py");
+    let dev_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/scripts/disc-introspection-mcp.py"
+    );
     if std::path::Path::new(dev_path).exists() {
         return Some(dev_path.to_string());
     }
@@ -1232,8 +1362,9 @@ pub(crate) fn parse_context_length(show_response: &serde_json::Value) -> Option<
 /// cache (one `/api/show` per model per boot — the value is static per tag).
 /// `None` on any failure: the caller falls back to the portable default.
 async fn ollama_model_ctx_limit(base: &str, model: &str) -> Option<u64> {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, Option<u64>>>> =
-        std::sync::OnceLock::new();
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Option<u64>>>,
+    > = std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(Default::default);
     // Key on base+model: switching the Ollama endpoint in config must not
     // serve the previous server's limits for the rest of the process.
@@ -1394,7 +1525,9 @@ pub(crate) async fn forward_ollama_line(
     // chars/3 estimate, which is blind to token-dense content. 0 = unknown.
     num_ctx: u64,
 ) -> bool {
-    if line.trim().is_empty() { return true; }
+    if line.trim().is_empty() {
+        return true;
+    }
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
         // In-band error object ({"error":"model runner has unexpectedly
         // stopped"}, sent on a 200 stream when the model crashes mid-
@@ -1505,7 +1638,8 @@ async fn start_ollama_http(
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let response = client.post(&url)
+    let response = client
+        .post(&url)
         .json(&body)
         .send()
         .await
@@ -1571,7 +1705,9 @@ async fn start_ollama_http(
                 Err(e) => {
                     tracing::warn!("Ollama stream error: {}", e);
                     if let Ok(mut se) = stderr_clone.lock() {
-                        se.push(format!("Ollama stream error (connection lost mid-generation): {e}"));
+                        se.push(format!(
+                            "Ollama stream error (connection lost mid-generation): {e}"
+                        ));
                     }
                     got_error = true;
                     break;
@@ -1585,7 +1721,16 @@ async fn start_ollama_http(
                 let line = buffer[..newline_pos].to_string();
                 buffer = buffer[newline_pos + 1..].to_string();
                 // Consumer gone (cancel) → stop reading the HTTP body.
-                if !forward_ollama_line(&line, &tx, &stderr_clone, &mut got_done, &mut got_error, ctx_cap).await {
+                if !forward_ollama_line(
+                    &line,
+                    &tx,
+                    &stderr_clone,
+                    &mut got_done,
+                    &mut got_error,
+                    ctx_cap,
+                )
+                .await
+                {
                     finish(&mut lifeline, false).await;
                     return;
                 }
@@ -1595,7 +1740,15 @@ async fn start_ollama_http(
         // Non-streaming responses (format-constrained / TypedSchema steps set
         // stream:false) arrive as a single JSON object with no trailing
         // newline, so the line loop above never fires — flush the remainder.
-        let _ = forward_ollama_line(buffer.trim(), &tx, &stderr_clone, &mut got_done, &mut got_error, ctx_cap).await;
+        let _ = forward_ollama_line(
+            buffer.trim(),
+            &tx,
+            &stderr_clone,
+            &mut got_done,
+            &mut got_error,
+            ctx_cap,
+        )
+        .await;
 
         // A stream that ends without the terminal `done` chunk was truncated
         // (server closed the connection, proxy cut it, model unloaded) — that
@@ -1623,12 +1776,26 @@ async fn start_ollama_http(
 /// MCP context is injected via --append-system-prompt for Claude Code,
 /// or prepended to the prompt for other agents.
 /// Returns: (binary, npx_package, args, env_key, stderr_mode, output_mode)
-fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_context: &str, model_flag: Option<&str>) -> (&'static str, Option<&'static str>, Vec<String>, &'static str, StderrMode, OutputMode) {
+fn agent_command(
+    agent_type: &AgentType,
+    prompt: &str,
+    full_access: bool,
+    mcp_context: &str,
+    model_flag: Option<&str>,
+) -> (
+    &'static str,
+    Option<&'static str>,
+    Vec<String>,
+    &'static str,
+    StderrMode,
+    OutputMode,
+) {
     match agent_type {
         AgentType::ClaudeCode => {
             let mut args = vec![
                 "--print".into(),
-                "--output-format".into(), "stream-json".into(),
+                "--output-format".into(),
+                "stream-json".into(),
                 "--verbose".into(),
                 "--include-partial-messages".into(),
             ];
@@ -1653,7 +1820,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::StreamJson,
             )
-        },
+        }
         AgentType::Codex => {
             let mut args: Vec<String> = vec!["exec".into()];
             if let Some(model) = model_flag {
@@ -1693,7 +1860,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
-        },
+        }
         AgentType::Vibe => {
             // Vibe CLI hangs: get_prompt_from_stdin() blocks on sys.stdin.read()
             // when stdin is not a tty, and 429 rate limits cause infinite hangs.
@@ -1722,7 +1889,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
-        },
+        }
         AgentType::GeminiCli => {
             // Gemini CLI requires -p <prompt> as the LAST args.
             // Options (--model, --yolo) must come BEFORE -p, otherwise
@@ -1751,7 +1918,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
-        },
+        }
         AgentType::Kiro => {
             // --trust-all-tools is REQUIRED in --no-interactive mode,
             // otherwise Kiro blocks waiting for tool confirmation that never comes.
@@ -1759,7 +1926,8 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 "chat".into(),
                 "--no-interactive".into(),
                 "--trust-all-tools".into(),
-                "--wrap".into(), "never".into(),
+                "--wrap".into(),
+                "never".into(),
             ];
             let _ = full_access; // Always trusted in non-interactive mode
             let full_prompt = if mcp_context.is_empty() {
@@ -1776,11 +1944,9 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
-        },
+        }
         AgentType::CopilotCli => {
-            let mut args: Vec<String> = vec![
-                "-p".into(),
-            ];
+            let mut args: Vec<String> = vec!["-p".into()];
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
@@ -1803,7 +1969,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
-        },
+        }
         AgentType::Ollama => {
             // Ollama: local LLM inference via `ollama run <model> <prompt>`
             let model = model_flag.unwrap_or("qwen3:8b");
@@ -1826,7 +1992,7 @@ fn agent_command(agent_type: &AgentType, prompt: &str, full_access: bool, mcp_co
                 StderrMode::StdoutOnly,
                 OutputMode::Text,
             )
-        },
+        }
         AgentType::Custom => (
             "echo",
             None,
@@ -1860,10 +2026,7 @@ pub(crate) const MAX_SINGLE_ARG_BYTES: usize = 100 * 1024;
 ///
 /// Unknown binaries keep the override — they may legitimately need
 /// a host-rooted HOME (arbitrary user-installed tools).
-pub(crate) fn should_skip_home_override(
-    binary: &str,
-    npx_package: Option<&str>,
-) -> bool {
+pub(crate) fn should_skip_home_override(binary: &str, npx_package: Option<&str>) -> bool {
     matches!(
         binary,
         "claude" | "codex" | "vibe" | "gemini" | "kiro-cli" | "copilot"
@@ -1914,8 +2077,8 @@ fn try_spawn(
             .unwrap_or(false);
         ("npx".to_string(), npx_args, via_wsl)
     } else {
-        let bin_loc = super::find_binary(binary)
-            .ok_or_else(|| format!("Binary '{}' not found", binary))?;
+        let bin_loc =
+            super::find_binary(binary).ok_or_else(|| format!("Binary '{}' not found", binary))?;
         let via_wsl = bin_loc.via_wsl;
         (bin_loc.path, args.to_vec(), via_wsl)
     };
@@ -1948,9 +2111,16 @@ fn try_spawn(
     // the child process; duplicating it at INFO turns a transient exposure
     // into a durable one. Operational diagnostics only need the executable,
     // argument count, workdir and auth mode.
-    tracing::info!("Spawning agent: {} ({} args) in {} (key: {})",
-        cmd_name, cmd_args.len(), work_dir.display(),
-        if api_key.is_some() { "override" } else { "local auth" }
+    tracing::info!(
+        "Spawning agent: {} ({} args) in {} (key: {})",
+        cmd_name,
+        cmd_args.len(),
+        work_dir.display(),
+        if api_key.is_some() {
+            "override"
+        } else {
+            "local auth"
+        }
     );
 
     // Decide whether to wrap the command with `wsl.exe -e`. On Windows native
@@ -1995,7 +2165,11 @@ fn try_spawn(
     let mut cmd = async_cmd(&final_cmd);
     cmd.args(&final_args)
         .current_dir(&effective_work_dir)
-        .stdin(if stdin_payload.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin_payload.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         // SIGKILL the agent process if its `Child` is dropped before
@@ -2070,7 +2244,8 @@ fn try_spawn(
     }
 
     // Resolve the effective home for agent config lookups (cross-platform).
-    let effective_home = real_home.clone()
+    let effective_home = real_home
+        .clone()
         .or_else(|| std::env::var("HOME").ok())
         .or_else(|| std::env::var("USERPROFILE").ok());
 
@@ -2118,7 +2293,11 @@ fn try_spawn(
                 .filter(|o| o.status.success())
                 .and_then(|o| {
                     let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    if t.is_empty() { None } else { Some(t) }
+                    if t.is_empty() {
+                        None
+                    } else {
+                        Some(t)
+                    }
                 })
                 .ok_or(std::env::VarError::NotPresent)
         });
@@ -2134,7 +2313,8 @@ fn try_spawn(
         }
     }
 
-    let mut child = cmd.spawn()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Spawn failed for {}: {}", cmd_name, e))?;
 
     // Feed the prompt over stdin when requested. The caller uses this path
@@ -2186,7 +2366,9 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
     match event_type {
         // Wrapped Anthropic streaming events
         "stream_event" => {
-            let Some(event) = json.get("event") else { return StreamJsonEvent::Skip };
+            let Some(event) = json.get("event") else {
+                return StreamJsonEvent::Skip;
+            };
 
             // Text delta: event.delta.type == "text_delta"
             if let Some(delta) = event.get("delta") {
@@ -2207,10 +2389,20 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
             // message_delta may carry usage
             if event.get("type").and_then(|v| v.as_str()) == Some("message_delta") {
                 if let Some(usage) = event.get("usage") {
-                    let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let input = usage
+                        .get("input_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let output = usage
+                        .get("output_tokens")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
                     if input > 0 || output > 0 {
-                        return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output, cost_usd: None };
+                        return StreamJsonEvent::Usage {
+                            input_tokens: input,
+                            output_tokens: output,
+                            cost_usd: None,
+                        };
                     }
                 }
             }
@@ -2226,7 +2418,10 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 
             // Content block start — tool use or thinking
             if let Some(content_block) = event.get("content_block") {
-                let block_type = content_block.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let block_type = content_block
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if block_type == "tool_use" {
                     if let Some(name) = content_block.get("name").and_then(|v| v.as_str()) {
                         return StreamJsonEvent::ToolStart(name.to_string());
@@ -2245,12 +2440,25 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 
         // Final result line — contains token usage and cost
         "result" => {
-            let cost = json.get("cost_usd").and_then(|v| v.as_f64()).filter(|c| *c > 0.0);
+            let cost = json
+                .get("cost_usd")
+                .and_then(|v| v.as_f64())
+                .filter(|c| *c > 0.0);
             if let Some(usage) = json.get("usage") {
-                let input = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-                let output = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                let input = usage
+                    .get("input_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let output = usage
+                    .get("output_tokens")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
                 if input > 0 || output > 0 {
-                    return StreamJsonEvent::Usage { input_tokens: input, output_tokens: output, cost_usd: cost };
+                    return StreamJsonEvent::Usage {
+                        input_tokens: input,
+                        output_tokens: output,
+                        cost_usd: cost,
+                    };
                 }
             }
             StreamJsonEvent::Skip
@@ -2287,9 +2495,8 @@ pub fn parse_claude_stream_line(line: &str) -> StreamJsonEvent {
 /// may contain other `<...>` patterns (code samples, XML docs, etc.), and
 /// over-stripping would be worse than the leak.
 pub fn strip_thinking_leaks(s: &str) -> String {
-    static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"(?i)</?think(ing)?>").unwrap()
-    });
+    static RE: std::sync::LazyLock<regex_lite::Regex> =
+        std::sync::LazyLock::new(|| regex_lite::Regex::new(r"(?i)</?think(ing)?>").unwrap());
     RE.replace_all(s, "").to_string()
 }
 
@@ -2297,7 +2504,8 @@ pub fn strip_thinking_leaks(s: &str) -> String {
 /// Handles CSI sequences (\x1b[...m), OSC, and other common escape patterns.
 pub fn strip_ansi(s: &str) -> String {
     static RE: std::sync::LazyLock<regex_lite::Regex> = std::sync::LazyLock::new(|| {
-        regex_lite::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]").unwrap()
+        regex_lite::Regex::new(r"\x1b\[[0-9;?]*[a-zA-Z]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-B]")
+            .unwrap()
     });
     RE.replace_all(s, "").to_string()
 }
@@ -2336,14 +2544,22 @@ pub fn clean_kiro_line(line: &str) -> Option<String> {
     } else {
         trimmed.to_string()
     };
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Parse token usage from agent output.
 /// Codex outputs "tokens used\nN,NNN" on stderr (StdoutOnly mode captures it).
 /// Kiro outputs "Credits: 0.05 • Time: 3s" on stderr.
 /// Returns (cleaned_response, tokens_used) — token lines are stripped if found in response.
-pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &[String]) -> (String, u64) {
+pub fn parse_token_usage(
+    agent_type: &AgentType,
+    response: &str,
+    stderr_lines: &[String],
+) -> (String, u64) {
     match agent_type {
         AgentType::Kiro => {
             // Kiro outputs "Credits: X.XX" or "▸ Credits: X.XX" on stderr.
@@ -2353,7 +2569,11 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
             for line in stderr_lines {
                 let clean = strip_ansi(line);
                 if let Some(credits_part) = clean.split("Credits:").nth(1) {
-                    let credits_str = credits_part.split('•').next().unwrap_or(credits_part).trim();
+                    let credits_str = credits_part
+                        .split('•')
+                        .next()
+                        .unwrap_or(credits_part)
+                        .trim();
                     if let Ok(credits) = credits_str.parse::<f64>() {
                         let tokens = (credits * 10000.0) as u64;
                         return (response.to_string(), tokens);
@@ -2363,7 +2583,10 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
                 }
             }
             if !stderr_lines.is_empty() {
-                tracing::debug!("Kiro stderr ({} lines), no Credits found", stderr_lines.len());
+                tracing::debug!(
+                    "Kiro stderr ({} lines), no Credits found",
+                    stderr_lines.len()
+                );
             }
             (response.to_string(), 0)
         }
@@ -2374,7 +2597,8 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
                 let last = stderr_lines[stderr_lines.len() - 1].trim();
                 let second_last = stderr_lines[stderr_lines.len() - 2].trim();
                 if second_last == "tokens used" {
-                    let count_str: String = last.chars().filter(|c| *c != ',' && *c != '.').collect();
+                    let count_str: String =
+                        last.chars().filter(|c| *c != ',' && *c != '.').collect();
                     if let Ok(count) = count_str.parse::<u64>() {
                         return (response.to_string(), count);
                     }
@@ -2386,7 +2610,8 @@ pub fn parse_token_usage(agent_type: &AgentType, response: &str, stderr_lines: &
                 let last = lines[lines.len() - 1].trim();
                 let second_last = lines[lines.len() - 2].trim();
                 if second_last == "tokens used" {
-                    let count_str: String = last.chars().filter(|c| *c != ',' && *c != '.').collect();
+                    let count_str: String =
+                        last.chars().filter(|c| *c != ',' && *c != '.').collect();
                     if let Ok(count) = count_str.parse::<u64>() {
                         let clean = lines[..lines.len() - 2].join("\n");
                         return (clean, count);
@@ -2470,7 +2695,11 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
         // For Google specifically, also try the gemini-cli settings.json
         // fallback before giving up — see comment in the main return below.
         return std::env::var(env_key).ok().or_else(|| {
-            if provider == "google" { read_gemini_settings_api_key() } else { None }
+            if provider == "google" {
+                read_gemini_settings_api_key()
+            } else {
+                None
+            }
         });
     }
 
@@ -2487,11 +2716,16 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
     // confusing fallback message `MCP issues detected. Run /mcp list
     // for status.` followed by the real `Network error. Unable to reach
     // the API.` because no API key meant no API call.
-    tokens.active_key_for(provider)
+    tokens
+        .active_key_for(provider)
         .map(|s| s.to_string())
         .or_else(|| std::env::var(env_key).ok())
         .or_else(|| {
-            if provider == "google" { read_gemini_settings_api_key() } else { None }
+            if provider == "google" {
+                read_gemini_settings_api_key()
+            } else {
+                None
+            }
         })
 }
 
@@ -2501,9 +2735,15 @@ fn get_api_key(env_key: &str, tokens: &TokensConfig) -> Option<String> {
 /// available" the same way as before this fallback existed.
 fn read_gemini_settings_api_key() -> Option<String> {
     let home = std::env::var("HOME").ok()?;
-    let path = std::path::Path::new(&home).join(".gemini").join("settings.json");
+    let path = std::path::Path::new(&home)
+        .join(".gemini")
+        .join("settings.json");
     let raw = std::fs::read_to_string(&path).ok()?;
     let val: serde_json::Value = serde_json::from_str(&raw).ok()?;
     let key = val.get("apiKey")?.as_str()?.trim();
-    if key.is_empty() { None } else { Some(key.to_string()) }
+    if key.is_empty() {
+        None
+    } else {
+        Some(key.to_string())
+    }
 }

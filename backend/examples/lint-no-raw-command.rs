@@ -41,9 +41,7 @@ use walkdir::WalkDir;
 ///   - Anything matching `*_test.rs` is test-only by convention.
 fn is_exempt_file(path: &Path) -> bool {
     let p = path.to_string_lossy();
-    p.ends_with("core/cmd.rs")
-        || p.ends_with("core\\cmd.rs")
-        || p.contains("_test.rs")
+    p.ends_with("core/cmd.rs") || p.ends_with("core\\cmd.rs") || p.contains("_test.rs")
 }
 
 /// True when an attribute is `#[cfg(test)]` or `#[cfg(any(test, ...))]` or
@@ -106,9 +104,7 @@ impl Linter {
         };
         let segments = &p.path.segments;
         let n = segments.len();
-        n >= 2
-            && segments[n - 2].ident == "Command"
-            && segments[n - 1].ident == "new"
+        n >= 2 && segments[n - 2].ident == "Command" && segments[n - 1].ident == "new"
     }
 }
 
@@ -192,7 +188,11 @@ fn lint_file(path: &Path) -> std::io::Result<Vec<(usize, String)>> {
             // Don't fail the lint when the file doesn't parse — that's
             // rustc's job. We just can't analyze it. Print a warning so
             // CI shows the skip but doesn't break.
-            eprintln!("warning: {} could not be parsed by syn: {}", path.display(), e);
+            eprintln!(
+                "warning: {} could not be parsed by syn: {}",
+                path.display(),
+                e
+            );
             return Ok(Vec::new());
         }
     };

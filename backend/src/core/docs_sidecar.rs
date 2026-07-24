@@ -164,7 +164,9 @@ impl DocsSidecar {
                 let _ = child.kill().await;
             }
             Err(_) => {
-                tracing::warn!("kronn-docs sidecar did not print READY marker within 15 s — aborting");
+                tracing::warn!(
+                    "kronn-docs sidecar did not print READY marker within 15 s — aborting"
+                );
                 let _ = child.kill().await;
             }
         }
@@ -282,11 +284,17 @@ mod tests {
         let p = venv_python_path();
         let s = p.to_string_lossy();
         if cfg!(windows) {
-            assert!(s.ends_with("python.exe"), "expected Scripts\\python.exe, got {s}");
+            assert!(
+                s.ends_with("python.exe"),
+                "expected Scripts\\python.exe, got {s}"
+            );
         } else {
             assert!(s.ends_with("bin/python"), "expected bin/python, got {s}");
         }
-        assert!(s.contains(".kronn"), "path should be under ~/.kronn, got {s}");
+        assert!(
+            s.contains(".kronn"),
+            "path should be under ~/.kronn, got {s}"
+        );
     }
 
     #[test]
@@ -324,11 +332,8 @@ mod tests {
         std::fs::write(&venv, b"venv").unwrap();
 
         let source = root.join("source-bundle");
-        let resolved = resolve_sidecar_program(
-            Some(root.join("missing").into_os_string()),
-            &source,
-            &venv,
-        );
+        let resolved =
+            resolve_sidecar_program(Some(root.join("missing").into_os_string()), &source, &venv);
         assert_eq!(resolved, Some(SidecarProgram::PythonModule(venv)));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -337,11 +342,8 @@ mod tests {
     #[test]
     fn no_installed_program_returns_none() {
         let root = test_dir("missing");
-        let resolved = resolve_sidecar_program(
-            None,
-            &root.join("source-bundle"),
-            &root.join("venv-python"),
-        );
+        let resolved =
+            resolve_sidecar_program(None, &root.join("source-bundle"), &root.join("venv-python"));
         assert_eq!(resolved, None);
     }
 
@@ -352,8 +354,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(&source, b"bundle").unwrap();
 
-        let resolved =
-            resolve_sidecar_program(None, &source, &root.join("missing-venv-python"));
+        let resolved = resolve_sidecar_program(None, &source, &root.join("missing-venv-python"));
         assert_eq!(resolved, Some(SidecarProgram::Bundled(source)));
 
         std::fs::remove_dir_all(root).unwrap();

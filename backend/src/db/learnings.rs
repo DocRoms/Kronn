@@ -122,7 +122,11 @@ pub fn list(
         sql.push_str(" AND status = ?1");
     }
     if project_id.is_some() {
-        sql.push_str(if status.is_some() { " AND project_id = ?2" } else { " AND project_id = ?1" });
+        sql.push_str(if status.is_some() {
+            " AND project_id = ?2"
+        } else {
+            " AND project_id = ?1"
+        });
     }
     sql.push_str(" ORDER BY created_at DESC");
     let mut stmt = conn.prepare(&sql)?;
@@ -191,7 +195,13 @@ pub fn finalize_promotion(
     conn.execute(
         "UPDATE learnings SET status = 'promoted', scope = ?2, promoted_target = ?3, \
          validated_by = ?4, last_validated_at = ?5 WHERE id = ?1 AND status = 'promoting'",
-        params![id, scope.as_str(), promoted_target, validated_by, Utc::now().to_rfc3339()],
+        params![
+            id,
+            scope.as_str(),
+            promoted_target,
+            validated_by,
+            Utc::now().to_rfc3339()
+        ],
     )?;
     Ok(())
 }
@@ -261,9 +271,8 @@ pub fn record_rejection(conn: &Connection, claim_hash: &str, reason: &str) -> Re
 
 /// Passe D (export v5) — every rejection counter row, for DB export.
 pub fn list_rejections(conn: &Connection) -> Result<Vec<crate::models::LearningRejection>> {
-    let mut stmt = conn.prepare(
-        "SELECT claim_hash, reason, count, last_at FROM learning_rejections",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT claim_hash, reason, count, last_at FROM learning_rejections")?;
     let rows = stmt.query_map([], |r| {
         Ok(crate::models::LearningRejection {
             claim_hash: r.get(0)?,
@@ -272,12 +281,16 @@ pub fn list_rejections(conn: &Connection) -> Result<Vec<crate::models::LearningR
             last_at: r.get(3)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Passe D (import v5) — restore a rejection row VERBATIM (count and last_at
 /// preserved — `record_rejection` would restart the counter at 1).
-pub fn insert_rejection_row(conn: &Connection, rej: &crate::models::LearningRejection) -> Result<()> {
+pub fn insert_rejection_row(
+    conn: &Connection,
+    rej: &crate::models::LearningRejection,
+) -> Result<()> {
     conn.execute(
         "INSERT INTO learning_rejections (claim_hash, reason, count, last_at) \
          VALUES (?1, ?2, ?3, ?4) \
@@ -310,7 +323,8 @@ mod tests {
              CREATE TABLE discussions(id TEXT PRIMARY KEY);",
         )
         .unwrap();
-        conn.execute_batch(include_str!("sql/063_continual_learning.sql")).unwrap();
+        conn.execute_batch(include_str!("sql/063_continual_learning.sql"))
+            .unwrap();
         // Seed the parent rows the samples reference (FK enforcement is on).
         conn.execute_batch(
             "INSERT INTO projects(id) VALUES('p1'); \
@@ -384,9 +398,15 @@ mod tests {
         let c = mem_db();
         insert(&c, &sample("r1", "same claim")).unwrap();
         assert!(reject(&c, "r1").unwrap(), "pending row rejected");
-        assert!(insert(&c, &sample("r2", "same claim")).is_ok(), "rejected must not block re-proposal");
+        assert!(
+            insert(&c, &sample("r2", "same claim")).is_ok(),
+            "rejected must not block re-proposal"
+        );
         // ...but two NON-rejected of the same key are still blocked.
-        assert!(insert(&c, &sample("r3", "same claim")).is_err(), "two active dups still blocked");
+        assert!(
+            insert(&c, &sample("r3", "same claim")).is_err(),
+            "two active dups still blocked"
+        );
     }
 
     #[test]
@@ -403,12 +423,25 @@ mod tests {
     fn two_phase_promotion_claims_then_finalizes() {
         let c = mem_db();
         insert(&c, &sample("v", "validate me")).unwrap();
-        assert!(claim_for_promotion(&c, "v").unwrap(), "claim wins on pending");
-        assert_eq!(get(&c, "v").unwrap().unwrap().status, LearningStatus::Promoting);
+        assert!(
+            claim_for_promotion(&c, "v").unwrap(),
+            "claim wins on pending"
+        );
+        assert_eq!(
+            get(&c, "v").unwrap().unwrap().status,
+            LearningStatus::Promoting
+        );
         // a second claim loses (already promoting), and reject is blocked too.
         assert!(!claim_for_promotion(&c, "v").unwrap(), "double-claim loses");
         assert!(!reject(&c, "v").unwrap(), "reject blocked while promoting");
-        finalize_promotion(&c, "v", LearningScope::Project, Some("docs/learnings.md"), "human").unwrap();
+        finalize_promotion(
+            &c,
+            "v",
+            LearningScope::Project,
+            Some("docs/learnings.md"),
+            "human",
+        )
+        .unwrap();
         let got = get(&c, "v").unwrap().unwrap();
         assert_eq!(got.status, LearningStatus::Promoted);
         assert_eq!(got.scope, Some(LearningScope::Project));
@@ -423,7 +456,10 @@ mod tests {
         insert(&c, &sample("rv", "revert me")).unwrap();
         assert!(claim_for_promotion(&c, "rv").unwrap());
         revert_promotion(&c, "rv").unwrap();
-        assert_eq!(get(&c, "rv").unwrap().unwrap().status, LearningStatus::Pending);
+        assert_eq!(
+            get(&c, "rv").unwrap().unwrap().status,
+            LearningStatus::Pending
+        );
         // re-claimable after revert (failed-write self-heal).
         assert!(claim_for_promotion(&c, "rv").unwrap());
     }
@@ -434,10 +470,16 @@ mod tests {
         insert(&c, &sample("s1", "stuck one")).unwrap();
         insert(&c, &sample("s2", "stuck two")).unwrap();
         claim_for_promotion(&c, "s1").unwrap(); // → promoting (simulate crash mid-promotion)
-        // s2 stays pending; only the promoting one is recovered.
+                                                // s2 stays pending; only the promoting one is recovered.
         assert_eq!(recover_stranded_promoting(&c).unwrap(), 1);
-        assert_eq!(get(&c, "s1").unwrap().unwrap().status, LearningStatus::Pending);
-        assert_eq!(get(&c, "s2").unwrap().unwrap().status, LearningStatus::Pending);
+        assert_eq!(
+            get(&c, "s1").unwrap().unwrap().status,
+            LearningStatus::Pending
+        );
+        assert_eq!(
+            get(&c, "s2").unwrap().unwrap().status,
+            LearningStatus::Pending
+        );
         // recovered row is re-claimable (self-heal on re-validate).
         assert!(claim_for_promotion(&c, "s1").unwrap());
     }
@@ -447,7 +489,10 @@ mod tests {
         let c = mem_db();
         insert(&c, &sample("rj", "reject me")).unwrap();
         assert!(reject(&c, "rj").unwrap(), "first reject ok");
-        assert!(!reject(&c, "rj").unwrap(), "second reject is a no-op (already rejected)");
+        assert!(
+            !reject(&c, "rj").unwrap(),
+            "second reject is a no-op (already rejected)"
+        );
     }
 
     #[test]
@@ -471,8 +516,14 @@ mod tests {
         insert(&c, &fresh).unwrap();
         let touched = mark_stale_before(&c, "2020-01-01T00:00:00+00:00").unwrap();
         assert_eq!(touched, 1, "only the ancient pending goes stale");
-        assert_eq!(get(&c, "old").unwrap().unwrap().status, LearningStatus::Stale);
-        assert_eq!(get(&c, "fresh").unwrap().unwrap().status, LearningStatus::Pending);
+        assert_eq!(
+            get(&c, "old").unwrap().unwrap().status,
+            LearningStatus::Stale
+        );
+        assert_eq!(
+            get(&c, "fresh").unwrap().unwrap().status,
+            LearningStatus::Pending
+        );
     }
 
     #[test]

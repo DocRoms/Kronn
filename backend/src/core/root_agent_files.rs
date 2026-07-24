@@ -51,12 +51,8 @@ const KRONN_BLOCK_BODY: &str = "> **Kronn project context** — Read [docs/AGENT
 /// iterates this list once per Phase 1 install. The slice lives
 /// here (not in `api/audit/full.rs`) so future helpers reading the
 /// canonical set don't have to import the audit module.
-pub const KRONN_ROOT_AGENT_FILES: &[&str] = &[
-    "CLAUDE.md",
-    ".cursorrules",
-    ".windsurfrules",
-    ".clinerules",
-];
+pub const KRONN_ROOT_AGENT_FILES: &[&str] =
+    &["CLAUDE.md", ".cursorrules", ".windsurfrules", ".clinerules"];
 
 /// Outcome of an [`inject_or_update`] call. Surfaced for tests +
 /// future SSE-event reporting if we ever want to tell users which
@@ -108,8 +104,16 @@ fn find_marker_zone(content: &str) -> Option<(usize, usize)> {
     let end_byte = after_start + end_rel + KRONN_BLOCK_END.len();
     // Consume one optional trailing newline so re-render keeps the
     // spacing tight (would otherwise pile up blank lines on each run).
-    let consume = if content.as_bytes().get(end_byte) == Some(&b'\n') { 1 } else { 0 };
-    let consume2 = if content.as_bytes().get(end_byte + consume) == Some(&b'\n') { 1 } else { 0 };
+    let consume = if content.as_bytes().get(end_byte) == Some(&b'\n') {
+        1
+    } else {
+        0
+    };
+    let consume2 = if content.as_bytes().get(end_byte + consume) == Some(&b'\n') {
+        1
+    } else {
+        0
+    };
     Some((start_byte, end_byte + consume + consume2))
 }
 
@@ -121,7 +125,10 @@ fn find_marker_zone(content: &str) -> Option<(usize, usize)> {
 ///
 /// Atomic writes via tmp-file + rename — a crash mid-write leaves
 /// the user's original file intact rather than truncated.
-pub fn inject_or_update(target_path: &Path, template_body: Option<&str>) -> std::io::Result<InjectOutcome> {
+pub fn inject_or_update(
+    target_path: &Path,
+    template_body: Option<&str>,
+) -> std::io::Result<InjectOutcome> {
     let block = render_block();
 
     // Case 1: file missing → create it. If template provided, the
@@ -224,7 +231,10 @@ mod tests {
         let body = fs::read_to_string(&target).unwrap();
         let block_idx = body.find(KRONN_BLOCK_START).unwrap();
         let tpl_idx = body.find("{{PROJECT_NAME}}").unwrap();
-        assert!(block_idx < tpl_idx, "Kronn block must appear above the template content");
+        assert!(
+            block_idx < tpl_idx,
+            "Kronn block must appear above the template content"
+        );
     }
 
     #[test]
@@ -235,7 +245,8 @@ mod tests {
         // preserved byte-identical below.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("CLAUDE.md");
-        let user_content = "# My personal rules\n\nDo not edit auto-generated SQL.\nLanguage: TypeScript only.\n";
+        let user_content =
+            "# My personal rules\n\nDo not edit auto-generated SQL.\nLanguage: TypeScript only.\n";
         write(&target, user_content);
         let outcome = inject_or_update(&target, None).unwrap();
         assert_eq!(outcome, InjectOutcome::Prepended);
@@ -243,8 +254,10 @@ mod tests {
         // Block at top
         assert!(body.starts_with(KRONN_BLOCK_START));
         // User content present in full, byte-identical
-        assert!(body.contains(user_content),
-            "user content must be preserved byte-identical: got {body:?}");
+        assert!(
+            body.contains(user_content),
+            "user content must be preserved byte-identical: got {body:?}"
+        );
         // Block precedes user content
         let block_end = body.find(KRONN_BLOCK_END).unwrap();
         let user_start = body.find("# My personal rules").unwrap();
@@ -260,7 +273,8 @@ mod tests {
         let target = tmp.path().join("CLAUDE.md");
         let stale_block = format!(
             "{start}\nOLD KRONN MESSAGE THAT MUST BE REPLACED\n{end}\n\n",
-            start = KRONN_BLOCK_START, end = KRONN_BLOCK_END,
+            start = KRONN_BLOCK_START,
+            end = KRONN_BLOCK_END,
         );
         let user_content = "# My rules\n\nUse pnpm.\n";
         write(&target, &format!("{stale_block}{user_content}"));
@@ -306,8 +320,10 @@ mod tests {
         write(&target, user);
         inject_or_update(&target, None).unwrap();
         let body = fs::read_to_string(&target).unwrap();
-        assert!(body.contains(user),
-            "unicode / emoji user content must survive verbatim");
+        assert!(
+            body.contains(user),
+            "unicode / emoji user content must survive verbatim"
+        );
     }
 
     #[test]
@@ -319,7 +335,8 @@ mod tests {
         let target = tmp.path().join("CLAUDE.md");
         let content = format!(
             "# User stuff at the top\n\nMore user stuff.\n\n{start}\nold body\n{end}\n",
-            start = KRONN_BLOCK_START, end = KRONN_BLOCK_END,
+            start = KRONN_BLOCK_START,
+            end = KRONN_BLOCK_END,
         );
         write(&target, &content);
         let outcome = inject_or_update(&target, None).unwrap();
@@ -342,7 +359,10 @@ mod tests {
         // bottom — the user can clean up manually after the audit.
         let tmp = TempDir::new().unwrap();
         let target = tmp.path().join("CLAUDE.md");
-        let content = format!("{start}\nincomplete\n\nuser content\n", start = KRONN_BLOCK_START);
+        let content = format!(
+            "{start}\nincomplete\n\nuser content\n",
+            start = KRONN_BLOCK_START
+        );
         write(&target, &content);
         let outcome = inject_or_update(&target, None).unwrap();
         assert_eq!(outcome, InjectOutcome::Prepended);
@@ -364,7 +384,10 @@ mod tests {
         let target = tmp.path().join("CLAUDE.md");
         inject_or_update(&target, None).unwrap();
         let tmp_file = tmp.path().join(".CLAUDE.md.kronn.tmp");
-        assert!(!tmp_file.exists(), "temp file must be removed after successful rename");
+        assert!(
+            !tmp_file.exists(),
+            "temp file must be removed after successful rename"
+        );
     }
 
     #[test]
@@ -404,8 +427,19 @@ mod tests {
             inject_or_update(&target, None).unwrap();
         }
         let body = fs::read_to_string(&target).unwrap();
-        assert_eq!(body.matches(KRONN_BLOCK_START).count(), 1, "no marker duplication across re-runs");
-        assert_eq!(body.matches(KRONN_BLOCK_END).count(), 1, "no marker duplication across re-runs");
-        assert!(body.contains(user), "user content survives 3 audit runs verbatim");
+        assert_eq!(
+            body.matches(KRONN_BLOCK_START).count(),
+            1,
+            "no marker duplication across re-runs"
+        );
+        assert_eq!(
+            body.matches(KRONN_BLOCK_END).count(),
+            1,
+            "no marker duplication across re-runs"
+        );
+        assert!(
+            body.contains(user),
+            "user content survives 3 audit runs verbatim"
+        );
     }
 }

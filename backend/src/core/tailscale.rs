@@ -191,7 +191,11 @@ pub async fn detect_all_ips() -> Vec<DetectedIp> {
     if !ips.iter().any(|d| d.kind == "lan") {
         if let Some(ip) = primary_lan_ipv4() {
             if !ips.iter().any(|d| d.ip == ip) {
-                ips.push(DetectedIp { ip, kind: "lan".into(), label: "LAN".into() });
+                ips.push(DetectedIp {
+                    ip,
+                    kind: "lan".into(),
+                    label: "LAN".into(),
+                });
             }
         }
     }
@@ -233,7 +237,11 @@ fn parse_host_ips_env() -> Option<Vec<DetectedIp>> {
         let iface = parts[0];
         let ip = parts[1];
         if let Some((ip_str, kind, label)) = classify_ip(ip, iface) {
-            ips.push(DetectedIp { ip: ip_str, kind, label });
+            ips.push(DetectedIp {
+                ip: ip_str,
+                kind,
+                label,
+            });
         }
     }
     Some(ips)
@@ -246,10 +254,7 @@ fn scan_all_interfaces() -> Vec<(String, String, String)> {
     #[cfg(target_os = "linux")]
     {
         // Parse `ip -4 addr show` output
-        if let Ok(output) = sync_cmd("ip")
-            .args(["-4", "addr", "show"])
-            .output()
-        {
+        if let Ok(output) = sync_cmd("ip").args(["-4", "addr", "show"]).output() {
             let text = String::from_utf8_lossy(&output.stdout);
             let mut current_iface = String::new();
             for line in text.lines() {
@@ -360,7 +365,9 @@ mod tests {
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     #[test]
@@ -450,7 +457,10 @@ mod tests {
     #[serial]
     fn parse_host_ips_env_valid() {
         let _env = env_guard();
-        std::env::set_var("KRONN_HOST_IPS", "eth0:192.168.1.50,tailscale0:100.100.50.1,tun0:10.8.0.5");
+        std::env::set_var(
+            "KRONN_HOST_IPS",
+            "eth0:192.168.1.50,tailscale0:100.100.50.1,tun0:10.8.0.5",
+        );
         let ips = parse_host_ips_env().unwrap();
         assert_eq!(ips.len(), 3);
         assert_eq!(ips[0].ip, "192.168.1.50");
@@ -483,7 +493,10 @@ mod tests {
     #[serial]
     fn parse_host_ips_env_skips_localhost_and_docker() {
         let _env = env_guard();
-        std::env::set_var("KRONN_HOST_IPS", "lo:127.0.0.1,docker0:172.17.0.1,eth0:192.168.1.10");
+        std::env::set_var(
+            "KRONN_HOST_IPS",
+            "lo:127.0.0.1,docker0:172.17.0.1,eth0:192.168.1.10",
+        );
         let ips = parse_host_ips_env().unwrap();
         assert_eq!(ips.len(), 1);
         assert_eq!(ips[0].ip, "192.168.1.10");
@@ -578,10 +591,7 @@ mod tests {
     #[serial]
     fn detect_via_host_env_returns_none_when_no_tailscale_entry() {
         let _env = env_guard();
-        std::env::set_var(
-            "KRONN_HOST_IPS",
-            "eth0:192.168.1.10,docker0:172.17.0.1",
-        );
+        std::env::set_var("KRONN_HOST_IPS", "eth0:192.168.1.10,docker0:172.17.0.1");
         assert!(detect_via_host_env().is_none());
         std::env::remove_var("KRONN_HOST_IPS");
     }
@@ -599,7 +609,10 @@ mod tests {
     fn parse_host_ips_env_malformed_entries_are_skipped() {
         let _env = env_guard();
         // No colon, trailing comma, only one part — all skipped silently.
-        std::env::set_var("KRONN_HOST_IPS", "garbage,eth0:192.168.1.5,broken,more-garbage,");
+        std::env::set_var(
+            "KRONN_HOST_IPS",
+            "garbage,eth0:192.168.1.5,broken,more-garbage,",
+        );
         let ips = parse_host_ips_env().expect("should still parse the good entry");
         assert_eq!(ips.len(), 1);
         assert_eq!(ips[0].ip, "192.168.1.5");

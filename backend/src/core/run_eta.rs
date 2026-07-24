@@ -74,7 +74,8 @@ pub fn next_check_initial(expected_ms: Option<u64>, samples: u32) -> NextCheck {
     } else {
         NextCheck {
             wait_seconds: SANITY_CHECK_S,
-            reason: "sanity check — confirm the run actually started (no historical baseline yet)".to_string(),
+            reason: "sanity check — confirm the run actually started (no historical baseline yet)"
+                .to_string(),
             confidence: Confidence::NoBaseline,
         }
     }

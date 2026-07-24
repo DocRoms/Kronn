@@ -27,17 +27,26 @@ async fn resolve_github_token_from_state(state: &AppState) -> Option<String> {
         .flatten()
 }
 
-async fn resolve_discussion_work_dir(state: &AppState, discussion_id: &str) -> Result<(std::path::PathBuf, String), String> {
+async fn resolve_discussion_work_dir(
+    state: &AppState,
+    discussion_id: &str,
+) -> Result<(std::path::PathBuf, String), String> {
     let did = discussion_id.to_string();
-    let disc = state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+    let disc = state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
         .await
         .map_err(|e| format!("DB error: {}", e))?;
     let disc = disc.ok_or_else(|| "Discussion not found".to_string())?;
 
-    let project_id = disc.project_id.ok_or_else(|| "Discussion has no project".to_string())?;
+    let project_id = disc
+        .project_id
+        .ok_or_else(|| "Discussion has no project".to_string())?;
 
     let pid = project_id.clone();
-    let project = state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+    let project = state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
         .await
         .map_err(|e| format!("DB error: {}", e))?;
     let project = project.ok_or_else(|| "Project not found".to_string())?;
@@ -67,9 +76,9 @@ pub async fn disc_git_status(
         Err(e) => return Json(ApiResponse::err(e)),
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_git_status(&work_dir)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let result = tokio::task::spawn_blocking(move || super::git_ops::run_git_status(&work_dir))
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(status) => Json(ApiResponse::ok(status)),
@@ -100,7 +109,9 @@ pub async fn disc_git_diff(
         } else {
             super::git_ops::run_git_diff(&work_dir, &file_path)
         }
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(diff) => Json(ApiResponse::ok(diff)),
@@ -137,7 +148,9 @@ pub async fn disc_git_commit(
     let sign = req.sign;
     let result = tokio::task::spawn_blocking(move || {
         super::git_ops::run_git_commit(&work_dir, &files, &message, amend, sign)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -158,7 +171,9 @@ pub async fn disc_git_push(
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
         super::git_ops::run_git_push(&work_dir, github_token.as_deref())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -174,10 +189,14 @@ pub async fn worktree_unlock(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<String>> {
-    let disc = match state.db.with_conn({
-        let did = id.clone();
-        move |conn| crate::db::discussions::get_discussion(conn, &did)
-    }).await {
+    let disc = match state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| crate::db::discussions::get_discussion(conn, &did)
+        })
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -194,10 +213,14 @@ pub async fn worktree_unlock(
         None => return Json(ApiResponse::err("No project associated")),
     };
 
-    let project_path = state.db.with_conn(move |conn| {
-        let p = crate::db::projects::get_project(conn, &pid)?;
-        Ok(p.map(|p| p.path).unwrap_or_default())
-    }).await.unwrap_or_default();
+    let project_path = state
+        .db
+        .with_conn(move |conn| {
+            let p = crate::db::projects::get_project(conn, &pid)?;
+            Ok(p.map(|p| p.path).unwrap_or_default())
+        })
+        .await
+        .unwrap_or_default();
 
     if project_path.is_empty() {
         return Json(ApiResponse::err("Project not found"));
@@ -213,17 +236,27 @@ pub async fn worktree_unlock(
 
     // Clear workspace_path in DB (worktree_branch stays so we can re-lock later)
     let did = disc.id.clone();
-    let _ = state.db.with_conn(move |conn| {
-        conn.execute(
-            "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
-            rusqlite::params![did],
-        )?;
-        Ok(())
-    }).await;
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            conn.execute(
+                "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
+                rusqlite::params![did],
+            )?;
+            Ok(())
+        })
+        .await;
 
     let branch = disc.worktree_branch.unwrap_or_default();
-    tracing::info!("Unlocked worktree for discussion '{}', branch {} is free", disc.title, branch);
-    Json(ApiResponse::ok(format!("Branch {} unlocked — you can now checkout it in your repo", branch)))
+    tracing::info!(
+        "Unlocked worktree for discussion '{}', branch {} is free",
+        disc.title,
+        branch
+    );
+    Json(ApiResponse::ok(format!(
+        "Branch {} unlocked — you can now checkout it in your repo",
+        branch
+    )))
 }
 
 /// POST /api/discussions/:id/worktree-lock
@@ -233,10 +266,14 @@ pub async fn worktree_lock(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Json<ApiResponse<String>> {
-    let disc = match state.db.with_conn({
-        let did = id.clone();
-        move |conn| crate::db::discussions::get_discussion(conn, &did)
-    }).await {
+    let disc = match state
+        .db
+        .with_conn({
+            let did = id.clone();
+            move |conn| crate::db::discussions::get_discussion(conn, &did)
+        })
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -248,7 +285,11 @@ pub async fn worktree_lock(
 
     let branch = match &disc.worktree_branch {
         Some(b) => b.clone(),
-        None => return Json(ApiResponse::err("No branch associated with this discussion")),
+        None => {
+            return Json(ApiResponse::err(
+                "No branch associated with this discussion",
+            ))
+        }
     };
 
     let pid = match &disc.project_id {
@@ -256,9 +297,11 @@ pub async fn worktree_lock(
         None => return Json(ApiResponse::err("No project associated")),
     };
 
-    let project = match state.db.with_conn(move |conn| {
-        crate::db::projects::get_project(conn, &pid)
-    }).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+    {
         Ok(Some(p)) => p,
         _ => return Json(ApiResponse::err("Project not found")),
     };
@@ -266,18 +309,26 @@ pub async fn worktree_lock(
     let resolved = crate::core::scanner::resolve_host_path(&project.path);
     let repo_path = std::path::Path::new(&resolved);
 
-    match crate::core::worktree::reattach_worktree(
-        repo_path, &project.name, &disc.title, &branch,
-    ) {
+    match crate::core::worktree::reattach_worktree(repo_path, &project.name, &disc.title, &branch) {
         Ok(info) => {
             let did = disc.id.clone();
             let wp = info.path.clone();
             let wb = info.branch.clone();
-            let _ = state.db.with_conn(move |conn| {
-                crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
-            }).await;
-            tracing::info!("Re-locked worktree for discussion '{}': {}", disc.title, info.path);
-            Json(ApiResponse::ok(format!("Worktree re-created at {}", info.path)))
+            let _ = state
+                .db
+                .with_conn(move |conn| {
+                    crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
+                })
+                .await;
+            tracing::info!(
+                "Re-locked worktree for discussion '{}': {}",
+                disc.title,
+                info.path
+            );
+            Json(ApiResponse::ok(format!(
+                "Worktree re-created at {}",
+                info.path
+            )))
         }
         Err(e) => Json(ApiResponse::err(format!("Failed to lock: {}", e))),
     }
@@ -370,25 +421,43 @@ pub async fn test_mode_enter(
     // only infra failures use `ApiResponse::err(...)`. The UI matches on
     // `status: "blocked"` (tag) to show the right modal.
     let blocked = |kind: &str, message: String, details: Option<serde_json::Value>| {
-        Json(ApiResponse::ok(TestModeEnterResult::Blocked(TestModeBlocker {
-            kind: kind.into(), message, details,
-        })))
+        Json(ApiResponse::ok(TestModeEnterResult::Blocked(
+            TestModeBlocker {
+                kind: kind.into(),
+                message,
+                details,
+            },
+        )))
     };
 
     let did = id.clone();
-    let disc = match state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did)).await {
+    let disc = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
     };
 
     if disc.test_mode_restore_branch.is_some() {
-        return blocked("AlreadyInTestMode", "Already in test mode — call /test-mode/exit first".into(), None);
+        return blocked(
+            "AlreadyInTestMode",
+            "Already in test mode — call /test-mode/exit first".into(),
+            None,
+        );
     }
 
     let branch = match &disc.worktree_branch {
         Some(b) if !b.is_empty() => b.clone(),
-        _ => return blocked("NoBranch", "Discussion has no worktree branch — switch to Isolated mode first".into(), None),
+        _ => {
+            return blocked(
+                "NoBranch",
+                "Discussion has no worktree branch — switch to Isolated mode first".into(),
+                None,
+            )
+        }
     };
 
     let pid = match &disc.project_id {
@@ -396,7 +465,11 @@ pub async fn test_mode_enter(
         None => return blocked("NoProject", "Discussion has no project".into(), None),
     };
 
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+    {
         Ok(Some(p)) => p,
         _ => return Json(ApiResponse::err("Project not found")),
     };
@@ -411,7 +484,10 @@ pub async fn test_mode_enter(
                 let count = files.len();
                 return blocked(
                     "WorktreeDirty",
-                    format!("Worktree has {} uncommitted file(s) — commit them first", count),
+                    format!(
+                        "Worktree has {} uncommitted file(s) — commit them first",
+                        count
+                    ),
                     Some(serde_json::json!({ "files": files })),
                 );
             }
@@ -423,7 +499,12 @@ pub async fn test_mode_enter(
     // ── Preflight #2 + #3: main repo state ──────────────────────────────
     let state_before = match crate::core::worktree::main_repo_state(&repo_path) {
         Ok(s) => s,
-        Err(e) => return Json(ApiResponse::err(format!("Failed to check main repo: {}", e))),
+        Err(e) => {
+            return Json(ApiResponse::err(format!(
+                "Failed to check main repo: {}",
+                e
+            )))
+        }
     };
 
     if state_before.is_detached && !req.force {
@@ -452,9 +533,16 @@ pub async fn test_mode_enter(
             );
         }
         match crate::core::worktree::stash_push(&repo_path, &stash_message) {
-            Ok(true) => { stashed = true; }
+            Ok(true) => {
+                stashed = true;
+            }
             Ok(false) => {} // no-op, tree cleaned itself between checks
-            Err(e) => return Json(ApiResponse::err(format!("Failed to stash dirty files: {}", e))),
+            Err(e) => {
+                return Json(ApiResponse::err(format!(
+                    "Failed to stash dirty files: {}",
+                    e
+                )))
+            }
         }
     }
 
@@ -465,16 +553,23 @@ pub async fn test_mode_enter(
             if stashed {
                 let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
             }
-            return Json(ApiResponse::err(format!("Failed to unlock worktree: {}", e)));
+            return Json(ApiResponse::err(format!(
+                "Failed to unlock worktree: {}",
+                e
+            )));
         }
         let did = disc.id.clone();
-        if let Err(e) = state.db.with_conn(move |conn| {
-            conn.execute(
-                "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
-                rusqlite::params![did],
-            )?;
-            Ok(())
-        }).await {
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                conn.execute(
+                    "UPDATE discussions SET workspace_path = NULL WHERE id = ?1",
+                    rusqlite::params![did],
+                )?;
+                Ok(())
+            })
+            .await
+        {
             // Worktree is already gone on disk — a stale pointer is
             // recoverable, but say so instead of pretending it's clean.
             tracing::warn!("Test mode: worktree removed but clearing workspace_path failed: {e}");
@@ -484,11 +579,19 @@ pub async fn test_mode_enter(
     // ── Checkout the discussion branch in the main repo ─────────────────
     if let Err(e) = crate::core::worktree::checkout_branch(&repo_path, &branch) {
         // Full rollback: re-create worktree + pop stash.
-        let _ = crate::core::worktree::reattach_worktree(&repo_path, &project.name, &disc.title, &branch);
+        let _ = crate::core::worktree::reattach_worktree(
+            &repo_path,
+            &project.name,
+            &disc.title,
+            &branch,
+        );
         if stashed {
             let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
         }
-        return Json(ApiResponse::err(format!("Checkout failed, rolled back: {}", e)));
+        return Json(ApiResponse::err(format!(
+            "Checkout failed, rolled back: {}",
+            e
+        )));
     }
 
     // ── Persist test-mode state in DB ────────────────────────────────────
@@ -499,15 +602,31 @@ pub async fn test_mode_enter(
     // reporting success.
     let previous_branch = state_before.current_branch.clone();
     let restore = previous_branch.clone();
-    let stash_ref_clone = if stashed { Some(stash_message.clone()) } else { None };
+    let stash_ref_clone = if stashed {
+        Some(stash_message.clone())
+    } else {
+        None
+    };
     let did = disc.id.clone();
-    if let Err(e) = state.db.with_conn(move |conn| {
-        crate::db::discussions::update_discussion_test_mode(
-            conn, &did, Some(&restore), stash_ref_clone.as_deref(),
-        )
-    }).await {
+    if let Err(e) = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::update_discussion_test_mode(
+                conn,
+                &did,
+                Some(&restore),
+                stash_ref_clone.as_deref(),
+            )
+        })
+        .await
+    {
         let _ = crate::core::worktree::checkout_branch(&repo_path, &previous_branch);
-        let _ = crate::core::worktree::reattach_worktree(&repo_path, &project.name, &disc.title, &branch);
+        let _ = crate::core::worktree::reattach_worktree(
+            &repo_path,
+            &project.name,
+            &disc.title,
+            &branch,
+        );
         if stashed {
             let _ = crate::core::worktree::stash_pop_by_message(&repo_path, &stash_message);
         }
@@ -518,15 +637,20 @@ pub async fn test_mode_enter(
 
     tracing::info!(
         "Test mode ON for disc '{}': main repo {} → {} (stashed={})",
-        disc.title, previous_branch, branch, stashed
+        disc.title,
+        previous_branch,
+        branch,
+        stashed
     );
 
-    Json(ApiResponse::ok(TestModeEnterResult::Ok(TestModeEnterResponse {
-        previous_branch,
-        tested_branch: branch,
-        stashed,
-        was_detached: state_before.is_detached,
-    })))
+    Json(ApiResponse::ok(TestModeEnterResult::Ok(
+        TestModeEnterResponse {
+            previous_branch,
+            tested_branch: branch,
+            stashed,
+            was_detached: state_before.is_detached,
+        },
+    )))
 }
 
 /// POST /api/discussions/:id/test-mode/exit
@@ -535,7 +659,11 @@ pub async fn test_mode_exit(
     Path(id): Path<String>,
 ) -> Json<ApiResponse<TestModeExitResponse>> {
     let did = id.clone();
-    let disc = match state.db.with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did)).await {
+    let disc = match state
+        .db
+        .with_conn(move |conn| crate::db::discussions::get_discussion(conn, &did))
+        .await
+    {
         Ok(Some(d)) => d,
         Ok(None) => return Json(ApiResponse::err("Discussion not found")),
         Err(e) => return Json(ApiResponse::err(format!("DB error: {}", e))),
@@ -551,7 +679,11 @@ pub async fn test_mode_exit(
         Some(p) => p.clone(),
         None => return Json(ApiResponse::err("Discussion has no project")),
     };
-    let project = match state.db.with_conn(move |conn| crate::db::projects::get_project(conn, &pid)).await {
+    let project = match state
+        .db
+        .with_conn(move |conn| crate::db::projects::get_project(conn, &pid))
+        .await
+    {
         Ok(Some(p)) => p,
         _ => return Json(ApiResponse::err("Project not found")),
     };
@@ -573,8 +705,12 @@ pub async fn test_mode_exit(
     let mut stash_warn: Option<String> = None;
     if let Some(ref msg) = stash_ref {
         match crate::core::worktree::stash_pop_by_message(&repo_path, msg) {
-            Ok(()) => { unstashed = true; }
-            Err(e) => { stash_warn = Some(e); }
+            Ok(()) => {
+                unstashed = true;
+            }
+            Err(e) => {
+                stash_warn = Some(e);
+            }
         }
     }
 
@@ -582,15 +718,23 @@ pub async fn test_mode_exit(
     let worktree_branch = disc.worktree_branch.clone().unwrap_or_default();
     let mut worktree_restored = false;
     if !worktree_branch.is_empty() {
-        match crate::core::worktree::reattach_worktree(&repo_path, &project.name, &disc.title, &worktree_branch) {
+        match crate::core::worktree::reattach_worktree(
+            &repo_path,
+            &project.name,
+            &disc.title,
+            &worktree_branch,
+        ) {
             Ok(info) => {
                 worktree_restored = true;
                 let did = disc.id.clone();
                 let wp = info.path.clone();
                 let wb = info.branch.clone();
-                let _ = state.db.with_conn(move |conn| {
-                    crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
-                }).await;
+                let _ = state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::discussions::update_discussion_workspace(conn, &did, &wp, &wb)
+                    })
+                    .await;
             }
             Err(e) => {
                 tracing::warn!("Failed to restore worktree for '{}': {}", disc.title, e);
@@ -600,13 +744,19 @@ pub async fn test_mode_exit(
 
     // Clear test-mode tracking fields.
     let did = disc.id.clone();
-    let _ = state.db.with_conn(move |conn| {
-        crate::db::discussions::update_discussion_test_mode(conn, &did, None, None)
-    }).await;
+    let _ = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::update_discussion_test_mode(conn, &did, None, None)
+        })
+        .await;
 
     tracing::info!(
         "Test mode OFF for disc '{}': restored `{}` (unstashed={}, worktree={})",
-        disc.title, restore_branch, unstashed, worktree_restored
+        disc.title,
+        restore_branch,
+        unstashed,
+        worktree_restored
     );
 
     // Stash-pop failure is non-fatal here: we already cleared the
@@ -644,7 +794,9 @@ pub async fn disc_exec(
     {
         let config = state.config.read().await;
         if config.agents.any_installed() && !config.agents.any_full_access() {
-            return Json(ApiResponse::err("Terminal requires full_access enabled on at least one agent"));
+            return Json(ApiResponse::err(
+                "Terminal requires full_access enabled on at least one agent",
+            ));
         }
     }
 
@@ -664,9 +816,9 @@ pub async fn disc_exec(
         Err(_) => return Json(ApiResponse::err("Server is shutting down")),
     };
 
-    let result = tokio::task::spawn_blocking(move || {
-        super::git_ops::run_exec(&work_dir, &cmd)
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    let result = tokio::task::spawn_blocking(move || super::git_ops::run_exec(&work_dir, &cmd))
+        .await
+        .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(resp) => Json(ApiResponse::ok(resp)),
@@ -691,7 +843,9 @@ pub async fn disc_create_pr(
     let github_token = resolve_github_token_from_state(&state).await;
     let result = tokio::task::spawn_blocking(move || {
         super::git_ops::run_create_pr(&work_dir, &title, &body, &base, github_token.as_deref())
-    }).await.unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
+    })
+    .await
+    .unwrap_or_else(|e| Err(format!("Task failed: {}", e)));
 
     match result {
         Ok(url) => Json(ApiResponse::ok(serde_json::json!({ "url": url }))),
@@ -734,28 +888,36 @@ pub async fn disc_pr_template(
 /// Build MCP context from global MCP configs for general discussions (no project).
 /// Lists the server names so the agent knows which MCP tools are available.
 async fn build_global_mcp_context(state: &AppState) -> Option<String> {
-    let configs = state.db.with_conn(|conn| {
-        crate::db::mcps::list_configs(conn)
-    }).await.ok()?;
+    let configs = state
+        .db
+        .with_conn(|conn| crate::db::mcps::list_configs(conn))
+        .await
+        .ok()?;
 
     let global_configs: Vec<_> = configs.into_iter().filter(|c| c.include_general).collect();
     if global_configs.is_empty() {
         return None;
     }
 
-    let servers = state.db.with_conn(|conn| {
-        crate::db::mcps::list_servers(conn)
-    }).await.unwrap_or_default();
-    let server_map: std::collections::HashMap<String, String> = servers.into_iter()
+    let servers = state
+        .db
+        .with_conn(|conn| crate::db::mcps::list_servers(conn))
+        .await
+        .unwrap_or_default();
+    let server_map: std::collections::HashMap<String, String> = servers
+        .into_iter()
         .map(|s| (s.id.clone(), s.name.clone()))
         .collect();
 
     let mut result = String::from("## MCP Servers available\n\n");
     result.push_str("You have access to the following MCP servers (global). ");
-    result.push_str("Use their tools (prefixed `mcp__<server>__<tool>`) instead of Bash workarounds.\n\n");
+    result.push_str(
+        "Use their tools (prefixed `mcp__<server>__<tool>`) instead of Bash workarounds.\n\n",
+    );
     result.push_str("Available servers:\n");
     for cfg in &global_configs {
-        let name = server_map.get(&cfg.server_id)
+        let name = server_map
+            .get(&cfg.server_id)
             .cloned()
             .unwrap_or_else(|| cfg.label.clone());
         result.push_str(&format!("- **{}** ({})\n", cfg.label, name));
@@ -766,8 +928,12 @@ async fn build_global_mcp_context(state: &AppState) -> Option<String> {
 }
 
 /// Build global MCP context AND write .mcp.json for general (no-project) discussions.
-pub(crate) async fn prepare_general_mcp(state: &AppState, workspace_path: &Option<String>) -> Option<String> {
-    let work_dir = workspace_path.clone()
+pub(crate) async fn prepare_general_mcp(
+    state: &AppState,
+    workspace_path: &Option<String>,
+) -> Option<String> {
+    let work_dir = workspace_path
+        .clone()
         .unwrap_or_else(|| std::env::temp_dir().to_string_lossy().to_string());
     {
         let db = state.db.clone();
@@ -775,10 +941,12 @@ pub(crate) async fn prepare_general_mcp(state: &AppState, workspace_path: &Optio
         if let Some(ref secret) = cfg.encryption_secret {
             let secret = secret.clone();
             let wd = work_dir;
-            let _ = db.with_conn(move |conn| {
-                let _ = crate::core::mcp_scanner::write_general_mcp_json(conn, &secret, &wd);
-                Ok(())
-            }).await;
+            let _ = db
+                .with_conn(move |conn| {
+                    let _ = crate::core::mcp_scanner::write_general_mcp_json(conn, &secret, &wd);
+                    Ok(())
+                })
+                .await;
         }
     }
     build_global_mcp_context(state).await
@@ -849,7 +1017,6 @@ pub(crate) fn format_tool_log(tool: &str, input_json: &str) -> String {
     // Fallback: just the tool name
     format!("Tool: {}", tool)
 }
-
 
 #[cfg(test)]
 mod tests {

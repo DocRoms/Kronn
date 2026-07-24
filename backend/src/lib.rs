@@ -1,5 +1,5 @@
-pub mod api;
 pub mod agents;
+pub mod api;
 pub mod core;
 pub mod db;
 pub mod models;
@@ -8,7 +8,6 @@ pub mod workflows;
 #[cfg(test)]
 mod api_tests;
 
-use std::sync::Arc;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -16,11 +15,12 @@ use axum::{
     routing::{delete, get, patch, post, put},
     Router,
 };
-use tokio::sync::{RwLock, Semaphore};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::Mutex;
+use tokio::sync::{RwLock, Semaphore};
 use tower_http::{
-    cors::{CorsLayer, AllowOrigin},
+    cors::{AllowOrigin, CorsLayer},
     trace::TraceLayer,
 };
 
@@ -71,12 +71,7 @@ impl AuditTracker {
 
     /// Seed progress when an audit stream starts. Called from the `start`
     /// SSE event. Resets any stale progress row for the same project.
-    pub fn start_progress(
-        &mut self,
-        project_id: impl Into<String>,
-        total_steps: u32,
-        kind: &str,
-    ) {
+    pub fn start_progress(&mut self, project_id: impl Into<String>, total_steps: u32, kind: &str) {
         let project_id = project_id.into();
         self.progress.insert(
             project_id.clone(),
@@ -107,8 +102,12 @@ impl AuditTracker {
         current_tool: Option<String>,
     ) {
         if let Some(entry) = self.progress.get_mut(project_id) {
-            if let Some(s) = step_tokens { entry.step_tokens = Some(s); }
-            if let Some(t) = total_tokens_so_far { entry.total_tokens_so_far = Some(t); }
+            if let Some(s) = step_tokens {
+                entry.step_tokens = Some(s);
+            }
+            if let Some(t) = total_tokens_so_far {
+                entry.total_tokens_so_far = Some(t);
+            }
             if let Some(tool) = current_tool {
                 entry.current_tool = Some(tool);
                 // 0.8.4 (#319 / B3) — bump the tool-call counter for
@@ -116,7 +115,8 @@ impl AuditTracker {
                 // the agent stream lands here, regardless of whether
                 // the agent also emitted a `Usage` block. Reset on
                 // step boundary via `clear_step_chips`.
-                entry.current_tool_call_count = Some(entry.current_tool_call_count.unwrap_or(0) + 1);
+                entry.current_tool_call_count =
+                    Some(entry.current_tool_call_count.unwrap_or(0) + 1);
             }
         }
     }
@@ -188,7 +188,8 @@ pub struct AppState {
     /// value is the bearer token + its absolute expiry. In-memory only —
     /// on restart, tokens are lost and re-exchanged on first use (one HTTP
     /// call per active OAuth2 plugin). See `core::oauth2_cache`.
-    pub oauth2_cache: Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>,
+    pub oauth2_cache:
+        Arc<tokio::sync::Mutex<HashMap<String, crate::core::oauth2_cache::CachedToken>>>,
     /// Handle to the kronn-docs Python sidecar (PDF/DOCX/XLSX/… gen).
     /// Always allocated — whether the sidecar is actually running is
     /// stored INSIDE the handle. Routes in `api::docs` probe it at
@@ -255,7 +256,11 @@ impl CancelGuard {
         if let Ok(mut map) = registry.lock() {
             map.insert(key.clone(), token.clone());
         }
-        Self { registry: registry.clone(), key, token }
+        Self {
+            registry: registry.clone(),
+            key,
+            token,
+        }
     }
 }
 
@@ -463,10 +468,7 @@ fn build_cors(domain: &Option<String>, port: u16) -> CorsLayer {
         ],
     };
 
-    let parsed: Vec<_> = origins
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let parsed: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(parsed))
@@ -494,18 +496,21 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // a bug on GitHub" button can stamp them into the issue template
         // without hitting an authenticated endpoint first. Docker's curl-based
         // healthcheck ignores the body, so adding fields is backwards-safe.
-        .route("/api/health", get(|| async {
-            axum::Json(serde_json::json!({
-                "ok": true,
-                "version": env!("CARGO_PKG_VERSION"),
-                "host_os": crate::agents::detect_host_label_public(),
-                // Lets the UI gate the "Install agent" button: under Docker the
-                // backend runs in a Linux container that can't install onto the
-                // host, so the UI points to the host-side `kronn` CLI instead.
-                // Native (Tauri/CLI) → false → Install works on the host.
-                "in_docker": crate::core::env::is_docker(),
-            }))
-        }))
+        .route(
+            "/api/health",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "ok": true,
+                    "version": env!("CARGO_PKG_VERSION"),
+                    "host_os": crate::agents::detect_host_label_public(),
+                    // Lets the UI gate the "Install agent" button: under Docker the
+                    // backend runs in a Linux container that can't install onto the
+                    // host, so the UI points to the host-side `kronn` CLI instead.
+                    // Native (Tauri/CLI) → false → Install works on the host.
+                    "in_docker": crate::core::env::is_docker(),
+                }))
+            }),
+        )
         // ── Setup wizard ──
         .route("/api/open-url", post(api::setup::open_url))
         .route("/api/setup/status", get(api::setup::get_status))
@@ -523,40 +528,111 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // `/api/docs`. Hand-curated; new endpoints opt in via the
         // `#[utoipa::path]` macro and a `paths(...)` entry in
         // `api::openapi::ApiDoc`.
-        .merge(utoipa_swagger_ui::SwaggerUi::new("/api/docs").url("/api/openapi.json", api::openapi::openapi_spec()))
+        .merge(
+            utoipa_swagger_ui::SwaggerUi::new("/api/docs")
+                .url("/api/openapi.json", api::openapi::openapi_spec()),
+        )
         // ── Config ──
         .route("/api/config/tokens", get(api::setup::get_tokens))
         .route("/api/config/api-keys", post(api::setup::save_api_key))
-        .route("/api/config/api-keys/{id}", delete(api::setup::delete_api_key))
-        .route("/api/config/api-keys/{id}/activate", post(api::setup::activate_api_key))
-        .route("/api/config/sync-agent-tokens", post(api::setup::sync_agent_tokens))
+        .route(
+            "/api/config/api-keys/{id}",
+            delete(api::setup::delete_api_key),
+        )
+        .route(
+            "/api/config/api-keys/{id}/activate",
+            post(api::setup::activate_api_key),
+        )
+        .route(
+            "/api/config/sync-agent-tokens",
+            post(api::setup::sync_agent_tokens),
+        )
         .route("/api/config/discover-keys", post(api::setup::discover_keys))
-        .route("/api/config/toggle-token-override", post(api::setup::toggle_token_override))
-        .route("/api/config/language", get(api::setup::get_language).post(api::setup::save_language))
-        .route("/api/config/ui-language", get(api::setup::get_ui_language).post(api::setup::save_ui_language))
-        .route("/api/config/stt-model", get(api::setup::get_stt_model).post(api::setup::save_stt_model))
+        .route(
+            "/api/config/toggle-token-override",
+            post(api::setup::toggle_token_override),
+        )
+        .route(
+            "/api/config/language",
+            get(api::setup::get_language).post(api::setup::save_language),
+        )
+        .route(
+            "/api/config/ui-language",
+            get(api::setup::get_ui_language).post(api::setup::save_ui_language),
+        )
+        .route(
+            "/api/config/stt-model",
+            get(api::setup::get_stt_model).post(api::setup::save_stt_model),
+        )
         .route("/api/config/tts-voices", get(api::setup::get_tts_voices))
         .route("/api/config/tts-voice", post(api::setup::save_tts_voice))
-        .route("/api/config/global-context", get(api::setup::get_global_context).post(api::setup::save_global_context))
-        .route("/api/config/global-context-mode", get(api::setup::get_global_context_mode).post(api::setup::save_global_context_mode))
+        .route(
+            "/api/config/global-context",
+            get(api::setup::get_global_context).post(api::setup::save_global_context),
+        )
+        .route(
+            "/api/config/global-context-mode",
+            get(api::setup::get_global_context_mode).post(api::setup::save_global_context_mode),
+        )
         // 0.8.7 anti-hallucination mode (off | warn | enforce).
-        .route("/api/config/anti-hallucination-mode", get(api::setup::get_anti_hallucination_mode).post(api::setup::save_anti_hallucination_mode))
-        .route("/api/config/continual-learning-enabled", get(api::setup::get_continual_learning_enabled).post(api::setup::save_continual_learning_enabled))
+        .route(
+            "/api/config/anti-hallucination-mode",
+            get(api::setup::get_anti_hallucination_mode)
+                .post(api::setup::save_anti_hallucination_mode),
+        )
+        .route(
+            "/api/config/continual-learning-enabled",
+            get(api::setup::get_continual_learning_enabled)
+                .post(api::setup::save_continual_learning_enabled),
+        )
         // 0.8.7 — spec doc served from include_str! (linked from Settings → Sourcing).
-        .route("/api/conventions/agents-md-format-v1", get(api::setup::get_agents_md_spec_v1))
+        .route(
+            "/api/conventions/agents-md-format-v1",
+            get(api::setup::get_agents_md_spec_v1),
+        )
         // P2 recovery passphrase (Argon2id-wrapped key). set/restore are
         // auth-gated as destructive-adjacent — see DESTRUCTIVE_PATHS.
-        .route("/api/config/recovery/status", get(api::setup::recovery_status))
+        .route(
+            "/api/config/recovery/status",
+            get(api::setup::recovery_status),
+        )
         .route("/api/config/recovery/set", post(api::setup::set_recovery))
-        .route("/api/config/recovery/restore", post(api::setup::restore_recovery))
-        .route("/api/config/scan-paths", get(api::setup::get_scan_paths).post(api::setup::set_scan_paths))
-        .route("/api/config/scan-ignore", get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore))
-        .route("/api/config/scan-depth", get(api::setup::get_scan_depth).post(api::setup::set_scan_depth))
-        .route("/api/config/agent-access", get(api::setup::get_agent_access).post(api::setup::set_agent_access))
-        .route("/api/config/model-tiers", get(api::setup::get_model_tiers).post(api::setup::set_model_tiers))
-        .route("/api/config/server", get(api::setup::get_server_config).post(api::setup::set_server_config))
-        .route("/api/config/network-exposure", get(api::setup::get_network_exposure).post(api::setup::set_network_exposure))
-        .route("/api/config/auth-token/regenerate", post(api::setup::regenerate_auth_token))
+        .route(
+            "/api/config/recovery/restore",
+            post(api::setup::restore_recovery),
+        )
+        .route(
+            "/api/config/scan-paths",
+            get(api::setup::get_scan_paths).post(api::setup::set_scan_paths),
+        )
+        .route(
+            "/api/config/scan-ignore",
+            get(api::setup::get_scan_ignore).post(api::setup::set_scan_ignore),
+        )
+        .route(
+            "/api/config/scan-depth",
+            get(api::setup::get_scan_depth).post(api::setup::set_scan_depth),
+        )
+        .route(
+            "/api/config/agent-access",
+            get(api::setup::get_agent_access).post(api::setup::set_agent_access),
+        )
+        .route(
+            "/api/config/model-tiers",
+            get(api::setup::get_model_tiers).post(api::setup::set_model_tiers),
+        )
+        .route(
+            "/api/config/server",
+            get(api::setup::get_server_config).post(api::setup::set_server_config),
+        )
+        .route(
+            "/api/config/network-exposure",
+            get(api::setup::get_network_exposure).post(api::setup::set_network_exposure),
+        )
+        .route(
+            "/api/config/auth-token/regenerate",
+            post(api::setup::regenerate_auth_token),
+        )
         .route("/api/config/db-info", get(api::setup::db_info))
         .route("/api/db/backup", post(api::setup::db_backup))
         .route("/api/config/export", get(api::setup::export_data))
@@ -577,82 +653,189 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/projects/add-folder", post(api::projects::add_folder))
         .route("/api/projects/bootstrap", post(api::projects::bootstrap))
         .route("/api/projects/clone", post(api::projects::clone_project))
-        .route("/api/projects/discover-repos", post(api::discover::discover_repos))
+        .route(
+            "/api/projects/discover-repos",
+            post(api::discover::discover_repos),
+        )
         .route("/api/projects/{id}", get(api::projects::get))
         .route("/api/projects/{id}", delete(api::projects::delete))
-        .route("/api/projects/{id}/install-template", post(api::projects::install_template))
+        .route(
+            "/api/projects/{id}/install-template",
+            post(api::projects::install_template),
+        )
         // 0.8.7 anti-hallu migration : inject the canonical section into
         // pre-existing projects + re-sync redirectors. Both idempotent.
-        .route("/api/projects/{id}/anti-hallu/status", get(api::projects::anti_hallu_inject::status))
-        .route("/api/projects/{id}/anti-hallu/inject", post(api::projects::anti_hallu_inject::inject))
-        .route("/api/projects/{id}/redirectors/sync", post(api::projects::anti_hallu_inject::sync_redirectors))
+        .route(
+            "/api/projects/{id}/anti-hallu/status",
+            get(api::projects::anti_hallu_inject::status),
+        )
+        .route(
+            "/api/projects/{id}/anti-hallu/inject",
+            post(api::projects::anti_hallu_inject::inject),
+        )
+        .route(
+            "/api/projects/{id}/redirectors/sync",
+            post(api::projects::anti_hallu_inject::sync_redirectors),
+        )
         .route("/api/projects/{id}/audit-info", get(api::audit::audit_info))
         .route("/api/projects/{id}/drift", get(api::audit::check_drift))
-        .route("/api/projects/{id}/partial-audit", post(api::audit::partial_audit))
-        .route("/api/projects/{id}/validate-audit", post(api::audit::validate_audit))
-        .route("/api/projects/{id}/mark-bootstrapped", post(api::audit::mark_bootstrapped))
-        .route("/api/projects/{id}/full-audit", post(api::audit::full_audit))
-        .route("/api/projects/{id}/cancel-audit", post(api::audit::cancel_audit))
-        .route("/api/projects/{id}/audit-status", get(api::audit::audit_status))
+        .route(
+            "/api/projects/{id}/partial-audit",
+            post(api::audit::partial_audit),
+        )
+        .route(
+            "/api/projects/{id}/validate-audit",
+            post(api::audit::validate_audit),
+        )
+        .route(
+            "/api/projects/{id}/mark-bootstrapped",
+            post(api::audit::mark_bootstrapped),
+        )
+        .route(
+            "/api/projects/{id}/full-audit",
+            post(api::audit::full_audit),
+        )
+        .route(
+            "/api/projects/{id}/cancel-audit",
+            post(api::audit::cancel_audit),
+        )
+        .route(
+            "/api/projects/{id}/audit-status",
+            get(api::audit::audit_status),
+        )
         // 0.8.3 (#288) — fleet-wide view of every running audit.
         .route("/api/audit-status", get(api::audit::audit_status_all))
         // 0.8.3 (#311) — last resumable audit run for a project. Drives
         // the "Reprendre Step N/10" button on the ProjectCard when an
         // earlier run was interrupted (rate-limit, crash, network blip).
-        .route("/api/projects/{id}/audit-resumable", get(api::audit::audit_latest_resumable))
+        .route(
+            "/api/projects/{id}/audit-resumable",
+            get(api::audit::audit_latest_resumable),
+        )
         // 0.8.4 (#298) — last completed audit + per-step metrics for the
         // ProjectCard recap panel. Read-only.
-        .route("/api/projects/{id}/audit-latest", get(api::audit::audit_latest))
-        .route("/api/projects/{id}/audit-history", get(api::audit::audit_history))
-        .route("/api/audit-runs/{run_id}/steps", get(api::audit::audit_run_steps))
+        .route(
+            "/api/projects/{id}/audit-latest",
+            get(api::audit::audit_latest),
+        )
+        .route(
+            "/api/projects/{id}/audit-history",
+            get(api::audit::audit_history),
+        )
+        .route(
+            "/api/audit-runs/{run_id}/steps",
+            get(api::audit::audit_run_steps),
+        )
         // 0.8.4 (#317 / B1) — admin: force-clear all `Running` audit_runs.
         // The boot hook handles the 30-min threshold automatically; this
         // is the manual escape hatch for operators.
-        .route("/api/audit-runs/cleanup", post(api::audit::audit_runs_cleanup))
-        .route("/api/projects/{id}/remap-path", post(api::projects::remap_path))
+        .route(
+            "/api/audit-runs/cleanup",
+            post(api::audit::audit_runs_cleanup),
+        )
+        .route(
+            "/api/projects/{id}/remap-path",
+            post(api::projects::remap_path),
+        )
         // Recover a project whose path no longer resolves (cross-machine
         // import): re-clone its repo_url locally + re-point the existing
         // project at the clone. Re-syncs plugins/skills to the new path.
-        .route("/api/projects/{id}/clone-and-remap", post(api::projects::clone_and_remap))
+        .route(
+            "/api/projects/{id}/clone-and-remap",
+            post(api::projects::clone_and_remap),
+        )
         // 0.7.1 — `ai/` → `docs/` convention migration. Idempotent, safe
         // to call on already-migrated or never-bootstrapped projects.
-        .route("/api/projects/{id}/migrate-docs", post(api::projects::migrate_docs))
+        .route(
+            "/api/projects/{id}/migrate-docs",
+            post(api::projects::migrate_docs),
+        )
         // 0.7.1 — User-scoped context CRUD : files in ~/.kronn/user-context/
         // are auto-injected into every agent's prompt. UI-editable so the
         // operator never needs a terminal.
         .route("/api/user-context", get(api::user_context::list))
-        .route("/api/user-context/{name}",
+        .route(
+            "/api/user-context/{name}",
             get(api::user_context::get)
                 .put(api::user_context::put)
-                .delete(api::user_context::delete))
-        .route("/api/projects/{id}/default-skills", put(api::projects::set_default_skills))
-        .route("/api/projects/{id}/default-profile", put(api::projects::set_default_profile))
+                .delete(api::user_context::delete),
+        )
+        .route(
+            "/api/projects/{id}/default-skills",
+            put(api::projects::set_default_skills),
+        )
+        .route(
+            "/api/projects/{id}/default-profile",
+            put(api::projects::set_default_profile),
+        )
         // 0.8.3 — companion repos. Body = full Vec<LinkedRepo>;
         // atomic replace (no partial CRUD per row).
-        .route("/api/projects/{id}/linked-repos", put(api::projects::set_linked_repos))
+        .route(
+            "/api/projects/{id}/linked-repos",
+            put(api::projects::set_linked_repos),
+        )
         // 0.8.6 (#27) — autocomplete picker source for the
         // linked-repos drawer. Returns other Kronn-known projects
         // sorted by proximity.
-        .route("/api/projects/{id}/linked-repos/candidates", get(api::projects::linked_repos_candidates))
-        .route("/api/projects/{id}/briefing", get(api::audit::get_briefing).put(api::audit::set_briefing))
-        .route("/api/projects/{id}/start-briefing", post(api::audit::start_briefing))
+        .route(
+            "/api/projects/{id}/linked-repos/candidates",
+            get(api::projects::linked_repos_candidates),
+        )
+        .route(
+            "/api/projects/{id}/briefing",
+            get(api::audit::get_briefing).put(api::audit::set_briefing),
+        )
+        .route(
+            "/api/projects/{id}/start-briefing",
+            post(api::audit::start_briefing),
+        )
         // 0.8.4 (#285) — désagentified briefing form. POST the 6 answers
         // directly, server writes docs/briefing.md + persists DB notes,
         // no LLM call. Coexists with the conversational variant above.
-        .route("/api/projects/{id}/save-briefing", post(api::audit::save_briefing_form))
-        .route("/api/projects/{id}/ai-files", get(api::ai_docs::list_ai_files))
-        .route("/api/projects/{id}/ai-file", get(api::ai_docs::read_ai_file))
-        .route("/api/projects/{id}/ai-search", get(api::ai_docs::search_ai_files))
-        .route("/api/projects/{id}/doc-asset", get(api::ai_docs::read_doc_asset))
-        .route("/api/projects/{id}/git-status", get(api::projects::git_status))
+        .route(
+            "/api/projects/{id}/save-briefing",
+            post(api::audit::save_briefing_form),
+        )
+        .route(
+            "/api/projects/{id}/ai-files",
+            get(api::ai_docs::list_ai_files),
+        )
+        .route(
+            "/api/projects/{id}/ai-file",
+            get(api::ai_docs::read_ai_file),
+        )
+        .route(
+            "/api/projects/{id}/ai-search",
+            get(api::ai_docs::search_ai_files),
+        )
+        .route(
+            "/api/projects/{id}/doc-asset",
+            get(api::ai_docs::read_doc_asset),
+        )
+        .route(
+            "/api/projects/{id}/git-status",
+            get(api::projects::git_status),
+        )
         .route("/api/projects/{id}/git-diff", get(api::projects::git_diff))
-        .route("/api/projects/{id}/git-branch", post(api::projects::git_branch))
-        .route("/api/projects/{id}/git-commit", post(api::projects::git_commit))
+        .route(
+            "/api/projects/{id}/git-branch",
+            post(api::projects::git_branch),
+        )
+        .route(
+            "/api/projects/{id}/git-commit",
+            post(api::projects::git_commit),
+        )
         .route("/api/projects/{id}/git-push", post(api::projects::git_push))
         .route("/api/projects/{id}/git-pr", post(api::projects::create_pr))
-        .route("/api/projects/{id}/pr-template", get(api::projects::pr_template))
+        .route(
+            "/api/projects/{id}/pr-template",
+            get(api::projects::pr_template),
+        )
         .route("/api/projects/{id}/exec", post(api::projects::project_exec))
-        .route("/api/projects/{id}/workflow-suggestions", get(api::workflows::suggestions))
+        .route(
+            "/api/projects/{id}/workflow-suggestions",
+            get(api::workflows::suggestions),
+        )
         // ── Agents ──
         .route("/api/agents", get(api::agents::detect))
         .route("/api/agents/install", post(api::agents::install))
@@ -677,17 +860,26 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route("/api/docs/xlsx", post(api::docs::generate_xlsx))
         .route("/api/docs/csv", post(api::docs::generate_csv))
         .route("/api/docs/pptx", post(api::docs::generate_pptx))
-        .route("/api/docs/file/{discussion_id}/{filename}", get(api::docs::download_file))
+        .route(
+            "/api/docs/file/{discussion_id}/{filename}",
+            get(api::docs::download_file),
+        )
         // ── MCPs ──
         .route("/api/mcps", get(api::mcps::overview))
         .route("/api/mcps/registry", get(api::mcps::list_registry))
         .route("/api/mcps/refresh", post(api::mcps::refresh))
         .route("/api/mcps/configs", post(api::mcps::create_config))
-        .route("/api/mcps/configs/{id}", patch(api::mcps::update_config).delete(api::mcps::delete_config))
+        .route(
+            "/api/mcps/configs/{id}",
+            patch(api::mcps::update_config).delete(api::mcps::delete_config),
+        )
         // 0.8.6 — Custom API plugin spec edit. Lets the user fix a
         // typo / add endpoints / change docs_url WITHOUT delete+recreate.
         // Server_id is preserved; configs & workflow ApiCall refs stay valid.
-        .route("/api/mcps/custom/{server_id}", put(api::mcps::update_custom_spec))
+        .route(
+            "/api/mcps/custom/{server_id}",
+            put(api::mcps::update_custom_spec),
+        )
         // 0.8.6 (#60) — cleanup orphan env keys left behind by a field
         // rename / removal. Body: { keys: ["OLD_KEY", …] }.
         .route(
@@ -705,18 +897,39 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             "/api/mcps/custom/import-file",
             post(api::mcps::import_custom_plugin_file),
         )
-        .route("/api/mcps/configs/{id}/projects", patch(api::mcps::set_config_projects))
-        .route("/api/mcps/configs/{id}/reveal", post(api::mcps::reveal_secrets))
+        .route(
+            "/api/mcps/configs/{id}/projects",
+            patch(api::mcps::set_config_projects),
+        )
+        .route(
+            "/api/mcps/configs/{id}/reveal",
+            post(api::mcps::reveal_secrets),
+        )
         .route("/api/mcps/host-discovery", get(api::mcps::host_discovery))
-        .route("/api/mcps/host-discovery/adopt", post(api::mcps::adopt_host_mcp))
-        .route("/api/mcps/context/{project_id}", get(api::mcps::list_contexts))
-        .route("/api/mcps/context/{project_id}/{slug}", get(api::mcps::get_context).put(api::mcps::update_context))
+        .route(
+            "/api/mcps/host-discovery/adopt",
+            post(api::mcps::adopt_host_mcp),
+        )
+        .route(
+            "/api/mcps/context/{project_id}",
+            get(api::mcps::list_contexts),
+        )
+        .route(
+            "/api/mcps/context/{project_id}/{slug}",
+            get(api::mcps::get_context).put(api::mcps::update_context),
+        )
         // ── Workflows ──
-        .route("/api/workflows", get(api::workflows::list).post(api::workflows::create))
+        .route(
+            "/api/workflows",
+            get(api::workflows::list).post(api::workflows::create),
+        )
         // 0.8.3 — Feasibility-Gated Implementation: one-shot template
         // creation for big tickets. POST `{project_id, ticket_ref?,
         // ticket_body?, agent?, name?}` → returns a 5-step workflow.
-        .route("/api/workflows/templates/feasibility-autopilot", post(api::workflows::create_feasibility_autopilot))
+        .route(
+            "/api/workflows/templates/feasibility-autopilot",
+            post(api::workflows::create_feasibility_autopilot),
+        )
         // 0.8.3 — Bundle creator. Atomic creation of (Quick Prompts
         // × N) + (Quick APIs × N) + (Custom API plugins × N) +
         // (1 Workflow) from a single `KRONN:BUNDLE_READY` chat
@@ -727,13 +940,30 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // 0.8.3 — Feasibility-Gated traceability surface. Read-only
         // for now; mutation (override / mark resolved) lands once the
         // frontend Decision-log page does.
-        .route("/api/agent-decisions", get(api::workflows::list_agent_decisions))
-        .route("/api/workflows/{id}", get(api::workflows::get).put(api::workflows::update).delete(api::workflows::delete))
+        .route(
+            "/api/agent-decisions",
+            get(api::workflows::list_agent_decisions),
+        )
+        .route(
+            "/api/workflows/{id}",
+            get(api::workflows::get)
+                .put(api::workflows::update)
+                .delete(api::workflows::delete),
+        )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
-        .route("/api/workflows/test-batch-step", post(api::workflows::test_batch_step))
+        .route(
+            "/api/workflows/test-batch-step",
+            post(api::workflows::test_batch_step),
+        )
         // ── ApiCall step wizard endpoints (P0.5 — désagentification) ──
-        .route("/api/workflow-steps/test-extract", post(api::workflows::test_extract))
-        .route("/api/workflow-steps/test-api-call", post(api::workflows::test_api_call))
+        .route(
+            "/api/workflow-steps/test-extract",
+            post(api::workflows::test_extract),
+        )
+        .route(
+            "/api/workflow-steps/test-api-call",
+            post(api::workflows::test_api_call),
+        )
         // 0.8.6 — Agent API broker. Lets the kronn-internal MCP forward
         // an agent-driven HTTP call through the same executor as
         // workflow ApiCall steps. Credentials never leave Kronn DB.
@@ -744,136 +974,335 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         // enriched with smart-polling `next_check` hints so an MCP-driven
         // agent on mobile can launch + track without burning tokens on
         // SSE chunks it can't easily consume.
-        .route("/api/mcp/workflow-trigger", post(api::mcp_remote::workflow_trigger))
-        .route("/api/mcp/workflow-run-status/{run_id}", get(api::mcp_remote::workflow_run_status))
+        .route(
+            "/api/mcp/workflow-trigger",
+            post(api::mcp_remote::workflow_trigger),
+        )
+        .route(
+            "/api/mcp/workflow-run-status/{run_id}",
+            get(api::mcp_remote::workflow_run_status),
+        )
         .route("/api/mcp/qp-run", post(api::mcp_remote::qp_run))
         // 0.8.7 phase 4 — PR2 (batch fan-out + run discussions) + PR3 (long-poll wait).
         .route("/api/mcp/qp-batch-run", post(api::mcp_remote::qp_batch_run))
-        .route("/api/mcp/workflow-run-discussions/{run_id}", get(api::mcp_remote::workflow_run_discussions))
-        .route("/api/mcp/workflow-wait-for-completion", post(api::mcp_remote::workflow_wait_for_completion))
+        .route(
+            "/api/mcp/workflow-run-discussions/{run_id}",
+            get(api::mcp_remote::workflow_run_discussions),
+        )
+        .route(
+            "/api/mcp/workflow-wait-for-completion",
+            post(api::mcp_remote::workflow_wait_for_completion),
+        )
         // 0.8.6 (#24) — unified API-call logs read surface. Lists / shows
         // / purges rows from `api_call_logs` (workflow + broker + manual).
-        .route("/api/api-call-logs", get(api::api_call_logs::list_api_call_logs))
-        .route("/api/api-call-logs/purge", post(api::api_call_logs::purge_api_call_logs))
-        .route("/api/api-call-logs/{id}", get(api::api_call_logs::get_api_call_log))
+        .route(
+            "/api/api-call-logs",
+            get(api::api_call_logs::list_api_call_logs),
+        )
+        .route(
+            "/api/api-call-logs/purge",
+            post(api::api_call_logs::purge_api_call_logs),
+        )
+        .route(
+            "/api/api-call-logs/{id}",
+            get(api::api_call_logs::get_api_call_log),
+        )
         // 0.9.0 — Continual Learning (spec docs/research/continual-learning-0.9.0-spec.md)
-        .route("/api/learnings/propose", post(api::learnings::propose_learning))
+        .route(
+            "/api/learnings/propose",
+            post(api::learnings::propose_learning),
+        )
         .route("/api/learnings", get(api::learnings::list_learnings))
         .route("/api/learnings/pending", get(api::learnings::pending_count))
-        .route("/api/learnings/{id}/validate", post(api::learnings::validate_learning))
-        .route("/api/learnings/{id}/reject", post(api::learnings::reject_learning))
-        .route("/api/discussions/{id}/learnings", get(api::learnings::disc_learnings))
-        .route("/api/projects/{id}/learnings/sync", post(api::learnings::sync_learnings_doc))
+        .route(
+            "/api/learnings/{id}/validate",
+            post(api::learnings::validate_learning),
+        )
+        .route(
+            "/api/learnings/{id}/reject",
+            post(api::learnings::reject_learning),
+        )
+        .route(
+            "/api/discussions/{id}/learnings",
+            get(api::learnings::disc_learnings),
+        )
+        .route(
+            "/api/projects/{id}/learnings/sync",
+            post(api::learnings::sync_learnings_doc),
+        )
         .route("/api/workflows/{id}/trigger", post(api::workflows::trigger))
-        .route("/api/workflows/{id}/runs", get(api::workflows::list_runs).delete(api::workflows::delete_all_runs))
-        .route("/api/workflows/{id}/runs/{run_id}", get(api::workflows::get_run).delete(api::workflows::delete_run))
-        .route("/api/workflows/{id}/runs/{run_id}/cancel", post(api::workflows::cancel_run))
-        .route("/api/workflows/{id}/runs/{run_id}/decide", post(api::workflows::decide_run))
+        .route(
+            "/api/workflows/{id}/runs",
+            get(api::workflows::list_runs).delete(api::workflows::delete_all_runs),
+        )
+        .route(
+            "/api/workflows/{id}/runs/{run_id}",
+            get(api::workflows::get_run).delete(api::workflows::delete_run),
+        )
+        .route(
+            "/api/workflows/{id}/runs/{run_id}/cancel",
+            post(api::workflows::cancel_run),
+        )
+        .route(
+            "/api/workflows/{id}/runs/{run_id}/decide",
+            post(api::workflows::decide_run),
+        )
         .route(
             "/api/workflows/{id}/runs/{run_id}/test-worktree",
             post(api::workflows::test_worktree).delete(api::workflows::delete_test_worktree),
         )
         // 0.7.0 UX pass — per-item export / import (single workflow or QP).
         // Distinct from /api/config/export which exports the whole DB.
-        .route("/api/workflows/{id}/export", get(api::workflows::export_workflow))
-        .route("/api/workflows/import", post(api::workflows::import_workflow))
-        .route("/api/workflow-runs/batch-summaries", get(api::workflows::list_batch_run_summaries))
-        .route("/api/workflow-runs/{run_id}", delete(api::workflows::delete_batch_run))
-        .route("/api/workflow-runs/{run_id}/resume", post(api::workflows::resume_interrupted))
+        .route(
+            "/api/workflows/{id}/export",
+            get(api::workflows::export_workflow),
+        )
+        .route(
+            "/api/workflows/import",
+            post(api::workflows::import_workflow),
+        )
+        .route(
+            "/api/workflow-runs/batch-summaries",
+            get(api::workflows::list_batch_run_summaries),
+        )
+        .route(
+            "/api/workflow-runs/{run_id}",
+            delete(api::workflows::delete_batch_run),
+        )
+        .route(
+            "/api/workflow-runs/{run_id}/resume",
+            post(api::workflows::resume_interrupted),
+        )
         // ── Quick Prompts ──
-        .route("/api/quick-prompts", get(api::quick_prompts::list).post(api::quick_prompts::create))
-        .route("/api/quick-prompts/{id}", put(api::quick_prompts::update).delete(api::quick_prompts::delete))
-        .route("/api/quick-prompts/{id}/batch", post(api::quick_prompts::batch_run))
+        .route(
+            "/api/quick-prompts",
+            get(api::quick_prompts::list).post(api::quick_prompts::create),
+        )
+        .route(
+            "/api/quick-prompts/{id}",
+            put(api::quick_prompts::update).delete(api::quick_prompts::delete),
+        )
+        .route(
+            "/api/quick-prompts/{id}/batch",
+            post(api::quick_prompts::batch_run),
+        )
         // Compare-agents mode — fan out the same prompt across N agents.
-        .route("/api/quick-prompts/{id}/compare-agents", post(api::quick_prompts::compare_agents))
+        .route(
+            "/api/quick-prompts/{id}/compare-agents",
+            post(api::quick_prompts::compare_agents),
+        )
         // 0.8.5 — version history + per-version metrics for the QP
         // history drawer (avg tokens, avg duration, avg cost per
         // version_index).
-        .route("/api/quick-prompts/{id}/history", get(api::quick_prompts::history))
-        .route("/api/quick-prompts/{id}/metrics", get(api::quick_prompts::metrics))
+        .route(
+            "/api/quick-prompts/{id}/history",
+            get(api::quick_prompts::history),
+        )
+        .route(
+            "/api/quick-prompts/{id}/metrics",
+            get(api::quick_prompts::metrics),
+        )
         // 0.8.5 — drop an archived QP version. Refused on the current
         // (highest) version_index; cascades originating_qp_* on discs
         // referencing the deleted version to NULL.
-        .route("/api/quick-prompts/{id}/versions/{version_index}", delete(api::quick_prompts::delete_version))
+        .route(
+            "/api/quick-prompts/{id}/versions/{version_index}",
+            delete(api::quick_prompts::delete_version),
+        )
         // 0.7.0 UX pass — per-item export / import.
-        .route("/api/quick-prompts/{id}/export", get(api::quick_prompts::export_qp))
-        .route("/api/quick-prompts/import", post(api::quick_prompts::import_qp))
+        .route(
+            "/api/quick-prompts/{id}/export",
+            get(api::quick_prompts::export_qp),
+        )
+        .route(
+            "/api/quick-prompts/import",
+            post(api::quick_prompts::import_qp),
+        )
         // ── Quick APIs (0.6.0 — reusable HTTP call templates) ──
-        .route("/api/quick-apis", get(api::quick_apis::list).post(api::quick_apis::create))
-        .route("/api/quick-apis/{id}", put(api::quick_apis::update).delete(api::quick_apis::delete))
+        .route(
+            "/api/quick-apis",
+            get(api::quick_apis::list).post(api::quick_apis::create),
+        )
+        .route(
+            "/api/quick-apis/{id}",
+            put(api::quick_apis::update).delete(api::quick_apis::delete),
+        )
         .route("/api/quick-apis/{id}/run", post(api::quick_apis::run_qa))
-        .route("/api/quick-apis/{id}/batch", post(api::quick_apis::batch_run_qa))
-        .route("/api/quick-apis/{id}/export", get(api::quick_apis::export_qa))
+        .route(
+            "/api/quick-apis/{id}/batch",
+            post(api::quick_apis::batch_run_qa),
+        )
+        .route(
+            "/api/quick-apis/{id}/export",
+            get(api::quick_apis::export_qa),
+        )
         .route("/api/quick-apis/import", post(api::quick_apis::import_qa))
         // ── Discussions ──
         .route("/api/discussions", get(api::discussions::list))
         .route("/api/discussions", post(api::discussions::create))
         // Static segment BEFORE the `{id}` capture so it isn't swallowed by it.
-        .route("/api/discussions/running", get(api::discussions::running_discussions))
+        .route(
+            "/api/discussions/running",
+            get(api::discussions::running_discussions),
+        )
         .route("/api/discussions/{id}", get(api::discussions::get))
-        .route("/api/discussions/{id}", delete(api::discussions::delete).patch(api::discussions::update))
-        .route("/api/discussions/{id}/messages", post(api::discussions::send_message))
-        .route("/api/discussions/{id}/messages/last", delete(api::discussions::delete_last_agent_messages).patch(api::discussions::edit_last_user_message))
-        .route("/api/discussions/{id}/run", post(api::discussions::run_agent))
-        .route("/api/discussions/{id}/stop", post(api::discussions::stop_agent))
-        .route("/api/discussions/{id}/dismiss-partial", post(api::discussions::dismiss_partial))
-        .route("/api/discussions/{id}/orchestrate", post(api::discussions::orchestrate))
+        .route(
+            "/api/discussions/{id}",
+            delete(api::discussions::delete).patch(api::discussions::update),
+        )
+        .route(
+            "/api/discussions/{id}/messages",
+            post(api::discussions::send_message),
+        )
+        .route(
+            "/api/discussions/{id}/messages/last",
+            delete(api::discussions::delete_last_agent_messages)
+                .patch(api::discussions::edit_last_user_message),
+        )
+        .route(
+            "/api/discussions/{id}/run",
+            post(api::discussions::run_agent),
+        )
+        .route(
+            "/api/discussions/{id}/stop",
+            post(api::discussions::stop_agent),
+        )
+        .route(
+            "/api/discussions/{id}/dismiss-partial",
+            post(api::discussions::dismiss_partial),
+        )
+        .route(
+            "/api/discussions/{id}/orchestrate",
+            post(api::discussions::orchestrate),
+        )
         .route("/api/discussions/{id}/share", post(api::discussions::share))
         // 0.8.6 phase 2 — cross-agent collab : invite a peer agent.
-        .route("/api/discussions/{id}/invite-peer", post(api::disc_invite::invite_peer))
+        .route(
+            "/api/discussions/{id}/invite-peer",
+            post(api::disc_invite::invite_peer),
+        )
         // List the active participants of a disc — header rendering.
-        .route("/api/discussions/{id}/participants", get(api::disc_invite::list_participants))
+        .route(
+            "/api/discussions/{id}/participants",
+            get(api::disc_invite::list_participants),
+        )
         // 0.8.6 phase 3 — long-poll for new peer messages.
-        .route("/api/discussions/{id}/wait", get(api::disc_invite::wait_for_peer))
+        .route(
+            "/api/discussions/{id}/wait",
+            get(api::disc_invite::wait_for_peer),
+        )
         // Companion : the bridge calls this from `disc_join({token})`
         // to validate the token and bind itself to the resolved disc.
         // Not scoped by id — the disc identity is what the token resolves to.
-        .route("/api/discussions/peer-join", post(api::disc_invite::peer_join))
-        .route("/api/discussions/peer-resume", post(api::disc_invite::peer_resume))
+        .route(
+            "/api/discussions/peer-join",
+            post(api::disc_invite::peer_join),
+        )
+        .route(
+            "/api/discussions/peer-resume",
+            post(api::disc_invite::peer_resume),
+        )
         // Cross-instance leg of the unified "join by code": a peer asks whether
         // we host the room behind a token; if so we share it back. Auth-exempt
         // (self-auth via invite code in body — see auth_middleware).
-        .route("/api/disc/claim-by-token", post(api::disc_invite::claim_by_token))
+        .route(
+            "/api/disc/claim-by-token",
+            post(api::disc_invite::claim_by_token),
+        )
         .route("/api/disc/fetch-file", post(api::disc_invite::fetch_file))
         // 0.8.6 phase 3 — `disc_leave` MCP tool's companion route.
         // Marks the caller's active session as `left` (idempotent).
-        .route("/api/discussions/peer-leave", post(api::disc_invite::peer_leave))
+        .route(
+            "/api/discussions/peer-leave",
+            post(api::disc_invite::peer_leave),
+        )
         // Introspection endpoints — surface the conversation as a queryable
         // resource for the agent (see api::disc_introspection). The
         // `kronn-internal` MCP bridge calls these via HTTP from the
         // agent's process, letting the agent decide at runtime whether
         // it needs metadata, a specific message, or an on-demand summary.
-        .route("/api/discussions/{id}/meta", get(api::disc_introspection::disc_meta))
-        .route("/api/discussions/{id}/message/{idx}", get(api::disc_introspection::disc_get_message))
-        .route("/api/discussions/{id}/summarize", post(api::disc_introspection::disc_summarize))
+        .route(
+            "/api/discussions/{id}/meta",
+            get(api::disc_introspection::disc_meta),
+        )
+        .route(
+            "/api/discussions/{id}/message/{idx}",
+            get(api::disc_introspection::disc_get_message),
+        )
+        .route(
+            "/api/discussions/{id}/summarize",
+            post(api::disc_introspection::disc_summarize),
+        )
         // 0.8.4 (#294) — cross-agent memory routes. Each one is a
         // 1:1 mirror of an MCP tool exposed by `disc-introspection-mcp.py`,
         // so a Claude Code (or any compatible) session can push its
         // history into Kronn DB and let a different agent pick it up
         // later. See `project_cross_agent_memory_0_8_4.md`.
-        .route("/api/disc/create",            post(api::disc_source::disc_create))
-        .route("/api/disc/append",            post(api::disc_source::disc_append))
-        .route("/api/disc/link",              post(api::disc_source::disc_link))
-        .route("/api/disc/unlink",            post(api::disc_source::disc_unlink))
-        .route("/api/disc/find_by_session",   get(api::disc_source::disc_find_by_session))
-        .route("/api/disc/search",            get(api::disc_source::disc_search))
-        .route("/api/disc/load_other",        get(api::disc_source::disc_load_other))
+        .route("/api/disc/create", post(api::disc_source::disc_create))
+        .route("/api/disc/append", post(api::disc_source::disc_append))
+        .route("/api/disc/link", post(api::disc_source::disc_link))
+        .route("/api/disc/unlink", post(api::disc_source::disc_unlink))
+        .route(
+            "/api/disc/find_by_session",
+            get(api::disc_source::disc_find_by_session),
+        )
+        .route("/api/disc/search", get(api::disc_source::disc_search))
+        .route(
+            "/api/disc/load_other",
+            get(api::disc_source::disc_load_other),
+        )
         // 0.8.4 (#294) UI-facing readers — let the frontend decorate
         // the sidebar with "imported from X" badges + drive the
         // source-filter dropdown.
-        .route("/api/disc/sources",           get(api::disc_source::list_source_bindings))
-        .route("/api/discussions/{id}/source", get(api::disc_source::disc_source_detail))
-        .route("/api/discussions/{id}/git-status", get(api::disc_git::disc_git_status))
-        .route("/api/discussions/{id}/git-diff", get(api::disc_git::disc_git_diff))
-        .route("/api/discussions/{id}/git-commit", post(api::disc_git::disc_git_commit))
-        .route("/api/discussions/{id}/git-push", post(api::disc_git::disc_git_push))
-        .route("/api/discussions/{id}/git-pr", post(api::disc_git::disc_create_pr))
-        .route("/api/discussions/{id}/pr-template", get(api::disc_git::disc_pr_template))
+        .route(
+            "/api/disc/sources",
+            get(api::disc_source::list_source_bindings),
+        )
+        .route(
+            "/api/discussions/{id}/source",
+            get(api::disc_source::disc_source_detail),
+        )
+        .route(
+            "/api/discussions/{id}/git-status",
+            get(api::disc_git::disc_git_status),
+        )
+        .route(
+            "/api/discussions/{id}/git-diff",
+            get(api::disc_git::disc_git_diff),
+        )
+        .route(
+            "/api/discussions/{id}/git-commit",
+            post(api::disc_git::disc_git_commit),
+        )
+        .route(
+            "/api/discussions/{id}/git-push",
+            post(api::disc_git::disc_git_push),
+        )
+        .route(
+            "/api/discussions/{id}/git-pr",
+            post(api::disc_git::disc_create_pr),
+        )
+        .route(
+            "/api/discussions/{id}/pr-template",
+            get(api::disc_git::disc_pr_template),
+        )
         .route("/api/discussions/{id}/exec", post(api::disc_git::disc_exec))
-        .route("/api/discussions/{id}/worktree-unlock", post(api::disc_git::worktree_unlock))
-        .route("/api/discussions/{id}/worktree-lock", post(api::disc_git::worktree_lock))
-        .route("/api/discussions/{id}/test-mode/enter", post(api::disc_git::test_mode_enter))
-        .route("/api/discussions/{id}/test-mode/exit", post(api::disc_git::test_mode_exit))
+        .route(
+            "/api/discussions/{id}/worktree-unlock",
+            post(api::disc_git::worktree_unlock),
+        )
+        .route(
+            "/api/discussions/{id}/worktree-lock",
+            post(api::disc_git::worktree_lock),
+        )
+        .route(
+            "/api/discussions/{id}/test-mode/enter",
+            post(api::disc_git::test_mode_enter),
+        )
+        .route(
+            "/api/discussions/{id}/test-mode/exit",
+            post(api::disc_git::test_mode_exit),
+        )
         // ── Context Files ──
         // Upload accepts files up to 64MB (axum's default body limit is ~2MB —
         // far too small for a HAR / log / dataset attached to be read off disk).
@@ -885,29 +1314,73 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
                 .post(api::discussions::upload_context_file)
                 .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
         )
-        .route("/api/discussions/{id}/context-files/{file_id}", delete(api::discussions::delete_context_file))
-        .route("/api/discussions/{id}/context-files/{file_id}/content", get(api::discussions::get_context_file_content))
-        .route("/api/discussions/{id}/context-files/link-pending", post(api::discussions::link_pending_context_files))
+        .route(
+            "/api/discussions/{id}/context-files/{file_id}",
+            delete(api::discussions::delete_context_file),
+        )
+        .route(
+            "/api/discussions/{id}/context-files/{file_id}/content",
+            get(api::discussions::get_context_file_content),
+        )
+        .route(
+            "/api/discussions/{id}/context-files/link-pending",
+            post(api::discussions::link_pending_context_files),
+        )
         // ── WebSocket ──
         .route("/api/ws", get(api::ws::ws_handler))
         // ── Contacts ──
-        .route("/api/contacts", get(api::contacts::list).post(api::contacts::add))
+        .route(
+            "/api/contacts",
+            get(api::contacts::list).post(api::contacts::add),
+        )
         .route("/api/contacts/invite-code", get(api::contacts::invite_code))
-        .route("/api/contacts/network-info", get(api::contacts::network_info))
+        .route(
+            "/api/contacts/network-info",
+            get(api::contacts::network_info),
+        )
         .route("/api/contacts/{id}", delete(api::contacts::delete))
         .route("/api/contacts/{id}/ping", get(api::contacts::ping))
         // ── Skills ──
-        .route("/api/skills", get(api::skills::list).post(api::skills::create))
-        .route("/api/skills/{id}", put(api::skills::update).delete(api::skills::delete))
-        .route("/api/skills/auto-triggers/disabled", get(api::skills::list_disabled_auto))
-        .route("/api/skills/{id}/auto-trigger/toggle", post(api::skills::toggle_auto_trigger))
+        .route(
+            "/api/skills",
+            get(api::skills::list).post(api::skills::create),
+        )
+        .route(
+            "/api/skills/{id}",
+            put(api::skills::update).delete(api::skills::delete),
+        )
+        .route(
+            "/api/skills/auto-triggers/disabled",
+            get(api::skills::list_disabled_auto),
+        )
+        .route(
+            "/api/skills/{id}/auto-trigger/toggle",
+            post(api::skills::toggle_auto_trigger),
+        )
         // ── Profiles ──
-        .route("/api/profiles", get(api::profiles::list).post(api::profiles::create))
-        .route("/api/profiles/{id}", get(api::profiles::get).put(api::profiles::update).delete(api::profiles::delete))
-        .route("/api/profiles/{id}/persona-name", put(api::profiles::update_persona_name))
+        .route(
+            "/api/profiles",
+            get(api::profiles::list).post(api::profiles::create),
+        )
+        .route(
+            "/api/profiles/{id}",
+            get(api::profiles::get)
+                .put(api::profiles::update)
+                .delete(api::profiles::delete),
+        )
+        .route(
+            "/api/profiles/{id}/persona-name",
+            put(api::profiles::update_persona_name),
+        )
         // ── Directives ──
-        .route("/api/directives", get(api::directives::list).post(api::directives::create))
-        .route("/api/directives/{id}", put(api::directives::update).delete(api::directives::delete))
+        .route(
+            "/api/directives",
+            get(api::directives::list).post(api::directives::create),
+        )
+        .route(
+            "/api/directives/{id}",
+            put(api::directives::update).delete(api::directives::delete),
+        )
         // ── Stats ──
         .route("/api/stats/tokens", get(api::stats::token_usage))
         .route("/api/stats/agent-usage", get(api::stats::agent_usage))
@@ -916,7 +1389,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .layer(TraceLayer::new_for_http());
 
     if enable_auth {
-        router = router.route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
+        router = router.route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
     }
 
     router.with_state(state)
@@ -937,7 +1413,10 @@ mod audit_tracker_tests {
         let p = t.get_progress("proj-a").unwrap();
         assert_eq!(p.total_steps, 10);
         assert_eq!(p.step_index, 0, "start_progress must reset step_index");
-        assert_eq!(p.current_file, None, "start_progress must clear current_file");
+        assert_eq!(
+            p.current_file, None,
+            "start_progress must clear current_file"
+        );
         assert_eq!(p.kind, "full_audit");
         assert_eq!(p.phase, "auditing");
     }
@@ -981,7 +1460,11 @@ mod audit_tracker_tests {
         {
             let p = t.get_progress("p-tc").unwrap();
             assert_eq!(p.current_tool.as_deref(), Some("Write"), "last-tool wins");
-            assert_eq!(p.current_tool_call_count, Some(3), "counter bumps on every tool update");
+            assert_eq!(
+                p.current_tool_call_count,
+                Some(3),
+                "counter bumps on every tool update"
+            );
         }
 
         // Step 2 — counter resets via `clear_step_chips` (fired by
@@ -990,12 +1473,19 @@ mod audit_tracker_tests {
         t.advance_step("p-tc", 2, Some("repo-map.md".into()));
         {
             let p = t.get_progress("p-tc").unwrap();
-            assert_eq!(p.current_tool_call_count, None, "counter resets at step boundary");
+            assert_eq!(
+                p.current_tool_call_count, None,
+                "counter resets at step boundary"
+            );
         }
         t.update_chips("p-tc", None, None, Some("Grep".into()));
         {
             let p = t.get_progress("p-tc").unwrap();
-            assert_eq!(p.current_tool_call_count, Some(1), "first tool in new step → counter = 1");
+            assert_eq!(
+                p.current_tool_call_count,
+                Some(1),
+                "first tool in new step → counter = 1"
+            );
         }
     }
 
@@ -1013,7 +1503,10 @@ mod audit_tracker_tests {
         t.update_chips("p-tok", Some(400), Some(400), None);
         let p = t.get_progress("p-tok").unwrap();
         assert_eq!(p.step_tokens, Some(400));
-        assert_eq!(p.current_tool_call_count, None, "token-only updates must NOT bump the counter");
+        assert_eq!(
+            p.current_tool_call_count, None,
+            "token-only updates must NOT bump the counter"
+        );
     }
 
     #[test]
@@ -1031,7 +1524,10 @@ mod audit_tracker_tests {
         // are independent.
         let mut t = AuditTracker::default();
         assert!(t.try_acquire_lease("p1"), "first acquire wins");
-        assert!(!t.try_acquire_lease("p1"), "second acquire refused while held");
+        assert!(
+            !t.try_acquire_lease("p1"),
+            "second acquire refused while held"
+        );
         assert!(t.try_acquire_lease("p2"), "other project unaffected");
         t.release_lease("p1");
         assert!(t.try_acquire_lease("p1"), "re-acquirable after release");
@@ -1076,17 +1572,47 @@ mod auth_tests {
     fn destructive_from_remote_is_denied_even_when_auth_off() {
         // THE fix: Docker default (auth off, 0.0.0.0). A LAN peer — not local,
         // no token — must NOT be able to wipe/overwrite the instance.
-        assert!(!auth_allows(&Method::POST, RESET, false, true, false, false));
-        assert!(!auth_allows(&Method::POST, IMPORT, false, true, false, false));
+        assert!(!auth_allows(
+            &Method::POST,
+            RESET,
+            false,
+            true,
+            false,
+            false
+        ));
+        assert!(!auth_allows(
+            &Method::POST,
+            IMPORT,
+            false,
+            true,
+            false,
+            false
+        ));
         // …and still denied even if no token is configured at all.
-        assert!(!auth_allows(&Method::POST, RESET, false, false, false, false));
+        assert!(!auth_allows(
+            &Method::POST,
+            RESET,
+            false,
+            false,
+            false,
+            false
+        ));
     }
 
     #[test]
     fn destructive_allowed_for_local_or_valid_token() {
-        assert!(auth_allows(&Method::POST, RESET, false, true, true, false), "local host may reset");
-        assert!(auth_allows(&Method::POST, RESET, false, true, false, true), "valid token may reset");
-        assert!(auth_allows(&Method::POST, IMPORT, true, true, true, false), "local host may import (auth on)");
+        assert!(
+            auth_allows(&Method::POST, RESET, false, true, true, false),
+            "local host may reset"
+        );
+        assert!(
+            auth_allows(&Method::POST, RESET, false, true, false, true),
+            "valid token may reset"
+        );
+        assert!(
+            auth_allows(&Method::POST, IMPORT, true, true, true, false),
+            "local host may import (auth on)"
+        );
     }
 
     #[test]
@@ -1094,9 +1620,18 @@ mod auth_tests {
         // recovery/set reads the active key, recovery/restore swaps it — both
         // must be denied to an unauthenticated remote peer even with auth off.
         for p in ["/api/config/recovery/set", "/api/config/recovery/restore"] {
-            assert!(!auth_allows(&Method::POST, p, false, true, false, false), "{p} must deny remote+no-token");
-            assert!(auth_allows(&Method::POST, p, false, true, true, false), "{p} allows local");
-            assert!(auth_allows(&Method::POST, p, false, true, false, true), "{p} allows valid token");
+            assert!(
+                !auth_allows(&Method::POST, p, false, true, false, false),
+                "{p} must deny remote+no-token"
+            );
+            assert!(
+                auth_allows(&Method::POST, p, false, true, true, false),
+                "{p} allows local"
+            );
+            assert!(
+                auth_allows(&Method::POST, p, false, true, false, true),
+                "{p} allows valid token"
+            );
         }
     }
 
@@ -1104,21 +1639,46 @@ mod auth_tests {
     fn every_delete_is_gated_even_when_auth_off() {
         // Passe D — the VERB is the criterion: a LAN peer on an auth-off bind
         // must not delete projects/discussions/workflows/… whatever the path.
-        for p in ["/api/projects/p1", "/api/discussions/d1", "/api/workflow-runs/r1", "/api/anything/new"] {
-            assert!(!auth_allows(&Method::DELETE, p, false, true, false, false), "{p} DELETE must deny remote");
-            assert!(auth_allows(&Method::DELETE, p, false, true, true, false), "{p} DELETE allows local");
-            assert!(auth_allows(&Method::DELETE, p, false, true, false, true), "{p} DELETE allows token");
+        for p in [
+            "/api/projects/p1",
+            "/api/discussions/d1",
+            "/api/workflow-runs/r1",
+            "/api/anything/new",
+        ] {
+            assert!(
+                !auth_allows(&Method::DELETE, p, false, true, false, false),
+                "{p} DELETE must deny remote"
+            );
+            assert!(
+                auth_allows(&Method::DELETE, p, false, true, true, false),
+                "{p} DELETE allows local"
+            );
+            assert!(
+                auth_allows(&Method::DELETE, p, false, true, false, true),
+                "{p} DELETE allows token"
+            );
         }
     }
 
     #[test]
     fn destructive_posts_inventory_is_gated() {
         // Passe D — system mutations + purges reachable by POST.
-        for p in ["/api/audit-runs/cleanup", "/api/api-call-logs/purge",
-                  "/api/debug/logs/clear", "/api/agents/uninstall", "/api/rtk/deactivate",
-                  "/api/mcps/custom/srv-1/cleanup-orphan-env"] {
-            assert!(!auth_allows(&Method::POST, p, false, true, false, false), "{p} must deny remote+no-token");
-            assert!(auth_allows(&Method::POST, p, false, true, true, false), "{p} allows local");
+        for p in [
+            "/api/audit-runs/cleanup",
+            "/api/api-call-logs/purge",
+            "/api/debug/logs/clear",
+            "/api/agents/uninstall",
+            "/api/rtk/deactivate",
+            "/api/mcps/custom/srv-1/cleanup-orphan-env",
+        ] {
+            assert!(
+                !auth_allows(&Method::POST, p, false, true, false, false),
+                "{p} must deny remote+no-token"
+            );
+            assert!(
+                auth_allows(&Method::POST, p, false, true, true, false),
+                "{p} allows local"
+            );
         }
     }
 
@@ -1126,7 +1686,14 @@ mod auth_tests {
     fn non_destructive_keeps_historical_behaviour() {
         // auth off → open (GET and ordinary POST alike).
         assert!(auth_allows(&Method::GET, NORMAL, false, true, false, false));
-        assert!(auth_allows(&Method::POST, NORMAL, false, true, false, false));
+        assert!(auth_allows(
+            &Method::POST,
+            NORMAL,
+            false,
+            true,
+            false,
+            false
+        ));
         // auth on, no token configured → open (first-run/back-compat).
         assert!(auth_allows(&Method::GET, NORMAL, true, false, false, false));
         // auth on, token configured, remote & no token → denied.
@@ -1184,8 +1751,8 @@ mod auth_tests {
         // accidentally hit Kronn without a token.
         assert!(!is_local_ip("100.64.0.1")); // Tailscale CGNAT
         assert!(!is_local_ip("192.168.1.10")); // home LAN
-        assert!(!is_local_ip("10.0.0.5"));     // RFC1918 LAN
-        assert!(!is_local_ip("8.8.8.8"));      // public
+        assert!(!is_local_ip("10.0.0.5")); // RFC1918 LAN
+        assert!(!is_local_ip("8.8.8.8")); // public
     }
 
     #[test]

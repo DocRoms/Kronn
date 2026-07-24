@@ -64,7 +64,6 @@ const RAW_PATTERNS: &[(&str, &str)] = &[
         r"\b(Bearer|Token|Basic)\s+([A-Za-z0-9._\-+/=]{20,})",
         "$1 ***REDACTED***",
     ),
-
     // ── Vendor-prefixed bare tokens ────────────────────────────────
     //
     // OpenAI / Anthropic sk-* keys (live + project + service variants).
@@ -191,8 +190,7 @@ pub fn looks_like_secret(input: &str) -> bool {
 // Anchored on the secret NAME, so ordinary path-keyed hex checksums (no NAME)
 // are never touched. Quoted MUST run before unquoted (the unquoted value class
 // excludes quotes, so it can't consume a quoted value itself).
-const ASSIGNMENT_NAME: &str =
-    r"[a-z0-9_.-]*(?:secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token)";
+const ASSIGNMENT_NAME: &str = r"[a-z0-9_.-]*(?:secret|apikey|api[_-]?key|passwd|password|pwd|pin|passcode|passphrase|access[_-]?key|private[_-]?key|signing[_-]?key|encryption[_-]?key|hmac[_-]?key|client[_-]?secret|auth[_-]?token|access[_-]?token|refresh[_-]?token|bearer[_-]?token)";
 
 static ASSIGNMENT: LazyLock<Vec<Pattern>> = LazyLock::new(|| {
     let quoted_dq = format!("(?i)(\\b{ASSIGNMENT_NAME}\\b\\s*[:=]\\s*)\"((?:\\\\.|[^\"\\\\])+)\"");
@@ -318,8 +316,14 @@ mod tests {
         );
         // …and redact_for_audit_artifact must CATCH it.
         let (out, n) = redact_for_audit_artifact(plain);
-        assert!(!out.contains("61cc954cdeadbeef0123456789abcdef"), "value must be masked: {out}");
-        assert!(out.contains("APP_SECRET=***REDACTED***"), "name kept, value masked: {out}");
+        assert!(
+            !out.contains("61cc954cdeadbeef0123456789abcdef"),
+            "value must be masked: {out}"
+        );
+        assert!(
+            out.contains("APP_SECRET=***REDACTED***"),
+            "name kept, value masked: {out}"
+        );
         assert!(n >= 1, "redaction count must be reported, got {n}");
     }
 
@@ -332,7 +336,10 @@ mod tests {
             "?apikey=Ab3xZ9Qw7Lm2Ns5Pt8Rv&lang=fr",
         ] {
             let (out, n) = redact_for_audit_artifact(line);
-            assert!(!out.contains("Ab3xZ9Qw7Lm2Ns5Pt8Rv"), "value must be masked in {line:?}: {out}");
+            assert!(
+                !out.contains("Ab3xZ9Qw7Lm2Ns5Pt8Rv"),
+                "value must be masked in {line:?}: {out}"
+            );
             assert!(n >= 1, "{line:?} should redact");
         }
     }
@@ -344,14 +351,20 @@ mod tests {
             ("password=admin", "admin"),
             ("secret: p@$$w0rd!#%", "p@$$w0rd!#%"),
             ("secret=99", "99"),
-            ("client_secret: \"my long secret phrase\"", "my long secret phrase"),
+            (
+                "client_secret: \"my long secret phrase\"",
+                "my long secret phrase",
+            ),
             ("access_token='xyz.123-ABC'", "xyz.123-ABC"),
             ("signing_key=short!", "short!"),
             ("encryption-key: `two words`", "two words"),
             ("PIN=7", "7"),
         ] {
             let (out, n) = redact_for_audit_artifact(line);
-            assert!(!out.contains(leak), "value {leak:?} must be masked in {line:?}: {out}");
+            assert!(
+                !out.contains(leak),
+                "value {leak:?} must be masked in {line:?}: {out}"
+            );
             assert!(n >= 1, "{line:?} should redact");
         }
     }
@@ -359,14 +372,36 @@ mod tests {
     #[test]
     fn audit_artifact_mixed_quotes_cannot_leak_a_secret_suffix() {
         for (line, leak, expected) in [
-            (r#"password="pa'ss""#, "pa'ss", r#"password="***REDACTED***""#),
-            (r#"client_secret='pa"ss'"#, r#"pa"ss"#, "client_secret='***REDACTED***'"),
-            ("signing_key=`pa'\"ss`", "pa'\"ss", "signing_key=`***REDACTED***`"),
-            (r#"password="pa\"ss""#, r#"pa\"ss"#, r#"password="***REDACTED***""#),
+            (
+                r#"password="pa'ss""#,
+                "pa'ss",
+                r#"password="***REDACTED***""#,
+            ),
+            (
+                r#"client_secret='pa"ss'"#,
+                r#"pa"ss"#,
+                "client_secret='***REDACTED***'",
+            ),
+            (
+                "signing_key=`pa'\"ss`",
+                "pa'\"ss",
+                "signing_key=`***REDACTED***`",
+            ),
+            (
+                r#"password="pa\"ss""#,
+                r#"pa\"ss"#,
+                r#"password="***REDACTED***""#,
+            ),
         ] {
             let (out, n) = redact_for_audit_artifact(line);
-            assert_eq!(out, expected, "mixed quote value must be fully masked: {line:?}");
-            assert!(!out.contains(leak), "secret suffix leaked from {line:?}: {out}");
+            assert_eq!(
+                out, expected,
+                "mixed quote value must be fully masked: {line:?}"
+            );
+            assert!(
+                !out.contains(leak),
+                "secret suffix leaked from {line:?}: {out}"
+            );
             assert!(n >= 1, "{line:?} should redact");
         }
     }
@@ -388,8 +423,12 @@ mod tests {
 
     #[test]
     fn audit_artifact_still_catches_vendor_keys() {
-        let (out, n) = redact_for_audit_artifact("key AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 here");
-        assert!(out.contains("AIza***REDACTED***"), "vendor pass still applies: {out}");
+        let (out, n) =
+            redact_for_audit_artifact("key AIzaSyABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 here");
+        assert!(
+            out.contains("AIza***REDACTED***"),
+            "vendor pass still applies: {out}"
+        );
         assert!(n >= 1);
     }
 
@@ -453,7 +492,10 @@ mod tests {
         for prefix in ["gho_", "ghs_", "ghu_", "ghr_"] {
             let raw = format!("{}abcdefghijklmnopqrstuvwxyz1234567890", prefix);
             let out = redact_secrets(&raw);
-            assert!(out.contains("***REDACTED***"), "prefix {prefix} not redacted: {out}");
+            assert!(
+                out.contains("***REDACTED***"),
+                "prefix {prefix} not redacted: {out}"
+            );
         }
     }
 
@@ -462,7 +504,10 @@ mod tests {
         for prefix in ["xoxb-", "xoxp-", "xoxa-", "xoxs-", "xoxr-"] {
             let raw = format!("Slack: {}123456789012-abcdefABCDEF", prefix);
             let out = redact_secrets(&raw);
-            assert!(out.contains("xox*-***REDACTED***"), "prefix {prefix} leaked: {out}");
+            assert!(
+                out.contains("xox*-***REDACTED***"),
+                "prefix {prefix} leaked: {out}"
+            );
         }
     }
 
@@ -596,15 +641,21 @@ mod tests {
 
     #[test]
     fn looks_like_secret_true_on_match() {
-        assert!(looks_like_secret("here is sk-abcdefghijklmnopqrstuvwxyz12345"));
-        assert!(looks_like_secret("authorization: bearer abcdefghijklmnopqrstuv"));
+        assert!(looks_like_secret(
+            "here is sk-abcdefghijklmnopqrstuvwxyz12345"
+        ));
+        assert!(looks_like_secret(
+            "authorization: bearer abcdefghijklmnopqrstuv"
+        ));
         assert!(looks_like_secret(r#"{"password": "anything"}"#));
         assert!(looks_like_secret("postgres://u:p@host/db"));
     }
 
     #[test]
     fn looks_like_secret_false_on_clean_text() {
-        assert!(!looks_like_secret("plain prose with no credentials in sight"));
+        assert!(!looks_like_secret(
+            "plain prose with no credentials in sight"
+        ));
         assert!(!looks_like_secret("use the bearer-token-name convention"));
         assert!(!looks_like_secret("AIza prefix without a real key"));
         assert!(!looks_like_secret(""));
