@@ -5,37 +5,8 @@ Status: **validated product design, implementation deferred** (2026-07-24).
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
 conversation. It records the product decisions made during the feature
-definition interview; it is not an authorization to start the feature before
-the delivery sequence below reaches the Planning phase. `[src: user: 2026-07-24: Planification feature-definition interview]`
-
-## Delivery sequence
-
-Current checkpoint:
-
-1. **Complete and merged — quick wins**:
-   - bundled PDF/DOCX desktop export and visual fidelity;
-   - standard copyable ID pills and feedback for discussions, workflows and
-     messages;
-   - `disc_get_message` stable-ID lookup plus optional context window;
-   - full MCP getters for skills, profiles and directives;
-   - shared SQLite/RFC3339 date parsing plus one-shot normalization;
-   - Agent+Exec isolation warning and the workflow form-label sweep.
-2. **Complete locally — Audit follow-up and release hardening**:
-   - crash-safe resume-token rotation;
-   - Claude resume binding scoped by logical session and terminal project;
-   - repository-wide Rust formatting baseline and enforced CI gate;
-   - current Rust clippy findings resolved;
-   - complete local backend, frontend, MCP, shell, document-export and Tauri
-     quality gates.
-3. **Next — push the pre-release branch, run CI, merge, then publish 0.8.13.**
-4. **Only after the 0.8.13 release — start the Planning implementation.**
-
-The message-ID work belongs to the quick-win branch because it is a
-small, independently useful foundation for future task provenance. The email
-share action for generated PDFs is explicitly deferred. `[src: user: 2026-07-24: validated delivery order and deferred email sharing]`
-
-The broader release sequencing and the placement of every remaining TD are
-tracked in `docs/design/roadmap-0.8.13-to-planning.md`.
+definition interview. Delivery and release tracking deliberately stay outside
+the repository. `[src: user: 2026-07-24: Planification feature-definition interview]`
 
 ## Product model
 
