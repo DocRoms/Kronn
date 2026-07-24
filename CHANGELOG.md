@@ -70,20 +70,22 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **False-positive TODO detection** — backtick-quoted mentions of `TODO` in prose no longer count as real markers.
 - **`make run-backend`** — builds then runs the bare binary (no cargo-watch): the exploitation mode for long audits, after two runs died to watcher-triggered rebuilds. Backend also writes a persistent plain-text log to `<data_dir>/kronn.log`.
 - **Templates directory resolves from the binary** (not the CWD) and the repo scanner skips MCP-context injection for template/`{{`-placeholder files.
+- **The key-management coverage gate remains meaningful after the Rustfmt
+  baseline.** Real error paths for unreadable/unwritable sidecar storage,
+  whitespace-only environment overrides, unavailable vault snapshots and the
+  OS-keychain constructor are now covered instead of lowering the CI floor.
 
 ### Documentation
 
 - Reconciled the technical-debt index: completed/obsolete TDs were removed,
   partial items now describe only their remaining scope, and previously
   unindexed open TDs are included.
-- Added the validated Planning/discussion-plan brief and a complete roadmap
-  from the 0.8.13 release train through the Planning evolution, with every open
-  TD assigned to a delivery track.
+- Added the validated Planning/discussion-plan product brief.
 
 ### Tests
 
 - Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, Claude terminal/project continuity across daemon/spare topology with logical-session fallback, session isolation, crash-safe token rotation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs.
-- Full suite: backend 4,277 passed / 4 ignored; frontend 2,619 passed; MCP
+- Full suite: backend 4,284 passed / 4 ignored; frontend 2,619 passed; MCP
   bridge 303 passed; shell 233 passed. Rustfmt, Clippy, production build, ESLint
   (0 errors), i18n parity, the frozen PDF/DOCX smoke test and Tauri
   `cargo check` also pass.
