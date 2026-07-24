@@ -74,6 +74,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   baseline.** Real error paths for unreadable/unwritable sidecar storage,
   whitespace-only environment overrides, unavailable vault snapshots and the
   OS-keychain constructor are now covered instead of lowering the CI floor.
+- **The linear workflow E2E no longer depends on `httpbin.org`.** Browser CI
+  now exercises the API/run/persistence lifecycle with three deterministic
+  zero-network steps. The complete JsonData → Notify → Notify runner path,
+  request interpolation and persisted results are covered against a
+  process-local sink through a test-only policy variant that is absent from
+  production builds; production SSRF rejection remains unchanged.
 
 ### Documentation
 
@@ -85,7 +91,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Tests
 
 - Backend audit-scope + core-checksums tests (chain assembly, relevance gate, drop-guard, resumable SQL, TD counts, resume resolution, cancel-ack, project lease, source-tree fingerprint with an end-to-end git-repo drift check), Python sidecar tests (bridge hardening, authenticated reload resume, Claude terminal/project continuity across daemon/spare topology with logical-session fallback, session isolation, crash-safe token rotation, resume_run_id, accepted-handshake, onboarding lifecycle), Dashboard toast tests, footer-brief assertions, 2 new E2E specs.
-- Full suite: backend 4,284 passed / 4 ignored; frontend 2,619 passed; MCP
+- Full suite: backend 4,285 passed / 4 ignored; frontend 2,619 passed; MCP
   bridge 303 passed; shell 233 passed. Rustfmt, Clippy, production build, ESLint
   (0 errors), i18n parity, the frozen PDF/DOCX smoke test and Tauri
   `cargo check` also pass.

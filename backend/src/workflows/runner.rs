@@ -177,6 +177,52 @@ pub async fn execute_run(
     // `None` for a top-level run or an isolated child.
     inherited_workspace: Option<String>,
 ) -> Result<()> {
+    execute_run_with_notify_policy(
+        state,
+        workflow,
+        run,
+        tokens_config,
+        agents_config,
+        events_tx,
+        shared_budget,
+        inherited_workspace,
+        NotifySecurityPolicy::Production,
+    )
+    .await
+}
+
+/// The production binary has only the enforcing variant. The loopback variant
+/// is compiled exclusively into Rust tests, so no environment variable, API
+/// payload or runtime configuration can weaken Notify's SSRF boundary.
+#[derive(Clone, Copy)]
+enum NotifySecurityPolicy {
+    Production,
+    #[cfg(test)]
+    AllowLoopbackForTests,
+}
+
+impl NotifySecurityPolicy {
+    fn enforce_public_ip(self) -> bool {
+        match self {
+            Self::Production => true,
+            #[cfg(test)]
+            Self::AllowLoopbackForTests => false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_run_with_notify_policy(
+    state: AppState,
+    workflow: &Workflow,
+    run: &mut WorkflowRun,
+    tokens_config: &TokensConfig,
+    agents_config: &AgentsConfig,
+    events_tx: Option<EventSender>,
+    shared_budget: Option<SharedBudget>,
+    inherited_workspace: Option<String>,
+    notify_security_policy: NotifySecurityPolicy,
+) -> Result<()> {
     // Captured once: drives the attach-vs-create and the skip-cleanup paths.
     let is_inherited_workspace = inherited_workspace.is_some();
     // Helper to send events (best-effort, ignore send errors)
@@ -846,8 +892,14 @@ pub async fn execute_run(
                 StepType::Notify => {
                     // Direct HTTP webhook — zero agent tokens. Used as a workflow
                     // finalizer or mechanical data step (post to Slack, create
-                    // ticket, etc.). Shipped 0.3.5.
-                    super::notify_step::execute_notify_step(step, &ctx).await
+                    // ticket, etc.). The alternate policy variant is cfg(test)
+                    // only; production always enforces the public-IP guard.
+                    super::notify_step::execute_notify_step_with_policy(
+                        step,
+                        &ctx,
+                        notify_security_policy.enforce_public_ip(),
+                    )
+                    .await
                 }
                 StepType::ApiCall => {
                     // Désagentification: direct HTTP call from the engine.
@@ -3498,6 +3550,21 @@ mod tests {
         s
     }
 
+    fn notify_step(name: &str, url: String, body_template: &str) -> WorkflowStep {
+        let mut step = fake_step(name);
+        step.step_type = StepType::Notify;
+        step.notify_config = Some(NotifyConfig {
+            url,
+            method: "POST".into(),
+            headers: std::collections::HashMap::from([(
+                "Content-Type".into(),
+                "application/json".into(),
+            )]),
+            body_template: body_template.into(),
+        });
+        step
+    }
+
     fn test_state_and_configs() -> (
         crate::AppState,
         crate::models::TokensConfig,
@@ -3614,6 +3681,104 @@ mod tests {
             2,
             "DB persisted both step results"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_run_drives_notify_chain_against_test_only_loopback_policy() {
+        let received = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<(String, String)>::new()));
+        let received_by_server = received.clone();
+        let app = axum::Router::new().route(
+            "/notify/{stage}",
+            axum::routing::post(
+                move |axum::extract::Path(stage): axum::extract::Path<String>, body: String| {
+                    let received = received_by_server.clone();
+                    async move {
+                        received.lock().await.push((stage, body));
+                        axum::Json(serde_json::json!({ "received": true }))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind local webhook");
+        let port = listener.local_addr().expect("local address").port();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve local webhook");
+        });
+
+        let (state, tokens, agents) = test_state_and_configs();
+        let mut workflow = make_workflow_with_artifacts(Default::default());
+        workflow.id = "wf-notify-hermetic".into();
+        workflow.steps = vec![
+            json_data_step(
+                "seed",
+                serde_json::json!({ "ticket": "EW-9999", "priority": "P1", "count": 3 }),
+            ),
+            notify_step(
+                "notify_a",
+                format!("http://127.0.0.1:{port}/notify/a"),
+                r#"{"phase":"a","ticket":"{{steps.seed.data.ticket}}"}"#,
+            ),
+            notify_step(
+                "notify_b",
+                format!("http://127.0.0.1:{port}/notify/b"),
+                r#"{"phase":"b","previous_status":{{steps.notify_a.data.http_status}}}"#,
+            ),
+        ];
+        let mut run = pending_run("run-notify-hermetic", &workflow.id);
+        insert_wf_and_run(&state, &workflow, &run).await;
+
+        execute_run_with_notify_policy(
+            state.clone(),
+            &workflow,
+            &mut run,
+            &tokens,
+            &agents,
+            None,
+            None,
+            None,
+            NotifySecurityPolicy::AllowLoopbackForTests,
+        )
+        .await
+        .expect("hermetic Notify chain must execute");
+        server.abort();
+
+        assert_eq!(run.status, RunStatus::Success);
+        assert_eq!(run.step_results.len(), 3);
+        assert!(
+            run.step_results
+                .iter()
+                .all(|result| result.status == RunStatus::Success),
+            "all runner-dispatched steps succeed: {:?}",
+            run.step_results,
+        );
+
+        let captured = received.lock().await.clone();
+        assert_eq!(captured.len(), 2, "both Notify requests reached the sink");
+        assert_eq!(captured[0].0, "a");
+        assert!(
+            captured[0].1.contains(r#""ticket":"EW-9999""#),
+            "JsonData output is interpolated into Notify A: {}",
+            captured[0].1,
+        );
+        assert_eq!(captured[1].0, "b");
+        assert!(
+            captured[1].1.contains(r#""previous_status":200"#),
+            "Notify A output is interpolated into Notify B: {}",
+            captured[1].1,
+        );
+
+        let persisted = state
+            .db
+            .with_conn(|conn| crate::db::workflows::get_run(conn, "run-notify-hermetic"))
+            .await
+            .expect("read persisted run")
+            .expect("persisted run exists");
+        assert_eq!(persisted.status, RunStatus::Success);
+        assert_eq!(persisted.step_results.len(), 3);
     }
 
     #[tokio::test]
