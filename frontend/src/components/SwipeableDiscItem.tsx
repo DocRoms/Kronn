@@ -1,5 +1,5 @@
 import { useState, useRef, memo } from 'react';
-import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star, Download, AlertTriangle } from 'lucide-react';
+import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star, Download, AlertTriangle, Check } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
@@ -33,6 +33,9 @@ export interface SwipeableDiscItemProps {
   onSelect: (discId: string, msgCount: number) => void;
   onArchive: (discId: string) => void;
   onDelete: (discId: string) => void;
+  selectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelection?: (discId: string) => void;
   /** Abort the running agent on this disc. Only rendered when `isSending`. */
   onStop?: (discId: string) => void;
   /** Toggle pin/favorite on this discussion. */
@@ -53,7 +56,7 @@ export interface SwipeableDiscItemProps {
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   disc, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
-  sourceAgent, sourceDiverged,
+  sourceAgent, sourceDiverged, selectionMode = false, isSelected = false, onToggleSelection,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
@@ -66,6 +69,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   const relativeWhen = formatRelativeTime(disc.updated_at, locale);
 
   const handlePointerDown = (e: React.PointerEvent) => {
+    if (selectionMode) return;
     startX.current = e.clientX;
     currentX.current = e.clientX;
     setSwiping(true);
@@ -81,6 +85,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   };
 
   const handlePointerUp = () => {
+    if (selectionMode) return;
     if (!swiping) return;
     setSwiping(false);
     if (offsetX > SWIPE_THRESHOLD) {
@@ -120,19 +125,23 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
       <div
         className="disc-item"
         data-active={isActive}
+        data-selected={selectionMode && isSelected}
         // Accessibility: this row is interactive (click/Enter selects the
         // discussion, swipe archives/deletes). Without role+tabIndex it's
         // unreachable by keyboard. Pre-fix the JSX was a plain div with
         // pointer handlers only — Alicia's audit (2026-05-09) flagged
         // "no keyboard nav, no focus ring".
-        role="button"
+        role={selectionMode ? 'checkbox' : 'button'}
         tabIndex={0}
-        aria-current={isActive ? 'true' : undefined}
+        aria-current={!selectionMode && isActive ? 'true' : undefined}
+        aria-checked={selectionMode ? isSelected : undefined}
         aria-label={`${disc.title} — ${msgCount} messages, ${disc.agent}`}
+        onClick={selectionMode ? () => onToggleSelection?.(disc.id) : undefined}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            onSelect(disc.id, msgCount);
+            if (selectionMode) onToggleSelection?.(disc.id);
+            else onSelect(disc.id, msgCount);
           }
         }}
         style={{
@@ -144,6 +153,11 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
         onPointerUp={handlePointerUp}
         onPointerCancel={() => { setSwiping(false); setOffsetX(0); }}
       >
+        {selectionMode && (
+          <span className="disc-item-selection-box" data-selected={isSelected} aria-hidden="true">
+            {isSelected && <Check size={11} />}
+          </span>
+        )}
         <div className="disc-item-content">
           <div className="disc-item-title">
             {isValidationDisc(disc.title) && <ShieldCheck size={10} style={{ color: 'var(--kr-accent-ink)', flexShrink: 0 }} />}

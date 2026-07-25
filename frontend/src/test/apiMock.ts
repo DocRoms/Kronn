@@ -39,6 +39,7 @@ export const API_NAMESPACES = [
   'agents',
   'mcps',
   'discussions',
+  'planning',
   'workflows',
   'quickPrompts',
   'quickApis',
@@ -85,6 +86,7 @@ interface DefaultMock {
   agents: Record<string, AnyFn>;
   mcps: Record<string, AnyFn>;
   discussions: Record<string, AnyFn>;
+  planning: Record<string, AnyFn>;
   workflows: Record<string, AnyFn>;
   quickPrompts: Record<string, AnyFn>;
   quickApis: Record<string, AnyFn>;
@@ -290,6 +292,31 @@ export function buildApiMock(overrides: PartialDeep<DefaultMock> = {}): DefaultM
       deleteLastAgentMessages: resolve(undefined),
       sendMessageStream: vi.fn(),
       runAgent: vi.fn(),
+    },
+
+    planning: {
+      list: resolve({ items: [], next_cursor: null }),
+      get: resolve(null),
+      create: resolve({}),
+      update: resolve({}),
+      linkDiscussion: resolve({
+        discussion_id: '',
+        primary_objective: null,
+        active: [],
+        later: [],
+        completed_active: 0,
+        total_active: 0,
+      }),
+      addBlocker: resolve({}),
+      discussionPlan: resolve({
+        discussion_id: '',
+        primary_objective: null,
+        active: [],
+        later: [],
+        completed_active: 0,
+        total_active: 0,
+      }),
+      changes: resolve([]),
     },
 
     workflows: {

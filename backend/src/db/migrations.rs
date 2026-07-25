@@ -304,6 +304,10 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
             "080_project_source_exclusions",
             include_str!("sql/080_project_source_exclusions.sql"),
         ),
+        (
+            "081_planning_tasks",
+            include_str!("sql/081_planning_tasks.sql"),
+        ),
     ];
 
     // Check if there are pending migrations before backing up

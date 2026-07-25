@@ -346,7 +346,7 @@ pub fn build_agent_prompt(
     // Introspection-tools heads-up. Only printed when the agent can
     // actually call them (the `kronn-internal` MCP server is wired in
     // .mcp.json and `KRONN_DISCUSSION_ID` is forwarded in the env). The
-    // text is short on purpose (~120 tokens) and explicitly tells the
+    // text is short on purpose and explicitly tells the
     // agent NOT to call them speculatively. Without the "only when you
     // see a context gap" framing, agents tend to call disc_summarize on
     // every turn and we lose the savings the strategy switch buys us.
@@ -371,17 +371,32 @@ pub fn build_agent_prompt(
             `disc_meta()` (compte de messages, agent, tier — gratuit), \
             `disc_get_message(idx | message_id, before?, after?)` (un message précis par index ou référence `MSG-…`, avec petit contexte optionnel — gratuit), \
             `disc_summarize(from?, to?)` (synthèse à la demande — coûte des tokens). \
-            N'utilise CES OUTILS QUE si tu remarques un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\n",
+            N'utilise CES OUTILS QUE si tu remarques un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\
+            Cette discussion peut avoir un plan partagé composé de tâches priorisées et modifiables dans Kronn. \
+            L'utilisateur peut y faire référence naturellement comme « le plan », « les tâches », « ce qu'il reste à faire », « la priorité », etc. \
+            `plan_get()` lit ce plan ; `task_list`/`task_get` lisent les tâches ; `task_create`/`task_update`/`task_link_discussion` permettent de créer, modifier, prioriser ou relier le travail. \
+            Lis d'abord le plan concerné. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine. \
+            Ne remplace pas une demande de mise à jour du plan par un simple résumé Markdown.\n\n",
         "es" => "Herramientas de historial vía MCP `kronn-internal`: \
             `disc_meta()` (cuenta de mensajes, agente, tier — gratuito), \
             `disc_get_message(idx | message_id, before?, after?)` (un mensaje por índice o referencia `MSG-…`, con contexto pequeño opcional — gratuito), \
             `disc_summarize(from?, to?)` (resumen bajo demanda — cuesta tokens). \
-            Úsalos SOLO cuando notes un hueco de contexto que no puedas deducir de la ventana actual.\n\n",
+            Úsalos SOLO cuando notes un hueco de contexto que no puedas deducir de la ventana actual.\n\
+            Esta conversación puede tener un plan compartido con tareas priorizadas y editables en Kronn. \
+            El usuario puede referirse a él naturalmente como « el plan », « las tareas », « lo que queda », « la prioridad », etc. \
+            `plan_get()` lee el plan; `task_list`/`task_get` leen tareas; `task_create`/`task_update`/`task_link_discussion` permiten crear, modificar, priorizar o vincular el trabajo. \
+            Lee primero el plan correspondiente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana. \
+            No sustituyas una actualización solicitada por un simple resumen Markdown.\n\n",
         _ => "History tools available via the `kronn-internal` MCP: \
             `disc_meta()` (message count, agent, tier — free), \
             `disc_get_message(idx | message_id, before?, after?)` (one message by index or `MSG-…` reference, with an optional small context window — free), \
             `disc_summarize(from?, to?)` (on-demand summary — costs tokens). \
-            Use these ONLY when you notice a context gap you cannot infer from the current window. Never speculatively.\n\n",
+            Use these ONLY when you notice a context gap you cannot infer from the current window. Never speculatively.\n\
+            This discussion may have a shared Kronn plan made of prioritized, editable tasks. \
+            The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. \
+            `plan_get()` reads the plan; `task_list`/`task_get` read tasks; `task_create`/`task_update`/`task_link_discussion` create, edit, prioritize or link work. \
+            Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence. \
+            Never replace a requested plan update with a prose-only Markdown summary.\n\n",
     };
 
     // Slash-marker fallback for agents that don't speak MCP (Vibe,
@@ -770,6 +785,24 @@ mod tests {
         assert!(prompt.contains("Can one of you investigate?"));
         assert!(prompt.contains("Claude Code: I found the failing route"));
         assert!(prompt.contains("Please respond to the latest agent message"));
+    }
+
+    #[test]
+    fn agent_prompt_maps_discussion_plan_wording_to_structured_mcp_tools() {
+        let disc = disc_with_messages(
+            vec![
+                user_msg("premier tour"),
+                user_msg("deuxième tour"),
+                user_msg("mets à jour le plan de discussion"),
+            ],
+            "fr",
+        );
+        let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+        assert!(prompt.contains("plan partagé composé de tâches priorisées"));
+        assert!(prompt.contains("« le plan », « les tâches »"));
+        assert!(prompt.contains("simple résumé Markdown"));
+        assert!(prompt.contains("`plan_get()`"));
+        assert!(prompt.contains("`task_link_discussion`"));
     }
 
     #[test]

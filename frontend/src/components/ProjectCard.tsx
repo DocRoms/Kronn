@@ -1,6 +1,6 @@
 import '../pages/Dashboard.css';
-import { useState, useCallback, useEffect, useRef } from 'react';
-import { projects as projectsApi } from '../lib/api';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
+import { planning, projects as projectsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useIsMobile } from '../hooks/useMediaQuery';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc, isTrackerMcp } from '../lib/constants';
@@ -23,11 +23,12 @@ import {
   MessageSquare, AlertTriangle,
   Play, FileCode, ShieldCheck, StopCircle, BookOpen, Rocket, Check, RefreshCw, Puzzle,
   FolderInput, Plug, X, FileText, DownloadCloud,
-  Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package,
+  Code2, ExternalLink, GitBranch, GitPullRequest, Tag, Package, ListTodo,
 } from 'lucide-react';
 import { BriefingForm } from './BriefingForm';
 import { CopyIdPill } from './CopyIdPill';
-import { SourceCodeViewer } from './SourceCodeViewer';
+import { ProjectCodePanel } from './ProjectCodePanel';
+import { ProjectTasksPanel } from './ProjectTasksPanel';
 
 const STATUS_COLORS: Record<string, string> = {
   Pending: 'var(--kr-warning)', Running: 'var(--kr-cyan)', Success: 'var(--kr-success)',
@@ -111,7 +112,10 @@ export function ProjectCard({
 }: ProjectCardProps) {
   const { t, locale } = useT();
   const isMobile = useIsMobile();
-  const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'docs' | 'code' | 'resources'>('overview');
+  const [detailView, setDetailView] = useState<'overview' | 'discussions' | 'tasks' | 'docs' | 'code' | 'resources'>('overview');
+  const [projectTaskCount, setProjectTaskCount] = useState<number | null>(null);
+  const [visibleDiscussionCount, setVisibleDiscussionCount] = useState(10);
+  const [discussionLoadAmount, setDiscussionLoadAmount] = useState<'10' | '50' | 'all'>('10');
   const [overviewGit, setOverviewGit] = useState<GitStatusResponse | null>(null);
   const [overviewGitLoading, setOverviewGitLoading] = useState(false);
   const [overviewGitError, setOverviewGitError] = useState(false);
@@ -120,6 +124,25 @@ export function ProjectCard({
   const [dependencyUpdatesLoading, setDependencyUpdatesLoading] = useState(false);
   const [dependencyUpdatesError, setDependencyUpdatesError] = useState(false);
   const dependencyRefreshRef = useRef(false);
+  const recentProjectDiscussions = useMemo(
+    () => [...projDiscussions].sort(
+      (left, right) => Date.parse(right.updated_at) - Date.parse(left.updated_at),
+    ),
+    [projDiscussions],
+  );
+
+  useEffect(() => {
+    if (!detailMode || !isOpen) return;
+    let alive = true;
+    planning.list({ projectId: proj.id, limit: 100 })
+      .then(response => {
+        if (alive) setProjectTaskCount(response.items.length);
+      })
+      .catch(() => {
+        if (alive) setProjectTaskCount(null);
+      });
+    return () => { alive = false; };
+  }, [detailMode, isOpen, proj.id]);
 
   useEffect(() => {
     if (!detailMode || !isOpen || detailView !== 'overview' || proj.path_exists === false) return;
@@ -1152,12 +1175,13 @@ export function ProjectCard({
           </header>
           <nav className="project-detail-tabs" aria-label={t('projects.master.detailNav')}>
             {([
-              ['overview', t('projects.master.tab.overview'), FileCode],
-              ['discussions', t('projects.master.tab.discussions'), MessageSquare],
-              ['docs', t('projects.master.tab.docs'), BookOpen],
-              ['code', t('projects.master.tab.code'), Code2],
-              ['resources', t('projects.master.tab.resources'), Puzzle],
-            ] as const).map(([view, label, Icon]) => (
+              ['overview', t('projects.master.tab.overview'), FileCode, undefined],
+              ['discussions', t('projects.master.tab.discussions'), MessageSquare, projDiscussions.length],
+              ['tasks', t('projects.master.tab.tasks'), ListTodo, projectTaskCount],
+              ['docs', t('projects.master.tab.docs'), BookOpen, undefined],
+              ['code', t('projects.master.tab.code'), Code2, undefined],
+              ['resources', t('projects.master.tab.resources'), Puzzle, undefined],
+            ] as const).map(([view, label, Icon, count]) => (
               <button
                 key={view}
                 type="button"
@@ -1165,6 +1189,9 @@ export function ProjectCard({
                 onClick={() => setDetailView(view)}
               >
                 <Icon size={13} /> {label}
+                {count !== undefined && (
+                  <span className="project-detail-tab-count">{count ?? '…'}</span>
+                )}
               </button>
             ))}
           </nav>
@@ -1655,6 +1682,11 @@ export function ProjectCard({
                   <strong>{projDiscussions.length}</strong>
                   <span>{t('projects.master.tab.discussions')}</span>
                 </button>
+                <button type="button" onClick={() => setDetailView('tasks')}>
+                  <ListTodo size={16} />
+                  <strong>{t('projects.master.overview.browse')}</strong>
+                  <span>{t('projects.master.tab.tasks')}</span>
+                </button>
                 <button type="button" onClick={() => setDetailView('docs')}>
                   <BookOpen size={16} />
                   <strong>
@@ -1727,7 +1759,19 @@ export function ProjectCard({
           )}
           {detailMode && detailView === 'code' && (
             <section className="project-detail-section project-detail-source" data-project-view="code">
-              <SourceCodeViewer projectId={proj.id} />
+              <ProjectCodePanel projectId={proj.id} />
+            </section>
+          )}
+          {detailMode && detailView === 'tasks' && (
+            <section className="project-detail-section" data-project-view="tasks">
+              <ProjectTasksPanel
+                projectId={proj.id}
+                onOpenPlanning={(taskId) =>
+                  onNavigate(taskId ? `planning:${taskId}` : 'planning')
+                }
+                onCountChange={setProjectTaskCount}
+                toast={toast}
+              />
             </section>
           )}
           {/* Docs migration banner — shown only on projects still using
@@ -1795,44 +1839,74 @@ export function ProjectCard({
 
           {/* -- 1. Discussions -- */}
           <div className="dash-section project-detail-section" data-project-view="discussions">
-            <button className="dash-collapsible-header" onClick={() => toggleSection('discussions')} aria-expanded={isSectionOpen('discussions')}>
-              {isSectionOpen('discussions') ? <ChevronDown size={12} className="flex-shrink-0" /> : <ChevronRight size={12} className="flex-shrink-0" />}
-              <MessageSquare size={14} /> <span className="dash-section-title">Discussions</span>
-              <span className="dash-count">{projDiscussions.length}</span>
-            </button>
-            {isSectionOpen('discussions') && (
-              <>
-                {projDiscussions.slice(0, 3).map(disc => (
-                  <div key={disc.id} className="dash-row">
-                    <div className="relative">
-                      <div aria-hidden="true" className="dash-dot" data-on="true" />
-                      <span className="dash-sr-only">
-                        {t('config.enabled')}
-                      </span>
-                    </div>
-                    <div className="flex-1 cursor-pointer" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }}>
-                      <span className="dash-row-disc-title">
-                        {isValidationDisc(disc.title) && <ShieldCheck size={10} className="text-accent" />}
-                        {disc.title}
-                      </span>
-                      <span className="dash-row-disc-meta">
-                        {unseenBasis(disc)} msg · {disc.agent}
-                      </span>
-                    </div>
-                    <button className="dash-icon-btn" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }} aria-label="Open discussion">
-                      <ChevronRight size={12} />
-                    </button>
-                  </div>
-                ))}
-                <button
-                  className="dash-icon-btn mt-4"
-                  style={{ fontSize: 11, gap: 4 }}
-                  onClick={() => { onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); onNavigate('discussions'); }}
-                >
-                  <Plus size={12} /> {t('disc.newTitle')}
+            {recentProjectDiscussions.slice(0, visibleDiscussionCount).map(disc => (
+              <div key={disc.id} className="dash-row">
+                <div className="relative">
+                  <div aria-hidden="true" className="dash-dot" data-on="true" />
+                  <span className="dash-sr-only">
+                    {t('config.enabled')}
+                  </span>
+                </div>
+                <div className="flex-1 cursor-pointer" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }}>
+                  <span className="dash-row-disc-title">
+                    {isValidationDisc(disc.title) && <ShieldCheck size={10} className="text-accent" />}
+                    {disc.title}
+                  </span>
+                  <span className="dash-row-disc-meta">
+                    {unseenBasis(disc)} msg · {disc.agent}
+                  </span>
+                </div>
+                <button className="dash-icon-btn" onClick={() => { onOpenDiscussion(disc.id); onNavigate('discussions'); }} aria-label="Open discussion">
+                  <ChevronRight size={12} />
                 </button>
-              </>
+              </div>
+            ))}
+            {recentProjectDiscussions.length === 0 && (
+              <div className="dash-empty">{t('projects.master.discussions.empty')}</div>
             )}
+            <div className="project-discussion-actions">
+              {visibleDiscussionCount < recentProjectDiscussions.length && (
+                <div
+                  className="project-discussions-load-more"
+                  onClick={event => {
+                    if ((event.target as HTMLElement).closest('select')) return;
+                    setVisibleDiscussionCount(count => (
+                      discussionLoadAmount === 'all'
+                        ? recentProjectDiscussions.length
+                        : Math.min(
+                          recentProjectDiscussions.length,
+                          count + Number(discussionLoadAmount),
+                        )
+                    ));
+                  }}
+                >
+                  <button type="button" className="project-discussions-load-action">
+                    <ChevronDown size={12} />
+                    {t('projects.master.discussions.loadPrefix')}
+                  </button>
+                  <select
+                    className="project-discussions-load-select"
+                    value={discussionLoadAmount}
+                    onChange={event => {
+                      setDiscussionLoadAmount(event.target.value as typeof discussionLoadAmount);
+                    }}
+                    aria-label={t('projects.master.discussions.loadAmountLabel')}
+                  >
+                    <option value="10">10</option>
+                    <option value="50">50</option>
+                    <option value="all">{t('projects.master.discussions.loadAll')}</option>
+                  </select>
+                  <span>{t('projects.master.discussions.loadSuffix')}</span>
+                </div>
+              )}
+              <button
+                type="button"
+                className="dash-icon-btn"
+                onClick={() => { onSetDiscPrefill({ projectId: proj.id, title: '', prompt: '' }); onNavigate('discussions'); }}
+              >
+                <Plus size={12} /> {t('disc.newTitle')}
+              </button>
+            </div>
           </div>
 
           {/* -- 2. Project documentation --

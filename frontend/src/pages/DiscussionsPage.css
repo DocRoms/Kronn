@@ -65,6 +65,37 @@
   gap: var(--kr-sp-3);
 }
 
+.disc-sidebar-header[data-selection-mode="true"] {
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.disc-sidebar-header[data-selection-mode="true"] .disc-sidebar-header-title {
+  color: var(--kr-accent-ink);
+  font-size: var(--kr-fs-sm);
+}
+
+.disc-sidebar-header .disc-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.disc-sidebar-header .disc-bulk-delete-btn:not(:disabled) {
+  border-color: rgba(var(--kr-error-rgb), 0.28);
+  color: var(--kr-error);
+}
+
+.disc-sidebar-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .disc-sidebar-list {
   flex: 1;
   overflow-y: auto;
@@ -536,6 +567,30 @@
   border-left-color: var(--kr-accent);
   color: var(--kr-text-primary);
   font-weight: 500;
+}
+
+.disc-item[data-selected="true"] {
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  border-left-color: var(--kr-accent);
+  color: var(--kr-text-primary);
+}
+
+.disc-item-selection-box {
+  display: inline-flex;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-xs);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-on-dark);
+}
+
+.disc-item-selection-box[data-selected="true"] {
+  border-color: var(--kr-accent);
+  background: var(--kr-accent);
 }
 
 .disc-item-content {
@@ -1073,8 +1128,8 @@
 .disc-chat-header {
   display: flex;
   align-items: center;
-  gap: var(--kr-sp-6);
-  padding: 14px 20px;
+  gap: var(--kr-sp-4);
+  padding: 11px 16px;
   border-bottom: 1px solid var(--kr-border);
   background: var(--kr-bg-surface);
   flex-shrink: 0;
@@ -1082,9 +1137,21 @@
 
 .disc-chat-header-info {
   flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.disc-chat-header-top {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  min-width: 0;
 }
 
 .disc-chat-header-title {
+  flex: 1;
+  min-width: 0;
   font-weight: 600;
   font-size: var(--kr-fs-lg);
   display: flex;
@@ -1092,21 +1159,19 @@
   gap: var(--kr-sp-3);
 }
 
-/* Introspection-tools call counter pill — sits in the title row, blue
- * tint to distinguish it from the orange/yellow "active task" badges. */
-.disc-introspection-pill {
-  display: inline-flex;
+.disc-chat-header-title-text {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-chat-header-presence {
+  display: flex;
   align-items: center;
-  gap: 3px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: var(--kr-fs-xs);
-  font-weight: 600;
-  background: rgba(var(--kr-info-rgb), 0.12);
-  color: var(--kr-info);
-  border: 1px solid rgba(var(--kr-info-rgb), 0.25);
+  min-width: 0;
   flex-shrink: 0;
-  cursor: help;
 }
 
 /* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
@@ -1163,17 +1228,66 @@
 .disc-chat-header-sub {
   font-size: var(--kr-fs-sm);
   color: var(--kr-text-secondary);
-  margin-top: 2px;
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  white-space: nowrap;
+}
+
+.disc-chat-header-sub::-webkit-scrollbar {
+  display: none;
+}
+
+.disc-chat-context-project {
+  max-width: 190px;
+  overflow: hidden;
+  padding: 2px 7px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: 999px;
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-chat-context-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.disc-chat-context-summary:hover {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.disc-chat-context-summary > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
 }
 
 .disc-chat-header-actions {
   display: flex;
   gap: 4px;
   align-items: center;
+  flex-shrink: 0;
+  padding: 3px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-subtle);
 }
 
 .disc-title-input {
@@ -1185,7 +1299,54 @@
   font-size: var(--kr-fs-lg);
   font-weight: 600;
   font-family: inherit;
-  width: 260px;
+  width: min(420px, 100%);
+}
+
+@media (max-width: 980px) {
+  .disc-chat-header {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .disc-chat-header-info {
+    flex-basis: calc(100% - 64px);
+  }
+
+  .disc-chat-header-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+}
+
+@media (max-width: 640px) {
+  .disc-chat-header {
+    gap: 8px;
+    padding: 8px 10px;
+  }
+
+  .disc-chat-header-top {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .disc-chat-header-title {
+    width: 100%;
+  }
+
+  .disc-chat-header-presence {
+    width: 100%;
+  }
+
+  .disc-chat-header-actions {
+    justify-content: flex-start;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .disc-chat-header-actions::-webkit-scrollbar {
+    display: none;
+  }
 }
 
 /* ── Worktree badge ───────────────────────────────────── */
@@ -1698,6 +1859,109 @@
   display: flex;
   flex: 1;
   overflow: hidden;
+}
+
+.disc-plan-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 3px 7px;
+  border: 1px solid var(--kr-border);
+  border-radius: 999px;
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+
+.disc-plan-btn:hover,
+.disc-plan-btn[data-active="true"] {
+  border-color: rgba(var(--kr-accent-rgb), 0.38);
+  background: rgba(var(--kr-accent-rgb), 0.08);
+  color: var(--kr-accent-ink);
+}
+
+.disc-plan-count {
+  font-family: var(--kr-font-mono);
+  color: inherit;
+}
+
+.disc-plan-later {
+  color: var(--kr-text-muted);
+}
+
+.planning-proposal {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  margin: 8px 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.24);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.055);
+}
+
+.planning-proposal-icon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-accent-rgb), 0.12);
+  color: var(--kr-accent-ink);
+}
+
+.planning-proposal-main {
+  display: grid;
+  min-width: 0;
+}
+
+.planning-proposal-main > span,
+.planning-proposal-main > small {
+  color: var(--kr-text-muted);
+  font-size: 10px;
+}
+
+.planning-proposal-main > strong {
+  overflow: hidden;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.planning-proposal-main > small {
+  color: var(--kr-error);
+}
+
+.planning-proposal > button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.planning-proposal[data-state="done"] {
+  border-color: rgba(var(--kr-success-rgb), 0.3);
+  background: rgba(var(--kr-success-rgb), 0.06);
+}
+
+.planning-proposal[data-state="done"] > button {
+  background: var(--kr-success);
+}
+
+.planning-proposal[data-state="error"] {
+  border-color: rgba(var(--kr-error-rgb), 0.3);
 }
 
 /* ── Message rows and bubbles ─────────────────────────── */
@@ -3306,6 +3570,12 @@
   display: flex;
   align-items: center;
   font-size: var(--kr-fs-sm);
+}
+
+.disc-icon-btn[data-active="true"] {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
 }
 
 /* ── Test mode (worktree swap) ─────────────────────────────── */

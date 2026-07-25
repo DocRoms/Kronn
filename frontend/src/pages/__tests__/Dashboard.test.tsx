@@ -46,6 +46,9 @@ vi.mock('../../lib/api', () => ({
     runAgent: vi.fn(),
     _streamSSE: vi.fn(),
   },
+  planning: {
+    list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
+  },
   config: {
     getLanguage: vi.fn().mockResolvedValue('fr'),
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
@@ -379,4 +382,3 @@ describe('Dashboard — audit_finished toast (0.9.0)', () => {
     expect(toast.textContent).toContain('6, 8');
   });
 });
-

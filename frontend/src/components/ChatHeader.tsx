@@ -1,19 +1,19 @@
 import { useState, useEffect, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { discussions as discussionsApi } from '../lib/api';
-import type { Project, AgentDetection, Discussion, AgentType, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact } from '../types/generated';
-import { isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, AGENT_LABELS } from '../lib/constants';
+import type { Project, AgentDetection, Discussion, AgentType } from '../types/generated';
+import { isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  GitBranch, Server,
+  GitBranch,
   Trash2,
   Pencil, ShieldCheck, Check, Zap, FileText, Settings, Rocket,
-  Menu, Lock, Unlock, Share2, Users2, Star,
-  FlaskConical, Info, ChevronRight, UserCircle,
+  Menu, Lock, Unlock, Star,
+  FlaskConical, Info, UserCircle,
+  ListTodo,
 } from 'lucide-react';
 import { MatrixText } from './MatrixText';
 import { LearningsBadge } from './LearningsBadge';
-import { ProfileTooltip } from './ProfileTooltip';
 import { DiscParticipantsHeader } from './DiscParticipantsHeader';
 import { AgentSwitchPicker } from './AgentSwitchPicker';
 
@@ -21,12 +21,12 @@ export interface ChatHeaderProps {
   discussion: Discussion;
   projects: Project[];
   agents: AgentDetection[];
-  availableSkills: Skill[];
-  availableProfiles: AgentProfile[];
-  availableDirectives: Directive[];
-  mcpConfigs: McpConfigDisplay[];
-  mcpIncompatibilities: McpIncompatibility[];
   showGitPanel: boolean;
+  showPlanPanel?: boolean;
+  showSettingsPanel?: boolean;
+  planCompleted?: number;
+  planTotal?: number;
+  planLater?: number;
   isMobile: boolean;
   sending: boolean;
   /// Number of uncommitted files in the discussion worktree (Isolated mode
@@ -37,12 +37,12 @@ export interface ChatHeaderProps {
   /// can open the preflight modal if the server returns a blocker.
   onRequestTestMode: () => void;
   onToggleGitPanel: () => void;
+  onTogglePlanPanel?: () => void;
+  onToggleSettingsPanel?: () => void;
   onToggleSidebar: () => void;
   onDelete: (discId: string) => void;
   onDiscussionUpdated: () => void;
   onAgentSwitch: (newAgent: AgentType) => void;
-  contacts: Contact[];
-  onShare: (contactIds: string[]) => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
@@ -51,46 +51,31 @@ export function ChatHeader({
   discussion,
   projects,
   agents,
-  availableSkills,
-  availableProfiles,
-  availableDirectives,
-  mcpConfigs,
-  mcpIncompatibilities,
   showGitPanel,
+  showPlanPanel = false,
+  showSettingsPanel = false,
+  planCompleted = 0,
+  planTotal = 0,
+  planLater = 0,
   isMobile,
   sending,
   pendingFilesCount,
   onRequestTestMode,
   onToggleGitPanel,
+  onTogglePlanPanel,
+  onToggleSettingsPanel,
   onToggleSidebar,
   onDelete,
   onDiscussionUpdated,
   onAgentSwitch,
-  contacts,
-  onShare,
   toast,
   t,
 }: ChatHeaderProps) {
   // Header-only state
   const [editingTitleId, setEditingTitleId] = useState<string | null>(null);
-  const [showSharePopover, setShowSharePopover] = useState(false);
   const [editingTitleText, setEditingTitleText] = useState('');
-  const [showMcpPopover, setShowMcpPopover] = useState(false);
-  const [mcpSearchFilter, setMcpSearchFilter] = useState('');
-  const [showProfileEditor, setShowProfileEditor] = useState(false);
-  // Which collapsible section in the profile editor popover is open
-  // (only one at a time). Mirrors NewDiscussionForm's pattern so the
-  // popover stays a manageable height even when there are many skills /
-  // profiles / directives configured. Default = null (everything
-  // collapsed; the operator clicks the section they want to edit).
-  const [expandedConfigSection, setExpandedConfigSection] =
-    useState<'profiles' | 'skills' | 'directives' | null>(null);
   const [isDiscIdCopied, setIsDiscIdCopied] = useState(false);
   const discIdResetTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Which inline badge popover is currently open, if any. Encoded as
-  // "type:id" (e.g. "profile:default-architect", "skill:bootstrap-architect")
-  // so we only need one useState for the whole header sub-row.
-  const [openBadgeInfo, setOpenBadgeInfo] = useState<string | null>(null);
 
   useEffect(() => () => {
     if (discIdResetTimer.current) clearTimeout(discIdResetTimer.current);
@@ -109,32 +94,11 @@ export function ChatHeader({
     }
   };
 
-  // Close the badge info popover on click-outside and on Escape. The
-  // click-outside check walks up from the event target until it finds
-  // a `.disc-badge-wrap` parent; if none, we close. This lets clicks
-  // *inside* the popover (e.g. on a link) pass through.
-  useEffect(() => {
-    if (!openBadgeInfo) return;
-    const onClick = (e: MouseEvent) => {
-      const el = e.target as Element | null;
-      if (!el?.closest('.disc-badge-wrap')) setOpenBadgeInfo(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpenBadgeInfo(null);
-    };
-    document.addEventListener('click', onClick);
-    document.addEventListener('keydown', onKey);
-    return () => {
-      document.removeEventListener('click', onClick);
-      document.removeEventListener('keydown', onKey);
-    };
-  }, [openBadgeInfo]);
-  const toggleBadgeInfo = (key: string) => (e: React.MouseEvent) => {
-    e.stopPropagation();
-    setOpenBadgeInfo(prev => (prev === key ? null : key));
-  };
-
   const installedAgentsList = agents.filter(isUsable);
+  const profileCount = discussion.profile_ids?.length ?? 0;
+  const skillCount = discussion.skill_ids?.length ?? 0;
+  const directiveCount = discussion.directive_ids?.length ?? 0;
+  const hasConfiguredContext = profileCount + skillCount + directiveCount > 0;
 
   return (
     <div className="disc-chat-header">
@@ -148,7 +112,8 @@ export function ChatHeader({
         </button>
       )}
       <div className="disc-chat-header-info">
-        <div className="disc-chat-header-title">
+        <div className="disc-chat-header-top">
+          <div className="disc-chat-header-title">
           {/* Pin / favorite toggle — always visible in the header so the user
               can pin from inside the conversation. Outline = not pinned,
               filled yellow = pinned. Sidebar shows the result in its
@@ -202,6 +167,7 @@ export function ChatHeader({
             />
           ) : (
             <span
+              className="disc-chat-header-title-text"
               style={{ cursor: (isValidationDisc(discussion.title) || isBootstrapDisc(discussion.title) || isBriefingDisc(discussion.title)) ? 'default' : 'pointer' }}
               onDoubleClick={() => {
                 if (isValidationDisc(discussion.title) || isBootstrapDisc(discussion.title) || isBriefingDisc(discussion.title)) return;
@@ -211,27 +177,6 @@ export function ChatHeader({
               title={(isValidationDisc(discussion.title) || isBootstrapDisc(discussion.title) || isBriefingDisc(discussion.title)) ? undefined : t('disc.editTitle')}
             >
               <MatrixText text={discussion.title} />
-            </span>
-          )}
-          {/* Introspection-tools call counter. Tracks `kronn-internal` MCP
-           *  activity (disc_meta / disc_get_message / disc_summarize). Lets
-           *  the user see at a glance when the agent has been digging in
-           *  the history — useful both as a "the agent is using its
-           *  context tools" reassurance and as an anomaly signal if the
-           *  number balloons unexpectedly. */}
-          {/* 0.8.6 phase 2 — disc-first refactor. Participants row +
-              [+ Inviter] button. Sits at the top of the header so the
-              user sees who is in the room at a glance. Empty for a
-              freshly-created disc (no agent launched) until the user
-              clicks `+ Inviter`. */}
-          <DiscParticipantsHeader discId={discussion.id} toast={toast} t={t} />
-          {(discussion.introspection_call_count ?? 0) > 0 && (
-            <span
-              className="disc-introspection-pill"
-              title={t('disc.introspectionPillTooltip', discussion.introspection_call_count ?? 0, (discussion.introspection_call_count ?? 0) > 1 ? 's' : '')}
-              aria-label={t('disc.introspectionPillTooltip', discussion.introspection_call_count ?? 0, (discussion.introspection_call_count ?? 0) > 1 ? 's' : '')}
-            >
-              🔧 {discussion.introspection_call_count}
             </span>
           )}
           {/* 0.8.5 — short disc-id pill. Surfaces the id so a user
@@ -273,9 +218,17 @@ export function ChatHeader({
             <Pencil size={10} />
           </button>
           )}
+          </div>
+          <div className="disc-chat-header-presence">
+            <DiscParticipantsHeader discId={discussion.id} toast={toast} t={t} />
+          </div>
         </div>
         <div className="disc-chat-header-sub">
-          <span>{discussion.project_id ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?') : t('disc.general')} · </span>
+          <span className="disc-chat-context-project">
+            {discussion.project_id
+              ? (projects.find(p => p.id === discussion.project_id)?.name ?? '?')
+              : t('disc.general')}
+          </span>
           <span className="relative flex-row gap-1">
             <AgentSwitchPicker
               currentAgent={discussion.agent}
@@ -338,475 +291,61 @@ export function ChatHeader({
               </span>
             </button>
           )}
-          {(discussion.profile_ids?.length ?? 0) > 0 && (
-            <>
-              <span className="disc-separator">·</span>
-              {discussion.profile_ids?.map((pid: string) => {
-                const p = availableProfiles.find(p => p.id === pid);
-                if (!p) return null;
-                const key = `profile:${pid}`;
-                const isOpen = openBadgeInfo === key;
-                return (
-                  <span key={pid} className="disc-badge-wrap">
-                    <button
-                      type="button"
-                      className="disc-header-profile-badge"
-                      style={{ background: `${p.color}15`, color: p.color, border: `1px solid ${p.color}30`, cursor: 'pointer' }}
-                      onClick={toggleBadgeInfo(key)}
-                      aria-expanded={isOpen}
-                      title={t('disc.badgeInfo.showDetails')}
-                    >
-                      {p.avatar} {p.persona_name || p.name}
-                    </button>
-                    {isOpen && (
-                      <div className="disc-badge-info-popover" role="dialog">
-                        <div className="disc-badge-info-header">
-                          <span className="disc-badge-info-avatar" style={{ background: `${p.color}20`, color: p.color }}>
-                            {p.avatar}
-                          </span>
-                          <div>
-                            <div className="disc-badge-info-title">{p.persona_name || p.name}</div>
-                            <div className="disc-badge-info-subtitle">{p.role}</div>
-                          </div>
-                        </div>
-                        <div className="disc-badge-info-kind">{t('disc.badgeInfo.profileKind')}</div>
-                        <div className="disc-badge-info-body">
-                          {p.persona_prompt.length > 400
-                            ? p.persona_prompt.slice(0, 400) + '…'
-                            : p.persona_prompt}
-                        </div>
-                        <div className="disc-badge-info-footer">
-                          ~{p.token_estimate} {t('disc.badgeInfo.tokens')}
-                          {p.is_builtin && <span className="disc-badge-info-pill">{t('disc.badgeInfo.builtin')}</span>}
-                        </div>
-                      </div>
-                    )}
-                  </span>
-                );
-              })}
-            </>
-          )}
-          {(discussion.skill_ids ?? []).length > 0 && (
-            <>
-              <span className="disc-separator">·</span>
-              {(discussion.skill_ids ?? []).map(sid => {
-                const skill = availableSkills.find(s => s.id === sid);
-                const key = `skill:${sid}`;
-                const isOpen = openBadgeInfo === key;
-                return (
-                  <span key={sid} className="disc-badge-wrap">
-                    <button
-                      type="button"
-                      className="disc-header-skill-badge"
-                      style={{ cursor: 'pointer' }}
-                      onClick={toggleBadgeInfo(key)}
-                      aria-expanded={isOpen}
-                      title={t('disc.badgeInfo.showDetails')}
-                    >
-                      {skill?.icon ? `${skill.icon} ` : ''}{skill?.name ?? sid}
-                    </button>
-                    {isOpen && skill && (
-                      <div className="disc-badge-info-popover" role="dialog">
-                        <div className="disc-badge-info-header">
-                          <span className="disc-badge-info-avatar">{skill.icon || '📘'}</span>
-                          <div>
-                            <div className="disc-badge-info-title">{skill.name}</div>
-                            <div className="disc-badge-info-subtitle">{skill.category}</div>
-                          </div>
-                        </div>
-                        <div className="disc-badge-info-kind">{t('disc.badgeInfo.skillKind')}</div>
-                        <div className="disc-badge-info-body">
-                          {skill.description}
-                        </div>
-                        <div className="disc-badge-info-footer">
-                          ~{skill.token_estimate} {t('disc.badgeInfo.tokens')}
-                          {skill.is_builtin && <span className="disc-badge-info-pill">{t('disc.badgeInfo.builtin')}</span>}
-                        </div>
-                      </div>
-                    )}
-                    {isOpen && !skill && (
-                      <div className="disc-badge-info-popover" role="dialog">
-                        <div className="disc-badge-info-title">{sid}</div>
-                        <div className="disc-badge-info-body">{t('disc.badgeInfo.notFound')}</div>
-                      </div>
-                    )}
-                  </span>
-                );
-              })}
-            </>
-          )}
-          {(discussion.directive_ids ?? []).length > 0 && (
-            <>
-              <span className="disc-separator">·</span>
-              {(discussion.directive_ids ?? []).map(id => {
-                const d = availableDirectives.find(dd => dd.id === id);
-                const key = `directive:${id}`;
-                const isOpen = openBadgeInfo === key;
-                return (
-                  <span key={id} className="disc-badge-wrap">
-                    <button
-                      type="button"
-                      className="disc-header-directive-badge"
-                      style={{ cursor: 'pointer' }}
-                      onClick={toggleBadgeInfo(key)}
-                      aria-expanded={isOpen}
-                      title={t('disc.badgeInfo.showDetails')}
-                    >
-                      <FileText size={7} style={{ marginRight: 2 }} />
-                      {d ? `${d.icon} ${d.name}` : id}
-                    </button>
-                    {isOpen && d && (
-                      <div className="disc-badge-info-popover" role="dialog">
-                        <div className="disc-badge-info-header">
-                          <span className="disc-badge-info-avatar">{d.icon || '📜'}</span>
-                          <div>
-                            <div className="disc-badge-info-title">{d.name}</div>
-                            <div className="disc-badge-info-subtitle">{d.category}</div>
-                          </div>
-                        </div>
-                        <div className="disc-badge-info-kind">{t('disc.badgeInfo.directiveKind')}</div>
-                        <div className="disc-badge-info-body">
-                          {d.description}
-                        </div>
-                        <div className="disc-badge-info-footer">
-                          ~{d.token_estimate} {t('disc.badgeInfo.tokens')}
-                          {d.is_builtin && <span className="disc-badge-info-pill">{t('disc.badgeInfo.builtin')}</span>}
-                        </div>
-                      </div>
-                    )}
-                  </span>
-                );
-              })}
-            </>
+          {hasConfiguredContext && (
+            <button
+              type="button"
+              className="disc-chat-context-summary"
+              onClick={onToggleSettingsPanel}
+              title={t('disc.configuredContextSummary', profileCount, skillCount, directiveCount)}
+              aria-label={t('disc.configuredContextSummary', profileCount, skillCount, directiveCount)}
+            >
+              {profileCount > 0 && <span><UserCircle size={10} /> {profileCount}</span>}
+              {skillCount > 0 && <span><Zap size={10} /> {skillCount}</span>}
+              {directiveCount > 0 && <span><FileText size={10} /> {directiveCount}</span>}
+            </button>
           )}
         </div>
       </div>
       <div className="disc-chat-header-actions">
         {/* 0.10.0 — pending-learnings badge (self-contained; hidden when 0). */}
         <LearningsBadge t={t} toast={toast} />
-        {/* MCP info button */}
-        <div className="relative">
-          <button
-            className="disc-icon-btn" style={{ color: showMcpPopover ? 'var(--kr-cyan)' : undefined }}
-            onClick={() => { setShowMcpPopover(prev => { if (prev) setMcpSearchFilter(''); return !prev; }); setShowProfileEditor(false); }}
-            title={t('disc.mcps')}
-            aria-label={t('disc.mcps')}
-          >
-            <Server size={13} />
-          </button>
-          {showMcpPopover && (() => {
-            const projectId = discussion.project_id;
-            const discMcps = projectId
-              ? mcpConfigs.filter(c => c.is_global || c.project_ids.includes(projectId))
-              : mcpConfigs.filter(c => c.include_general);
-            // Agents running via direct API (no CLI) cannot use MCP tools
-            const apiOnlyAgents: AgentType[] = ['Vibe' as AgentType];
-            const isApiOnly = apiOnlyAgents.includes(discussion.agent);
-            const filterLower = mcpSearchFilter.toLowerCase();
-            const filteredMcps = filterLower
-              ? discMcps.filter(c => c.label.toLowerCase().includes(filterLower) || c.server_name.toLowerCase().includes(filterLower))
-              : discMcps;
-            return (
-              <div className="disc-mcp-popover">
-                <div className="disc-mcp-header">
-                  {t('disc.mcps')}
-                  <span className="disc-mcp-header-count">{discMcps.length}</span>
-                </div>
-                {discMcps.length > 6 && (
-                  <div className="disc-mcp-search-wrap">
-                    <input
-                      type="text"
-                      value={mcpSearchFilter}
-                      onChange={e => setMcpSearchFilter(e.target.value)}
-                      placeholder={t('disc.mcpSearch')}
-                      className="disc-mcp-search"
-                      autoFocus
-                    />
-                  </div>
-                )}
-                {isApiOnly && (
-                  <div className="disc-mcp-api-notice">
-                    <span className="text-xs">⚡</span>
-                    Mode API — MCPs indisponibles
-                  </div>
-                )}
-                <div className="disc-mcp-list">
-                  {filteredMcps.length === 0 ? (
-                    <div className="disc-mcp-empty">{mcpSearchFilter ? t('disc.noMcps') : t('disc.noMcps')}</div>
-                  ) : filteredMcps.map(c => {
-                    const incomp = mcpIncompatibilities.find(
-                      i => i.server_id === c.server_id && i.agent === discussion.agent
-                    );
-                    return (
-                      <div
-                        key={c.id}
-                        title={incomp ? `\u26a0 ${incomp.reason}` : isApiOnly ? 'Non disponible en mode API' : undefined}
-                        className="disc-mcp-item"
-                        style={{
-                          color: incomp ? 'var(--kr-error)' : isApiOnly ? 'var(--kr-text-ghost)' : 'var(--kr-text-primary)',
-                          opacity: incomp ? 0.7 : isApiOnly ? 0.5 : 1,
-                        }}
-                      >
-                        <Server size={9} style={{ color: incomp ? 'var(--kr-error)' : isApiOnly ? 'var(--kr-text-ghost)' : 'var(--kr-cyan)' }} className="flex-shrink-0" />
-                        {c.label}
-                        {incomp && <span className="disc-mcp-incompatible">incompatible</span>}
-                        <span className="disc-mcp-item-name">{c.server_name}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })()}
-        </div>
+        <button
+          type="button"
+          className="disc-icon-btn"
+          data-active={showSettingsPanel}
+          onClick={onToggleSettingsPanel}
+          title={t('disc.settingsPanel')}
+          aria-label={t('disc.settingsPanel')}
+          aria-expanded={showSettingsPanel}
+        >
+          <Settings size={13} />
+        </button>
 
-        {/* Edit profiles/skills button */}
-        <div className="relative">
-          <button
-            className="disc-icon-btn" style={{ color: showProfileEditor ? 'var(--kr-purple-soft)' : undefined }}
-            onClick={() => { setShowProfileEditor(prev => !prev); setShowMcpPopover(false); }}
-            title={t('disc.editConfig')}
-            aria-label={t('disc.editConfig')}
-          >
-            <Settings size={13} />
-          </button>
-          {showProfileEditor && (
-            <div className="disc-profile-popover">
-              {/* Project */}
-              <div className="disc-popover-section">
-                <div className="disc-popover-label">{t('disc.project')}</div>
-                <select
-                  className="disc-popover-select"
-                  value={discussion.project_id ?? ''}
-                  onChange={async (e) => {
-                    // Send "" (not null) for "General" — serde can't distinguish
-                    // JSON null from absent field with Option<Option<String>>
-                    const newPid = e.target.value;
-                    try {
-                      await discussionsApi.update(discussion.id, { project_id: newPid || '' });
-                      onDiscussionUpdated();
-                    } catch (err) {
-                      console.error('Failed to update project:', err);
-                    }
-                  }}
-                >
-                  <option value="">{t('disc.general')}</option>
-                  {projects.filter(p => !isHiddenPath(p.path)).map(p => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
-                  ))}
-                </select>
-              </div>
-
-              {/* Profiles — collapsed accordion (was always-open chip wall;
-                  with N profiles configured the popover overflowed the
-                  viewport and clipped the Directives + Tier sections at
-                  the bottom). */}
-              {availableProfiles.length > 0 && (
-                <div className="disc-popover-section">
-                  <button
-                    type="button"
-                    className="disc-advanced-section-toggle"
-                    onClick={() => setExpandedConfigSection(prev => prev === 'profiles' ? null : 'profiles')}
-                  >
-                    <ChevronRight size={9} className="disc-chevron" data-expanded={expandedConfigSection === 'profiles'} />
-                    <UserCircle size={10} />
-                    <span>{t('profiles.select')}</span>
-                    {(discussion.profile_ids ?? []).length > 0 && (
-                      <span className="disc-advanced-count">{(discussion.profile_ids ?? []).length}</span>
-                    )}
-                  </button>
-                  {expandedConfigSection === 'profiles' && (
-                    <div className="flex-wrap gap-2" style={{ paddingTop: 6 }}>
-                      {availableProfiles.map(profile => {
-                        const active = (discussion.profile_ids ?? []).includes(profile.id);
-                        return (
-                          <ProfileTooltip key={profile.id} profile={profile}>
-                            <button
-                              className="disc-toggle-pill"
-                              data-active={active}
-                              data-color="purple"
-                              style={{
-                                borderColor: active ? (profile.color || 'rgba(var(--kr-purple-rgb), 0.4)') : undefined,
-                                background: active ? `${profile.color}15` : undefined,
-                                color: active ? (profile.color || 'var(--kr-purple-soft)') : undefined,
-                              }}
-                              onClick={async () => {
-                                const current = discussion.profile_ids ?? [];
-                                const next = active ? current.filter((id: string) => id !== profile.id) : [...current, profile.id];
-                                await discussionsApi.update(discussion.id, { profile_ids: next });
-                                onDiscussionUpdated();
-                              }}>
-                              {active && <Check size={8} />}
-                              {profile.avatar} {profile.persona_name || profile.name}
-                            </button>
-                          </ProfileTooltip>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Skills — same collapsed-by-default treatment. */}
-              {availableSkills.length > 0 && (
-                <div className="disc-popover-section">
-                  <button
-                    type="button"
-                    className="disc-advanced-section-toggle"
-                    onClick={() => setExpandedConfigSection(prev => prev === 'skills' ? null : 'skills')}
-                  >
-                    <ChevronRight size={9} className="disc-chevron" data-expanded={expandedConfigSection === 'skills'} />
-                    <Zap size={10} />
-                    <span>{t('skills.selectSkills')}</span>
-                    {(discussion.skill_ids ?? []).length > 0 && (
-                      <span className="disc-advanced-count">{(discussion.skill_ids ?? []).length}</span>
-                    )}
-                  </button>
-                  {expandedConfigSection === 'skills' && (
-                    <div className="flex-wrap gap-2" style={{ paddingTop: 6 }}>
-                      {availableSkills.map(skill => {
-                        const active = (discussion.skill_ids ?? []).includes(skill.id);
-                        return (
-                          <button key={skill.id}
-                            className="disc-toggle-pill"
-                            data-active={active}
-                            data-color="accent"
-                            onClick={async () => {
-                              const current = discussion.skill_ids ?? [];
-                              const next = active ? current.filter((id: string) => id !== skill.id) : [...current, skill.id];
-                              await discussionsApi.update(discussion.id, { skill_ids: next });
-                              onDiscussionUpdated();
-                            }}>
-                            {active && <Check size={8} />}
-                            {skill.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Model Tier */}
-              <div className="disc-popover-section">
-                <div className="disc-popover-label">{t('disc.modelTier')}</div>
-                <div className="flex-row gap-2">
-                  {(['economy', 'default', 'reasoning'] as const).map(tier => {
-                    const active = (discussion.tier ?? 'default') === tier;
-                    return (
-                      <button key={tier}
-                        className="disc-toggle-pill"
-                        data-active={active}
-                        data-tier={tier}
-                        onClick={async () => {
-                          await discussionsApi.update(discussion.id, { tier });
-                          onDiscussionUpdated();
-                        }}>
-                        {tier === 'economy' ? '⚡' : tier === 'reasoning' ? '\ud83e\udde0' : '\u2699\ufe0f'} {t(`disc.tier.${tier}`)}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* Auto-summary policy. Default `Auto` keeps the historical
-               *  per-agent threshold-based summarisation. `Off` saves the
-               *  recurring eco-tier summary call (~500-2000 tokens each)
-               *  on big-context models or short threads where the agent
-               *  already has full visibility. `OnDemand` is reserved for
-               *  the upcoming kronn-internal MCP tools and behaves like
-               *  `Off` until they ship. User feedback on 2026-05-09:
-               *  "on a une synthèse auto tous les <x> messages, mais dans
-               *   la majorité des cas c'est pas forcément utile". */}
-              <div className="disc-popover-section">
-                <div className="disc-popover-label">{t('disc.summaryStrategyLabel')}</div>
-                <div className="flex-row gap-2">
-                  {(['Auto', 'OnDemand', 'Off'] as const).map(strategy => {
-                    const active = (discussion.summary_strategy ?? 'Auto') === strategy;
-                    return (
-                      <button key={strategy}
-                        className="disc-toggle-pill"
-                        data-active={active}
-                        title={t(`disc.summaryStrategy.${strategy}.hint`)}
-                        onClick={async () => {
-                          await discussionsApi.update(discussion.id, { summary_strategy: strategy });
-                          onDiscussionUpdated();
-                        }}>
-                        {t(`disc.summaryStrategy.${strategy}.label`)}
-                      </button>
-                    );
-                  })}
-                </div>
-                {/* Surface the architectural limit: Vibe + Ollama don't read
-                 *  the MCP config files Kronn writes, so the kronn-internal
-                 *  introspection tools (disc_meta / disc_get_message /
-                 *  disc_summarize) never show up for them. Without this
-                 *  notice, picking `OnDemand` for a Vibe disc looks like a
-                 *  silent no-op — the agent just falls back to raw
-                 *  context. We tell the user up-front so they can either
-                 *  switch to a supporting agent or accept the fallback. */}
-                {!agentSupportsIntrospection(discussion.agent) && (
-                  <div
-                    className="disc-popover-note"
-                    role="note"
-                    data-testid="introspection-unsupported-note"
-                  >
-                    ⚠️ {t('disc.introspectionUnsupportedNote', AGENT_LABELS[discussion.agent] ?? discussion.agent)}
-                  </div>
-                )}
-              </div>
-
-              {/* Directives — same accordion pattern. */}
-              {availableDirectives.length > 0 && (
-                <div className="disc-popover-section">
-                  <button
-                    type="button"
-                    className="disc-advanced-section-toggle"
-                    onClick={() => setExpandedConfigSection(prev => prev === 'directives' ? null : 'directives')}
-                  >
-                    <ChevronRight size={9} className="disc-chevron" data-expanded={expandedConfigSection === 'directives'} />
-                    <FileText size={10} />
-                    <span>{t('directives.title')}</span>
-                    {(discussion.directive_ids ?? []).length > 0 && (
-                      <span className="disc-advanced-count">{(discussion.directive_ids ?? []).length}</span>
-                    )}
-                  </button>
-                  {expandedConfigSection === 'directives' && (
-                    <div className="flex-wrap gap-2" style={{ paddingTop: 6 }}>
-                      {availableDirectives.map(directive => {
-                        const active = (discussion.directive_ids ?? []).includes(directive.id);
-                        return (
-                          <button key={directive.id}
-                            className="disc-toggle-pill"
-                            data-active={active}
-                            data-color="warning"
-                            onClick={async () => {
-                              const current = discussion.directive_ids ?? [];
-                              const next = active ? current.filter((id: string) => id !== directive.id) : [...current, directive.id];
-                              await discussionsApi.update(discussion.id, { directive_ids: next });
-                              onDiscussionUpdated();
-                            }}>
-                            {active && <Check size={8} />}
-                            {directive.icon} {directive.name}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
+        <button
+          type="button"
+          className="disc-plan-btn"
+          data-active={showPlanPanel}
+          onClick={onTogglePlanPanel}
+          title={t('planning.openPlan')}
+          aria-label={t('planning.openPlan')}
+          aria-expanded={showPlanPanel}
+        >
+          <ListTodo size={13} />
+          <span>{t('planning.short')}</span>
+          <span className="disc-plan-count">{planCompleted}/{planTotal}</span>
+          {planLater > 0 && <span className="disc-plan-later">+{planLater}</span>}
+        </button>
 
         {discussion.project_id && (
           <button
-            className="disc-icon-btn" style={{ color: showGitPanel ? 'var(--kr-accent-ink)' : undefined }}
+            className="disc-icon-btn"
+            data-active={showGitPanel}
             onClick={onToggleGitPanel}
             title={pendingFilesCount > 0
               ? t('git.pendingFilesTooltip', pendingFilesCount)
               : t('git.filesBtn')}
             aria-label={t('git.filesBtn')}
+            aria-expanded={showGitPanel}
           >
             <GitBranch size={13} />
             {pendingFilesCount > 0 && (
@@ -815,44 +354,6 @@ export function ChatHeader({
               </span>
             )}
           </button>
-        )}
-        {/* Share button */}
-        {contacts.length > 0 && (
-          <div style={{ position: 'relative' }}>
-            <button
-              className="disc-icon-btn"
-              onClick={() => setShowSharePopover(!showSharePopover)}
-              style={{ color: discussion.shared_id ? 'var(--kr-success)' : undefined }}
-              title={discussion.shared_id ? t('contacts.wsConnected') : 'Share'}
-            >
-              {discussion.shared_id ? <Users2 size={12} /> : <Share2 size={12} />}
-            </button>
-            {showSharePopover && (
-              <div className="disc-popover" style={{ right: 0, top: '100%', minWidth: 200 }}>
-                <div className="text-sm font-semibold mb-3">Share with</div>
-                {contacts.map(c => {
-                  const alreadyShared = discussion.shared_with?.includes(c.id);
-                  return (
-                    <button
-                      key={c.id}
-                      className="disc-popover-row"
-                      style={{ opacity: alreadyShared ? 0.5 : 1 }}
-                      onClick={() => {
-                        if (!alreadyShared) {
-                          onShare([c.id]);
-                          setShowSharePopover(false);
-                        }
-                      }}
-                      disabled={alreadyShared}
-                    >
-                      <span className="text-sm">{c.pseudo}</span>
-                      {alreadyShared && <Check size={10} style={{ color: 'var(--kr-success)' }} />}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
         )}
         <button
           className="disc-icon-btn" style={{ color: 'var(--kr-error)' }}

@@ -214,6 +214,21 @@ class CallDiscCreateAutoInheritTests(unittest.TestCase):
         self.assertEqual(body["source_agent"], "ManualImport")
         self.assertEqual(body["source_session_id"], "ext-sess-42")
 
+    def test_forwards_explicit_no_agent_flag(self):
+        """The generic create helper must carry the backend routing flag.
+
+        `disc_create_room` uses this path to create a collaboration room
+        without a native principal; dropping the flag here reintroduces the
+        unsolicited second responder.
+        """
+        self.mod.call_disc_create({
+            "title": "Peer-only room",
+            "agent": "Codex",
+            "no_agent": True,
+        })
+        _, _, body = self.fake_http.call_args.args
+        self.assertIs(body["no_agent"], True)
+
     def test_missing_required_fields_raise_runtime_error_with_clear_message(self):
         """Pre-0.8.5 the script's own assertions had to stay sharp —
         the wizard isn't on the path here, so a malformed agent payload
@@ -1658,8 +1673,9 @@ class DiscCreateRoomTests(unittest.TestCase):
       * missing `title` raises immediately (no HTTP, clear message)
       * happy path returns a flat payload exposing both disc_id and
         token + instruction_text from the second hop
-      * uses `_agent_type_for_session()` for the `agent` field (so the
-        Kronn UI shows the right CLI in the participants header from t0)
+      * keeps `_agent_type_for_session()` as the persisted placeholder agent
+        while setting `no_agent=true`, so joined peers never wake a native
+        duplicate responder
       * invite-peer is hit at the disc_id RETURNED by disc_create, not
         at any agent-passed id — closes a tampering surface.
     """
@@ -1732,6 +1748,7 @@ class DiscCreateRoomTests(unittest.TestCase):
         create_body = self.fake_http.call_args_list[0].args[2]
         self.assertEqual(create_body["agent"], "ClaudeCode")
         self.assertEqual(create_body["title"], "x")
+        self.assertIs(create_body["no_agent"], True)
 
     def test_next_step_warns_when_bridge_already_bound(self):
         # 0.8.6 fix 2026-05-22 — when the caller is already bound to
@@ -4712,6 +4729,100 @@ class ResumeBindingTests(unittest.TestCase):
         method, path, body = http.call_args.args[0], http.call_args.args[1], http.call_args.args[2]
         self.assertEqual((method, path), ("POST", "/api/disc/append"))
         self.assertEqual(body["session_id"], self.mod._session_id_for_caller())
+
+
+class PlanningToolTests(unittest.TestCase):
+    def setUp(self):
+        self.mod = _load_module()
+        self.mod._CURRENT_DISC_ID = "disc-plan"
+        self.fake_http = mock.MagicMock(return_value={
+            "success": True,
+            "data": {"ok": True},
+        })
+
+    def test_catalogue_and_dispatch_expose_the_compact_contract(self):
+        expected = {
+            "plan_get", "task_list", "task_get", "task_changes",
+            "task_create", "task_update", "task_update_dod", "task_link_discussion",
+            "task_add_blocker",
+        }
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertTrue(expected.issubset(names))
+        self.assertTrue(expected.issubset(self.mod.DISPATCH))
+        task_list = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_list")
+        self.assertEqual(task_list["inputSchema"]["properties"]["limit"]["maximum"], 100)
+
+    def test_plan_get_defaults_to_current_discussion(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_plan_get({})
+        self.fake_http.assert_called_once_with(
+            "GET", "/api/discussions/disc-plan/plan"
+        )
+
+    def test_task_list_encodes_filters_and_boolean_lowercase(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_task_list({
+                "priority": "high",
+                "tag": "platform",
+                "with_discussion": False,
+                "limit": 25,
+            })
+        method, path = self.fake_http.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertIn("priority=high", path)
+        self.assertIn("tag=platform", path)
+        self.assertIn("with_discussion=false", path)
+        self.assertIn("limit=25", path)
+
+    def test_task_create_attributes_the_acting_agent(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_create({
+                "title": "Plan it",
+                "priority": "critical",
+                "source_message_id": "MSG-12345678",
+            })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("POST", "/api/planning/tasks"))
+        self.assertEqual(body["title"], "Plan it")
+        self.assertEqual(body["actor"], {
+            "kind": "agent",
+            "id": "Codex",
+            "source_message_id": "MSG-12345678",
+        })
+
+    def test_task_update_preserves_explicit_null_for_clear(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="ClaudeCode"):
+            self.mod.call_task_update({
+                "task_id": "KT-42",
+                "blocked_reason": None,
+            })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual((method, path), ("PATCH", "/api/planning/tasks/KT-42"))
+        self.assertIn("blocked_reason", body)
+        self.assertIsNone(body["blocked_reason"])
+        self.assertEqual(body["actor"]["id"], "ClaudeCode")
+
+    def test_task_update_dod_is_an_atomic_narrow_write(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http), \
+             mock.patch.object(self.mod, "_agent_type_for_session", return_value="Codex"):
+            self.mod.call_task_update_dod({
+                "task_id": "KT-42",
+                "dod_id": "dod/a",
+                "completed": True,
+            })
+        method, path, body = self.fake_http.call_args.args
+        self.assertEqual(
+            (method, path),
+            ("PATCH", "/api/planning/tasks/KT-42/dod/dod%2Fa"),
+        )
+        self.assertEqual(body["completed"], True)
+        self.assertEqual(body["actor"]["id"], "Codex")
+
+    def test_task_add_blocker_requires_both_references(self):
+        with self.assertRaisesRegex(RuntimeError, "task_id and blocker_task_id"):
+            self.mod.call_task_add_blocker({"task_id": "KT-1"})
 
 
 if __name__ == "__main__":

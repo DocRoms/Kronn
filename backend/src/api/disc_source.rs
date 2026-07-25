@@ -54,6 +54,11 @@ pub struct DiscCreateRequest {
     pub source_agent: Option<String>,
     #[serde(default)]
     pub source_session_id: Option<String>,
+    /// Disable Kronn's native discussion runner. Multi-agent rooms created
+    /// through `disc_create_room` set this so only explicitly joined peers
+    /// answer live MCP appends.
+    #[serde(default)]
+    pub no_agent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -99,6 +104,7 @@ pub async fn disc_create(
     let language = req.language.unwrap_or_else(|| "en".to_string());
     let disc_id = Uuid::new_v4().to_string();
     let agent = req.agent.clone();
+    let no_agent = req.no_agent;
     let disc = Discussion {
         awaiting_agent: false,
         id: disc_id.clone(),
@@ -139,6 +145,9 @@ pub async fn disc_create(
         .db
         .with_conn(move |conn| {
             crate::db::discussions::insert_discussion(conn, &disc_for_insert)?;
+            if no_agent {
+                crate::db::discussions::set_disc_no_agent(conn, &disc_for_insert.id, true)?;
+            }
             Ok::<_, anyhow::Error>(())
         })
         .await;
@@ -1058,6 +1067,7 @@ mod tests {
         .expect("minimal create body must parse");
         assert_eq!(minimal.title, "test");
         assert!(minimal.source_agent.is_none());
+        assert!(!minimal.no_agent);
 
         // With source binding — CLI-initiated import.
         let bound: DiscCreateRequest = serde_json::from_str(
@@ -1071,6 +1081,42 @@ mod tests {
         .expect("bound create body must parse");
         assert_eq!(bound.source_agent.as_deref(), Some("ClaudeCode"));
         assert_eq!(bound.source_session_id.as_deref(), Some("abc-123"));
+    }
+
+    #[tokio::test]
+    async fn disc_create_can_persist_a_no_agent_room() {
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        let config = Arc::new(RwLock::new(crate::core::config::default_config()));
+        let state = crate::AppState::new_defaults(config, db, crate::DEFAULT_MAX_CONCURRENT_AGENTS);
+
+        let response = disc_create(
+            State(state.clone()),
+            Json(DiscCreateRequest {
+                title: "Peer-only room".into(),
+                agent: AgentType::Codex,
+                language: Some("fr".into()),
+                project_id: None,
+                source_agent: None,
+                source_session_id: None,
+                no_agent: true,
+            }),
+        )
+        .await;
+        let created = response.0.data.expect("room creation succeeds");
+        let disc_id = created.disc_id;
+
+        let is_no_agent = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::disc_is_no_agent(conn, &disc_id))
+            .await
+            .unwrap();
+        assert!(
+            is_no_agent,
+            "a peer-only room must never wake the persisted placeholder agent"
+        );
     }
 
     #[test]

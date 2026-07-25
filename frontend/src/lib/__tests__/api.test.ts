@@ -78,6 +78,7 @@ describe('api module', () => {
       expect(api.agents).toBeDefined();
       expect(api.mcps).toBeDefined();
       expect(api.discussions).toBeDefined();
+      expect(api.planning).toBeDefined();
       expect(api.workflows).toBeDefined();
       expect(api.skills).toBeDefined();
       expect(api.stats).toBeDefined();
@@ -285,6 +286,53 @@ describe('api module', () => {
       const { projects } = await getApi();
       const result = await projects.gitCommit('proj-1', { files: ['src/main.rs'], message: 'fix bug' });
       expect(result.hash).toBe('abc1234');
+    });
+  });
+
+  describe('planning API', () => {
+    it('encodes compact list filters without unrelated fields', async () => {
+      mockFetchResponse({ items: [], next_cursor: null });
+      const { planning } = await getApi();
+      await planning.list({
+        search: 'upgrade PHP',
+        priority: 'high',
+        tag: 'platform',
+        withDiscussion: false,
+        cursor: 50,
+        limit: 25,
+      });
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/planning/tasks?search=upgrade+PHP&priority=high&tag=platform&with_discussion=false&cursor=50&limit=25',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('uses copyable KT references safely in detail and update routes', async () => {
+      mockFetchResponse({});
+      const { planning } = await getApi();
+      await planning.get('KT-142');
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        '/api/planning/tasks/KT-142',
+        expect.objectContaining({ method: 'GET' }),
+      );
+      await planning.update('KT-142', { status: 'done' });
+      expect(globalThis.fetch).toHaveBeenLastCalledWith(
+        '/api/planning/tasks/KT-142',
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'done' }),
+        }),
+      );
+    });
+
+    it('requests only discussion-plan deltas after the supplied timestamp', async () => {
+      mockFetchResponse([]);
+      const { planning } = await getApi();
+      await planning.changes('disc/one', '2026-07-25T09:30:00+02:00');
+      expect(globalThis.fetch).toHaveBeenCalledWith(
+        '/api/discussions/disc%2Fone/plan/changes?since=2026-07-25T09%3A30%3A00%2B02%3A00',
+        expect.objectContaining({ method: 'GET' }),
+      );
     });
   });
 });

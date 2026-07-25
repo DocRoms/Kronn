@@ -14,6 +14,8 @@ export type AddContactResult = { contact: Contact,
  */
 warning: string | null, };
 
+export type AddPlanningBlockerRequest = { blocker_task_id: string, actor?: PlanningActor, };
+
 export type AdoptHostMcpRequest = {
 /**
  * Source file as reported by host_discovery (e.g. "/home/user/.claude.json").
@@ -844,6 +846,12 @@ export type CreateMcpConfigRequest = { server_id: string, label: string, env: Re
  */
 custom_spec?: CustomApiPayload | null, };
 
+export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean, };
+
+export type CreatePlanningTaskLink = { label: string, url: string, };
+
+export type CreatePlanningTaskRequest = { title: string, description?: string, status?: PlanningTaskStatus, priority?: PlanningTaskPriority, parent_id?: string | null, project_ids?: Array<string>, tags?: Array<string>, definition_of_done?: Array<CreatePlanningDodItem>, links?: Array<CreatePlanningTaskLink>, actor?: PlanningActor, };
+
 export type CreateProfileRequest = { name: string, persona_name?: string, role: string, avatar: string, color: string, category: ProfileCategory, persona_prompt: string, default_engine?: string | null, };
 
 export type CreateQuickApiRequest = { name: string, icon?: string | null, description?: string, project_id?: string | null, api_plugin_slug: string, api_config_id: string, api_endpoint_path: string, api_method?: string | null, api_query?: { [key in string]: string } | null, api_path_params?: { [key in string]: string } | null, api_headers?: { [key in string]: string } | null, api_body?: JsonValue | null, api_extract?: ExtractSpec | null, api_pagination?: PaginationSpec | null, api_timeout_ms?: number | null, api_max_retries?: number | null, variables?: Array<PromptVariable>, profile_ids?: Array<string>, directive_ids?: Array<string>, };
@@ -1043,7 +1051,13 @@ export type DiscCreateRequest = { title: string, agent: AgentType, language?: st
  * When set, the new disc is immediately bound to this
  * (source_agent, source_session_id) pair.
  */
-source_agent?: string | null, source_session_id?: string | null, };
+source_agent?: string | null, source_session_id?: string | null,
+/**
+ * Disable Kronn's native discussion runner. Multi-agent rooms created
+ * through `disc_create_room` set this so only explicitly joined peers
+ * answer live MCP appends.
+ */
+no_agent?: boolean, };
 
 export type DiscCreateResponse = { disc_id: string,
 /**
@@ -1317,6 +1331,8 @@ poll_policy: PollBackoffPolicy,
  * stab-3 — current server-computed regime for this disc.
  */
 pacing?: PacingState, project_id: string | null, };
+
+export type DiscussionPlan = { discussion_id: string, primary_objective: PlanningTaskSummary | null, active: Array<PlanningDiscussionRelation>, later: Array<PlanningDiscussionRelation>, completed_active: number, total_active: number, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -1658,6 +1674,8 @@ description?: string, };
 export type LinkedRepoCandidate = { id: string, name: string, path: string, proximity_hint: string, };
 
 export type LinkMcpConfigRequest = { project_ids: Array<string>, };
+
+export type LinkPlanningDiscussionRequest = { discussion_id: string, placement?: PlanningPlacement, is_primary?: boolean, position?: number | null, actor?: PlanningActor, };
 
 /**
  * The lint result attached to an agent message.
@@ -2113,6 +2131,32 @@ export type PeerResumeResponse = { disc_id: string, session_pk: number,
  * Rotated credential replacing the one supplied in the request.
  */
 resume_token: string, };
+
+export type PlanningActor = { kind: PlanningActorKind, id: string | null, source_message_id: string | null, };
+
+export type PlanningActorKind = "human" | "agent";
+
+export type PlanningDiscussionRelation = { placement: PlanningPlacement, is_primary: boolean, position: number, task: PlanningTaskSummary, };
+
+export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number, };
+
+export type PlanningPlacement = "active" | "later";
+
+export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
+
+export type PlanningTaskDetail = { subtasks: Array<PlanningTaskSummary>, description: string, blocked_reason: string | null, definition_of_done: Array<PlanningDodItem>, links: Array<PlanningTaskLink>, blockers: Array<PlanningTaskSummary>, blocking: Array<PlanningTaskSummary>, events: Array<PlanningTaskEvent>, id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
+
+export type PlanningTaskEvent = { id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
+
+export type PlanningTaskLink = { id: string, label: string, url: string, position: number, };
+
+export type PlanningTaskListResponse = { items: Array<PlanningTaskSummary>, next_cursor: number | null, };
+
+export type PlanningTaskPriority = "critical" | "high" | "normal" | "low";
+
+export type PlanningTaskStatus = "idea" | "todo" | "in_progress" | "blocked" | "done" | "archived";
+
+export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
 
 /**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
@@ -3019,6 +3063,10 @@ summary_strategy?: SummaryStrategy | null, };
 export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, };
 
 export type UpdateMcpContextRequest = { content: string, };
+
+export type UpdatePlanningDodItemRequest = { completed: boolean, actor?: PlanningActor, };
+
+export type UpdatePlanningTaskRequest = { title?: string | null, description?: string | null, status?: PlanningTaskStatus | null, priority?: PlanningTaskPriority | null, parent_id?: string | null | null, blocked_reason?: string | null | null, rank?: number | null, project_ids?: Array<string> | null, tags?: Array<string> | null, definition_of_done?: Array<CreatePlanningDodItem> | null, links?: Array<CreatePlanningTaskLink> | null, actor?: PlanningActor, };
 
 export type UpdateWorkflowRequest = { name?: string | null, project_id?: string | null | null, trigger?: WorkflowTrigger | null, steps?: Array<WorkflowStep> | null, actions?: Array<WorkflowAction> | null, safety?: WorkflowSafety | null, workspace_config?: WorkspaceConfig | null, concurrency_limit?: number | null, guards?: WorkflowGuards | null,
 /**

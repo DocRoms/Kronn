@@ -104,6 +104,17 @@ import type {
   LearningStatus,
   LearningProposeRequest,
   ProposeResult,
+  AddPlanningBlockerRequest,
+  CreatePlanningTaskRequest,
+  DiscussionPlan,
+  LinkPlanningDiscussionRequest,
+  PlanningTaskChange,
+  PlanningTaskDetail,
+  PlanningTaskListResponse,
+  PlanningTaskPriority,
+  PlanningTaskStatus,
+  UpdatePlanningDodItemRequest,
+  UpdatePlanningTaskRequest,
 } from '../types/generated';
 import type { DiscoverKeysResponse, TestModeEnterResult, TestModeExitResponse } from '../types/extensions';
 
@@ -1468,6 +1479,78 @@ export const discussions = {
     }
 
     done();
+  },
+};
+
+export interface PlanningTaskListFilters {
+  search?: string;
+  status?: PlanningTaskStatus;
+  priority?: PlanningTaskPriority;
+  projectId?: string;
+  discussionId?: string;
+  tag?: string;
+  withDiscussion?: boolean;
+  cursor?: number;
+  limit?: number;
+}
+
+export const planning = {
+  list: (filters: PlanningTaskListFilters = {}) => {
+    const query = new URLSearchParams();
+    if (filters.search) query.set('search', filters.search);
+    if (filters.status) query.set('status', filters.status);
+    if (filters.priority) query.set('priority', filters.priority);
+    if (filters.projectId) query.set('project_id', filters.projectId);
+    if (filters.discussionId) query.set('discussion_id', filters.discussionId);
+    if (filters.tag) query.set('tag', filters.tag);
+    if (filters.withDiscussion !== undefined) {
+      query.set('with_discussion', String(filters.withDiscussion));
+    }
+    if (filters.cursor !== undefined) query.set('cursor', String(filters.cursor));
+    if (filters.limit !== undefined) query.set('limit', String(filters.limit));
+    const suffix = query.size > 0 ? `?${query.toString()}` : '';
+    return api<PlanningTaskListResponse>('GET', `/planning/tasks${suffix}`);
+  },
+  get: (taskId: string) =>
+    api<PlanningTaskDetail>('GET', `/planning/tasks/${encodeURIComponent(taskId)}`),
+  create: (request: CreatePlanningTaskRequest) =>
+    api<PlanningTaskDetail>('POST', '/planning/tasks', request),
+  update: (taskId: string, request: UpdatePlanningTaskRequest) =>
+    api<PlanningTaskDetail>(
+      'PATCH',
+      `/planning/tasks/${encodeURIComponent(taskId)}`,
+      request,
+    ),
+  updateDod: (
+    taskId: string,
+    dodId: string,
+    request: UpdatePlanningDodItemRequest,
+  ) =>
+    api<PlanningTaskDetail>(
+      'PATCH',
+      `/planning/tasks/${encodeURIComponent(taskId)}/dod/${encodeURIComponent(dodId)}`,
+      request,
+    ),
+  linkDiscussion: (taskId: string, request: LinkPlanningDiscussionRequest) =>
+    api<DiscussionPlan>(
+      'POST',
+      `/planning/tasks/${encodeURIComponent(taskId)}/discussions`,
+      request,
+    ),
+  addBlocker: (taskId: string, request: AddPlanningBlockerRequest) =>
+    api<PlanningTaskDetail>(
+      'POST',
+      `/planning/tasks/${encodeURIComponent(taskId)}/blockers`,
+      request,
+    ),
+  discussionPlan: (discussionId: string) =>
+    api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
+  changes: (discussionId: string, since?: string) => {
+    const suffix = since ? `?since=${encodeURIComponent(since)}` : '';
+    return api<PlanningTaskChange[]>(
+      'GET',
+      `/discussions/${encodeURIComponent(discussionId)}/plan/changes${suffix}`,
+    );
   },
 };
 

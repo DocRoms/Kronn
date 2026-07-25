@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef, useDeferredValue, useEffect } from 'react';
+import { useState, useMemo, useRef, useDeferredValue, useEffect, useCallback } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem, unseenBasis } from './SwipeableDiscItem';
 import type { Discussion, Project, Contact, BatchRunSummary } from '../types/generated';
@@ -28,6 +28,8 @@ export interface DiscussionSidebarProps {
   onArchive: (discId: string) => void;
   onUnarchive: (discId: string) => void;
   onDelete: (discId: string) => void;
+  onBulkArchive?: (discIds: string[]) => Promise<void>;
+  onBulkDelete?: (discIds: string[]) => Promise<void>;
   onTogglePin: (discId: string, pinned: boolean) => void;
   onNewDiscussion: () => void;
   onClose: () => void;
@@ -117,6 +119,8 @@ export function DiscussionSidebar({
   onArchive,
   onUnarchive,
   onDelete,
+  onBulkArchive,
+  onBulkDelete,
   onTogglePin,
   onNewDiscussion,
   onClose,
@@ -169,6 +173,45 @@ export function DiscussionSidebar({
   // mounts the rest of its discs on demand. Search still shows all
   // matches because the user is explicitly hunting.
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set());
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [bulkActionBusy, setBulkActionBusy] = useState(false);
+  const bulkActionInFlightRef = useRef(false);
+
+  const toggleSelection = useCallback((discId: string) => {
+    setSelectedIds(previous => {
+      const next = new Set(previous);
+      if (next.has(discId)) next.delete(discId);
+      else next.add(discId);
+      return next;
+    });
+  }, []);
+
+  const leaveSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+  }, []);
+
+  const runBulkAction = async (kind: 'archive' | 'delete') => {
+    const action = kind === 'archive' ? onBulkArchive : onBulkDelete;
+    if (!action || selectedIds.size === 0 || bulkActionInFlightRef.current) return;
+    const confirmKey = kind === 'archive'
+      ? 'disc.bulk.confirmArchive'
+      : 'disc.bulk.confirmDelete';
+    if (!confirm(t(confirmKey, selectedIds.size))) return;
+
+    bulkActionInFlightRef.current = true;
+    setBulkActionBusy(true);
+    try {
+      await action([...selectedIds]);
+      leaveSelectionMode();
+    } catch {
+      toast(t('disc.bulk.error'), 'error');
+    } finally {
+      bulkActionInFlightRef.current = false;
+      setBulkActionBusy(false);
+    }
+  };
 
   // 0.8.4 (#294) — cross-agent source bindings. Fetched once at mount
   // + on each disc list change so newly-imported discs get the badge
@@ -363,36 +406,94 @@ export function DiscussionSidebar({
   // ─── Render ───────────────────────────────────────────────────────────
   return (
     <div className="disc-sidebar" data-mobile={isMobile}>
-      <div className="disc-sidebar-header">
-        <span className="disc-sidebar-header-title">Discussions</span>
+      <div className="disc-sidebar-header" data-selection-mode={selectionMode}>
+        <span className="disc-sidebar-header-title">
+          {selectionMode ? t('disc.bulk.selected', selectedIds.size) : 'Discussions'}
+        </span>
         <div className="disc-sidebar-header-actions">
-          {/* 0.8.3 (#277) — "Mark all as read" button. Only rendered
-              when (a) the parent wired the handler AND (b) there's at
-              least one unread message anywhere (archived + batch
-              children + active included). Without (b) the button is
-              just clutter on a clean inbox; without (a) it'd be a
-              dead button. Title carries the count so users know what
-              they'd clear before clicking. */}
-          {onMarkAllRead && totalUnseenAll > 0 && (
-            <button
-              className="disc-icon-btn"
-              onClick={onMarkAllRead}
-              aria-label={t('disc.markAllRead')}
-              title={t('disc.markAllReadTooltip', totalUnseenAll)}
-            >
-              <CheckCheck size={14} />
-            </button>
-          )}
-          <button className="disc-scan-btn" data-tour-id="new-disc-btn" onClick={onNewDiscussion}>
-            <Plus size={12} /> {t('disc.new')}
-          </button>
-          {isMobile && (
-            <button className="disc-icon-btn" onClick={onClose} aria-label="Close sidebar"><X size={16} /></button>
-          )}
-          {!isMobile && onCollapse && (
-            <button className="disc-icon-btn" onClick={onCollapse} aria-label="Collapse sidebar" title="Collapse sidebar">
-              <ChevronLeft size={16} />
-            </button>
+          {selectionMode ? (
+            <>
+              <button
+                type="button"
+                className="disc-icon-btn"
+                onClick={() => void runBulkAction('archive')}
+                disabled={selectedIds.size === 0 || bulkActionBusy || !onBulkArchive}
+                aria-label={t('disc.bulk.archive')}
+                title={t('disc.bulk.archive')}
+              >
+                {bulkActionBusy ? <Loader2 size={14} className="spin" /> : <Archive size={14} />}
+              </button>
+              <button
+                type="button"
+                className="disc-icon-btn disc-bulk-delete-btn"
+                onClick={() => void runBulkAction('delete')}
+                disabled={selectedIds.size === 0 || bulkActionBusy || !onBulkDelete}
+                aria-label={t('disc.bulk.delete')}
+                title={t('disc.bulk.delete')}
+              >
+                <Trash2 size={14} />
+              </button>
+              <button
+                type="button"
+                className="disc-icon-btn"
+                onClick={leaveSelectionMode}
+                disabled={bulkActionBusy}
+                aria-label={t('disc.bulk.cancel')}
+                title={t('disc.bulk.cancel')}
+              >
+                <X size={14} />
+              </button>
+            </>
+          ) : (
+            <>
+              {/* 0.8.3 (#277) — "Mark all as read" button. Only rendered
+                  when (a) the parent wired the handler AND (b) there's at
+                  least one unread message anywhere (archived + batch
+                  children + active included). Without (b) the button is
+                  just clutter on a clean inbox; without (a) it'd be a
+                  dead button. Title carries the count so users know what
+                  they'd clear before clicking. */}
+              {onMarkAllRead && totalUnseenAll > 0 && (
+                <button
+                  className="disc-icon-btn"
+                  onClick={onMarkAllRead}
+                  aria-label={t('disc.markAllRead')}
+                  title={t('disc.markAllReadTooltip', totalUnseenAll)}
+                >
+                  <CheckCheck size={14} />
+                </button>
+              )}
+              {(onBulkArchive || onBulkDelete) && discussions.length > 0 && (
+                <button
+                  type="button"
+                  className="disc-icon-btn"
+                  onClick={() => setSelectionMode(true)}
+                  aria-label={t('disc.bulk.start')}
+                  title={t('disc.bulk.start')}
+                >
+                  <ListChecks size={14} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="disc-icon-btn"
+                data-tour-id="new-disc-btn"
+                onClick={onNewDiscussion}
+                aria-label={t('disc.new')}
+                title={t('disc.new')}
+              >
+                <Plus size={14} />
+                <span className="disc-sidebar-visually-hidden">{t('disc.new')}</span>
+              </button>
+              {isMobile && (
+                <button className="disc-icon-btn" onClick={onClose} aria-label="Close sidebar"><X size={16} /></button>
+              )}
+              {!isMobile && onCollapse && (
+                <button className="disc-icon-btn" onClick={onCollapse} aria-label="Collapse sidebar" title="Collapse sidebar">
+                  <ChevronLeft size={16} />
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -591,6 +692,9 @@ export function DiscussionSidebar({
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   isSending={!!sendingMap[disc.id]}
                   isQueued={isQueuedDisc(disc)}
+                  selectionMode={selectionMode}
+                  isSelected={selectedIds.has(disc.id)}
+                  onToggleSelection={toggleSelection}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onDelete={onDelete}
@@ -635,6 +739,9 @@ export function DiscussionSidebar({
                   lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                   isSending={!!sendingMap[disc.id]}
                   isQueued={isQueuedDisc(disc)}
+                  selectionMode={selectionMode}
+                  isSelected={selectedIds.has(disc.id)}
+                  onToggleSelection={toggleSelection}
                   onSelect={onSelect}
                   onArchive={onArchive}
                   onDelete={onDelete}
@@ -921,7 +1028,10 @@ export function DiscussionSidebar({
                                           isActive={disc.id === activeId}
                                           lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                           isSending={!!sendingMap[disc.id]}
-                  isQueued={isQueuedDisc(disc)}
+                                          isQueued={isQueuedDisc(disc)}
+                                          selectionMode={selectionMode}
+                                          isSelected={selectedIds.has(disc.id)}
+                                          onToggleSelection={toggleSelection}
                                           onSelect={onSelect}
                                           onArchive={onArchive}
                                           onDelete={onDelete}
@@ -956,7 +1066,10 @@ export function DiscussionSidebar({
                                       isActive={disc.id === activeId}
                                       lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                                       isSending={!!sendingMap[disc.id]}
-                  isQueued={isQueuedDisc(disc)}
+                                      isQueued={isQueuedDisc(disc)}
+                                      selectionMode={selectionMode}
+                                      isSelected={selectedIds.has(disc.id)}
+                                      onToggleSelection={toggleSelection}
                                       onSelect={onSelect}
                                       onArchive={onArchive}
                                       onDelete={onDelete}
@@ -1023,7 +1136,10 @@ export function DiscussionSidebar({
                 isActive={disc.id === activeId}
                 lastSeenCount={lastSeenMsgCount[disc.id] ?? 0}
                 isSending={!!sendingMap[disc.id]}
-                  isQueued={isQueuedDisc(disc)}
+                isQueued={isQueuedDisc(disc)}
+                selectionMode={selectionMode}
+                isSelected={selectedIds.has(disc.id)}
+                onToggleSelection={toggleSelection}
                 onSelect={onSelect}
                 onArchive={onUnarchive}
                 onDelete={onDelete}

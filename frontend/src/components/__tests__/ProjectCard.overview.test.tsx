@@ -76,8 +76,8 @@ vi.mock('../../lib/I18nContext', () => ({
 vi.mock('../../hooks/useMediaQuery', () => ({ useIsMobile: () => false }));
 
 import { ProjectCard } from '../ProjectCard';
-import { projects as projectsApi } from '../../lib/api';
-import type { Project } from '../../types/generated';
+import { planning as planningApi, projects as projectsApi } from '../../lib/api';
+import type { Discussion, Project } from '../../types/generated';
 
 const noop = () => {};
 
@@ -164,5 +164,142 @@ describe('ProjectCard — repository overview', () => {
       expect(projectsApi.dependencyUpdates).toHaveBeenCalledWith('p-overview', true),
     );
     expect(projectsApi.dependencyUpdates).toHaveBeenCalledTimes(2);
+  });
+
+  it('puts discussion/task counts in tabs and paginates recent discussions', async () => {
+    const discussions = Array.from({ length: 65 }, (_, index) => ({
+      id: `disc-${index}`,
+      project_id: PROJECT.id,
+      title: `Discussion ${index}`,
+      agent: 'Codex',
+      messages: [],
+      message_count: index,
+      non_system_message_count: index,
+      archived: false,
+      updated_at: new Date(2026, 0, index + 1).toISOString(),
+    })) as unknown as Discussion[];
+    vi.mocked(planningApi.list).mockResolvedValueOnce({
+      items: Array.from({ length: 4 }, () => ({})),
+      next_cursor: null,
+    } as never);
+
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={discussions}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={noop}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    const discussionsTab = screen.getByRole('button', {
+      name: /projects\.master\.tab\.discussions 65/,
+    });
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /projects\.master\.tab\.tasks 4/ }))
+        .toBeInTheDocument();
+    });
+
+    fireEvent.click(discussionsTab);
+    expect(screen.getByText('Discussion 64')).toBeInTheDocument();
+    expect(screen.getByText('Discussion 55')).toBeInTheDocument();
+    expect(screen.queryByText('Discussion 54')).not.toBeInTheDocument();
+
+    const amount = screen.getByLabelText('projects.master.discussions.loadAmountLabel');
+    expect(screen.getByRole('option', { name: '10' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: '50' })).toBeInTheDocument();
+    expect(screen.getByRole('option', {
+      name: 'projects.master.discussions.loadAll',
+    })).toBeInTheDocument();
+
+    fireEvent.change(amount, { target: { value: '50' } });
+    fireEvent.click(screen.getByText('projects.master.discussions.loadPrefix'));
+    expect(screen.getByText('Discussion 5')).toBeInTheDocument();
+    expect(screen.queryByText('Discussion 4')).not.toBeInTheDocument();
+
+    fireEvent.click(amount);
+    expect(screen.queryByText('Discussion 4')).not.toBeInTheDocument();
+
+    fireEvent.change(amount, { target: { value: 'all' } });
+    fireEvent.click(screen.getByText('projects.master.discussions.loadSuffix'));
+    expect(screen.getByText('Discussion 0')).toBeInTheDocument();
+    expect(screen.queryByText('projects.master.tab.discussions', { selector: '.dash-section-title' }))
+      .not.toBeInTheDocument();
+  });
+
+  it('opens a project task directly in global planning', async () => {
+    vi.mocked(planningApi.list).mockResolvedValue({
+      items: [{
+        id: 'task-42',
+        reference: 'KT-42',
+        parent_id: null,
+        parent_reference: null,
+        parent_title: null,
+        title: 'Review release',
+        status: 'todo',
+        priority: 'high',
+        rank: 1024,
+        completed_subtasks: 0,
+        total_subtasks: 0,
+        project_ids: [PROJECT.id],
+        discussion_ids: [],
+        tags: [],
+        blocker_count: 0,
+        created_at: '2026-07-25T00:00:00Z',
+        updated_at: '2026-07-25T00:00:00Z',
+      }],
+      next_cursor: null,
+    });
+    const onNavigate = vi.fn();
+
+    render(
+      <ProjectCard
+        project={PROJECT}
+        detailMode
+        isOpen
+        onToggleOpen={noop}
+        discussions={[]}
+        driftStatus={undefined}
+        agents={[]}
+        allSkills={[]}
+        mcpConfigs={[]}
+        workflows={[]}
+        configLanguage="fr"
+        toast={vi.fn()}
+        onNavigate={onNavigate}
+        onSetDiscPrefill={noop}
+        onAutoRunDiscussion={noop}
+        onOpenDiscussion={noop}
+        onRefetch={noop}
+        onRefetchDiscussions={noop}
+        onRefetchSkills={noop}
+        onRefetchDrift={noop}
+      />,
+    );
+
+    fireEvent.click(await screen.findByRole('button', {
+      name: /projects\.master\.tab\.tasks 1/,
+    }));
+    fireEvent.click(await screen.findByRole('button', {
+      name: 'projects.tasks.openTask',
+    }));
+
+    expect(onNavigate).toHaveBeenCalledWith('planning:task-42');
   });
 });

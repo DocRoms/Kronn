@@ -393,13 +393,25 @@ describe('GitPanel — create PR', () => {
 // ─── Diff view ────────────────────────────────────────────────────────────────
 
 describe('GitPanel — diff', () => {
+  it('expands into a split diff and file-list view', async () => {
+    const { container } = renderPanel();
+    await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
+
+    fireEvent.click(screen.getByLabelText('git.expandPanel'));
+
+    await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/main.rs', false));
+    expect(container.querySelector('.git-panel')?.getAttribute('data-expanded')).toBe('true');
+    expect(screen.getByLabelText('git.changedFilesList')).toBeDefined();
+    expect(screen.getByLabelText('git.collapsePanel')).toBeDefined();
+  });
+
   it('opens the diff view on file click and fetches via projects.gitDiff', async () => {
     renderPanel();
     await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
     fireEvent.click(screen.getByText('src/main.rs'));
     await waitFor(() => expect(projectsApi.gitDiff).toHaveBeenCalledWith('p1', 'src/main.rs', false));
     // Diff header shows path + Back button.
-    await waitFor(() => expect(screen.getByLabelText('Back')).toBeDefined());
+    await waitFor(() => expect(screen.getByLabelText('git.back')).toBeDefined());
     await waitFor(() => expect(screen.getByText(/added line/)).toBeDefined());
   });
 
@@ -407,8 +419,8 @@ describe('GitPanel — diff', () => {
     renderPanel();
     await waitFor(() => expect(screen.getByText('src/main.rs')).toBeDefined());
     fireEvent.click(screen.getByText('src/main.rs'));
-    await waitFor(() => expect(screen.getByLabelText('Back')).toBeDefined());
-    fireEvent.click(screen.getByLabelText('Back'));
+    await waitFor(() => expect(screen.getByLabelText('git.back')).toBeDefined());
+    fireEvent.click(screen.getByLabelText('git.back'));
     await waitFor(() => expect(screen.getByText('git.title')).toBeDefined());
   });
 

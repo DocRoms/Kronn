@@ -2,13 +2,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { projects as projectsApi, discussions as discussionsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import ReactMarkdown from 'react-markdown';
-import { languageForPath, highlightLine, parseDiffLines } from '../lib/diff-syntax';
+import './DiscussionToolPanel.css';
 import './GitPanel.css';
 import {
   GitBranch, GitCommit, GitPullRequest, Upload, RefreshCw, ChevronLeft,
   FileEdit, FilePlus, FileMinus, FileX, AlertTriangle, ExternalLink,
-  Loader2, Check, X, Terminal,
+  Loader2, Check, X, Terminal, Maximize2, Minimize2,
 } from 'lucide-react';
+import { GitDiffViewer } from './GitDiffViewer';
 
 // ─── Types (mirrors backend GitStatusResponse / GitDiffResponse) ─────────────
 
@@ -35,6 +36,7 @@ interface Props {
   projectId?: string;
   discussionId?: string;
   onClose: () => void;
+  onExpandedChange?: (expanded: boolean) => void;
   terminalEnabled?: boolean;
 }
 
@@ -56,7 +58,42 @@ const STATUS_COLORS: Record<string, string> = {
   untracked: 'var(--kr-text-dim)',
 };
 
-export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = false }: Props) {
+function ExpandedFileButton({
+  file,
+  active,
+  committed = false,
+  onClick,
+}: {
+  file: GitFile;
+  active: boolean;
+  committed?: boolean;
+  onClick: () => void;
+}) {
+  const Icon = STATUS_ICONS[file.status] || FileX;
+  const color = STATUS_COLORS[file.status] || 'var(--kr-text-faint)';
+  return (
+    <button
+      type="button"
+      className="git-expanded-file"
+      data-active={active}
+      data-committed={committed}
+      onClick={onClick}
+      title={file.path}
+    >
+      <Icon size={12} style={{ color }} />
+      <span>{file.path}</span>
+      <small style={{ color }}>{file.status}</small>
+    </button>
+  );
+}
+
+export function GitPanel({
+  projectId,
+  discussionId,
+  onClose,
+  onExpandedChange,
+  terminalEnabled = false,
+}: Props) {
   const { t } = useT();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -64,8 +101,10 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
 
   // Diff view
   const [diffPath, setDiffPath] = useState<string | null>(null);
+  const [diffCommitted, setDiffCommitted] = useState(false);
   const [diffContent, setDiffContent] = useState('');
   const [diffLoading, setDiffLoading] = useState(false);
+  const [expanded, setExpanded] = useState(false);
 
   // Branch creation
   const [showBranch, setShowBranch] = useState(false);
@@ -119,8 +158,9 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
 
   useEffect(() => { fetchStatus(); }, [fetchStatus]);
 
-  const openDiff = async (path: string, committed = false) => {
+  const openDiff = useCallback(async (path: string, committed = false) => {
     setDiffPath(path);
+    setDiffCommitted(committed);
     setDiffLoading(true);
     try {
       let res;
@@ -137,7 +177,30 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
     } finally {
       setDiffLoading(false);
     }
+  }, [discussionId, projectId]);
+
+  const toggleExpanded = () => {
+    setExpanded(value => {
+      const next = !value;
+      onExpandedChange?.(next);
+      return next;
+    });
   };
+
+  useEffect(() => () => {
+    onExpandedChange?.(false);
+  }, [onExpandedChange]);
+
+  useEffect(() => {
+    if (!expanded || diffPath || !status) return;
+    const firstWorkingFile = status.files[0];
+    const firstCommittedFile = status.committed_files?.[0];
+    if (firstWorkingFile) {
+      void openDiff(firstWorkingFile.path);
+    } else if (firstCommittedFile) {
+      void openDiff(firstCommittedFile.path, true);
+    }
+  }, [diffPath, expanded, openDiff, status]);
 
   const handleCreateBranch = async () => {
     if (!branchName.trim() || !projectId) return;
@@ -285,91 +348,114 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
   // ─── Diff view ──────────────────────────────────────────────────────────────
   if (diffPath) {
     return (
-      <div className="git-panel">
-        <div className="git-header">
-          <button className="git-back-btn" onClick={() => setDiffPath(null)} aria-label="Back">
+      <aside
+        className="disc-tool-panel git-panel"
+        data-expanded={expanded}
+        aria-label={t('git.title')}
+      >
+        <header className="disc-tool-panel-header git-header">
+          <button
+            className="disc-tool-panel-icon git-back-btn"
+            onClick={() => setDiffPath(null)}
+            aria-label={t('git.back')}
+          >
             <ChevronLeft size={14} />
           </button>
-          <span className="git-header-title">{diffPath}</span>
-          <button className="git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
-        </div>
-        <div className="git-diff-container">
-          {diffLoading ? (
-            <div className="git-center"><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /></div>
-          ) : (
-            (() => {
-              // Resolve the language once per diff, not per line — hljs
-              // registration is already cached but the extension lookup
-              // itself is cheap-but-not-free.
-              const lang = languageForPath(diffPath);
-              const parsed = parseDiffLines(diffContent);
-              return (
-                <pre className="git-diff-pre">
-                  {parsed.map((line, i) => {
-                    // Deletion lines deliberately skip syntax highlighting:
-                    // the point is to show what's GOING AWAY, not to parse
-                    // stale code. Flat red is the clearest signal.
-                    if (line.kind === 'del') {
-                      return (
-                        <div key={i} className="git-diff-line git-diff-line-del">
-                          <span className="git-diff-prefix">-</span>
-                          <span className="git-diff-content">{line.content || '\u00A0'}</span>
-                        </div>
-                      );
-                    }
-                    if (line.kind === 'hunk') {
-                      return (
-                        <div key={i} className="git-diff-line git-diff-line-hunk">
-                          <span className="git-diff-content">{line.raw}</span>
-                        </div>
-                      );
-                    }
-                    if (line.kind === 'meta') {
-                      return (
-                        <div key={i} className="git-diff-line git-diff-line-meta">
-                          <span className="git-diff-content">{line.raw || '\u00A0'}</span>
-                        </div>
-                      );
-                    }
-                    // Additions + context → syntax highlighted.
-                    const prefix = line.kind === 'add' ? '+' : ' ';
-                    const kindClass = line.kind === 'add' ? 'git-diff-line-add' : 'git-diff-line-ctx';
-                    const html = highlightLine(line.content, lang);
-                    return (
-                      <div key={i} className={`git-diff-line ${kindClass}`}>
-                        <span className="git-diff-prefix">{prefix}</span>
-                        <span
-                          className="git-diff-content hljs"
-                          dangerouslySetInnerHTML={{ __html: html || '\u00A0' }}
-                        />
-                      </div>
-                    );
-                  })}
-                </pre>
-              );
-            })()
-          )}
-        </div>
-      </div>
+          <span className="disc-tool-panel-title git-header-title">{diffPath}</span>
+          <div className="disc-tool-panel-actions">
+            <button
+              type="button"
+              className="disc-tool-panel-icon"
+              onClick={toggleExpanded}
+              title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+              aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+              aria-pressed={expanded}
+            >
+              {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
+            <button
+              className="disc-tool-panel-icon git-close-btn"
+              onClick={onClose}
+              aria-label={t('common.close')}
+            >
+              <X size={14} />
+            </button>
+          </div>
+        </header>
+        {expanded && status ? (
+          <div className="git-expanded-layout">
+            <GitDiffViewer
+              path={diffPath}
+              content={diffContent}
+              loading={diffLoading}
+              className="git-expanded-preview"
+            />
+            <aside className="git-expanded-files" aria-label={t('git.changedFilesList')}>
+              <div className="git-expanded-files-head">
+                <strong>{t('git.changedFilesList')}</strong>
+                <span>{status.files.length + (status.committed_files?.length ?? 0)}</span>
+              </div>
+              <div className="git-expanded-file-list">
+                {status.files.map(file => (
+                  <ExpandedFileButton
+                    key={file.path}
+                    file={file}
+                    active={!diffCommitted && diffPath === file.path}
+                    onClick={() => void openDiff(file.path)}
+                  />
+                ))}
+                {(status.committed_files?.length ?? 0) > 0 && (
+                  <div className="git-expanded-file-group">{t('git.committedChanges')}</div>
+                )}
+                {status.committed_files?.map(file => (
+                  <ExpandedFileButton
+                    key={`committed-${file.path}`}
+                    file={file}
+                    active={diffCommitted && diffPath === file.path}
+                    committed
+                    onClick={() => void openDiff(file.path, true)}
+                  />
+                ))}
+              </div>
+            </aside>
+          </div>
+        ) : (
+          <GitDiffViewer path={diffPath} content={diffContent} loading={diffLoading} />
+        )}
+      </aside>
     );
   }
 
   // ─── Main view ──────────────────────────────────────────────────────────────
   return (
-    <div className="git-panel">
+    <aside
+      className="disc-tool-panel git-panel"
+      data-expanded={expanded}
+      aria-label={t('git.title')}
+    >
       {/* Header */}
-      <div className="git-header">
-        <span className="git-header-title">
+      <header className="disc-tool-panel-header git-header">
+        <span className="disc-tool-panel-title git-header-title">
           <GitBranch size={13} style={{ marginRight: 6 }} />
           {t('git.title')}
         </span>
-        <div className="git-header-actions">
-          <button className="git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
+        <div className="disc-tool-panel-actions git-header-actions">
+          <button
+            type="button"
+            className="disc-tool-panel-icon"
+            onClick={toggleExpanded}
+            title={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+            aria-label={expanded ? t('git.collapsePanel') : t('git.expandPanel')}
+            aria-pressed={expanded}
+          >
+            {expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+          <button className="disc-tool-panel-icon git-icon-btn" onClick={fetchStatus} title={t('git.refresh')} aria-label={t('git.refresh')}>
             <RefreshCw size={12} />
           </button>
-          <button className="git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
+          <button className="disc-tool-panel-icon git-close-btn" onClick={onClose} aria-label="Close git panel"><X size={14} /></button>
         </div>
-      </div>
+      </header>
 
       {loading && (
         <div className="git-center"><Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} /></div>
@@ -682,6 +768,6 @@ export function GitPanel({ projectId, discussionId, onClose, terminalEnabled = f
           )}
         </div>
       )}
-    </div>
+    </aside>
   );
 }

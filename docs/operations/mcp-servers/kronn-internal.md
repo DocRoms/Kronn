@@ -12,6 +12,31 @@ Bidirectional gateway between a CLI agent (Claude Code, Codex, Gemini, Kiro, Vib
 2. **Cross-agent memory** (0.8.4) — `disc_create`, `disc_append`, `disc_link`, `disc_unlink`, `disc_find_by_session`, `disc_search`, `disc_load_other`. Push transcripts in / out of Kronn so the same thread can be picked up by a different agent later.
 3. **Catalog + actions** (0.8.5–0.8.6) — `mcp_list`, `workflow_list`, `qp_list`, `qa_list`, `workflow_create_draft`, `qp_create_draft`, `api_call` (broker that invokes Kronn-configured APIs without credentials in the prompt).
 4. **Multi-agent collab** (0.8.6) — `disc_join` (consume invite token), `disc_wait_for_peer` (long-poll), `disc_leave`. Lets N CLI agents share one Kronn discussion in real time.
+5. **Planning** (0.9.1) — `plan_get`, `task_list`, `task_get` and
+   `task_changes` provide compact, on-demand task context. Narrow
+   `task_create`, `task_update`, `task_update_dod`, `task_link_discussion` and
+   `task_add_blocker` writes attribute every change to the calling agent.
+   `[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
+   `[src: file: backend/scripts/disc-introspection-mcp.py:3049-3165]`
+
+## Planning context discipline
+
+- Call `plan_get` to understand the current discussion objective and ordered
+  active/later plan; do not reread the transcript for task state.
+- Use `task_list` for compact discovery and filtering. It deliberately omits
+  descriptions, DoD bodies, links and event logs.
+- Call `task_get` only after selecting one task; it accepts both `KT-142`
+  references and UUIDs.
+- Use `task_changes(discussion_id, since)` for delta refreshes. Planning data
+  is not injected into every prompt.
+- MCP writes stamp the client-derived agent identity automatically; callers
+  may add `source_message_id` for provenance.
+- When intent is ambiguous, emit a fenced `kronn-plan-action` JSON proposal
+  (`create`, `create_many`, `status`, `complete`, `unblock` or `open`) instead
+  of writing. Kronn renders it as a human-gated action card; no mutation occurs
+  until the user clicks Apply.
+  `[src: file: backend/src/db/planning.rs:801-850]`
+  `[src: file: backend/scripts/disc-introspection-mcp.py:3035-3165]`
 
 Agent-library catalogs deliberately stay compact:
 `skills_list` / `profiles_list` / `directives_list` omit their potentially long

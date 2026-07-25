@@ -27,7 +27,7 @@
 
 **Smaller prompts, more code where code is enough: fewer hallucinations, lower token bill, eco-design by default.**
 
-> **Status: 0.9.0 (in development — latest stable release: 0.8.12).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
+> **Status: 0.9.1 (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.
 > **License: AGPL-3.0.** Using Kronn locally to build *your own* product is fine; the copyleft only kicks in if you distribute a modified Kronn to others. See [License notes](#license-notes-agpl-3-0).
 
 ## Contents
@@ -90,7 +90,7 @@ Download the installer for your OS from [Releases](https://github.com/DocRoms/Kr
 ### From source: one command
 
 ```bash
-git clone --branch 0.8.12 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start        # guided setup & launch (Docker)
 ```
@@ -105,7 +105,7 @@ cd Kronn
 Requires Docker + Docker Compose. On Windows, WSL2 (Docker Engine inside WSL works, Docker Desktop optional).
 
 ```bash
-git clone --branch 0.8.12 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
+git clone --branch 0.9.1 --depth 1 https://github.com/DocRoms/Kronn.git   # latest stable release
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -127,7 +127,7 @@ When you want orchestration (multi-step, conditional, scheduled, gated), graduat
 
 ## What you can do
 
-Four flows that scratch real itches. Each one is a primary use case, pick whichever maps to your day.
+Eight flows that scratch real itches. Each one is a primary use case, pick whichever maps to your day.
 
 ### 1. Batch a Quick Prompt over N tickets
 
@@ -151,12 +151,25 @@ If they all converge on the same answer → your prompt is solid, ship it into a
   <img src="docs/screenshots/kronn-qp-launch.en.png" alt="Compare-agents launch form, a Quick Prompt with a ticket variable, all 7 installed agents (Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, Ollama) selected as chips, and a 'Comparer (7)' CTA to fan the same prompt across them in parallel" />
 </p>
 
-### 3. Stay 100% local with Ollama
+### 3. Keep one prioritized plan across projects and discussions
+
+Create ideas or tasks in the global **Planning** workspace, rank them inside
+Critical / High / Normal / Low bands, and link the same task to several projects
+or discussions without duplicating it. Each discussion gets a compact plan panel
+with its primary objective, active/later work, subtasks and Definition of Done
+checklists. Humans and agents update the same durable state; every change keeps
+its actor and agents can fetch only the task or delta they need through MCP
+instead of rereading the whole conversation.
+
+Project task lists deep-link straight to the full Planning detail, so the backlog,
+project view and discussion plan always lead back to one source of truth.
+
+### 4. Stay 100% local with Ollama
 
 Run Llama 3, Gemma, Qwen, Codestral on your machine via Ollama as a first-class agent. Same Discussions / Quick Prompts / Workflows surface, Kronn just routes the calls to `http://localhost:11434/v1/` instead of the cloud. Pick your default model right from Settings. **Zero token bill, zero code leaving your laptop.**
 
 
-### 4. Burn tokens only where they earn their cost
+### 5. Burn tokens only where they earn their cost
 
 A real Auto-Dev workflow in Kronn looks like:
 
@@ -170,13 +183,13 @@ A real Auto-Dev workflow in Kronn looks like:
 
 You build this via the **wizard UI** (drag-drop step types, autocomplete on agent/MCP/QP references) or a hand-written `WORKFLOW.md` file (Symphony-compatible), no DSL to learn, both modes interop.
 
-Workflow engine supports **8 step types** total: `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `Notify`, `Gate` (human approval), `Exec` (shell, allowlist-gated). Full reference in [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine).
+Workflow engine supports **9 step types** total: `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `Notify`, `Gate` (human approval), `Exec` (allowlist-gated process execution), and `SubWorkflow` for composing reusable workflows. Full reference in [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine).
 
 <p align="center">
   <img src="docs/screenshots/kronn-workflow-wizard.en.png" alt="Workflow wizard, Advanced mode, Infos/Task/Summary tabs, name + project picker. Drag-drop step types in next steps; no DSL to learn." />
 </p>
 
-### 5. Audit your codebase with an AI that doesn't forget
+### 6. Audit your codebase with an AI that doesn't forget
 
 Most "ask an AI about my repo" flows restart cold every conversation. Kronn flips that: the first time you onboard a project, an audit pass reads your source + configs and writes a structured `docs/` tree that lives in the repo.
 
@@ -207,7 +220,7 @@ The whole tree is injected as project context into every Discussion, Quick Promp
 
 This is what makes Kronn a **knowledge-persistence layer with strict baselines**, not just a prompt launcher.
 
-### 6. Close the loop: audit → tickets → AutoPilot → PR
+### 7. Close the loop: audit → tickets → AutoPilot → PR
 
 The audit isn't a doc that sits in a folder. **0.8.2 wires it into action.**
 
@@ -240,7 +253,7 @@ Same allowlist + same timeout. Setup fails → main is NOT executed and you see 
 
 For dockerized projects, the `docker-in-docker` volume mismatch is solved at the infra layer (self-mount + host-path translation), so `docker compose run --rm svc <cmd>` works from a worktree without any extra config.
 
-### 7. Catch hallucinations before they spread (0.8.7)
+### 8. Catch hallucinations before they spread (0.8.7)
 
 AI agents confidently assert file paths that don't exist, functions they invented, versions that aren't yours. When one of those lies gets persisted into `docs/AGENTS.md`, every future agent inherits it as "established truth". **0.8.7 ships a two-tier guard that runs on every agent reply.**
 
@@ -262,6 +275,7 @@ The full convention is an open spec (`backend/docs/conventions/agents-md-format-
 
 - **Project**: a git repo Kronn knows about. Tracks AI context (`docs/AGENTS.md`) plus a structured audit tree (`docs/glossary.md`, `docs/repo-map.md`, `docs/architecture/overview.md` and friends) covering legacy hotspots, test gaps, coding conventions and per-MCP capabilities. Each section has drift detection: re-audit only what's stale.
 - **Discussion**: a chat thread bound (or not) to a project. Streams in real-time via SSE, persisted in SQLite, optionally isolated in a git worktree. Three flavours: **(a)** single agent (default), **(b)** multi-agent debate (configurable rounds), **(c)** **cross-agent room (0.8.6)** — invite N CLIs (Claude Code, Codex, Gemini, Kiro, Vibe…) into the same discussion via a one-click `[+ Inviter]` button, each agent talks via MCP tools (`disc_append`, `disc_wait_for_peer`), no human messenger needed. Validated live on a 3-agent roleplay session.
+- **Task / discussion plan**: one ranked task can be global or linked to several projects and discussions. It carries subtasks, Definition of Done, links, tags and blockers; the global Planning backlog, project Tasks view, discussion panel and MCP tools all edit the same record.
 - **Quick Prompt**: reusable prompt template with `{{variables}}` and conditional sections. One-shot, fan-out, or chained.
 - **Workflow**: a multi-step pipeline. Triggered by cron, by a tracker (Jira / GitHub), or manually. See [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine) for the engine guarantees.
 

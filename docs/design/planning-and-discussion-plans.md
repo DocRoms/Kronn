@@ -1,6 +1,14 @@
 # Planning and discussion plans
 
-Status: **validated product design, target 0.9.1** (2026-07-24).
+Status: **implemented for 0.9.1** (2026-07-25).
+
+The domain schema, compact HTTP/MCP contract, discussion panel, global backlog,
+human-gated proposal cards and delta-only prompt notifications are implemented.
+`[src: file: backend/src/db/sql/081_planning_tasks.sql:1-99]`
+`[src: file: backend/src/api/planning.rs:1-156]`
+`[src: file: backend/scripts/disc-introspection-mcp.py:169-365]`
+`[src: file: frontend/src/pages/PlanningPage.tsx:1-650]`
+`[src: file: frontend/src/components/DiscussionPlanPanel.tsx:1-300]`
 
 This document is the implementation brief for a future Planning workspace and
 the smaller discussion-plan panel that exposes the same task data inside a
@@ -66,6 +74,14 @@ projects, expose backlinks, and reject cycles. Finishing all blockers proposes
 an unblock action instead of changing status automatically. Dependencies do not
 recalculate priorities. `[src: user: 2026-07-24: task-detail and dependency decisions]`
 
+DoD item identifiers remain stable when the checklist is edited. A dedicated
+per-item completion endpoint/tool updates one checkbox atomically, so two agents
+checking different items do not overwrite one another. Archived and completed
+blockers are both treated as satisfied while their relations remain visible for
+traceability. Rank writes rebalance the affected active priority band in the
+same transaction, preserving a deterministic order after repeated midpoint
+inserts.
+
 ## Discussion integration
 
 Every discussion can link several tasks and has at most one primary objective.
@@ -77,7 +93,9 @@ also carry a per-discussion placement:
 
 The same task can be active in one discussion and later in another. The
 discussion-plan order is independent from global priority. Task status remains
-global and therefore stays synchronized everywhere. `[src: user: 2026-07-24: discussion relation decisions]`
+global and therefore stays synchronized everywhere. A primary objective is
+necessarily active; moving it to `Later` clears its primary flag.
+`[src: user: 2026-07-24: discussion relation decisions]`
 
 The discussion header gets a button such as `Plan · 7/12 +4`. It opens a side
 panel using the same interaction pattern as the Git file panel. The panel shows
@@ -85,7 +103,9 @@ a vertical timeline: recent completed work, a collapsed “See N completed”
 section for the middle, current work, then upcoming work. The linked primary
 objective stays visible but collapsible. A small `+` provides quick creation.
 Manual additions happen in this panel; no persistent “Add to plan” control is
-added to every message. `[src: user: 2026-07-24: discussion-panel decisions]`
+added to every message. While open, the panel refreshes its compact plan and
+selected detail in the background so human and agent edits appear without a
+manual close/reopen cycle. `[src: user: 2026-07-24: discussion-panel decisions]`
 
 Agents may instead emit structured proposals that the UI renders as existing
 action-like cards. Initial actions are:
@@ -133,7 +153,10 @@ The intended read surface is:
 - `task_changes(discussion_id, since)` — deltas only.
 
 Writes are separate tools with narrow schemas. Lists are compact by default and
-full content is returned only for an explicitly requested task. Agents must be
+full content is returned only for an explicitly requested task.
+`task_update_dod(task_id, dod_id, completed)` is the preferred narrow write for
+checkbox progress. Delta timestamps are compared numerically as RFC3339
+instants, independent of `Z`/offset spelling and fractional precision. Agents must be
 taught this contract in the same prompt/instruction layer that currently
 advertises discussion-history tools. Today that layer explicitly describes
 `disc_meta`, `disc_get_message`, and `disc_summarize`. `[src: file: backend/src/api/disc_prompts.rs:346-361]`
@@ -146,18 +169,23 @@ offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: 
 
 ## Suggested implementation slices
 
-1. **Schema and domain** — tasks, parent links, ranked priorities, DoD items,
+1. **Schema and domain — implemented** — tasks, parent links, ranked priorities, DoD items,
    task links, tags, blockers, discussion relations, actor metadata and event
    log.
-2. **Read/write API and MCP** — compact reads first, explicit writes, cycle and
+2. **Read/write API and MCP — implemented** — compact reads first, explicit writes, cycle and
    authorization guards.
-3. **Discussion panel** — primary objective, active/later timeline, progress,
+3. **Discussion panel — implemented** — primary objective, active/later timeline, progress,
    creation and agent action cards.
-4. **Global workspace** — prioritized backlog, reorder, filters and task detail
+4. **Global workspace — implemented** — prioritized backlog, reorder, filters and task detail
    panel.
-5. **Agent behavior** — instructions, change notifications, grouped activity
+5. **Agent behavior — implemented** — instructions, change notifications, grouped activity
    events and source-message provenance.
-6. **Deferred delegation** — task-to-discussion briefing and agent launch only
+6. **Project workspace — implemented** — project cards expose their linked
+   tasks, quick creation/completion and direct navigation to each task's global
+   Planning detail without duplicating task state.
+   `[src: file: frontend/src/components/ProjectTasksPanel.tsx:1-200]`
+   `[src: file: frontend/src/pages/Dashboard.tsx:1260-1310]`
+7. **Deferred delegation** — task-to-discussion briefing and agent launch only
    after the task workflow is proven manually.
 
 ## Acceptance anchors
@@ -166,6 +194,8 @@ offer both “Create only” and “Create and run”. `[src: user: 2026-07-24: 
   global backlog.
 - One task can be linked to multiple projects/discussions while having a single
   global status.
+- A task linked to a project discussion is discoverable through that project
+  and displays the project badge without a duplicate explicit relation.
 - A discussion plan can order active and later work independently from global
   priority.
 - Every agent change identifies its actor and is visible without rereading the

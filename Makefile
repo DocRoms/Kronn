@@ -1,4 +1,4 @@
-.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump desktop desktop-dev desktop-target
+.PHONY: install start start-prod stop logs clean build dev-backend run-backend dev-frontend setup check test-shell lint-backend .env kiro-login bump check-version desktop desktop-dev desktop-target
 
 # Doc-skippers type `make` bare (or `make install`) before reading anything.
 # Bare `make` used to run the FIRST target — `_gen-override`, an internal Docker
@@ -406,6 +406,7 @@ help:
 	@echo "  make typegen        Sync Rust → TS types"
 	@echo "  make test-shell     Run shell tests (bats)"
 	@echo "  make bump V=x.y.z  Bump version everywhere"
+	@echo "  make check-version  Verify release version consistency"
 	@echo "  make desktop        Build desktop app (current platform)"
 	@echo "  make desktop-dev    Run desktop app (dev mode)"
 	@echo "  make desktop-target T=<triple>  Cross-compile desktop app"
@@ -425,8 +426,13 @@ endif
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/package.json
 	@sed $(SEDI) 's/"version": ".*"/"version": "$(V)"/' desktop/src-tauri/tauri.conf.json
 	@sed $(SEDI) -E \
-		-e 's/(Status: )[0-9]+\.[0-9]+\.[0-9]+/\1$(V)/' \
-		-e 's/Kronn v[0-9]+\.[0-9]+\.[0-9]+/Kronn v$(V)/' README.md
+		-e 's|^> \*\*Status:.*|> **Status: $(V) (current release).** Functional but pre-1.0. Breaking changes happen between minor versions; patch versions are safe.|' \
+		-e 's|(git clone --branch )[0-9]+\.[0-9]+\.[0-9]+|\1$(V)|g' \
+		-e 's|Kronn v[0-9]+\.[0-9]+\.[0-9]+|Kronn v$(V)|g' README.md
+	@sed $(SEDI) -E \
+		-e 's|^> \*\*Statut :.*|> **Statut : $(V) (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.|' \
+		-e 's|(git clone --branch )[0-9]+\.[0-9]+\.[0-9]+|\1$(V)|g' \
+		-e 's|Kronn v[0-9]+\.[0-9]+\.[0-9]+|Kronn v$(V)|g' README.fr.md
 	@# 0.8.6 — also bump the hardcoded version in the public site (FR/EN/ES).
 	@# Pre-fix `make bump` skipped these and we shipped 0.8.6 with the site
 	@# still claiming v0.8.5 on the early-access disclaimer + credits line.
@@ -444,6 +450,11 @@ endif
 		{ echo "$(YELLOW)  desktop: offline failed, retrying online$(RESET)"; cd ../../desktop/src-tauri && cargo update --workspace >/dev/null; }
 	@echo "$(GREEN)✓ Version bumped to $(V) in all files$(RESET)"
 	@echo "  Files updated: VERSION, backend/Cargo.toml, desktop/src-tauri/Cargo.toml,"
-	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json, README.md,"
+	@echo "  frontend/package.json, desktop/package.json, desktop/src-tauri/tauri.conf.json,"
+	@echo "  README.md, README.fr.md,"
 	@echo "  site/index.html, site/en.html, site/es.html (v-prefixed mentions only — historical (0.8.x) refs preserved)"
 	@echo "  + Cargo.lock (backend, desktop/src-tauri) synced via cargo update --workspace"
+	@$(MAKE) --no-print-directory check-version
+
+check-version:
+	@./scripts/check-version-sync.sh

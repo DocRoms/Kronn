@@ -5,6 +5,8 @@ import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
 import { DocPreview } from './DocPreview';
 import { DocDataExport } from './DocDataExport';
+import { PlanningActionCard } from './PlanningActionCard';
+import { parsePlanningProposal } from '../lib/planningProposal';
 import { MermaidDiagram } from './MermaidDiagram';
 import remarkGfm from 'remark-gfm';
 import remarkEmoji from 'remark-emoji';
@@ -898,6 +900,18 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
             }
           } catch {
             // fall through to raw code render
+          }
+        }
+        if (className.includes('language-kronn-plan-action')) {
+          const raw = codeEl?.props?.children;
+          const text = Array.isArray(raw) ? raw.join('') : String(raw ?? '');
+          try {
+            const proposal = parsePlanningProposal(JSON.parse(text));
+            if (proposal) {
+              return <PlanningActionCard proposal={proposal} discussionId={discussionId} />;
+            }
+          } catch {
+            // Malformed proposals stay visible as raw code.
           }
         }
         return (

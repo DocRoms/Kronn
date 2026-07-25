@@ -75,6 +75,24 @@ describe('GitPanel', () => {
     });
   });
 
+  it('reports expanded state and restores it when the panel unmounts', async () => {
+    const onExpandedChange = vi.fn();
+    const { unmount } = render(
+      <GitPanel
+        projectId="p1"
+        onClose={onClose}
+        onExpandedChange={onExpandedChange}
+      />,
+    );
+    await screen.findByText('feat/new-feature');
+
+    fireEvent.click(screen.getByLabelText('git.expandPanel'));
+    expect(onExpandedChange).toHaveBeenCalledWith(true);
+
+    unmount();
+    expect(onExpandedChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('renders file list with correct statuses', async () => {
     render(<GitPanel projectId="p1" onClose={onClose} />);
     await waitFor(() => {
