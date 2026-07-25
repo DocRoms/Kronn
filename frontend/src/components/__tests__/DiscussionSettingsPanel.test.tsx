@@ -1,5 +1,5 @@
-// Regression guard for the 0.7.0 UX fix: the per-discussion config
-// popover (Settings cog → Edit profiles/skills/directives) used to render
+// Regression guard for the discussion Settings side panel. The editor used
+// to render
 // every section's chip wall always-open, so workspaces with many
 // configured items overflowed the viewport and clipped the trailing
 // sections.
@@ -16,12 +16,10 @@ vi.mock('../../lib/I18nContext', () => ({
   useT: () => ({ t: (key: string) => key }),
 }));
 
-import { ChatHeader } from '../ChatHeader';
+import { DiscussionSettingsPanel } from '../DiscussionSettingsPanel';
 import type { Discussion, Skill, AgentProfile, Directive } from '../../types/generated';
 
 const noop = () => {};
-const t = (key: string, ...args: (string | number)[]) =>
-  args.length > 0 ? `${key}:${args.join(',')}` : key;
 
 function makeDiscussion(over: Partial<Discussion> = {}): Discussion {
   return {
@@ -55,45 +53,38 @@ const directives: Directive[] = [
   { id: 'd1', name: 'Caveman', icon: '🪨', description: '', built_in: false, enabled: true } as any,
 ];
 
-function renderHeader(disc: Discussion = makeDiscussion()) {
+function renderPanel(
+  disc: Discussion = makeDiscussion(),
+  options: { contacts?: any[]; onShare?: (ids: string[]) => void } = {},
+) {
   return render(
-    <ChatHeader
+    <DiscussionSettingsPanel
       discussion={disc}
       projects={[]}
-      agents={[]}
       availableSkills={skills}
       availableProfiles={profiles}
       availableDirectives={directives}
       mcpConfigs={[]}
       mcpIncompatibilities={[]}
-      showGitPanel={false}
-      isMobile={false}
-      sending={false}
-      pendingFilesCount={0}
-      onRequestTestMode={noop}
-      onToggleGitPanel={noop}
-      onToggleSidebar={noop}
-      onDelete={noop}
+      contacts={options.contacts ?? []}
+      onClose={noop}
       onDiscussionUpdated={noop}
-      onAgentSwitch={noop}
-      contacts={[]}
-      onShare={noop}
+      onShare={options.onShare ?? noop}
       toast={vi.fn()}
-      t={t}
     />
   );
 }
 
-function openConfigPopover() {
-  // The cog button has aria-label="disc.editConfig" via the i18n stub.
-  const btn = screen.getByLabelText('disc.editConfig');
-  fireEvent.click(btn);
-}
+describe('DiscussionSettingsPanel — collapsed context sections', () => {
+  it('uses the shared themed utility-panel shell', () => {
+    const { container } = renderPanel();
+    expect(container.querySelector('.disc-tool-panel.disc-settings-panel')).toBeInTheDocument();
+    expect(screen.getByText('disc.settingsPanel')).toBeInTheDocument();
+    expect(screen.getByText('Claude Code')).toBeInTheDocument();
+  });
 
-describe('ChatHeader — config popover (collapsed accordion sections)', () => {
   it('renders all three section toggles but no chip walls by default', () => {
-    renderHeader();
-    openConfigPopover();
+    renderPanel();
     // Toggles visible.
     expect(screen.getByText('profiles.select')).toBeInTheDocument();
     expect(screen.getByText('skills.selectSkills')).toBeInTheDocument();
@@ -105,8 +96,7 @@ describe('ChatHeader — config popover (collapsed accordion sections)', () => {
   });
 
   it('expanding the Skills section reveals only its chips, not the others', () => {
-    renderHeader();
-    openConfigPopover();
+    renderPanel();
     fireEvent.click(screen.getByText('skills.selectSkills'));
     expect(screen.getByText('tdd')).toBeInTheDocument();
     expect(screen.getByText('systematic-debugging')).toBeInTheDocument();
@@ -116,8 +106,7 @@ describe('ChatHeader — config popover (collapsed accordion sections)', () => {
   });
 
   it('opening another section auto-collapses the previous one', () => {
-    renderHeader();
-    openConfigPopover();
+    renderPanel();
     fireEvent.click(screen.getByText('skills.selectSkills'));
     expect(screen.getByText('tdd')).toBeInTheDocument();
 
@@ -127,8 +116,7 @@ describe('ChatHeader — config popover (collapsed accordion sections)', () => {
   });
 
   it('clicking the same toggle twice collapses the section back', () => {
-    renderHeader();
-    openConfigPopover();
+    renderPanel();
     fireEvent.click(screen.getByText('directives.title'));
     expect(screen.getByText(/Caveman/)).toBeInTheDocument();
     fireEvent.click(screen.getByText('directives.title'));
@@ -137,11 +125,21 @@ describe('ChatHeader — config popover (collapsed accordion sections)', () => {
 
   it('shows the active count next to a toggle when items are selected', () => {
     const disc = makeDiscussion({ skill_ids: ['s1', 's2'] } as any);
-    renderHeader(disc);
-    openConfigPopover();
+    renderPanel(disc);
     // The count badge sits inside the toggle: look for "2" near "skills.selectSkills".
     const skillsToggle = screen.getByText('skills.selectSkills').closest('button');
     expect(skillsToggle).not.toBeNull();
     expect(skillsToggle!.textContent).toContain('2');
+  });
+
+  it('shares from the settings panel without rendering a header popover', () => {
+    const onShare = vi.fn();
+    renderPanel(makeDiscussion(), {
+      contacts: [{ id: 'contact-1', pseudo: 'Alice' }],
+      onShare,
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /Alice/ }));
+    expect(onShare).toHaveBeenCalledWith(['contact-1']);
   });
 });

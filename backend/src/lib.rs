@@ -683,6 +683,35 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             post(api::setup::import_data)
                 .layer(axum::extract::DefaultBodyLimit::max(512 * 1024 * 1024)),
         )
+        // ── Planning / discussion plans ──
+        .route(
+            "/api/planning/tasks",
+            get(api::planning::list_tasks).post(api::planning::create_task),
+        )
+        .route(
+            "/api/planning/tasks/{id}",
+            get(api::planning::get_task).patch(api::planning::update_task),
+        )
+        .route(
+            "/api/planning/tasks/{id}/dod/{dod_id}",
+            patch(api::planning::update_dod_item),
+        )
+        .route(
+            "/api/planning/tasks/{id}/discussions",
+            post(api::planning::link_discussion),
+        )
+        .route(
+            "/api/planning/tasks/{id}/blockers",
+            post(api::planning::add_blocker),
+        )
+        .route(
+            "/api/discussions/{id}/plan",
+            get(api::planning::get_discussion_plan),
+        )
+        .route(
+            "/api/discussions/{id}/plan/changes",
+            get(api::planning::task_changes),
+        )
         // ── Projects ──
         .route("/api/projects", get(api::projects::list))
         .route("/api/projects", post(api::projects::create))

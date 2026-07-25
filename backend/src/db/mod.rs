@@ -8,6 +8,7 @@ pub mod discussions;
 pub mod learnings;
 pub mod mcps;
 pub mod migrations;
+pub mod planning;
 pub mod projects;
 pub mod quick_apis;
 pub mod quick_prompts;

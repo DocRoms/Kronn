@@ -27,7 +27,7 @@
 
 **Prompts plus petits, code déterministe quand c'est possible : moins d'hallucinations, facture tokens divisée, écoconception par conception.**
 
-> **Statut : 0.8.12 (en développement — dernière release stable : 0.8.11).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
+> **Statut : 0.9.1 (version actuelle).** Fonctionnel mais pré-1.0. Les versions mineures peuvent introduire des breaking changes ; les patch versions sont safe.
 > **Licence : AGPL-3.0.** Utiliser Kronn localement pour développer *ton propre* produit ne déclenche pas le copyleft ; il ne s'applique que si tu redistribues une version modifiée à d'autres. Voir [Notes sur la licence](#notes-sur-la-licence-agpl-3-0).
 
 ## Sommaire
@@ -93,7 +93,7 @@ Télécharge l'installeur pour ton OS depuis [Releases](https://github.com/DocRo
 Requiert Docker + Docker Compose. Sur Windows, WSL2 (Docker Engine dans WSL fonctionne, Docker Desktop optionnel).
 
 ```bash
-git clone --branch 0.8.11 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
+git clone --branch 0.9.1 --depth 1 https://github.com/DocRoms/Kronn.git   # dernière release stable
 cd Kronn
 ./kronn start
 # → http://localhost:3140
@@ -115,7 +115,7 @@ Quand tu veux orchestrer (multi-step, conditionnel, planifié, gaté), passe à 
 
 ## Ce que tu peux en faire
 
-Quatre flows qui répondent à de vrais besoins. Chacun est un use case primaire, choisis celui qui correspond à ta journée.
+Sept flows qui répondent à de vrais besoins. Chacun est un use case primaire, choisis celui qui correspond à ta journée.
 
 ### 1. Batcher un Quick Prompt sur N tickets
 
@@ -139,12 +139,25 @@ S'ils convergent tous sur la même réponse → ton prompt est solide, déploie-
   <img src="docs/screenshots/kronn-qp-launch.png" alt="Formulaire de lancement compare-agents, un Quick Prompt avec une variable ticket, tous les 7 agents installés (Claude Code, Codex, Vibe, Gemini CLI, Kiro, GitHub Copilot, Ollama) sélectionnés en chips, et un CTA « Comparer (7) » pour propager le même prompt sur tous en parallèle" />
 </p>
 
-### 3. 100 % local avec Ollama
+### 3. Garde un plan priorisé entre projets et discussions
+
+Crée une idée ou une tâche dans l'espace global **Planification**, classe-la
+dans les bandes Critique / Haute / Normale / Basse, puis lie la même tâche à
+plusieurs projets ou discussions sans la dupliquer. Chaque discussion possède
+un panneau compact avec son objectif principal, les tâches actives/à faire plus
+tard, les sous-tâches et les checklists de Definition of Done.
+
+Humains et agents modifient le même état durable, avec l'auteur de chaque
+changement. Via MCP, un agent ne récupère que la tâche ou le delta nécessaire au
+lieu de relire toute la conversation. Depuis un projet, chaque tâche ouvre
+directement sa fiche complète dans Planification.
+
+### 4. 100 % local avec Ollama
 
 Lance Llama 3, Gemma, Qwen, Codestral sur ta machine via Ollama, traité comme un agent à part entière. Mêmes Discussions / Quick Prompts / Workflows, Kronn route juste les appels vers `http://localhost:11434/v1/` au lieu du cloud. Choisis ton modèle par défaut depuis Settings. **0 € de tokens, 0 ligne de code qui quitte ton laptop.**
 
 
-### 4. Ne brûle des tokens QUE là où ils méritent leur coût
+### 5. Ne brûle des tokens QUE là où ils méritent leur coût
 
 Un vrai workflow Auto-Dev dans Kronn ressemble à ça :
 
@@ -158,13 +171,13 @@ Un vrai workflow Auto-Dev dans Kronn ressemble à ça :
 
 Tu construis ça via le **wizard UI** (drag-drop des types de step, autocomplétion sur les références agent/MCP/QP) ou un fichier `WORKFLOW.md` écrit à la main (compatible Symphony), aucun DSL à apprendre, les deux modes interop.
 
-Le moteur de workflow supporte **8 types de steps** au total : `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `Notify`, `Gate` (approbation humaine), `Exec` (shell, allowlist-gated). Référence complète dans [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine).
+Le moteur de workflow supporte **9 types de steps** au total : `Agent`, `ApiCall`, `BatchApiCall`, `BatchQuickPrompt`, `JsonData`, `Notify`, `Gate` (approbation humaine), `Exec` (exécution allowlistée) et `SubWorkflow` pour composer des workflows réutilisables. Référence complète dans [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine).
 
 <p align="center">
   <img src="docs/screenshots/kronn-workflow-wizard.png" alt="Wizard workflow, mode Avancé, onglets Infos/Tâche/Résumé, nom + sélecteur de projet. Drag-drop des types de step dans les étapes suivantes ; aucun DSL à apprendre." />
 </p>
 
-### 5. Audite ta codebase avec une IA qui n'oublie pas
+### 6. Audite ta codebase avec une IA qui n'oublie pas
 
 La plupart des « demande à l'IA ce qu'elle pense de mon repo » repartent de zéro à chaque conversation. Kronn inverse ça : la première fois que tu onboardes un projet, une passe d'audit lit ton code + tes configs et écrit une arborescence `docs/` structurée qui vit dans le repo.
 
@@ -189,13 +202,13 @@ L'arborescence entière est injectée comme contexte projet dans chaque Discussi
 - **Checklist baseline obligatoire** : le Step 9 scanne TOUJOURS 5 catégories trop souvent oubliées (Dockerfile USER / display_errors / opcache / HEALTHCHECK, compose resource limits, CI quality gate + `StrictHostKeyChecking`, secrets dans `.env*`, a11y/CSP web). Chaque item produit une ligne explicite « verified present / verified absent / TD » — tu peux faire confiance à l'audit pour ne pas avoir détourné le regard.
 - **Mémoire anti-répétition** : chaque audit lit les TDs existants comme priors et RÉUTILISE leurs IDs au lieu de churner les slugs. Un bloc YAML `audit_history` sur chaque fichier détail trace chaque passe. Un rapport de réconciliation (`_reconciliation-<date>.md`) classifie les TDs disparus en `Fixed / Stale / Missed / Uncertain` — plus rien ne disparaît silencieusement entre audits.
 - **Statut à deux niveaux** : `Verified in source` (l'agent a ouvert le fichier et confirmé) vs `Inferred` (pattern match seulement). La Phase 3 de validation skip les Verified pour t'épargner le temps.
-- **Types d'audit spécialisés** : à côté du Full audit canonique en 10 steps, Kronn ship des passes focalisées — `Drift`, `Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, plus une escape hatch `Custom`. Chacune écrit dans son propre fichier d'index pour ne pas écraser les TDs du Full.
+- **Types d'audit spécialisés** : depuis la 0.9.0, le Full audit enchaîne les 9 steps de documentation puis les 7 passes focalisées (`Security`, `Docker`, `Performance`, `Accessibility`, `Database`, `ApiDesign`, `CodeQuality`) dans un seul lancement de 16 steps. Chaque passe commence par un test de pertinence ; `Drift`, `Rgaa`, `Custom` et les audits focalisés restent lançables séparément.
 - **Health badge avec cluster recommendations** : chaque run est persisté dans `audit_runs` avec durée, comptage par sévérité (Critical × 12 + High × 4 + Medium × 1.5 + Low × 0.3 = score 0–100) et une liste `recommendations_json`. Quand ≥3 findings clusterisent sur une dimension (ex. 5 TDs Docker), le dashboard surface inline « Lance un audit Docker focus ».
 - **Gate community standards** : si ton projet a une intent OSS (LICENSE présent OU remote sur github/gitlab/codeberg OU README mentionne « contribute »), le Step 9 flag aussi les `LICENSE`, `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, templates issue/PR manquants. Les projets privés skip ce bloc entièrement.
 
 C'est ce qui fait de Kronn une **couche de persistance de connaissance avec baselines strictes**, pas juste un lanceur de prompts.
 
-### 6. Boucle la boucle : audit → tickets → AutoPilot → PR
+### 7. Boucle la boucle : audit → tickets → AutoPilot → PR
 
 L'audit n'est pas un doc qui dort dans un coin. **0.8.2 le branche à l'action.**
 
@@ -236,6 +249,7 @@ Pour les projets dockerisés, le mismatch volume `docker-in-docker` est réglé 
 
 - **Project** : un repo git que Kronn connaît. Garde le contexte IA (`docs/AGENTS.md`) plus une arborescence d'audit structurée (`docs/glossary.md`, `docs/repo-map.md`, `docs/architecture/overview.md` et ses sœurs) qui couvre les hotspots legacy, les gaps de tests, les conventions de code et les capabilities par MCP. Chaque section a son drift detection : ré-audite uniquement ce qui est stale.
 - **Discussion** : un thread de chat lié (ou non) à un projet. Mono-agent ou debate multi-agents. Stream temps réel via SSE, persisté en SQLite, isolable dans un git worktree.
+- **Tâche / plan de discussion** : une même tâche priorisée peut rester globale ou être liée à plusieurs projets et discussions. Sous-tâches, Definition of Done, liens, tags et blocages sont partagés entre le backlog Planification, les projets, les panneaux de discussion et les outils MCP.
 - **Quick Prompt** : un template de prompt réutilisable avec `{{variables}}` et sections conditionnelles. One-shot, fan-out, ou chaîné.
 - **Workflow** : un pipeline multi-step. Déclenché par cron, par un tracker (Jira / GitHub), ou manuellement. Voir [docs/architecture/overview.md](docs/architecture/overview.md#workflow-engine) pour les garanties moteur.
 

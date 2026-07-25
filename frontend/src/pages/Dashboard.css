@@ -2152,6 +2152,64 @@ html[data-density="large"] .dash-main {
   color: var(--kr-accent-ink);
 }
 
+.project-detail-tab-count {
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: var(--kr-r-pill);
+  background: var(--kr-bg-accent-soft);
+  color: var(--kr-accent-ink);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.25;
+  text-align: center;
+}
+
+.project-discussion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  margin-top: var(--kr-sp-4);
+}
+
+.project-discussions-load-more {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 6px 10px;
+  border: 1px dashed var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.project-discussions-load-more:hover {
+  background: rgba(var(--kr-accent-rgb), 0.08);
+}
+
+.project-discussions-load-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-1);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.project-discussions-load-select {
+  padding: 2px 22px 2px 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-xs);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: inherit;
+}
+
 .project-detail-card .dash-card-body {
   padding: 16px 18px 20px;
 }
@@ -2609,6 +2667,7 @@ html[data-density="large"] .dash-main {
 }
 
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='discussions'] .project-detail-section[data-project-view='discussions'],
+.project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='tasks'] .project-detail-section[data-project-view='tasks'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='docs'] .project-detail-section[data-project-view='docs'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='code'] .project-detail-section[data-project-view='code'],
 .project-detail-card .dash-card-body[data-detail-mode='true'][data-detail-view='resources'] .project-detail-section[data-project-view='resources'] {

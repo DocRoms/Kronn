@@ -23,6 +23,7 @@ import { ErrorBoundary } from '../components/ErrorBoundary';
 // at the cost of a one-time ~100 ms fetch on first tab switch.
 const McpPage = lazy(() => import('./McpPage').then(m => ({ default: m.McpPage })));
 const WorkflowsPage = lazy(() => import('./WorkflowsPage').then(m => ({ default: m.WorkflowsPage })));
+const PlanningPage = lazy(() => import('./PlanningPage').then(m => ({ default: m.PlanningPage })));
 const SettingsPage = lazy(() => import('./SettingsPage').then(m => ({ default: m.SettingsPage })));
 const DiscussionsPage = lazy(() => import('./DiscussionsPage').then(m => ({ default: m.DiscussionsPage })));
 import { ActiveRunsPopover } from '../components/workflows/ActiveRunsPopover';
@@ -33,10 +34,10 @@ import {
   Plus, Search, Zap, Settings,
   Loader2,
   MessageSquare, X,
-  Rocket, Check, Workflow, FileText,
+  Rocket, Check, Workflow, FileText, ListTodo,
 } from 'lucide-react';
 
-type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'settings';
+type Page = 'projects' | 'mcps' | 'workflows' | 'discussions' | 'planning' | 'settings';
 
 interface DashboardProps {
   onReset: () => void;
@@ -59,6 +60,7 @@ export function Dashboard({ onReset }: DashboardProps) {
   const { toast, ToastContainer } = useToast();
   const [page, setPage] = useState<Page>('projects');
   const [mcpSelectedConfigId, setMcpSelectedConfigId] = useState<string | null>(null);
+  const [planningSelectedTaskId, setPlanningSelectedTaskId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   // Cross-page prefill for discussion creation (e.g. "validate audit" from Projects)
   const [discPrefill, setDiscPrefill] = useState<{ projectId: string; title: string; prompt: string; locked?: boolean } | null>(null);
@@ -645,6 +647,7 @@ export function Dashboard({ onReset }: DashboardProps) {
         {([
           ['projects', Folder, t('nav.projects')],
           ['discussions', MessageSquare, t('nav.discussions')],
+          ['planning', ListTodo, t('nav.planning')],
           ['mcps', Puzzle, t('nav.mcps')],
           ['workflows', Workflow, t('nav.workflows')],
           // 0.8.6 (#61 follow-up 2026-05-21) — API call logs moved from a
@@ -696,6 +699,7 @@ export function Dashboard({ onReset }: DashboardProps) {
                 }
                 setPage(id as Page);
                 if (id !== 'mcps') setMcpSelectedConfigId(null);
+                setPlanningSelectedTaskId(null);
               }}
               title={label}
             >
@@ -1260,6 +1264,12 @@ export function Dashboard({ onReset }: DashboardProps) {
               if (p.startsWith('mcps:')) {
                 setMcpSelectedConfigId(p.split(':')[1]);
                 setPage('mcps');
+              } else if (p.startsWith('planning:')) {
+                setPlanningSelectedTaskId(p.slice('planning:'.length));
+                setPage('planning');
+              } else if (p === 'planning') {
+                setPlanningSelectedTaskId(null);
+                setPage('planning');
               } else {
                 setPage(p as Page);
               }
@@ -1275,6 +1285,25 @@ export function Dashboard({ onReset }: DashboardProps) {
             onSetExpandedId={setExpandedId}
           />
         </ErrorBoundary>)}
+
+        {/* ════════ PLANIFICATION ════════ */}
+        {page === 'planning' && (
+          <ErrorBoundary mode="zone" label="Planning">
+            <Suspense fallback={<PageFallback />}>
+              <PlanningPage
+                key={planningSelectedTaskId ?? 'planning'}
+                initialSelectedTaskId={planningSelectedTaskId}
+                projects={projects}
+                discussions={allDiscussions}
+                toast={toast}
+                onNavigateDiscussion={(discussionId) => {
+                  setOpenDiscussionId(discussionId);
+                  setPage('discussions');
+                }}
+              />
+            </Suspense>
+          </ErrorBoundary>
+        )}
 
         {/* ════════ Plugins ════════ */}
         {page === 'mcps' && (

@@ -99,6 +99,23 @@ vi.mock('../../lib/api', () => ({
   quickPrompts: {
     list: vi.fn().mockResolvedValue([]),
   },
+  planning: {
+    discussionPlan: vi.fn().mockResolvedValue({
+      discussion_id: 'test',
+      primary_objective: null,
+      active: [],
+      later: [],
+      completed_active: 0,
+      total_active: 0,
+    }),
+    changes: vi.fn().mockResolvedValue([]),
+    list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
+    get: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    linkDiscussion: vi.fn(),
+    addBlocker: vi.fn(),
+  },
   config: {
     getUiLanguage: vi.fn().mockResolvedValue('fr'),
     saveUiLanguage: vi.fn().mockResolvedValue(undefined),

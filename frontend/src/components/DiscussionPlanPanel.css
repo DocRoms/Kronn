@@ -1,0 +1,346 @@
+.plan-panel {
+  width: min(400px, 42vw);
+}
+
+.plan-panel-header {
+  flex-shrink: 0;
+}
+
+.plan-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: var(--kr-fs-md);
+  font-weight: 650;
+}
+
+.plan-panel-progress {
+  margin-top: 3px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.plan-panel-close,
+.plan-detail-head button {
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.plan-quick-create {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 12px;
+  padding: 7px 8px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-muted);
+}
+
+.plan-quick-create input {
+  width: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+}
+
+.plan-quick-create button {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent);
+  color: var(--kr-text-on-accent);
+  cursor: pointer;
+}
+
+.plan-quick-create button:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.plan-panel-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 12px 24px;
+}
+
+.plan-panel-state,
+.plan-panel-error,
+.plan-panel-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 24px 12px;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+}
+
+.plan-panel-error {
+  color: var(--kr-error);
+}
+
+.plan-panel-empty {
+  flex-direction: column;
+  text-align: center;
+}
+
+.plan-panel-empty span {
+  max-width: 250px;
+  color: var(--kr-text-muted);
+}
+
+.plan-primary {
+  margin: 4px 0 14px;
+}
+
+.plan-primary > button,
+.plan-timeline-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 0;
+  padding: 7px 2px;
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.045em;
+}
+
+.plan-primary > button {
+  cursor: pointer;
+}
+
+.plan-primary-card {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.22);
+  border-radius: var(--kr-r-md);
+  background: rgba(var(--kr-accent-rgb), 0.06);
+}
+
+.plan-primary-card span {
+  color: var(--kr-accent);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+}
+
+.plan-timeline-section {
+  position: relative;
+  padding: 0 0 10px 18px;
+}
+
+.plan-timeline-section::before {
+  position: absolute;
+  top: 30px;
+  bottom: 0;
+  left: 6px;
+  width: 1px;
+  background: var(--kr-border-medium);
+  content: "";
+}
+
+.plan-timeline-section h3 {
+  margin-left: -18px;
+}
+
+.plan-task {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  align-items: start;
+  gap: 7px;
+  margin-bottom: 6px;
+  padding: 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+}
+
+.plan-task[data-status="in_progress"] {
+  border-color: rgba(var(--kr-info-rgb), 0.35);
+  box-shadow: inset 2px 0 0 var(--kr-info);
+}
+
+.plan-task[data-status="done"] {
+  opacity: 0.66;
+}
+
+.plan-task-check,
+.plan-task-main {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.plan-task-check {
+  display: grid;
+  place-items: center;
+  padding: 1px 0;
+  color: var(--kr-text-secondary);
+}
+
+.plan-task-action {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+}
+
+.plan-task-action:hover,
+.plan-task-action[data-active="true"] {
+  background: var(--kr-bg-elevated);
+  color: var(--kr-accent-ink);
+}
+
+.plan-task[data-status="done"] .plan-task-check {
+  color: var(--kr-success);
+}
+
+.plan-task-main {
+  min-width: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.plan-task-title {
+  display: block;
+  overflow: hidden;
+  font-size: var(--kr-fs-sm);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+}
+
+.plan-task[data-status="done"] .plan-task-title {
+  text-decoration: line-through;
+}
+
+.plan-task-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 4px;
+  color: var(--kr-text-muted);
+  font-size: 10px;
+}
+
+.plan-task-id {
+  padding: 1px 5px;
+  font-size: 10px;
+}
+
+.plan-blocked {
+  color: var(--kr-error);
+}
+
+.plan-priority-dot {
+  width: 7px;
+  height: 7px;
+  margin-top: 4px;
+  border-radius: 50%;
+  background: var(--kr-text-muted);
+}
+
+.plan-priority-dot[data-priority="critical"] { background: var(--kr-error); }
+.plan-priority-dot[data-priority="high"] { background: var(--kr-warning); }
+.plan-priority-dot[data-priority="normal"] { background: var(--kr-info); }
+
+.plan-see-completed {
+  width: 100%;
+  margin: 1px 0 5px;
+  padding: 5px;
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.plan-later {
+  margin-top: 8px;
+  opacity: 0.78;
+}
+
+.plan-detail {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-raised);
+}
+
+.plan-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--kr-accent);
+  font-family: var(--kr-font-mono);
+  font-size: var(--kr-fs-xs);
+}
+
+.plan-detail h3 {
+  margin: 8px 0;
+  font-size: var(--kr-fs-md);
+}
+
+.plan-detail p {
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.plan-dod {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.plan-dod > button {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.plan-dod > button:hover {
+  color: var(--kr-text-primary);
+}
+
+.plan-dod > button:disabled {
+  cursor: wait;
+}
+
+.plan-dod > button[data-done="true"] {
+  color: var(--kr-text-muted);
+  text-decoration: line-through;
+}

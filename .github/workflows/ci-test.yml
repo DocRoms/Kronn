@@ -519,6 +519,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Verify release version consistency
+        run: make check-version
+
       - name: Run bats tests
         run: make test-shell
 

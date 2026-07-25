@@ -1283,7 +1283,7 @@
       <a class="btn btn-pink" href="#level-1">▼ How to play</a>
       <a class="btn btn-electric" href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">↓ Install</a>
     </div>
-    <div class="ea-disclaimer">v0.9.0 · <span class="ea-tag">early access</span> · la API y los step types pueden cambiar antes de la v1.0</div>
+    <div class="ea-disclaimer">v0.9.1 · <span class="ea-tag">early access</span> · la API y los step types pueden cambiar antes de la v1.0</div>
   </section>
 
   <!-- LEVEL 1 · THE BRIDGE -->
@@ -1315,7 +1315,7 @@
         </div>
         <div class="loop-edge loop-mcp">
           <span class="loop-glyph">▼</span>
-          <span class="loop-tag"><span class="sk-pk">MCP · 28 herramientas</span> · un agente pilota Kronn (workflow, room, API) sin abrir la UI.</span>
+          <span class="loop-tag"><span class="sk-pk">MCP · 77 herramientas</span> · un agente pilota Kronn (workflow, room, planificación, API) sin abrir la UI.</span>
         </div>
       </div>
 
@@ -1337,8 +1337,8 @@
           <p class="body">Toda la doc (arquitectura, deuda técnica, convenciones, glosario) en formato <span class="sk-pk">optimizado en tokens</span>, legible por humanos y optimizado para IA (<code>docs/AGENTS.md</code> define su estructura). Detección de drift, auditorías especializadas (Security, Docker, RGAA…) y health score.</p>
         </div>
         <div class="leaf">
-          <div class="title">Memoria viva</div>
-          <p class="body">Discusiones persistidas en local, retomadas por cualquier CLI, y N agentes en una misma room. Los agentes <strong>mantienen la doc y la deuda técnica</strong> al tocar el código.</p>
+          <div class="title">Memoria y planificación vivas</div>
+          <p class="body">Discusiones persistentes retomadas por cualquier CLI y <strong>tareas priorizadas compartidas</strong> entre backlog global, proyectos y planes de discusión. Humanos y agentes actualizan la misma fuente de verdad.</p>
         </div>
         <div class="leaf">
           <div class="title">Quick Prompts medidos</div>
@@ -1346,7 +1346,7 @@
         </div>
         <div class="leaf">
           <div class="title">Workflows desagentificados</div>
-          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>8 tipos de pasos</strong> + batch fan-out; el agente solo interviene cuando es verdaderamente necesario.</p>
+          <p class="body"><strong>Desagentificar</strong> es sustituir los pasos mecánicos por steps deterministas (<code>Exec</code> · <code>Gate</code> · <code>Notify</code> · <code>ApiCall</code>…) a <span class="sk-pk">0 tokens</span>. <strong>9 tipos de pasos</strong>, incluido <code>SubWorkflow</code>, + batch fan-out; el agente solo interviene cuando es verdaderamente necesario.</p>
         </div>
         <div class="leaf">
           <div class="title">Plugins MCP &amp; API</div>
@@ -1589,6 +1589,7 @@
         <div class="inv-cat"><span class="num">01</span>Memoria y contexto</div>
         <ul class="inv-list">
           <li>Discusiones persistidas en local (SQLite)</li>
+          <li>Planificación global + planes de discusión compartidos con los agentes</li>
           <li>Continuación cross-CLI: Claude exporta, Codex retoma (0.8.4)</li>
           <li><strong>Multi-CLI en vivo</strong>: N agentes en una misma discusión (0.8.6)</li>
           <li><code>docs/AGENTS.md</code> generado por auditoría</li>
@@ -1615,7 +1616,7 @@
       <div class="inventory-col">
         <div class="inv-cat"><span class="num">03</span>Workflows</div>
         <ul class="inv-list">
-          <li>8 step types: Agent · ApiCall · BatchApiCall · BatchQuickPrompt · JsonData · Notify · Exec · Gate</li>
+          <li>9 step types: Agent · ApiCall · BatchApiCall · BatchQuickPrompt · JsonData · Notify · Exec · Gate · SubWorkflow</li>
           <li>0 tokens en los pasos mecánicos (por definición)</li>
           <li>AI Workflow Architect: dry-run + 1 clic</li>
           <li>Batch workflows (fan-out · chaining · git worktree · diff integrado)</li>
@@ -1632,7 +1633,7 @@
         <div class="inv-cat"><span class="num">04</span>Agentes · plugins · local</div>
         <ul class="inv-list">
           <li>7+ CLI soportados (Claude Code · Codex · Gemini · Ollama · Vibe…)</li>
-          <li>MCP <code>kronn-internal</code>: 28 herramientas para que el agente pilote Kronn</li>
+          <li>MCP <code>kronn-internal</code>: 77 herramientas para que el agente pilote Kronn</li>
           <li><strong>Eco mode</strong> vía <a href="https://github.com/rtk-ai/rtk" target="_blank" rel="noopener">RTK</a>: proxy token-killer en 1 clic en agentes soportados</li>
           <li>Ollama 100% local + TTS Piper / STT Whisper (FR · EN · ES)</li>
           <li>Plugins <strong>MCP</strong>: Atlassian · Linear · Notion · …</li>
@@ -1817,7 +1818,7 @@
 
       <div class="concept-card">
         <div class="concept-term">StepType</div>
-        <p class="concept-def">Los 8 tipos de step disponibles en un workflow: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>) y 6 <strong>mecánicos</strong> (<code>ApiCall</code>, <code>BatchApiCall</code>, <code>JsonData</code>, <code>Notify</code>, <code>Exec</code>, <code>Gate</code>) a 0 tokens.</p>
+        <p class="concept-def">Los 9 tipos de step de un workflow: 2 IA (<code>Agent</code>, <code>BatchQuickPrompt</code>), 6 <strong>mecánicos</strong> a 0 tokens (<code>ApiCall</code>, <code>BatchApiCall</code>, <code>JsonData</code>, <code>Notify</code>, <code>Exec</code>, <code>Gate</code>) y <code>SubWorkflow</code> para componer pipelines.</p>
       </div>
 
       <div class="concept-card">
@@ -1884,7 +1885,7 @@
       <div class="sec-panel warn">
         <div class="sec-title">Lo que no tenemos</div>
         <ul class="sec-list warn">
-          <li><strong>Aún no en v1.0 estable.</strong> Versión actual v0.9.0, early access. La API, los step types y los esquemas pueden evolucionar entre versiones.</li>
+          <li><strong>Aún no en v1.0 estable.</strong> Versión actual v0.9.1, early access. La API, los step types y los esquemas pueden evolucionar entre versiones.</li>
           <li>Sin certificación SOC2 ni GDPR a día de hoy</li>
           <li>Single-user · sin RBAC ni gestión de equipos</li>
           <li>Si usas Anthropic / OpenAI / Google, tus prompts van a ellos: su responsabilidad, no la nuestra</li>
@@ -1900,7 +1901,7 @@
   <footer>
     <div class="game-over">· Continue ? ·</div>
     <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener">github.com/DocRoms/Kronn</a>
-    <span class="credits">kronn v0.9.0 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
+    <span class="credits">kronn v0.9.1 · agpl-3.0 · rust × typescript · made by <a href="https://www.docroms.com/" target="_blank" rel="noopener">d.r.</a></span>
   </footer>
 
 </div>

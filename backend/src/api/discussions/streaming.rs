@@ -758,6 +758,39 @@ async fn make_agent_stream_inner(
         format!("{}{}", context_files_prompt, companion_context)
     };
 
+    // Planning stays pull-based: inject no task body, list or description.
+    // Only signal that linked state changed since this discussion's last
+    // agent reply; the agent can then call plan_get/task_changes if relevant.
+    let planning_change_count = {
+        let planning_disc_id = discussion_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                crate::db::planning::change_count_since_last_agent(conn, &planning_disc_id)
+            })
+            .await
+            .unwrap_or(0)
+    };
+    let context_files_prompt = if planning_change_count == 0 {
+        context_files_prompt
+    } else {
+        let notice = match disc.language.as_str() {
+            "fr" => format!(
+                "--- Plan de discussion modifié ({planning_change_count} changement(s)) ---\n\
+                 Appelle `plan_get` seulement si ce plan est utile à la demande actuelle.\n\n"
+            ),
+            "es" => format!(
+                "--- Plan de conversación modificado ({planning_change_count} cambio(s)) ---\n\
+                 Llama a `plan_get` solo si el plan es útil para la solicitud actual.\n\n"
+            ),
+            _ => format!(
+                "--- Discussion plan changed ({planning_change_count} change(s)) ---\n\
+                 Call `plan_get` only if the plan is relevant to the current request.\n\n"
+            ),
+        };
+        format!("{context_files_prompt}{notice}")
+    };
+
     // Estimate extra_context size so build_agent_prompt can respect the agent's budget.
     // This mirrors what runner::start_agent_with_config will build.
     let extra_context_len = estimate_extra_context_len(

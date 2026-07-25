@@ -1,0 +1,85 @@
+/* Shared chrome for the discussion utility panels (Plan, Code and Settings).
+ * Panel contents keep their own component classes; this file owns only the
+ * shell so every tool behaves the same across themes and breakpoints. */
+.disc-tool-panel {
+  box-sizing: border-box;
+  width: min(400px, 42vw);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  overflow: hidden;
+  border-left: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08);
+}
+
+.disc-tool-panel-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-4);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.disc-tool-panel-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+  font-weight: 650;
+}
+
+.disc-tool-panel-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-tool-panel-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.disc-tool-panel-icon {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.disc-tool-panel-icon:hover,
+.disc-tool-panel-icon:focus-visible {
+  border-color: var(--kr-border-medium);
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
+.disc-tool-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  .disc-tool-panel {
+    position: absolute;
+    z-index: 40;
+    inset: 0 0 0 auto;
+    width: min(100%, 400px);
+    box-shadow: var(--kr-shadow-xl);
+  }
+}

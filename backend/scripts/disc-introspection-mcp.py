@@ -164,6 +164,229 @@ TOOLS = [
             "required": [],
         },
     },
+    # ─── 0.9.1 planning / discussion plans ─────────────────────────────
+    {
+        "name": "plan_get",
+        "description": (
+            "Return the compact structured Discussion plan (French UI: "
+            "'Plan de discussion') for a discussion: primary objective, "
+            "active tasks, later tasks and progress. Defaults to the current "
+            "discussion. Call this FIRST when the user asks to read or update "
+            "the discussion plan; that phrase means Kronn's shared task plan, "
+            "not a prose/Markdown summary."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "discussion_id": {
+                    "type": "string",
+                    "description": "Discussion UUID. Omit for the current discussion.",
+                },
+            },
+        },
+    },
+    {
+        "name": "task_list",
+        "description": (
+            "List compact planning-task summaries with bounded pagination. "
+            "Returns no Markdown description, DoD body, links or event log; "
+            "call task_get only for the task you need. Filters: search, "
+            "status, priority, project_id, discussion_id, tag, with_discussion."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "search": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["idea", "todo", "in_progress", "blocked", "done", "archived"],
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["critical", "high", "normal", "low"],
+                },
+                "project_id": {"type": "string"},
+                "discussion_id": {"type": "string"},
+                "tag": {"type": "string"},
+                "with_discussion": {"type": "boolean"},
+                "cursor": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50},
+            },
+        },
+    },
+    {
+        "name": "task_get",
+        "description": (
+            "Return one FULL planning task including description, Definition "
+            "of Done, links, blockers/backlinks and attributed event history. "
+            "Accepts the copyable KT-142 reference or the UUID."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"task_id": {"type": "string"}},
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "task_changes",
+        "description": (
+            "Return at most 200 attributed task events for tasks linked to a "
+            "discussion after an RFC3339 timestamp. Defaults to the current "
+            "discussion. Use for delta refreshes; do not reload every task."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "discussion_id": {"type": "string"},
+                "since": {
+                    "type": "string",
+                    "description": "Exclusive RFC3339 timestamp; omitted means all retained events.",
+                },
+            },
+        },
+    },
+    {
+        "name": "task_create",
+        "description": (
+            "Create one planning task. Keep quick creation compact: title is "
+            "required; status defaults to idea and priority to normal. The "
+            "bridge records this MCP client's agent identity in the event log. "
+            "Use direct writes only when the user's intent is unambiguous."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["idea", "todo", "in_progress", "blocked", "done", "archived"],
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["critical", "high", "normal", "low"],
+                },
+                "parent_id": {"type": "string"},
+                "project_ids": {"type": "array", "items": {"type": "string"}},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "definition_of_done": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "sentence": {"type": "string"},
+                            "completed": {"type": "boolean"},
+                        },
+                        "required": ["sentence"],
+                    },
+                },
+                "links": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "label": {"type": "string"},
+                            "url": {"type": "string"},
+                        },
+                        "required": ["label", "url"],
+                    },
+                },
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "task_update",
+        "description": (
+            "Patch one planning task by KT reference or UUID. Only supplied "
+            "fields change. Set parent_id or blocked_reason to null to clear "
+            "it. Full-array fields (projects, tags, DoD, links) replace their "
+            "current collection."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["idea", "todo", "in_progress", "blocked", "done", "archived"],
+                },
+                "priority": {
+                    "type": "string",
+                    "enum": ["critical", "high", "normal", "low"],
+                },
+                "parent_id": {"type": ["string", "null"]},
+                "blocked_reason": {"type": ["string", "null"]},
+                "rank": {"type": "integer"},
+                "project_ids": {"type": "array", "items": {"type": "string"}},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "definition_of_done": {"type": "array", "items": {"type": "object"}},
+                "links": {"type": "array", "items": {"type": "object"}},
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "task_link_discussion",
+        "description": (
+            "Link a task to one discussion as active or later, optionally as "
+            "its single primary objective. Defaults to the current discussion. "
+            "Use after task_create when the user asks to add work to the "
+            "Discussion plan."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "discussion_id": {"type": "string"},
+                "placement": {"type": "string", "enum": ["active", "later"], "default": "active"},
+                "is_primary": {"type": "boolean", "default": False},
+                "position": {"type": "integer"},
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "task_update_dod",
+        "description": (
+            "Check or uncheck one Definition of Done item atomically. Use the "
+            "DoD item id returned by task_get. Prefer this over replacing the "
+            "whole definition_of_done array when only completion changed: two "
+            "agents can update different items without overwriting each other."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "dod_id": {"type": "string"},
+                "completed": {"type": "boolean"},
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id", "dod_id", "completed"],
+        },
+    },
+    {
+        "name": "task_add_blocker",
+        "description": (
+            "Declare that task_id is blocked by blocker_task_id. Both accept "
+            "KT references or UUIDs. Cross-project dependencies are allowed; "
+            "cycles are rejected."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string"},
+                "blocker_task_id": {"type": "string"},
+                "source_message_id": {"type": "string"},
+            },
+            "required": ["task_id", "blocker_task_id"],
+        },
+    },
     # ─── 0.8.4 (#294) cross-agent memory tools ─────────────────────────
     # Each one is a 1:1 mirror of a backend route in
     # `backend/src/api/disc_source.rs`. They let an external CLI
@@ -190,6 +413,7 @@ TOOLS = [
                 "project_id": {"type": "string", "description": "Bind to a Kronn project, optional."},
                 "source_agent": {"type": "string", "description": "Source CLI label, e.g. 'ClaudeCode'."},
                 "source_session_id": {"type": "string", "description": "Session id from the CLI runtime."},
+                "no_agent": {"type": "boolean", "description": "Disable the native principal so only explicitly joined peers answer. Defaults to false for this low-level import tool; disc_create_room sets it to true."},
             },
             "required": ["title", "agent"],
         },
@@ -399,6 +623,9 @@ TOOLS = [
             "surface : creates a fresh discussion AND mints an invite "
             "token in a single call. Returns `{disc_id, title, token, "
             "instruction_text, expires_at, next_step}`.\n\n"
+            "The room has no native Kronn principal by default: messages "
+            "posted by joined MCP peers do NOT auto-launch the discussion's "
+            "placeholder agent. Only the explicitly joined peers answer.\n\n"
             "⚠ IMPORTANT — this tool does NOT switch your current "
             "bridge binding. Your existing disc (the one you are "
             "currently talking in) stays the active one. The new room "
@@ -2834,6 +3061,143 @@ def call_disc_summarize(args):
     return _unwrap(_http("POST", f"/api/discussions/{_disc_id()}/summarize", body))
 
 
+# ─── 0.9.1 planning / discussion plans ─────────────────────────────────
+
+def _planning_actor(args):
+    actor = {"kind": "agent", "id": _agent_type_for_session()}
+    source_message_id = args.get("source_message_id")
+    if source_message_id:
+        actor["source_message_id"] = source_message_id
+    return actor
+
+
+def _planning_discussion_id(args):
+    return (args.get("discussion_id") or "").strip() or _disc_id()
+
+
+def call_plan_get(args):
+    discussion_id = urllib.parse.quote(_planning_discussion_id(args), safe="")
+    return _unwrap(_http("GET", f"/api/discussions/{discussion_id}/plan"))
+
+
+def call_task_list(args):
+    allowed = (
+        "search", "status", "priority", "project_id", "discussion_id", "tag",
+        "with_discussion", "cursor", "limit",
+    )
+    query = {}
+    for key in allowed:
+        if key in args and args[key] is not None:
+            value = args[key]
+            query[key] = str(value).lower() if isinstance(value, bool) else value
+    suffix = f"?{urllib.parse.urlencode(query)}" if query else ""
+    return _unwrap(_http("GET", f"/api/planning/tasks{suffix}"))
+
+
+def call_task_get(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_get: task_id is required")
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _unwrap(_http("GET", f"/api/planning/tasks/{encoded}"))
+
+
+def call_task_changes(args):
+    discussion_id = urllib.parse.quote(_planning_discussion_id(args), safe="")
+    query = {}
+    if args.get("since"):
+        query["since"] = args["since"]
+    suffix = f"?{urllib.parse.urlencode(query)}" if query else ""
+    return _unwrap(_http(
+        "GET", f"/api/discussions/{discussion_id}/plan/changes{suffix}"
+    ))
+
+
+def call_task_create(args):
+    title = (args.get("title") or "").strip()
+    if not title:
+        raise RuntimeError("task_create: title is required")
+    body = {"title": title, "actor": _planning_actor(args)}
+    for key in (
+        "description", "status", "priority", "parent_id", "project_ids",
+        "tags", "definition_of_done", "links",
+    ):
+        if key in args and args[key] is not None:
+            body[key] = args[key]
+    return _unwrap(_http("POST", "/api/planning/tasks", body))
+
+
+def call_task_update(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_update: task_id is required")
+    body = {"actor": _planning_actor(args)}
+    for key in (
+        "title", "description", "status", "priority", "parent_id",
+        "blocked_reason", "rank", "project_ids", "tags",
+        "definition_of_done", "links",
+    ):
+        if key in args:
+            body[key] = args[key]
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _unwrap(_http("PATCH", f"/api/planning/tasks/{encoded}", body))
+
+
+def call_task_link_discussion(args):
+    task_id = (args.get("task_id") or "").strip()
+    if not task_id:
+        raise RuntimeError("task_link_discussion: task_id is required")
+    body = {
+        "discussion_id": _planning_discussion_id(args),
+        "placement": args.get("placement", "active"),
+        "is_primary": bool(args.get("is_primary", False)),
+        "actor": _planning_actor(args),
+    }
+    if args.get("position") is not None:
+        body["position"] = args["position"]
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _unwrap(_http(
+        "POST", f"/api/planning/tasks/{encoded}/discussions", body
+    ))
+
+
+def call_task_update_dod(args):
+    task_id = (args.get("task_id") or "").strip()
+    dod_id = (args.get("dod_id") or "").strip()
+    if not task_id or not dod_id:
+        raise RuntimeError("task_update_dod: task_id and dod_id are required")
+    if not isinstance(args.get("completed"), bool):
+        raise RuntimeError("task_update_dod: completed must be a boolean")
+    encoded_task = urllib.parse.quote(task_id, safe="")
+    encoded_dod = urllib.parse.quote(dod_id, safe="")
+    return _unwrap(_http(
+        "PATCH",
+        f"/api/planning/tasks/{encoded_task}/dod/{encoded_dod}",
+        {
+            "completed": args["completed"],
+            "actor": _planning_actor(args),
+        },
+    ))
+
+
+def call_task_add_blocker(args):
+    task_id = (args.get("task_id") or "").strip()
+    blocker_task_id = (args.get("blocker_task_id") or "").strip()
+    if not task_id or not blocker_task_id:
+        raise RuntimeError(
+            "task_add_blocker: task_id and blocker_task_id are required"
+        )
+    encoded = urllib.parse.quote(task_id, safe="")
+    return _unwrap(_http(
+        "POST",
+        f"/api/planning/tasks/{encoded}/blockers",
+        {
+            "blocker_task_id": blocker_task_id,
+            "actor": _planning_actor(args),
+        },
+    ))
+
+
 # ─── 0.8.4 (#294) cross-agent memory tools ─────────────────────────────
 
 def call_disc_create(args):
@@ -2845,7 +3209,13 @@ def call_disc_create(args):
         "title": args["title"],
         "agent": args["agent"],
     }
-    for k in ("language", "project_id", "source_agent", "source_session_id"):
+    for k in (
+        "language",
+        "project_id",
+        "source_agent",
+        "source_session_id",
+        "no_agent",
+    ):
         v = args.get(k)
         if v is not None:
             body[k] = v
@@ -3096,7 +3466,14 @@ def call_disc_create_room(args):
     # switch would be even worse) but adds a `next_step` field in the
     # response that explicitly tells the agent what to do : stay in
     # the current disc + share the token, OR switch via disc_join.
-    create_args = {"title": title, "agent": _agent_type_for_session() or "Unknown"}
+    create_args = {
+        "title": title,
+        # The persisted Discussion model still requires an agent value, but a
+        # collaboration room must not have a native responder: joined MCP peers
+        # are the only actors expected to answer there.
+        "agent": _agent_type_for_session() or "Unknown",
+        "no_agent": True,
+    }
     if args.get("language"):
         create_args["language"] = args["language"]
     if args.get("project_id"):
@@ -5354,6 +5731,16 @@ DISPATCH = {
     "disc_meta": call_disc_meta,
     "disc_get_message": call_disc_get_message,
     "disc_summarize": call_disc_summarize,
+    # 0.9.1 — planning and discussion plans.
+    "plan_get": call_plan_get,
+    "task_list": call_task_list,
+    "task_get": call_task_get,
+    "task_changes": call_task_changes,
+    "task_create": call_task_create,
+    "task_update": call_task_update,
+    "task_update_dod": call_task_update_dod,
+    "task_link_discussion": call_task_link_discussion,
+    "task_add_blocker": call_task_add_blocker,
     # 0.8.4 (#294) cross-agent memory
     "disc_create": call_disc_create,
     "disc_append": call_disc_append,
@@ -5524,6 +5911,7 @@ def _handle(req):
                     "owns ALL credentials server-side (never paste secrets). "
                     "Your tools, by area:\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. Users may call it “the plan”, “the tasks”, “what remains”, “priority”, or similar. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. You may create, edit, prioritize or link tasks directly when intent is unambiguous; otherwise propose a clickable human gate with a `kronn-plan-action` JSON fence (`create`, `create_many`, `status`, `complete`, `unblock`, or `open`). Never answer a requested plan update with only a prose summary.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"

@@ -23,6 +23,7 @@ pub mod mcp_remote;
 pub mod mcps;
 pub mod ollama;
 pub mod openapi;
+pub mod planning;
 pub mod profiles;
 pub mod projects;
 pub mod quick_apis;

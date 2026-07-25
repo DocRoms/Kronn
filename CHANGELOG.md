@@ -7,6 +7,77 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [0.9.1]
+
+### Added
+
+- **Planning workspace and discussion plans.** Kronn now has one shared,
+  local-first task model for ideas, prioritized work and subtasks. Tasks support
+  stable `KT-…` references, Markdown descriptions, Definition of Done
+  checklists, useful links, free tags, project/discussion links, cross-project
+  blockers, ranked priorities and attributable human/agent activity. The global
+  Planning page provides priority bands, drag-and-drop ranking, search and
+  filters, duplicate hints, quick creation and a complete side-panel editor.
+- **Plans inside discussions.** A compact header chip opens a Git-style side
+  panel with the primary objective, active/later timeline, progress, collapsed
+  completed work and quick task creation. Tasks can move between active and
+  later or become the primary objective without leaving the conversation.
+  Task references use the standard copyable-ID pill, and Definition of Done
+  items can be checked directly from the panel with live progress feedback.
+- **Token-efficient Planning tools for agents.** `plan_get`, `task_list`,
+  `task_get` and `task_changes` expose bounded on-demand reads through
+  `kronn-internal`; narrow attributed writes cover creation, updates,
+  discussion links and blockers. Agent prompts receive only a tiny
+  change-notification when relevant data changed. Ambiguous agent suggestions
+  use clickable `kronn-plan-action` cards and never mutate state before human
+  confirmation.
+- **Reliable collaborative task updates.** Open discussion plans refresh
+  automatically, DoD items keep stable IDs and use an atomic per-item write,
+  delta timestamps compare as instants, archived blockers are considered
+  satisfied, primary objectives cannot remain in “Later”, and priority ranks
+  are rebalanced after drag-and-drop.
+
+### Changed
+
+- **Version bumped to 0.9.1** across the backend, frontend and desktop
+  manifests.
+- **Discussion headers are clearer and lighter.** Identity, participants and
+  configured context now follow a compact two-level hierarchy; long titles,
+  narrow screens and every theme keep the same readable, accessible layout
+  without expanding profiles, skills and directives across the whole header.
+- **Discussion utility panels are consistent and theme-aware.** Plan, changed
+  files and the new Settings panel share one responsive side-panel shell in
+  light and dark themes. Project, AI mode, summary policy, profiles, skills,
+  directives, available plugins and tool-call counts now live in the Settings
+  panel instead of competing for space in the conversation header. Sharing
+  moved there too, eliminating its layout-shifting popover. The changed-files
+  panel can expand over the conversation into a split Git-diff workspace with
+  the syntax-aware preview and modified/committed file list side by side. While
+  expanded, it temporarily collapses the discussion sidebar and restores the
+  user's previous layout on exit, keeping messages readable on medium screens.
+- **Projects connect planning and code review.** Each project now has a Tasks
+  view for its linked work, quick creation, completion toggles and direct access
+  to the global backlog. Every task also has a direct action that opens its full
+  detail in Planning. Tasks linked through a project discussion inherit that
+  project for filtering and badges, so existing discussion plans appear without
+  duplicate links. Discussion and task totals live in their tabs; Discussions
+  starts with the ten most recent entries and can load 10, 50, or all older
+  discussions on demand.
+  The Code view can switch from source browsing to the same syntax-aware Git
+  diff workspace used by discussions, with separate working-tree and
+  committed-on-branch file groups loaded only on demand.
+- **Bulk discussion housekeeping.** The discussion sidebar has a compact
+  selection mode for archiving or deleting multiple discussions with one
+  confirmation, while keeping the existing swipe actions for one-off changes.
+- **MCP-created collaboration rooms are peer-only by default.**
+  `disc_create_room` no longer installs a hidden native principal that wakes
+  whenever an invited agent replies, preventing duplicate unsolicited answers.
+- **Release metadata cannot silently drift anymore.** The bilingual READMEs,
+  clone commands, public FR/EN/ES site, manifests, lockfiles, `VERSION` and the
+  first changelog release are synchronized on `0.9.1`. `make bump` now updates
+  every public current-version marker, while `make check-version` and CI reject
+  stale release metadata.
+
 ## [0.9.0]
 
 ### Added

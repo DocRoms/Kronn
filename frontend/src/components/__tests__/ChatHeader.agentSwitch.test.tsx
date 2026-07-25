@@ -76,23 +76,17 @@ function renderHeader(options: {
         makeAgent('Codex'),
         makeAgent('GeminiCli', false),
       ]}
-      availableSkills={[]}
-      availableProfiles={[]}
-      availableDirectives={[]}
-      mcpConfigs={[]}
-      mcpIncompatibilities={[]}
       showGitPanel={false}
       isMobile={false}
       sending={sending}
       pendingFilesCount={0}
       onRequestTestMode={noop}
       onToggleGitPanel={noop}
+      onToggleSettingsPanel={noop}
       onToggleSidebar={noop}
       onDelete={noop}
       onDiscussionUpdated={noop}
       onAgentSwitch={onAgentSwitch}
-      contacts={[]}
-      onShare={noop}
       toast={toast}
       t={t}
     />,

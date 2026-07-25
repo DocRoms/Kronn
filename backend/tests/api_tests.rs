@@ -37,6 +37,160 @@ fn isolate_config_dir() {
     });
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// Planning / discussion plans
+// ═══════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn planning_task_create_list_and_get_round_trip() {
+    let app = test_app();
+    let (_, created) = post_json(
+        app.clone(),
+        "/api/planning/tasks",
+        serde_json::json!({
+            "title": "Ship planning",
+            "priority": "high",
+            "tags": ["release", "UX"],
+            "definition_of_done": [
+                {"sentence": "The compact API is covered", "completed": false}
+            ],
+            "links": [
+                {"label": "Design", "url": "https://example.test/design"}
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(created["success"], true);
+    assert_eq!(created["data"]["reference"], "KT-1");
+    assert_eq!(created["data"]["status"], "idea");
+    let task_id = created["data"]["id"].as_str().unwrap();
+
+    let (_, listed) = get_json(
+        app.clone(),
+        "/api/planning/tasks?priority=high&search=planning",
+    )
+    .await;
+    assert_eq!(listed["data"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["data"]["items"][0]["id"], task_id);
+
+    let (_, tagged) = get_json(app.clone(), "/api/planning/tasks?tag=ux").await;
+    assert_eq!(tagged["data"]["items"].as_array().unwrap().len(), 1);
+
+    let (_, detail) = get_json(app, &format!("/api/planning/tasks/{task_id}")).await;
+    assert_eq!(
+        detail["data"]["definition_of_done"][0]["sentence"],
+        "The compact API is covered"
+    );
+    assert_eq!(detail["data"]["links"][0]["label"], "Design");
+    assert_eq!(detail["data"]["events"][0]["action"], "created");
+}
+
+#[tokio::test]
+async fn planning_discussion_plan_replaces_the_primary_objective() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|connection| {
+            let now = chrono::Utc::now().to_rfc3339();
+            connection.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('planning-disc', 'Planning', ?1, ?1)",
+                [now],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let mut task_ids = Vec::new();
+    for title in ["First objective", "Second objective"] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/planning/tasks",
+            serde_json::json!({"title": title, "status": "todo"}),
+        )
+        .await;
+        let task_id = created["data"]["id"].as_str().unwrap().to_string();
+        let (_, linked) = post_json(
+            app.clone(),
+            &format!("/api/planning/tasks/{task_id}/discussions"),
+            serde_json::json!({
+                "discussion_id": "planning-disc",
+                "placement": "active",
+                "is_primary": true
+            }),
+        )
+        .await;
+        assert_eq!(linked["success"], true);
+        task_ids.push(task_id);
+    }
+
+    let (_, plan) = get_json(app.clone(), "/api/discussions/planning-disc/plan").await;
+    assert_eq!(plan["data"]["primary_objective"]["id"], task_ids[1]);
+    assert_eq!(plan["data"]["active"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        plan["data"]["active"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|relation| relation["is_primary"] == true)
+            .count(),
+        1
+    );
+
+    let (_, changes) = get_json(
+        app,
+        "/api/discussions/planning-disc/plan/changes?since=2026-01-01T00%3A00%3A00Z",
+    )
+    .await;
+    assert_eq!(changes["success"], true);
+    assert_eq!(changes["data"].as_array().unwrap().len(), 4);
+    assert!(changes["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|change| change["action"] == "discussion_linked"));
+}
+
+#[tokio::test]
+async fn planning_api_rejects_dependency_cycles_and_identifies_agent_events() {
+    let app = test_app();
+    let mut task_ids = Vec::new();
+    for title in ["A", "B"] {
+        let (_, created) = post_json(
+            app.clone(),
+            "/api/planning/tasks",
+            serde_json::json!({"title": title, "status": "todo"}),
+        )
+        .await;
+        task_ids.push(created["data"]["id"].as_str().unwrap().to_string());
+    }
+
+    let (_, first_link) = post_json(
+        app.clone(),
+        &format!("/api/planning/tasks/{}/blockers", task_ids[0]),
+        serde_json::json!({
+            "blocker_task_id": task_ids[1],
+            "actor": {"kind": "agent", "id": "Codex"}
+        }),
+    )
+    .await;
+    assert_eq!(first_link["success"], true);
+    assert_eq!(first_link["data"]["events"][0]["actor_kind"], "agent");
+    assert_eq!(first_link["data"]["events"][0]["actor_id"], "Codex");
+
+    let (_, cycle) = post_json(
+        app,
+        &format!("/api/planning/tasks/{}/blockers", task_ids[1]),
+        serde_json::json!({"blocker_task_id": task_ids[0]}),
+    )
+    .await;
+    assert_eq!(cycle["success"], false);
+    assert_eq!(cycle["error_code"], "validation");
+    assert!(cycle["error"].as_str().unwrap().contains("cycle"));
+}
+
 fn test_state() -> AppState {
     isolate_config_dir();
     let db = Arc::new(kronn::db::Database::open_in_memory().expect("Failed to open in-memory DB"));

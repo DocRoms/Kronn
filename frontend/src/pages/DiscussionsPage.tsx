@@ -5,8 +5,10 @@ import { unseenBasis } from '../components/SwipeableDiscItem';
 import { ToolCallsGroup } from '../components/ToolCallsGroup';
 import { groupMessagesWithToolFold } from '../lib/discussionMessageGrouping';
 import { ChatInput } from '../components/ChatInput';
-import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi } from '../lib/api';
+import { discussions as discussionsApi, projects as projectsApi, skills as skillsApi, profiles as profilesApi, directives as directivesApi, contacts as contactsApi, workflows as workflowsApi, quickPrompts as quickPromptsApi, planning as planningApi } from '../lib/api';
 import { GitPanel } from '../components/GitPanel';
+import { DiscussionPlanPanel } from '../components/DiscussionPlanPanel';
+import { DiscussionSettingsPanel } from '../components/DiscussionSettingsPanel';
 import { TestModeBanner } from '../components/TestModeBanner';
 import { TestModeModal } from '../components/TestModeModal';
 import type { TestModeBlocker } from '../types/extensions';
@@ -19,7 +21,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary } from '../types/generated';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue } from '../hooks/useMessageQueue';
@@ -174,6 +176,22 @@ export function DiscussionsPage({
   const [activeDiscussionId, setActiveDiscussionId] = useState<string | null>(initialActiveDiscussionId ?? null);
   const [showNewDiscussion, setShowNewDiscussion] = useState(false);
   const [showGitPanel, setShowGitPanel] = useState(false);
+  const [gitPanelExpanded, setGitPanelExpanded] = useState(false);
+  const [showPlanPanel, setShowPlanPanel] = useState(false);
+  const [showSettingsPanel, setShowSettingsPanel] = useState(false);
+  const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+
+  useEffect(() => {
+    if (!showGitPanel && !showPlanPanel && !showSettingsPanel) return;
+    const closePanel = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setShowGitPanel(false);
+      setShowPlanPanel(false);
+      setShowSettingsPanel(false);
+    };
+    window.addEventListener('keydown', closePanel);
+    return () => window.removeEventListener('keydown', closePanel);
+  }, [showGitPanel, showPlanPanel, showSettingsPanel]);
   // 0.8.3 (#280) — flag set when an audit is running on the same
   // project as the active discussion. Drives the banner that warns
   // the user "MCPs are temporarily filtered for audit perf — re-run
@@ -363,6 +381,42 @@ export function DiscussionsPage({
   const activeDiscussion = (activeDiscussionId && loadedDiscussions[activeDiscussionId])
     ? loadedDiscussions[activeDiscussionId]
     : allDiscussions.find(d => d.id === activeDiscussionId) ?? null;
+
+  useEffect(() => {
+    if (!activeDiscussionId) return;
+    let cancelled = false;
+    planningApi.discussionPlan(activeDiscussionId)
+      .then(plan => {
+        if (!cancelled) setDiscussionPlan(plan);
+      })
+      .catch(() => {
+        if (!cancelled) setDiscussionPlan(null);
+      });
+    return () => { cancelled = true; };
+  }, [activeDiscussionId]);
+
+  useEffect(() => {
+    const refreshPlan = (event: Event) => {
+      const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
+      if (!discussionId || discussionId !== activeDiscussionId) return;
+      planningApi.discussionPlan(discussionId)
+        .then(setDiscussionPlan)
+        .catch(() => { /* panel will surface a fetch error when opened */ });
+    };
+    const openPlan = (event: Event) => {
+      const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
+      if (discussionId !== activeDiscussionId) return;
+      setShowGitPanel(false);
+      setShowSettingsPanel(false);
+      setShowPlanPanel(true);
+    };
+    window.addEventListener('kronn:plan-changed', refreshPlan);
+    window.addEventListener('kronn:open-discussion-plan', openPlan);
+    return () => {
+      window.removeEventListener('kronn:plan-changed', refreshPlan);
+      window.removeEventListener('kronn:open-discussion-plan', openPlan);
+    };
+  }, [activeDiscussionId]);
   const batchReviewRows = useMemo(
     () => buildBatchTriageRows(batchReviewDiscs),
     [batchReviewDiscs],
@@ -1446,6 +1500,34 @@ export function DiscussionsPage({
     await discussionsApi.update(discId, { archived: false });
     refetchDiscussions();
   }, [refetchDiscussions]);
+  const handleBulkArchive = useCallback(async (discIds: string[]) => {
+    const results = await Promise.allSettled(
+      discIds.map(discId => discussionsApi.update(discId, { archived: true })),
+    );
+    setActiveDiscussionId(previous => (
+      previous && discIds.includes(previous) ? null : previous
+    ));
+    refetchDiscussions();
+    if (results.some(result => result.status === 'rejected')) {
+      throw new Error('bulk archive failed');
+    }
+  }, [refetchDiscussions]);
+  const handleBulkDelete = useCallback(async (discIds: string[]) => {
+    for (const discId of discIds) {
+      try { abortControllers.current[discId]?.abort(); } catch { /* noop */ }
+      cleanupStreamBase(discId);
+    }
+    const results = await Promise.allSettled(
+      discIds.map(discId => discussionsApi.delete(discId)),
+    );
+    setActiveDiscussionId(previous => (
+      previous && discIds.includes(previous) ? null : previous
+    ));
+    refetchDiscussions();
+    if (results.some(result => result.status === 'rejected')) {
+      throw new Error('bulk delete failed');
+    }
+  }, [abortControllers, cleanupStreamBase, refetchDiscussions]);
 
   const handleToggleGroup = useCallback((key: string) => {
     setCollapsedDiscGroups(prev => {
@@ -1716,7 +1798,7 @@ export function DiscussionsPage({
   return (
     <div className="disc-root">
       {/* Sidebar — collapsed mode shows a thin rail with expand button */}
-      {!isMobile && sidebarCollapsed ? (
+      {!isMobile && (sidebarCollapsed || gitPanelExpanded) ? (
         <div className="disc-sidebar-rail" onClick={() => setSidebarCollapsed(false)} title="Expand sidebar">
           <ChevronRight size={16} />
         </div>
@@ -1737,6 +1819,8 @@ export function DiscussionsPage({
           onArchive={handleDiscArchive}
           onUnarchive={handleDiscUnarchive}
           onDelete={handleDiscDelete}
+          onBulkArchive={handleBulkArchive}
+          onBulkDelete={handleBulkDelete}
           onTogglePin={async (discId, pinned) => {
             try {
               await discussionsApi.update(discId, { pinned });
@@ -1854,6 +1938,8 @@ export function DiscussionsPage({
             onGoCommit={() => {
               setTestModeBlocker(null);
               setTestModePendingDiscId(null);
+              setShowPlanPanel(false);
+              setShowSettingsPanel(false);
               setShowGitPanel(true);
             }}
             onCancel={() => { setTestModeBlocker(null); setTestModePendingDiscId(null); }}
@@ -1956,17 +2042,31 @@ export function DiscussionsPage({
               discussion={activeDiscussion}
               projects={projects}
               agents={agents}
-              availableSkills={availableSkills}
-              availableProfiles={availableProfiles}
-              availableDirectives={availableDirectives}
-              mcpConfigs={mcpConfigs}
-              mcpIncompatibilities={mcpIncompatibilities}
               showGitPanel={showGitPanel}
+              showPlanPanel={showPlanPanel}
+              showSettingsPanel={showSettingsPanel}
+              planCompleted={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.completed_active : 0}
+              planTotal={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.total_active : 0}
+              planLater={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.length : 0}
               isMobile={isMobile}
               sending={sending}
               pendingFilesCount={pendingFilesCount}
               onRequestTestMode={() => { void handleRequestTestMode(activeDiscussion.id); }}
-              onToggleGitPanel={() => setShowGitPanel(prev => !prev)}
+              onToggleGitPanel={() => {
+                setShowPlanPanel(false);
+                setShowSettingsPanel(false);
+                setShowGitPanel(prev => !prev);
+              }}
+              onTogglePlanPanel={() => {
+                setShowGitPanel(false);
+                setShowSettingsPanel(false);
+                setShowPlanPanel(prev => !prev);
+              }}
+              onToggleSettingsPanel={() => {
+                setShowGitPanel(false);
+                setShowPlanPanel(false);
+                setShowSettingsPanel(prev => !prev);
+              }}
               onToggleSidebar={() => setSidebarOpen(true)}
               onDelete={async (discId) => {
                 if (!confirm(t('disc.confirmDelete'))) return;
@@ -1976,21 +2076,11 @@ export function DiscussionsPage({
               }}
               onDiscussionUpdated={handleDiscussionUpdated}
               onAgentSwitch={handleAgentSwitch}
-              contacts={contactsList}
-              onShare={async (contactIds) => {
-                try {
-                  await discussionsApi.share(activeDiscussion.id, contactIds);
-                  toast(t('contacts.added'), 'success');
-                  reloadDiscussion(activeDiscussion.id);
-                } catch {
-                  toast(t('contacts.addError'), 'error');
-                }
-              }}
               toast={toast}
               t={t}
             />
 
-            {/* Messages + Git Panel side by side */}
+            {/* Messages + one shared utility panel side by side */}
             <div className="disc-messages-git-row">
             <div className="disc-messages-col">
 
@@ -3008,12 +3098,50 @@ export function DiscussionsPage({
               <GitPanel
                 projectId={activeDiscussion.project_id}
                 discussionId={activeDiscussion.workspace_mode === 'Isolated' ? activeDiscussion.id : undefined}
-                onClose={() => setShowGitPanel(false)}
+                onClose={() => {
+                  setGitPanelExpanded(false);
+                  setShowGitPanel(false);
+                }}
+                onExpandedChange={setGitPanelExpanded}
                 terminalEnabled={agentAccess ? Object.values(agentAccess).some(v => (v as { full_access?: boolean } | undefined)?.full_access) : false}
               />
             )}
 
-            </div>{/* end flex row (messages + git panel) */}
+            {showPlanPanel && (
+              <DiscussionPlanPanel
+                discussionId={activeDiscussion.id}
+                onClose={() => setShowPlanPanel(false)}
+                onChanged={setDiscussionPlan}
+                toast={toast}
+              />
+            )}
+
+            {showSettingsPanel && (
+              <DiscussionSettingsPanel
+                discussion={activeDiscussion}
+                projects={projects}
+                availableSkills={availableSkills}
+                availableProfiles={availableProfiles}
+                availableDirectives={availableDirectives}
+                mcpConfigs={mcpConfigs}
+                mcpIncompatibilities={mcpIncompatibilities}
+                contacts={contactsList}
+                onClose={() => setShowSettingsPanel(false)}
+                onDiscussionUpdated={handleDiscussionUpdated}
+                onShare={async (contactIds) => {
+                  try {
+                    await discussionsApi.share(activeDiscussion.id, contactIds);
+                    toast(t('contacts.added'), 'success');
+                    reloadDiscussion(activeDiscussion.id);
+                  } catch {
+                    toast(t('contacts.addError'), 'error');
+                  }
+                }}
+                toast={toast}
+              />
+            )}
+
+            </div>{/* end flex row (messages + utility panel) */}
           </>
         ) : !showNewDiscussion && (
           <div className="disc-placeholder">
