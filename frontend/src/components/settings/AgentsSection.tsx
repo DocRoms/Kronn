@@ -757,8 +757,13 @@ export function AgentsSection({
                 kiro: { economy: [], default: [], reasoning: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
                 vibe: { economy: [], default: [], reasoning: [], fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null, modelsUrl: '' },
                 copilot_cli: {
-                  economy: ['gpt-4o-mini'], default: ['o4-mini', 'gpt-4o-mini'], reasoning: ['o4-mini'],
-                  fallbackEconomy: 'gpt-4o-mini', fallbackDefault: null, fallbackReasoning: 'o4-mini',
+                  // Copilot's enabled models depend on the account and its
+                  // policy. Keep only current CLI identifiers here; an empty
+                  // tier lets Copilot choose an account-compatible model.
+                  economy: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
+                  default: ['auto', 'claude-sonnet-4-5', 'claude-sonnet-4', 'gpt-5'],
+                  reasoning: ['auto', 'gpt-5', 'claude-sonnet-4-5', 'claude-sonnet-4'],
+                  fallbackEconomy: null, fallbackDefault: null, fallbackReasoning: null,
                   modelsUrl: 'https://docs.github.com/en/copilot',
                 },
               };

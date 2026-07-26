@@ -54,6 +54,31 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
     expect(chips[1].textContent).toContain('Codex');
   });
 
+  it('shows only an explicitly declared JOIN model and labels it as join metadata', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 1, agent_type: 'ClaudeCode', model: 'claude-sonnet-4-5',
+        session_id: 'sess-A', role: 'peer', status: 'active',
+      },
+      {
+        id: 2, agent_type: 'Codex', model: null,
+        session_id: 'sess-B', role: 'peer', status: 'active',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-models" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const models = document.querySelectorAll('.disc-participant-model');
+    expect(models).toHaveLength(1);
+    expect(models[0].textContent).toContain('claude-sonnet-4-5');
+    expect(models[0].getAttribute('title'))
+      .toBe('disc.modelDeclaredAtJoin(claude-sonnet-4-5)');
+    expect(document.body.textContent).not.toContain('undefined');
+  });
+
   it('renders paused participants with the paused style attribute', async () => {
     // Visual differentiation : the chip has `data-status="paused"`,
     // CSS turns it grey. The test checks the attribute rather than
@@ -134,8 +159,8 @@ describe('DiscParticipantsHeader — 0.8.6 phase 2', () => {
   });
 });
 
-describe('activity placeholder — presence phase 1 (0.8.12 PR B)', () => {
-  it('renders the i18n label for a live activity and nothing when absent', async () => {
+describe('honest participant presence — 0.9.2 G', () => {
+  it('keeps a conservative legacy fallback when the backend has no presence_state', async () => {
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', activity: 'listening' },
       { id: 2, agent_type: 'Codex', session_id: 'sB', role: 'peer', status: 'active', activity: 'reading' },
@@ -147,16 +172,13 @@ describe('activity placeholder — presence phase 1 (0.8.12 PR B)', () => {
       await Promise.resolve();
     });
     const labels = Array.from(document.querySelectorAll('.disc-participant-activity'));
-    expect(labels.length, 'only live activities render').toBe(2);
-    expect(labels[0].textContent).toBe('disc.activityListening');
+    expect(labels.length, 'every participant gets an honest state').toBe(3);
+    expect(labels[0].textContent).toBe('disc.presenceListening');
     expect(labels[1].textContent).toBe('disc.activityReading');
+    expect(labels[2].textContent).toBe('disc.presenceOffline');
   });
 
-  it('a waiting participant with a stale heartbeat renders fresh (dormant), not away', async () => {
-    // Presence-gap fix, rendered: a dormant agent mid-pacing-pause keeps a
-    // fresh dot (activity outranks the aged last_seen) and shows the
-    // "dormant" label — instead of flipping to "away" and prompting a
-    // needless relaunch.
+  it('a waiting legacy participant renders dormant, not falsely listening', async () => {
     const staleHeartbeat = new Date(Date.now() - 20 * 60_000).toISOString();
     (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
       { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', activity: 'waiting', last_seen: staleHeartbeat },
@@ -167,9 +189,10 @@ describe('activity placeholder — presence phase 1 (0.8.12 PR B)', () => {
       await Promise.resolve();
     });
     const chip = document.querySelector('.disc-participant-chip');
-    expect(chip?.getAttribute('data-freshness'), 'waiting outranks stale last_seen').toBe('fresh');
+    expect(chip?.getAttribute('data-presence')).toBe('dormant');
+    expect(chip?.getAttribute('data-freshness')).toBe('idle');
     const label = document.querySelector('.disc-participant-activity');
-    expect(label?.textContent).toBe('disc.activityWaiting');
+    expect(label?.textContent).toBe('disc.presenceDormant');
   });
 
   it('never renders a raw token for an unknown future activity value', async () => {
@@ -181,8 +204,115 @@ describe('activity placeholder — presence phase 1 (0.8.12 PR B)', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(document.querySelector('.disc-participant-activity')).toBeNull();
+    expect(document.querySelector('.disc-participant-activity')?.textContent)
+      .toBe('disc.presenceOffline');
     expect(document.body.textContent).not.toContain('compiling');
+  });
+
+  it('renders server-derived listening, dormant and offline states plus write failure', async () => {
+    const nextPollAt = new Date(Date.now() + 30_000).toISOString();
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active',
+        presence_state: 'listening', read_live: true, write_state: 'ok',
+        wake_mode: 'external_poll', next_poll_at: null,
+      },
+      {
+        id: 2, agent_type: 'Codex', session_id: 'sB', role: 'peer', status: 'active',
+        presence_state: 'dormant', read_live: false, write_state: 'unknown',
+        wake_mode: 'external_poll', next_poll_at: nextPollAt,
+      },
+      {
+        id: 3, agent_type: 'GeminiCli', session_id: 'sC', role: 'peer', status: 'active',
+        presence_state: 'offline', read_live: false, write_state: 'failed',
+        wake_mode: 'external_poll', next_poll_at: null,
+      },
+      {
+        id: 4, agent_type: 'Ollama', session_id: 'sD', role: 'peer', status: 'active',
+        presence_state: 'running', read_live: false, write_state: 'unknown',
+        wake_mode: 'native_dispatch', next_poll_at: null,
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-honest" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const chips = Array.from(document.querySelectorAll('.disc-participant-chip'));
+    expect(chips.map(chip => chip.getAttribute('data-presence')))
+      .toEqual(['listening', 'dormant', 'offline', 'running']);
+    expect(chips[0].getAttribute('data-read-live')).toBe('true');
+    expect(chips[1].textContent).toContain('disc.presenceDormantSeconds');
+    expect(chips[2].textContent).toContain('disc.presenceOffline');
+    expect(chips[2].textContent).toContain('disc.writeFailed');
+    expect(chips[3].querySelector('.disc-participant-running')).not.toBeNull();
+  });
+
+  it('projects paused participants to the explicit paused/offline state', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: 1, agent_type: 'Codex', session_id: 'sA', role: 'peer', status: 'paused',
+        presence_state: 'listening', read_live: true, write_state: 'ok',
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-paused" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chip = document.querySelector('.disc-participant-chip');
+    expect(chip?.getAttribute('data-presence')).toBe('offline');
+    expect(chip?.textContent).toContain('disc.presencePaused');
+  });
+
+  it('labels a deferred native obligation as waiting for a runtime', async () => {
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      {
+        id: -1, agent_type: 'Vibe', session_id: null, role: 'peer', status: 'active',
+        presence_state: 'dormant', read_live: false, write_state: 'unknown',
+        wake_mode: 'native_dispatch',
+        next_poll_at: new Date(Date.now() + 30_000).toISOString(),
+      },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-obligation" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const chip = document.querySelector('.disc-participant-chip');
+    expect(chip?.getAttribute('data-wake-mode')).toBe('native_dispatch');
+    expect(chip?.textContent).toContain('disc.presenceAwaitingRuntime');
+    expect(chip?.textContent).not.toContain('disc.presenceDormantSeconds');
+  });
+
+  it('pins the invite button OUTSIDE the scrollable chip strip (3 offline peers)', async () => {
+    // Regression: with 3+ offline "reconnexion requise" peers the chip strip
+    // widens; the invite button must stay a pinned sibling of the scrollable
+    // list, never a wrapped/scrolled-away last item that gets clipped.
+    (discussionsApi.participants as ReturnType<typeof vi.fn>).mockResolvedValue([
+      { id: 1, agent_type: 'ClaudeCode', session_id: 'sA', role: 'owner', status: 'active', presence_state: 'offline' },
+      { id: 2, agent_type: 'Codex', session_id: 'sB', role: 'peer', status: 'active', presence_state: 'offline' },
+      { id: 3, agent_type: 'GeminiCli', session_id: 'sC', role: 'peer', status: 'active', presence_state: 'offline' },
+    ]);
+    await act(async () => {
+      render(<DiscParticipantsHeader discId="d-3offline" toast={toast} t={t} />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const list = document.querySelector('.disc-participants-list');
+    const inviteBtn = document.querySelector('.disc-participants-invite-btn');
+    // All three chips live INSIDE the scrollable strip.
+    expect(list?.querySelectorAll('.disc-participant-chip')).toHaveLength(3);
+    // The invite button is a sibling of the strip, NOT nested inside it.
+    expect(inviteBtn).not.toBeNull();
+    expect(list?.contains(inviteBtn as Node)).toBe(false);
+    expect(inviteBtn?.parentElement?.classList.contains('disc-participants-row')).toBe(true);
+    // Every chip renders the honest "offline" state.
+    document.querySelectorAll('.disc-participant-chip').forEach(chip => {
+      expect(chip.getAttribute('data-presence')).toBe('offline');
+    });
   });
 });
 

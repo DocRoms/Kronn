@@ -1,0 +1,23 @@
+{
+  "_comment": "Single source of truth for the Planning contract carried by TWO surfaces: the Kronn-launched agent prompt notice (backend/src/api/disc_prompts.rs :: build_agent_prompt / introspection_notice) and the kronn-internal MCP server `instructions` block (backend/scripts/disc-introspection-mcp.py :: initialize). A parity test on each side asserts its surface still carries every invariant below. Editing the contract means editing THIS file; the two tests then tell you which surface you forgot to update. Checks are presence-of-invariant, never textual equality across locales/surfaces. See KT-29 (0.9.2-I).",
+  "fence": "kronn-plan-action",
+  "proposal_actions": ["create", "create_many", "status", "complete", "unblock", "open"],
+  "read_tools": ["plan_get", "task_list", "task_get", "task_changes", "proposal_list", "proposal_get"],
+  "forbidden_decision_tools": ["proposal_accept", "proposal_reject", "proposal_decide"],
+  "aliases": {
+    "en": ["the plan", "the tasks", "what remains", "the priority"],
+    "fr": ["le plan", "les tâches", "ce qu'il reste", "la priorité"],
+    "es": ["el plan", "las tareas", "lo que queda", "la prioridad"]
+  },
+  "no_prose_only": {
+    "en": "prose-only",
+    "fr": "simple résumé",
+    "es": "simple resumen"
+  },
+  "human_decides": {
+    "_comment": "Agents may READ and PROPOSE; only a human accepts/rejects/decides a DURABLE proposal. This gates the decision, not every Planning write (unambiguous intent still applies directly).",
+    "en": "only a human",
+    "fr": "seul un humain",
+    "es": "solo un humano"
+  }
+}

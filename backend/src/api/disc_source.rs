@@ -190,6 +190,11 @@ pub struct DiscAppendMessage {
     pub content: String,
     #[serde(default)]
     pub agent_type: Option<AgentType>,
+    /// Explicit one-shot responder requested by a structured `@agent`
+    /// mention. The append transaction consumes this as a durable dispatch
+    /// override; ordinary prose must leave it unset.
+    #[serde(default)]
+    pub target_agent: Option<AgentType>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]
@@ -275,6 +280,68 @@ pub async fn disc_append(
     // so the posting agent can self-correct.
     let live_agent_append =
         req.messages.len() == 1 && matches!(req.messages[0].role, MessageRole::Agent);
+    let live_peer_should_dispatch = if live_agent_append && req.session_id.is_some() {
+        let did = req.disc_id.clone();
+        let native_agent = format!("{:?}", disc.agent);
+        state
+            .db
+            .with_conn(move |conn| {
+                let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
+                let native_agent_live =
+                    crate::db::discussion_sessions::count_live_participants_for_agent(
+                        conn,
+                        &did,
+                        &native_agent,
+                    )?;
+                Ok(!no_agent && native_agent_live == 0)
+            })
+            .await
+            // A presence lookup failure must not create a duplicate native
+            // responder. The joined peer's message is still persisted.
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    // Structured `@agent` mention (0.9.2-G): a live peer append carrying an
+    // explicit `target_agent` requests THAT agent. Anti-loop: the field is set
+    // by the bridge from a structured mention, never inferred from prose, and
+    // a self-mention is dropped.
+    let requested_target: Option<AgentType> = if live_agent_append && req.session_id.is_some() {
+        req.messages[0]
+            .target_agent
+            .clone()
+            .filter(|t| req.messages[0].agent_type.as_ref() != Some(t))
+    } else {
+        None
+    };
+    // A target that already has a joined peer must answer through that peer:
+    // spawning a second native runtime would create the exact double-responder
+    // the sticky gate prevents. Only an ABSENT target gets the durable one-shot
+    // obligation (so @ollama still works when no Ollama peer is present).
+    // Lookup failures fail closed to peer ownership — duplicate replies are
+    // worse than leaving an explicit mention for the existing room members.
+    let targeted_agent = if let Some(target) = requested_target.clone() {
+        let did = req.disc_id.clone();
+        let target_name = format!("{target:?}");
+        let target_is_live = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::count_live_participants_for_agent(
+                    conn,
+                    &did,
+                    &target_name,
+                )
+            })
+            .await
+            .map(|count| count > 0)
+            .unwrap_or(true);
+        (!target_is_live).then_some(target)
+    } else {
+        None
+    };
+    // Any explicit target supersedes the native-principal fallback, including
+    // when its live peer owns the reply and no dispatch row is needed.
+    let native_should_dispatch = live_peer_should_dispatch && requested_target.is_none();
     let mut live_lint_report: Option<crate::core::anti_halluc::LintReport> = None;
     let mut lint_summary: Option<AppendLintSummary> = None;
     if live_agent_append && crate::core::anti_halluc::current_mode().is_active() {
@@ -372,10 +439,29 @@ pub async fn disc_append(
         };
         let did_insert = did_for_loop.clone();
         let msg_clone = msg.clone();
+        let dispatch_job_id = Uuid::new_v4().to_string();
+        let targeted = targeted_agent.clone();
         let insert_result = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
+                if let Some(ref target) = targeted {
+                    crate::db::discussions::insert_message_with_targeted_dispatch(
+                        conn,
+                        &did_insert,
+                        &msg_clone,
+                        &dispatch_job_id,
+                        target,
+                    )
+                } else if native_should_dispatch {
+                    crate::db::discussions::insert_message_with_dispatch(
+                        conn,
+                        &did_insert,
+                        &msg_clone,
+                        &dispatch_job_id,
+                    )
+                } else {
+                    crate::db::discussions::insert_message(conn, &did_insert, &msg_clone)
+                }
             })
             .await;
         match insert_result {
@@ -436,12 +522,21 @@ pub async fn disc_append(
                                 &did_touch,
                                 &agent_type,
                                 Some(&session_id),
+                            )?;
+                            // 0.9.2-G — a landed append IS proof the write path
+                            // works: write-liveness becomes `ok`.
+                            crate::db::discussion_sessions::mark_write_ok(
+                                conn,
+                                &did_touch,
+                                &agent_type,
+                                Some(&session_id),
+                                chrono::Utc::now(),
                             )
                         })
                         .await
                     {
                         tracing::warn!(
-                            "disc_append: failed to bump heartbeat / clear activity: {e}"
+                            "disc_append: failed to bump heartbeat / clear activity / write-state: {e}"
                         );
                     }
                 }
@@ -452,35 +547,30 @@ pub async fn disc_append(
     // Room routing is intentionally asymmetric:
     // - a HUMAN message skips Kronn's native runner while joined MCP peers
     //   are live (messaging.rs), so the user does not get two answers;
-    // - a joined PEER's reply must wake the native principal, otherwise the
-    //   room stalls after `disc_append` (the message was persisted/federated
-    //   but nobody answered it).
+    // - a joined PEER's reply wakes the native principal only when no live
+    //   session of that principal's agent type already owns the room. A live
+    //   Claude peer can wake an absent Codex principal, while a live Codex MCP
+    //   session must not spawn a second Codex process for its own append.
     //
     // A session id distinguishes a live joined peer from historical imports.
     // Bulk appends, duplicates and no-agent rooms never trigger execution.
-    if is_live_peer_turn(live_agent_append, req.session_id.as_deref(), appended) {
-        let did_no_agent = req.disc_id.clone();
-        let no_agent = state
-            .db
-            .with_conn(move |conn| crate::db::discussions::disc_is_no_agent(conn, &did_no_agent))
-            .await
-            .unwrap_or(true);
-        if !no_agent {
-            let started = crate::api::discussions::streaming::spawn_agent_stream_if_idle(
-                state.clone(),
-                req.disc_id.clone(),
+    let native_dispatched =
+        is_live_peer_turn(live_agent_append, req.session_id.as_deref(), appended)
+            && native_should_dispatch;
+    let targeted_dispatched = targeted_agent.is_some() && appended == 1;
+    if native_dispatched || targeted_dispatched {
+        state.agent_dispatch_notify.notify_one();
+        if let Some(ref target) = targeted_agent.filter(|_| targeted_dispatched) {
+            tracing::info!(
+                "disc_append: live peer mentioned {:?} on {} — queued durable targeted turn",
+                target,
+                req.disc_id
             );
-            if started {
-                tracing::info!(
-                    "disc_append: live peer replied on {} — waking native discussion agent",
-                    req.disc_id
-                );
-            } else {
-                tracing::debug!(
-                    "disc_append: native agent already running on {} — peer reply persisted without duplicate launch",
-                    req.disc_id
-                );
-            }
+        } else {
+            tracing::info!(
+                "disc_append: live peer replied on {} — queued durable native-agent turn",
+                req.disc_id
+            );
         }
     }
 
@@ -828,6 +918,7 @@ mod tests {
             role: MessageRole::Agent,
             content: content.into(),
             agent_type: Some(AgentType::Codex),
+            target_agent: None,
         }
     }
 
@@ -923,6 +1014,276 @@ mod tests {
         assert!(
             state.cancel_registry.lock().unwrap().is_empty(),
             "a no-agent room persists the peer message without starting a native runner"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_peer_append_commits_a_durable_native_dispatch() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions SET no_agent = 0 WHERE id = 'd-lint'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        append_as(
+            &state,
+            vec![agent_msg("s-durable", "réponse du pair")],
+            Some("joined-session"),
+        )
+        .await;
+
+        let (job, awaiting) = state
+            .db
+            .with_conn(|conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let awaiting = conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                Ok((job, awaiting))
+            })
+            .await
+            .unwrap();
+        let job = job.expect("peer turn must own a durable native response");
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+        assert!(awaiting);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_native_agent_session_prevents_a_duplicate_dispatch() {
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'Codex'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        append_as(
+            &state,
+            vec![agent_msg(
+                "same-agent-turn",
+                "réponse du Codex déjà connecté",
+            )],
+            Some("joined-session"),
+        )
+        .await;
+
+        let (job, awaiting) = state
+            .db
+            .with_conn(|conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let awaiting = conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                Ok((job, awaiting))
+            })
+            .await
+            .unwrap();
+        assert!(
+            job.is_none(),
+            "a live session of the native agent type already owns the reply"
+        );
+        assert!(!awaiting);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_peer_mention_dispatches_targeted_agent_bypassing_native_gate() {
+        // 0.9.2-G: a joined Codex peer mentions @ollama. Even though the native
+        // principal (Codex) is live — which suppresses the NATIVE dispatch — the
+        // structured target must still queue a durable one-shot for Ollama, or
+        // the mentioned agent never answers (the peer→peer targeting gap).
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'Codex'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("mention-ollama", "@ollama peux-tu confirmer ?");
+        msg.target_agent = Some(AgentType::Ollama);
+        append_as(&state, vec![msg], Some("joined-session")).await;
+
+        let (job, awaiting) = state
+            .db
+            .with_conn(|conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let awaiting = conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                Ok((job, awaiting))
+            })
+            .await
+            .unwrap();
+        let job = job.expect("a structured mention must own a durable targeted response");
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+        assert_eq!(
+            job.agent_override,
+            Some(AgentType::Ollama),
+            "the durable job must target the mentioned agent, not the native principal"
+        );
+        assert!(awaiting);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn live_peer_mention_does_not_spawn_duplicate_native_target() {
+        // Regression (live room 0.9.2): Vibe mentioned @codex while a joined
+        // Codex peer was actively watching. The targeted path bypassed every
+        // liveness gate and spawned a second native Codex, producing two near-
+        // identical replies. A live target owns the mention; no job is needed.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'ClaudeCode'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Vibe",
+                    Some("vibe-session"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("codex-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("vibe-mentions-live-codex", "@codex peux-tu confirmer ?");
+        msg.agent_type = Some(AgentType::Vibe);
+        msg.target_agent = Some(AgentType::Codex);
+        append_as(&state, vec![msg], Some("vibe-session")).await;
+
+        let (job, awaiting) = state
+            .db
+            .with_conn(|conn| {
+                let job = crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint")?;
+                let awaiting = conn.query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd-lint'",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )?;
+                Ok((job, awaiting))
+            })
+            .await
+            .unwrap();
+        assert!(
+            job.is_none(),
+            "the joined Codex peer owns @codex; a native Codex would duplicate it"
+        );
+        assert!(
+            !awaiting,
+            "no native response is owed while the peer is live"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn self_mention_does_not_dispatch() {
+        // Anti-loop: an agent mentioning its own type is a no-op for targeting.
+        // With the native principal (Codex) live, neither the targeted nor the
+        // native path fires — so a self-mention never spawns a responder.
+        crate::core::anti_halluc::set_mode("off");
+        let (state, _tmp) = lint_state(false).await;
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 0, agent = 'Codex'
+                     WHERE id = 'd-lint'",
+                    [],
+                )?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-lint",
+                    "Codex",
+                    Some("joined-session"),
+                    "peer",
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let mut msg = agent_msg("self-mention", "@codex je me réponds ?");
+        msg.target_agent = Some(AgentType::Codex);
+        append_as(&state, vec![msg], Some("joined-session")).await;
+
+        let job = state
+            .db
+            .with_conn(|conn| crate::db::agent_dispatch::find_active_for_discussion(conn, "d-lint"))
+            .await
+            .unwrap();
+        assert!(
+            job.is_none(),
+            "a self-mention must not create a dispatch, and the live native session suppresses the native path"
         );
     }
 
@@ -1026,6 +1387,7 @@ mod tests {
             role: MessageRole::User,
             content: "look at [src: file: src/ghost.rs:1]".into(),
             agent_type: None,
+            target_agent: None,
         };
         let out = append(&state, vec![user]).await;
         assert!(out.lint.is_none(), "user messages must not lint");
@@ -1134,6 +1496,32 @@ mod tests {
             bad.is_err(),
             "missing source_msg_id must fail deser (dedup invariant)"
         );
+    }
+
+    #[test]
+    fn disc_append_target_agent_is_optional_and_typed() {
+        let without_target = serde_json::from_str::<DiscAppendMessage>(
+            r#"{
+                "source_msg_id": "source-1",
+                "role": "Agent",
+                "content": "plain peer message",
+                "agent_type": "Codex"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(without_target.target_agent, None);
+
+        let targeted = serde_json::from_str::<DiscAppendMessage>(
+            r#"{
+                "source_msg_id": "source-2",
+                "role": "Agent",
+                "content": "@ollama continue",
+                "agent_type": "ClaudeCode",
+                "target_agent": "Ollama"
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(targeted.target_agent, Some(AgentType::Ollama));
     }
 
     #[test]

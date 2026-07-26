@@ -44,6 +44,16 @@ teardown() {
     assert_output --partial "Release version 1.2.3 is synchronized everywhere"
 }
 
+@test "version sync accepts a dated changelog release heading" {
+    printf '## [1.2.3] - 2026-07-27\n' > "$TEST_TMPDIR/CHANGELOG.md"
+
+    run env KRONN_VERSION_ROOT="$TEST_TMPDIR" \
+        "$PROJECT_ROOT/scripts/check-version-sync.sh"
+
+    assert_success
+    assert_output --partial "Release version 1.2.3 is synchronized everywhere"
+}
+
 @test "version sync rejects stale README clone instructions" {
     printf '> **Status: 1.2.3 (current release).**\ngit clone --branch 1.2.2 repo\n' \
         > "$TEST_TMPDIR/README.md"

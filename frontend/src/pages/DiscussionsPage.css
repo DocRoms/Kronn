@@ -1174,6 +1174,30 @@
   flex-shrink: 0;
 }
 
+/* Three or more joined CLIs no longer compete with the discussion title for
+ * the same horizontal line. Keep the compact one-line header for the common
+ * 0–2 participant case, then promote the participant strip to its own row.
+ * This preserves the title/id/actions and still lets a large room scroll its
+ * participant strip without growing the whole page indefinitely. */
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3)) {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+}
+
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+  .disc-chat-header-title,
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+  .disc-chat-header-presence {
+  width: 100%;
+}
+
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+  .disc-chat-header-presence {
+  overflow: hidden;
+}
+
 /* 0.8.5 — short disc-id pill in ChatHeader. Click → copy full UUID
  * to clipboard. Neutral ghost colour so it doesn't compete with the
  * introspection pill or title — but mono font for the id readability. */
@@ -1892,6 +1916,20 @@
   color: var(--kr-text-muted);
 }
 
+.disc-plan-pending {
+  display: inline-grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--kr-warning);
+  color: var(--kr-bg-base);
+  font-family: var(--kr-font-mono);
+  font-size: 9px;
+  font-weight: 750;
+}
+
 .planning-proposal {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -1933,14 +1971,39 @@
   white-space: nowrap;
 }
 
+.planning-proposal-task-list {
+  display: grid;
+  gap: 3px;
+  max-height: 132px;
+  margin: 6px 0 0;
+  padding: 0 4px 0 20px;
+  overflow-y: auto;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+}
+
+.planning-proposal-task-list li {
+  padding-left: 2px;
+  overflow-wrap: anywhere;
+}
+
+.planning-proposal-task-list li::marker {
+  color: var(--kr-accent-ink);
+  font-family: var(--kr-font-mono);
+  font-size: 10px;
+}
+
 .planning-proposal-main > small {
   color: var(--kr-error);
 }
 
-.planning-proposal > button {
+.planning-proposal-open {
   display: inline-flex;
   align-items: center;
   gap: 5px;
+  width: max-content;
+  margin-top: 7px;
   padding: 5px 8px;
   border: 0;
   border-radius: var(--kr-r-sm);
@@ -1951,17 +2014,146 @@
   cursor: pointer;
 }
 
-.planning-proposal[data-state="done"] {
+.planning-proposal[data-state="applied"],
+.planning-proposal[data-state="dismissed"] {
   border-color: rgba(var(--kr-success-rgb), 0.3);
   background: rgba(var(--kr-success-rgb), 0.06);
 }
 
-.planning-proposal[data-state="done"] > button {
-  background: var(--kr-success);
+.planning-proposal-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
 }
 
 .planning-proposal[data-state="error"] {
   border-color: rgba(var(--kr-error-rgb), 0.3);
+}
+
+.planning-review {
+  display: grid;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.planning-review-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+}
+
+.planning-review-item[data-state="accepted"] {
+  border-color: rgba(var(--kr-success-rgb), 0.25);
+}
+
+.planning-review-item[data-state="rejected"] {
+  opacity: 0.68;
+}
+
+.planning-review-item-main {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.planning-review-item-main > strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+  overflow-wrap: anywhere;
+}
+
+.planning-review-item-main > small {
+  color: var(--kr-text-muted);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.planning-review-item-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  width: max-content;
+  color: var(--kr-warning);
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.planning-review-item-state[data-state="accepted"] { color: var(--kr-success); }
+.planning-review-item-state[data-state="rejected"] { color: var(--kr-text-muted); }
+
+.planning-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.planning-review-actions button,
+.planning-review-reject button,
+.planning-review-error button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  color: var(--kr-text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.planning-review-actions button[data-action="accept"] {
+  border-color: rgba(var(--kr-accent-rgb), 0.35);
+  background: var(--kr-accent);
+  color: var(--kr-bg-base);
+}
+
+.planning-review-actions button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.planning-review-reject {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 5px;
+  margin-top: 3px;
+}
+
+.planning-review-reject input {
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--kr-border-medium);
+  border-radius: var(--kr-r-sm);
+  outline: 0;
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-xs);
+}
+
+.planning-review-error {
+  color: var(--kr-error) !important;
+}
+
+.planning-review-error button {
+  margin-left: 6px;
+}
+
+.planning-review[data-compact="true"] .planning-review-item {
+  padding: 6px;
+}
+
+.planning-review[data-compact="true"] .planning-review-actions button {
+  font-size: 0;
 }
 
 /* ── Message rows and bubbles ─────────────────────────── */
@@ -2028,6 +2220,11 @@
   background: rgba(var(--kr-error-rgb), 0.06);
 }
 
+.disc-msg-bubble[data-role="system"][data-variant="kronn-planning"] {
+  border-color: rgba(var(--kr-accent-rgb), 0.3);
+  background: rgba(var(--kr-accent-rgb), 0.065);
+}
+
 .disc-msg-agent-label {
   display: flex;
   align-items: center;
@@ -2035,6 +2232,11 @@
   font-size: var(--kr-fs-xs);
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.disc-msg-attempted-model {
+  font-weight: 400;
+  opacity: 0.72;
 }
 
 .disc-msg-time {
@@ -2759,6 +2961,18 @@
 
 .disc-mention-item[data-highlighted="false"] {
   background: transparent;
+}
+
+.disc-agent-mention-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: 2px 7px;
+  border: 1px solid;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-sm);
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 /* Emoji variant of the autocomplete popover: taller list (20 items) + a

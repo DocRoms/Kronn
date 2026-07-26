@@ -1,102 +1,179 @@
-// Background spawning helpers: fan-out an agent run on a discussion
-// without blocking on the SSE response (used by the workflow runner's
-// BatchQuickPrompt step), with optional silent-crash retry and
-// optional Quick Prompt chaining inside the same discussion.
+// Durable agent-dispatch runtime. Every detached run is represented by an
+// `agent_dispatch_jobs` row before execution, claimed atomically, and only
+// completed after the agent's background stream has actually terminated.
 
 use crate::AppState;
 
-use super::streaming::make_agent_stream;
+use axum::response::sse::{Event, Sse};
 
-/// Spawn an agent run on a discussion in the background, without SSE wrapping.
+use super::streaming::{
+    make_agent_stream_tracked, make_agent_stream_tracked_with_initial_event, AgentExecutionOutcome,
+};
+use super::SseStream;
+
+const RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS: i64 = 30;
+
+struct DispatchHandoffGuard {
+    state: Option<AppState>,
+    job_id: String,
+}
+
+impl DispatchHandoffGuard {
+    fn new(state: AppState, job_id: String) -> Self {
+        Self {
+            state: Some(state),
+            job_id,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.state = None;
+    }
+}
+
+impl Drop for DispatchHandoffGuard {
+    fn drop(&mut self) {
+        let Some(state) = self.state.take() else {
+            return;
+        };
+        let job_id = self.job_id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                let retry_id = job_id.clone();
+                match state
+                    .db
+                    .with_conn(move |conn| {
+                        crate::db::agent_dispatch::release_unstarted_claim(
+                            conn,
+                            &retry_id,
+                            "claim_handoff_dropped",
+                        )
+                    })
+                    .await
+                {
+                    Ok(true) => {
+                        tracing::warn!("Requeued dispatch {job_id} after dropped claim handoff");
+                        state.agent_dispatch_notify.notify_one();
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!("Unable to requeue dropped dispatch {job_id}: {error}")
+                    }
+                }
+            });
+        }
+    }
+}
+
+struct DispatchSettlement {
+    changed: bool,
+    batch_run: Option<crate::models::WorkflowRun>,
+}
+
+/// Persist a dispatch terminal state and its parent batch progress as one
+/// atomic unit. If either write fails, the job remains runnable and recovery
+/// can retry without leaving a batch permanently stuck at n-1/N.
+fn persist_dispatch_settlement(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    discussion_id: &str,
+    group_id: Option<&str>,
+    child_succeeded: bool,
+    error: Option<&str>,
+) -> anyhow::Result<DispatchSettlement> {
+    let transaction = conn.unchecked_transaction()?;
+    let changed = if let Some(error) = error {
+        crate::db::agent_dispatch::mark_failed(&transaction, job_id, error)?
+    } else {
+        crate::db::agent_dispatch::mark_completed(&transaction, job_id)?
+    };
+    let mut batch_run = None;
+    if changed {
+        let still_awaiting =
+            crate::db::agent_dispatch::has_active_for_discussion(&transaction, discussion_id)?;
+        crate::db::discussions::set_awaiting_agent(&transaction, discussion_id, still_awaiting)?;
+        if let Some(run_id) = group_id {
+            batch_run = crate::db::workflows::increment_batch_progress(
+                &transaction,
+                run_id,
+                child_succeeded,
+            )?;
+        }
+    }
+    transaction.commit()?;
+    Ok(DispatchSettlement { changed, batch_run })
+}
+
+/// Start the process-wide durable dispatch worker.
 ///
-/// Used by the workflow runner's `BatchQuickPrompt` step executor to fan out
-/// N child discs in parallel. Each call reuses the full `make_agent_stream`
-/// pipeline (auth, worktree lock, agent spawn, batch progress hook) but the
-/// returned SSE stream is immediately dropped.
-///
-/// The actual agent work runs in a detached `tokio::spawn` inside
-/// `make_agent_stream` and keeps executing even after the SSE stream is
-/// dropped — the spawned task checks `tx.is_closed()` only to skip streaming
-/// chunks to a gone client, not to abort the run. Completion still persists
-/// the agent message to DB and fires the batch progress WS events.
-///
-/// The `agent_semaphore` on `state` still caps concurrency across all fan-outs.
+/// The periodic scan is a crash-safe fallback; normal producers also notify
+/// the worker immediately through `agent_dispatch_notify`.
+pub fn start_agent_dispatcher(state: AppState) {
+    tokio::spawn(async move {
+        loop {
+            let exhausted = state
+                .db
+                .with_conn(|conn| crate::db::agent_dispatch::list_exhausted_ids(conn, 64))
+                .await
+                .unwrap_or_else(|error| {
+                    tracing::error!("Agent dispatch exhausted-job scan failed: {error}");
+                    Vec::new()
+                });
+            for id in exhausted {
+                let lookup_id = id.clone();
+                match state
+                    .db
+                    .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &lookup_id))
+                    .await
+                {
+                    Ok(Some(job)) => {
+                        fail_dispatch_job(&state, &job, "maximum dispatch attempts exhausted").await
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!("Unable to load exhausted dispatch {id}: {error}")
+                    }
+                }
+            }
+
+            let runnable = state
+                .db
+                .with_conn(|conn| crate::db::agent_dispatch::list_runnable_ids(conn, 64))
+                .await;
+            let ids = match runnable {
+                Ok(ids) => ids,
+                Err(error) => {
+                    tracing::error!("Agent dispatch scan failed: {error}");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    continue;
+                }
+            };
+
+            if ids.is_empty() {
+                tokio::select! {
+                    _ = state.agent_dispatch_notify.notified() => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
+                continue;
+            }
+
+            for id in ids {
+                let worker_state = state.clone();
+                tokio::spawn(async move {
+                    dispatch_job_by_id(worker_state, id).await;
+                });
+            }
+            // Give the spawned claim transactions time to run before scanning
+            // the same Pending rows again. Duplicate execution is still
+            // prevented by the atomic Pending -> Running claim.
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    });
+}
+
+/// Spawn an agent run and wait for its durable job to reach a terminal state.
 pub async fn spawn_agent_run_background(state: AppState, discussion_id: String) {
     spawn_agent_run_with_chain(state, discussion_id, Vec::new(), None).await;
-}
-
-/// Run an agent on `discussion_id` and, if the first attempt comes back with
-/// the silent-crash signature, retry once.
-///
-/// The signature: an assistant message that starts with `[Agent exited with
-/// error]` AND mentions `No output captured` — the discussion path's
-/// canonical "Claude Code died, no stderr to explain why" footer (cf.
-/// the message generation in `make_agent_stream` around line 1500).
-///
-/// Why retry pays off: the failure mode is intermittent, NOT deterministic.
-/// Heavy parallel runs (Ticket Autopilot batch on 17 tickets, two workflows
-/// concurrent) hit auth-file races, network pool saturation, and shared
-/// resource contention that resolves on its own within a few seconds. A
-/// fresh spawn after a brief backoff usually goes through.
-///
-/// Capped at 1 retry to keep token spend bounded — a deterministic failure
-/// (auth genuinely expired, rate limit, broken prompt) won't be saved by
-/// looping forever.
-async fn run_with_silent_retry(state: &AppState, discussion_id: &str) {
-    for attempt in 0..2 {
-        let _sse = make_agent_stream(state.clone(), discussion_id.to_string(), None).await;
-        drop(_sse);
-        if attempt == 0 && last_message_is_silent_crash(state, discussion_id).await {
-            tracing::warn!(
-                "Discussion {} matched silent-crash pattern on attempt 1 — \
-                 retrying once after a brief backoff (auth/network may have \
-                 been transiently saturated)",
-                discussion_id
-            );
-            // Wipe the failed message so the retry doesn't append a 2nd
-            // assistant turn alongside the broken one. Idempotent: deletes
-            // the trailing assistant message(s) since the last user turn.
-            let did = state.db.clone();
-            let did2 = discussion_id.to_string();
-            let _ = did
-                .with_conn(move |conn| {
-                    crate::db::discussions::delete_last_agent_messages(conn, &did2)
-                })
-                .await;
-            // Backoff: lets the auth file lock release, the API rate
-            // limiter window slide, etc. 5s is the sweet spot we observed
-            // empirically — short enough not to feel laggy on the UI,
-            // long enough to clear typical contention.
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            continue;
-        }
-        break;
-    }
-}
-
-/// Inspect the most recent assistant message of a discussion: returns true
-/// when it carries the canonical silent-crash footer. Defensive about DB
-/// failures — those count as "not silent-crash" so the retry path doesn't
-/// fire spuriously when the lookup itself goes wrong.
-async fn last_message_is_silent_crash(state: &AppState, discussion_id: &str) -> bool {
-    let did = discussion_id.to_string();
-    let messages = match state
-        .db
-        .clone()
-        .with_conn(move |conn| crate::db::discussions::list_messages(conn, &did))
-        .await
-    {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    let last_assistant = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == crate::models::MessageRole::Agent);
-    match last_assistant {
-        Some(m) => super::message_matches_silent_crash(&m.content),
-        None => false,
-    }
 }
 
 /// Spawn an agent run and, after it completes, execute chained Quick Prompts
@@ -124,75 +201,345 @@ pub async fn spawn_agent_run_with_chain(
     chain_prompt_ids: Vec<String>,
     batch_item: Option<String>,
 ) {
-    // First run — the initial QP prompt was already inserted by create_batch_run.
-    // Wrapped in `run_with_silent_retry` to absorb the Claude Code CLI's
-    // "exit 1 + zero output" failure mode that hits batch children under
-    // concurrency pressure (auth file contention, network pool saturation).
-    run_with_silent_retry(&state, &discussion_id).await;
-
-    // Chain: for each subsequent QP, inject its prompt and re-run the agent.
-    for (i, qp_id) in chain_prompt_ids.iter().enumerate() {
-        // Load the QP
-        let qp_id_clone = qp_id.clone();
-        let qp = match state
-            .db
-            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &qp_id_clone))
-            .await
-        {
-            Ok(Some(qp)) => qp,
-            Ok(None) => {
-                tracing::warn!(
-                    "Chain QP '{}' not found — skipping (step {}/{})",
-                    qp_id,
-                    i + 1,
-                    chain_prompt_ids.len()
-                );
-                continue;
+    let did = discussion_id.clone();
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let dedupe_key = format!("runtime:{did}:{job_id}");
+    let enqueue_id = job_id.clone();
+    let enqueue_did = did.clone();
+    let enqueue_chain = chain_prompt_ids.clone();
+    let enqueue_item = batch_item.clone();
+    let job = match state
+        .db
+        .with_conn(move |conn| {
+            if let Some(active) =
+                crate::db::agent_dispatch::find_active_for_discussion(conn, &enqueue_did)?
+            {
+                return Ok(active);
             }
-            Err(e) => {
-                tracing::error!("Chain QP '{}' DB error: {} — aborting chain", qp_id, e);
-                break;
+            let transaction = conn.unchecked_transaction()?;
+            let job = crate::db::agent_dispatch::enqueue_for_latest_user(
+                &transaction,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: &enqueue_id,
+                    discussion_id: &enqueue_did,
+                    dedupe_key: &dedupe_key,
+                    agent_override: None,
+                    chain_prompt_ids: &enqueue_chain,
+                    batch_item: enqueue_item.as_deref(),
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::discussions::set_awaiting_agent(&transaction, &enqueue_did, true)?;
+            transaction.commit()?;
+            Ok(job)
+        })
+        .await
+    {
+        Ok(job) => job,
+        Err(error) => {
+            tracing::error!("Unable to enqueue agent run for {discussion_id}: {error}");
+            return;
+        }
+    };
+
+    state.agent_dispatch_notify.notify_one();
+    wait_for_dispatch_job(state, job.id).await;
+}
+
+async fn wait_for_dispatch_job(state: AppState, job_id: String) {
+    loop {
+        // The caller also attempts the claim so workflow-local concurrency
+        // permits cover the real run even if the global worker has not polled
+        // yet. Claim remains exclusive with the process-wide worker.
+        dispatch_job_by_id(state.clone(), job_id.clone()).await;
+
+        let lookup_id = job_id.clone();
+        let status = state
+            .db
+            .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &lookup_id))
+            .await;
+        match status {
+            Ok(Some(job))
+                if matches!(
+                    job.status,
+                    crate::db::agent_dispatch::DispatchStatus::Completed
+                        | crate::db::agent_dispatch::DispatchStatus::Failed
+                        | crate::db::agent_dispatch::DispatchStatus::Cancelled
+                ) =>
+            {
+                return;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                tracing::error!("Agent dispatch job {job_id} disappeared");
+                return;
+            }
+            Err(error) => {
+                tracing::error!("Agent dispatch job {job_id} lookup failed: {error}");
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn dispatch_job_by_id(state: AppState, job_id: String) {
+    if let Some(stream) = stream_dispatch_job(state, job_id, None).await {
+        // The completion monitor owns the actual run. A background worker has
+        // no SSE client, so dropping only the receiver is intentional.
+        drop(stream);
+    }
+}
+
+/// Claim a durable dispatch job and expose its live SSE stream when the caller
+/// is an HTTP request. The spawned completion monitor owns the power lease and
+/// terminal DB transition, so disconnecting the browser cannot orphan work.
+pub(crate) async fn stream_dispatch_job(
+    state: AppState,
+    job_id: String,
+    initial_event: Option<Event>,
+) -> Option<Sse<SseStream>> {
+    let claim_id = job_id.clone();
+    let job = match state
+        .db
+        .with_conn(move |conn| crate::db::agent_dispatch::claim(conn, &claim_id))
+        .await
+    {
+        Ok(Some(job)) => job,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::error!("Agent dispatch claim failed for {job_id}: {error}");
+            return None;
+        }
+    };
+    stream_claimed_dispatch_job(state, job, initial_event).await
+}
+
+pub(crate) async fn stream_claimed_dispatch_job(
+    state: AppState,
+    job: crate::db::agent_dispatch::AgentDispatchJob,
+    initial_event: Option<Event>,
+) -> Option<Sse<SseStream>> {
+    let mut handoff_guard = DispatchHandoffGuard::new(state.clone(), job.id.clone());
+    if let Some(ref run_id) = job.group_id {
+        let _ = state
+            .ws_broadcast
+            .send(crate::models::WsMessage::BatchRunChildStarted {
+                run_id: run_id.clone(),
+                discussion_id: job.discussion_id.clone(),
+            });
+    }
+
+    // If the process crashed after persisting the answer but before marking
+    // the job complete, do not spend tokens a second time.
+    let existing = if job.attempts > 1 {
+        let recovery_job = job.clone();
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::agent_dispatch::latest_completed_agent_message(conn, &recovery_job)
+            })
+            .await
+    } else {
+        Ok(None)
+    };
+    match existing {
+        Ok(Some((_message_id, content, succeeded))) => {
+            finish_dispatch_turn(&state, job, content, succeeded).await;
+            handoff_guard.disarm();
+            return None;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            fail_dispatch_job(&state, &job, &format!("response recovery failed: {error}")).await;
+            handoff_guard.disarm();
+            return None;
+        }
+    }
+
+    let status_id = job.id.clone();
+    let current_status = state
+        .db
+        .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &status_id))
+        .await;
+    match current_status {
+        Ok(Some(current))
+            if current.status == crate::db::agent_dispatch::DispatchStatus::Running => {}
+        Ok(_) => {
+            handoff_guard.disarm();
+            return None;
+        }
+        Err(error) => {
+            tracing::error!("Unable to verify claimed dispatch {}: {error}", job.id);
+            return None;
+        }
+    }
+
+    let power_lease = crate::core::power_guard::acquire();
+    let (stream, completion) = match initial_event {
+        Some(event) => {
+            make_agent_stream_tracked_with_initial_event(
+                state.clone(),
+                job.discussion_id.clone(),
+                job.agent_override.clone(),
+                job.id.clone(),
+                event,
+            )
+            .await
+        }
+        None => {
+            make_agent_stream_tracked(
+                state.clone(),
+                job.discussion_id.clone(),
+                job.agent_override.clone(),
+                job.id.clone(),
+            )
+            .await
+        }
+    };
+    tokio::spawn(async move {
+        let _power_lease = power_lease;
+        let outcome =
+            completion
+                .await
+                .unwrap_or_else(|_| AgentExecutionOutcome::RuntimeUnavailable {
+                    reason: "agent_completion_channel_dropped".to_string(),
+                });
+        let status_id = job.id.clone();
+        let cancelled = state
+            .db
+            .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &status_id))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|current| {
+                current.status == crate::db::agent_dispatch::DispatchStatus::Cancelled
+            });
+        if cancelled {
+            // stop_agent settles the Cancelled job and its parent batch in
+            // one transaction. The completion observer must only wake
+            // waiters; incrementing here would double-count the child.
+            state.agent_dispatch_notify.notify_waiters();
+            return;
+        }
+        let reported_success = match outcome {
+            AgentExecutionOutcome::Finished { success } => success,
+            AgentExecutionOutcome::RuntimeUnavailable { reason } => {
+                defer_runtime_unavailable(&state, &job, &reason).await;
+                return;
+            }
+            AgentExecutionOutcome::PreflightFailed => {
+                fail_dispatch_job(&state, &job, "agent execution preflight failed").await;
+                return;
             }
         };
 
-        // ─ Phase 4 — `{{previous_qp.output}}` chain variable ────────────
-        // Before rendering this QP's template, fetch the agent's most-recent
-        // reply on this discussion. That reply is either:
-        //   • the initial QP's response (when i == 0), or
-        //   • the previous chain step's response (when i > 0).
-        // Either way the agent's last message holds what the user means by
-        // "previous_qp". When no agent message exists (agent crashed before
-        // replying), the placeholder is substituted with an empty string —
-        // template rendering must not fail the chain.
-        let disc_for_lookup = discussion_id.clone();
-        let previous_output = state
+        let completed_job = job.clone();
+        let response = state
             .db
-            .with_conn(move |conn| crate::db::discussions::list_messages(conn, &disc_for_lookup))
-            .await
-            .ok()
-            .and_then(|msgs| {
-                msgs.into_iter()
-                    .rev()
-                    .find(|m| matches!(m.role, crate::models::MessageRole::Agent))
-                    .map(|m| m.content)
+            .with_conn(move |conn| {
+                crate::db::agent_dispatch::latest_completed_agent_message(conn, &completed_job)
             })
-            .unwrap_or_default();
+            .await;
+        match response {
+            Ok(Some((_message_id, content, succeeded))) => {
+                if succeeded != reported_success {
+                    tracing::warn!(
+                        "Agent dispatch {} completion signal disagrees with durable reply metadata",
+                        job.id
+                    );
+                }
+                finish_dispatch_turn(&state, job, content, succeeded).await
+            }
+            Ok(None) => {
+                fail_dispatch_job(&state, &job, "agent finished without a durable reply").await
+            }
+            Err(error) => {
+                fail_dispatch_job(&state, &job, &format!("reply lookup failed: {error}")).await
+            }
+        }
+    });
+    handoff_guard.disarm();
+    Some(stream)
+}
 
-        // Render the chain QP's template (pure helper — see tests below).
-        let rendered_content = render_chain_qp_prompt(
-            &qp.prompt_template,
-            qp.variables.first().map(|v| v.name.as_str()),
-            batch_item.as_deref(),
-            &previous_output,
+async fn finish_dispatch_turn(
+    state: &AppState,
+    job: crate::db::agent_dispatch::AgentDispatchJob,
+    response: String,
+    execution_succeeded: bool,
+) {
+    if super::message_matches_silent_crash(&response) && job.turn_attempts < 2 {
+        tracing::warn!(
+            "Discussion {} matched silent-crash pattern — retrying once",
+            job.discussion_id
         );
+        let retry_id = job.id.clone();
+        let retry_discussion_id = job.discussion_id.clone();
+        let retried = state
+            .db
+            .with_conn(move |conn| {
+                let transaction = conn.unchecked_transaction()?;
+                crate::db::discussions::delete_last_agent_messages(
+                    &transaction,
+                    &retry_discussion_id,
+                )?;
+                crate::db::agent_dispatch::retry_after(
+                    &transaction,
+                    &retry_id,
+                    5,
+                    "silent_agent_crash",
+                )?;
+                crate::db::discussions::set_awaiting_agent(
+                    &transaction,
+                    &retry_discussion_id,
+                    true,
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await;
+        if let Err(error) = retried {
+            fail_dispatch_job(state, &job, &format!("silent-crash retry failed: {error}")).await;
+        } else {
+            state.agent_dispatch_notify.notify_one();
+        }
+        return;
+    }
 
-        // Insert the QP prompt as a User message
-        let msg = crate::models::DiscussionMessage {
+    if !execution_succeeded {
+        fail_dispatch_job(state, &job, "agent reported an unsuccessful completion").await;
+        return;
+    }
+
+    if let Some(qp_id) = job.chain_prompt_ids.get(job.next_chain_index) {
+        let lookup_id = qp_id.clone();
+        let qp = state
+            .db
+            .with_conn(move |conn| crate::db::quick_prompts::get_quick_prompt(conn, &lookup_id))
+            .await;
+        let qp = match qp {
+            Ok(Some(qp)) => qp,
+            Ok(None) => {
+                fail_dispatch_job(state, &job, &format!("chain QP '{qp_id}' not found")).await;
+                return;
+            }
+            Err(error) => {
+                fail_dispatch_job(state, &job, &format!("chain QP lookup failed: {error}")).await;
+                return;
+            }
+        };
+        let message = crate::models::DiscussionMessage {
             model: None,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: crate::models::MessageRole::User,
-            content: rendered_content,
+            content: render_chain_qp_prompt(
+                &qp.prompt_template,
+                qp.variables.first().map(|variable| variable.name.as_str()),
+                job.batch_item.as_deref(),
+                &response,
+            ),
             agent_type: None,
             timestamp: chrono::Utc::now(),
             tokens_used: 0,
@@ -204,33 +551,162 @@ pub async fn spawn_agent_run_with_chain(
             source_msg_id: None,
             duration_ms: None,
         };
-        let disc_id_for_insert = discussion_id.clone();
-        if let Err(e) = state
+        let advance_id = job.id.clone();
+        match state
             .db
             .with_conn(move |conn| {
-                crate::db::discussions::insert_message(conn, &disc_id_for_insert, &msg)
+                crate::db::agent_dispatch::advance_chain_trigger(conn, &advance_id, &message)
             })
             .await
         {
-            tracing::error!(
-                "Failed to insert chain QP '{}' message: {} — aborting chain",
-                qp.name,
-                e
-            );
-            break;
+            Ok(true) => state.agent_dispatch_notify.notify_one(),
+            Ok(false) => {
+                tracing::warn!(
+                    "Agent dispatch {} changed state before chain advance",
+                    job.id
+                )
+            }
+            Err(error) => {
+                fail_dispatch_job(state, &job, &format!("chain advance failed: {error}")).await
+            }
         }
+        return;
+    }
 
-        tracing::info!(
-            "Chain QP '{}'  ({}/{}) injected into disc {} — firing agent",
-            qp.name,
-            i + 1,
-            chain_prompt_ids.len(),
-            discussion_id
-        );
+    let complete_id = job.id.clone();
+    let complete_discussion_id = job.discussion_id.clone();
+    let complete_group_id = job.group_id.clone();
+    let completed = state
+        .db
+        .with_conn(move |conn| {
+            persist_dispatch_settlement(
+                conn,
+                &complete_id,
+                &complete_discussion_id,
+                complete_group_id.as_deref(),
+                true,
+                None,
+            )
+        })
+        .await;
+    match completed {
+        Ok(DispatchSettlement {
+            changed: true,
+            batch_run,
+        }) => {
+            if let Some(updated_run) = batch_run {
+                super::streaming::broadcast_batch_progress(state, &job.discussion_id, &updated_run);
+            }
+        }
+        Ok(DispatchSettlement { changed: false, .. }) => {
+            settle_cancelled_dispatch(state, &job).await;
+            return;
+        }
+        Err(error) => {
+            tracing::error!("Unable to complete agent dispatch {}: {error}", job.id);
+            return;
+        }
+    }
+    state.agent_dispatch_notify.notify_waiters();
+}
 
-        // Re-fire the agent
-        let _sse = make_agent_stream(state.clone(), discussion_id.clone(), None).await;
-        drop(_sse);
+async fn fail_dispatch_job(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    error: &str,
+) {
+    tracing::error!("Agent dispatch {} failed: {error}", job.id);
+    let fail_id = job.id.clone();
+    let fail_discussion_id = job.discussion_id.clone();
+    let fail_group_id = job.group_id.clone();
+    let fail_error = error.to_string();
+    let failed = state
+        .db
+        .with_conn(move |conn| {
+            persist_dispatch_settlement(
+                conn,
+                &fail_id,
+                &fail_discussion_id,
+                fail_group_id.as_deref(),
+                false,
+                Some(&fail_error),
+            )
+        })
+        .await;
+    match failed {
+        Ok(DispatchSettlement {
+            changed: true,
+            batch_run,
+        }) => {
+            if let Some(updated_run) = batch_run {
+                super::streaming::broadcast_batch_progress(state, &job.discussion_id, &updated_run);
+            }
+        }
+        Ok(DispatchSettlement { changed: false, .. }) => {
+            settle_cancelled_dispatch(state, job).await;
+            return;
+        }
+        Err(db_error) => {
+            tracing::error!("Unable to persist failed dispatch {}: {db_error}", job.id);
+            return;
+        }
+    }
+    state.agent_dispatch_notify.notify_waiters();
+}
+
+async fn defer_runtime_unavailable(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+    reason: &str,
+) {
+    let job_id = job.id.clone();
+    let persisted_reason = format!("runtime_unavailable: {reason}");
+    match state
+        .db
+        .with_conn(move |conn| {
+            crate::db::agent_dispatch::defer_runtime_unavailable(
+                conn,
+                &job_id,
+                RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS,
+                &persisted_reason,
+            )
+        })
+        .await
+    {
+        Ok(true) => tracing::warn!(
+            "Deferred dispatch {} for {}s because its runtime is unavailable: {}",
+            job.id,
+            RUNTIME_UNAVAILABLE_RETRY_DELAY_SECONDS,
+            reason
+        ),
+        Ok(false) => {}
+        Err(error) => tracing::error!(
+            "Unable to defer dispatch {} after unavailable runtime: {}",
+            job.id,
+            error
+        ),
+    }
+    state.agent_dispatch_notify.notify_waiters();
+}
+
+async fn settle_cancelled_dispatch(
+    state: &AppState,
+    job: &crate::db::agent_dispatch::AgentDispatchJob,
+) {
+    let status_id = job.id.clone();
+    let cancelled = state
+        .db
+        .with_conn(move |conn| crate::db::agent_dispatch::get(conn, &status_id))
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|current| {
+            current.status == crate::db::agent_dispatch::DispatchStatus::Cancelled
+        });
+    if cancelled {
+        // The cancellation endpoint already advanced the parent batch in the
+        // same transaction that marked this job Cancelled.
+        state.agent_dispatch_notify.notify_waiters();
     }
 }
 
@@ -261,7 +737,9 @@ pub(crate) fn render_chain_qp_prompt(
 
 #[cfg(test)]
 mod chain_render_tests {
-    use super::render_chain_qp_prompt;
+    use super::{persist_dispatch_settlement, render_chain_qp_prompt, DispatchHandoffGuard};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
 
     #[test]
     fn previous_qp_output_is_substituted() {
@@ -330,5 +808,188 @@ mod chain_render_tests {
     fn no_var_no_batch_item_returns_template_as_is() {
         let out = render_chain_qp_prompt("Static prompt", None, None, "");
         assert_eq!(out, "Static prompt");
+    }
+
+    #[tokio::test]
+    async fn dropped_handoff_guard_requeues_the_unstarted_claim() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d-guard', 'Guard', ?1, ?1)",
+                [&now],
+            )?;
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-guard', 'd-guard', 'User', 'go', ?1, 1, ?1)",
+                [&now],
+            )?;
+            crate::db::agent_dispatch::enqueue_for_latest_user(
+                conn,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: "j-guard",
+                    discussion_id: "d-guard",
+                    dedupe_key: "message:u-guard",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::agent_dispatch::claim(conn, "j-guard")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = crate::AppState::new_defaults(
+            Arc::new(RwLock::new(crate::core::config::default_config())),
+            db,
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+
+        drop(DispatchHandoffGuard::new(state.clone(), "j-guard".into()));
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                let job = state
+                    .db
+                    .with_conn(|conn| crate::db::agent_dispatch::get(conn, "j-guard"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if job.status == crate::db::agent_dispatch::DispatchStatus::Pending {
+                    assert_eq!(job.attempts, 0);
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("handoff guard requeues promptly");
+    }
+
+    #[tokio::test]
+    async fn dispatch_and_batch_progress_commit_or_rollback_together() {
+        let db = Arc::new(crate::db::Database::open_in_memory().unwrap());
+        db.with_conn(|conn| {
+            let now = chrono::Utc::now();
+            let now_text = now.to_rfc3339();
+            conn.execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d-atomic', 'Atomic batch', ?1, ?1)",
+                [&now_text],
+            )?;
+            conn.execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u-atomic', 'd-atomic', 'User', 'go', ?1, 1, ?1)",
+                [&now_text],
+            )?;
+            crate::db::workflows::ensure_batch_placeholder_workflow(
+                conn,
+                "qp-atomic",
+                "Atomic QP",
+                None,
+            )?;
+            crate::db::workflows::insert_run(
+                conn,
+                &crate::models::WorkflowRun {
+                    id: "batch-atomic".into(),
+                    workflow_id: "qp:qp-atomic".into(),
+                    status: crate::models::RunStatus::Running,
+                    trigger_context: None,
+                    step_results: vec![],
+                    tokens_used: 0,
+                    workspace_path: None,
+                    started_at: now,
+                    finished_at: None,
+                    run_type: "batch".into(),
+                    batch_total: 1,
+                    batch_completed: 0,
+                    batch_failed: 0,
+                    batch_name: Some("Atomic batch".into()),
+                    parent_run_id: None,
+                    state: std::collections::HashMap::new(),
+                    produced_branches: vec![],
+                    parent_workflow_id: None,
+                    parent_workflow_name: None,
+                    parent_run_started_at: None,
+                },
+            )?;
+            crate::db::agent_dispatch::enqueue_for_latest_user(
+                conn,
+                crate::db::agent_dispatch::NewLatestUserDispatch {
+                    id: "j-atomic",
+                    discussion_id: "d-atomic",
+                    dedupe_key: "message:u-atomic",
+                    agent_override: None,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: Some("batch-atomic"),
+                    group_concurrency_limit: None,
+                },
+            )?;
+            crate::db::agent_dispatch::claim(conn, "j-atomic")?;
+            conn.execute_batch(
+                "CREATE TRIGGER reject_batch_progress
+                 BEFORE UPDATE ON workflow_runs
+                 BEGIN
+                   SELECT RAISE(ABORT, 'forced batch progress failure');
+                 END;",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let failed = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-atomic",
+                    "d-atomic",
+                    Some("batch-atomic"),
+                    true,
+                    None,
+                )
+            })
+            .await;
+        assert!(failed.is_err());
+
+        db.with_conn(|conn| {
+            let job = crate::db::agent_dispatch::get(conn, "j-atomic")?.unwrap();
+            assert_eq!(
+                job.status,
+                crate::db::agent_dispatch::DispatchStatus::Running
+            );
+            let run = crate::db::workflows::get_run(conn, "batch-atomic")?.unwrap();
+            assert_eq!(run.batch_completed, 0);
+            assert_eq!(run.status, crate::models::RunStatus::Running);
+            conn.execute_batch("DROP TRIGGER reject_batch_progress;")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let settled = db
+            .with_conn(|conn| {
+                persist_dispatch_settlement(
+                    conn,
+                    "j-atomic",
+                    "d-atomic",
+                    Some("batch-atomic"),
+                    true,
+                    None,
+                )
+            })
+            .await
+            .unwrap();
+        assert!(settled.changed);
+        let batch = settled.batch_run.unwrap();
+        assert_eq!(batch.batch_completed, 1);
+        assert_eq!(batch.status, crate::models::RunStatus::Success);
     }
 }

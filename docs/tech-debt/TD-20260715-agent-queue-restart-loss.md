@@ -2,14 +2,14 @@
 
 - **ID**: TD-20260715-agent-queue-restart-loss
 - **Area**: Backend / Agents (spawn lifecycle, batch QP, ops)
-- **Status**: PARTIAL — lifecycle visibility and cancellation shipped in
-  0.8.12; persistent re-enqueue remains open.
-- **Problem (fact)**: Pending/in-flight **agent work still lives in memory**.
+- **Status**: RESOLVED in 0.9.2 — durable dispatch queue, boot re-enqueue,
+  idempotent claim and tracked completion.
+- **Problem (historical)**: Pending/in-flight agent work lived only in memory.
   Incident #1 (2026-07-15, disc `1306b6c4-9168-481d-b2eb-9f9a82fea378`):
   1. **Restart wipes the queue.** Batch-QP fan-out is a detached `tokio::spawn`
      (`backend/src/workflows/batch_step.rs:263`), and message-triggered agent runs
      are the same pattern (`backend/src/api/discussions/runtime.rs:24`,
-     `spawn_agent_run_background` → detached `tokio::spawn`). A `cargo watch`
+     `spawn_agent_run_background` → detached `tokio::spawn`). A dev-watcher
      rebuild at 13:29 killed 23 queued triage responses + 1 pending discussion
      reply. Since 0.8.12 an `awaiting_agent` marker survives the restart and the
      boot reconcile appends an interruption notice, but the work is deliberately
@@ -18,16 +18,28 @@
   - batch/discussion deletion propagates cancellation before deleting rows;
   - queued and running batch children are distinct WS/UI states;
   - owed work is DB-backed and a boot reconcile makes interruption visible.
-  These close the original zombie and observability defects, but not lossless
+  These closed the original zombie and observability defects, but not lossless
   restart recovery. [src: file: backend/src/api/workflows.rs:2003-2071]
   [src: file: backend/src/workflows/batch_step.rs:209-217]
-- **Why we can't fix now (constraint)**: Persistence + reconcile of the agent
-  queue is a lifecycle feature (DB table for pending spawns, boot re-enqueue,
-  idempotence guarantees), cancellation needs plumbing from the delete paths
-  down to child processes, and the observability gap spans API + UI. Sequenced
-  after the 0.9 campaign passes; too broad for a hotfix.
-- **Impact**: correctness and operator friction: interrupted work is now visible
-  and recoverable manually, but a restart still requires a relaunch.
+- **Resolution (0.9.2)**:
+  - migration 083 persists one job per accepted turn/batch child, in the same
+    transaction as its trigger message;
+  - atomic claims serialize a discussion and enforce batch group concurrency;
+  - interactive HTTP runs retain their live SSE while a detached completion
+    monitor owns persistence, cancellation and the shared power lease;
+  - agent replies record their exact dispatch job id and durable success bit,
+    preventing a neighbouring turn's response from satisfying a recovered job;
+  - boot resets interrupted `Running` jobs to `Pending`; recovered partial
+    messages are explicitly excluded from completion detection;
+  - QP chains advance their trigger transactionally, silent crashes retry once,
+    and a global attempt ceiling dead-letters repeated restart failures;
+  - MCP QP/batch launches and joined-peer replies use the same durable queue.
+  [src: file: backend/src/db/agent_dispatch.rs]
+  [src: file: backend/src/api/discussions/runtime.rs]
+  [src: file: backend/src/db/sql/083_agent_dispatch_jobs.sql]
+- **Impact**: backend/dev restarts no longer silently lose accepted agent work;
+  queued turns resume automatically and already-persisted replies are not
+  regenerated.
 - **Where (pointers)**:
   - `backend/src/workflows/batch_step.rs:263` — batch fan-out `tokio::spawn`
     (fire-and-forget, no persisted queue).
@@ -37,20 +49,18 @@
     point); `runner.rs:1999` — existing step-level `cancel_token` to reuse.
   - `backend/src/db/workflows.rs` — batch run rows (`create_batch_run`), the
     natural anchor for a persisted pending-spawn set.
-- **Suggested direction (non-binding)**:
+- **Implemented direction**:
   - **Ops mitigation first (no backend code)**: a `kronn serve` mode that runs a
     **copy** of the compiled binary (e.g. `~/.local/share/kronn/bin/kronn-stable`)
-    without `cargo watch`, so dev edits/rebuilds in the repo never restart the
+    without the watcher, so dev edits/rebuilds in the repo never restart the
     serving instance. Today `kronn start-dev` → `make dev-backend` →
-    `cd backend && cargo watch -x run` (`Makefile:232-234`) is the only native
+    `cd backend && watchexec --restart … -- cargo run` (`Makefile:232-234`) is the only native
     path, i.e. the "production" instance is a hot-reload dev instance.
-  - **T1 — persist + reconcile**: persist pending agent work (batch children not
-    yet answered, message-triggered replies) and re-enqueue at boot, generalizing
-    the existing `Interrupted`-runs reconcile pattern.
-  - Graceful shutdown complements T1: on SIGTERM stop accepting spawns, flush
-    state, then exit — makes even voluntary restarts lossless.
-- **Next step**: design the persisted spawn record and idempotent boot claim;
-  retain the 0.8.12 interruption notice as the fail-closed fallback.
+  - **T1 — persist + reconcile** is complete via `agent_dispatch_jobs`.
+  - Graceful shutdown remains a complementary improvement, not a prerequisite
+    for lossless queue recovery.
+- **Next step**: keep the 0.8.12 interruption notice only as the fail-closed
+  fallback for legacy/non-dispatch runs.
 
 ## Notes
 

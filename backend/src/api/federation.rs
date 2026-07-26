@@ -10,7 +10,7 @@
 
 use base64::Engine as _;
 
-use crate::models::{DiscussionMessage, WsMessage};
+use crate::models::{DiscussionMessage, MessageRevisionEvent, WsMessage};
 use crate::AppState;
 
 /// Broadcast `msg` to peers iff `disc_id` is a shared discussion. No-op for a
@@ -58,6 +58,43 @@ pub async fn federate_message(state: &AppState, disc_id: &str, msg: &DiscussionM
     // F8 — also announce any files pinned to this message so the peer can fetch
     // the binaries (federation is otherwise text-only).
     emit_attachments(state, &shared_id, &msg.id, &from_invite_code).await;
+}
+
+/// Broadcast an atomic message revision to mirrors of the same shared
+/// discussion. The receiver applies the content-hash CAS and emits its own
+/// fresh local cursor event; duplicates converge on `idempotency_key`.
+pub async fn federate_message_revision(state: &AppState, event: &MessageRevisionEvent) {
+    let did = event.discussion_id.clone();
+    let shared_id = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::get_discussion(conn, &did).map(|d| d.and_then(|d| d.shared_id))
+        })
+        .await
+        .ok()
+        .flatten();
+    let Some(shared_id) = shared_id else {
+        return;
+    };
+
+    let config = state.config.read().await;
+    let from_pseudo = crate::api::contacts::invite_pseudo(&config.server);
+    let from_invite_code = crate::api::contacts::build_invite_code(&config.server).await;
+    drop(config);
+
+    let _ = state.ws_broadcast.send(WsMessage::MessageRevised {
+        shared_discussion_id: shared_id,
+        event_id: event.id.clone(),
+        target_message_id: event.target_message_id.clone(),
+        previous_content_hash: event.previous_content_hash.clone(),
+        expected_revision: event.expected_revision.clone(),
+        revision: event.revision.clone(),
+        content: event.content.clone(),
+        target_agent: event.target_agent.clone(),
+        idempotency_key: event.idempotency_key.clone(),
+        from_pseudo,
+        from_invite_code,
+    });
 }
 
 /// Broadcast a `FileAttached` for every `context_file` pinned to `message_id`,
@@ -119,6 +156,14 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
         .with_conn(move |conn| crate::db::discussions::list_messages(conn, &did))
         .await
         .unwrap_or_default();
+    let did = disc_id.clone();
+    let revision_events = state
+        .db
+        .with_conn(move |conn| {
+            crate::db::discussions::list_revision_events_after(conn, &did, since_timestamp)
+        })
+        .await
+        .unwrap_or_default();
 
     let config = state.config.read().await;
     let our_pseudo = crate::api::contacts::invite_pseudo(&config.server);
@@ -127,6 +172,25 @@ pub async fn respond_to_sync_request(state: &AppState, shared_id: &str, since_ti
     drop(config);
 
     let mut sent = 0u32;
+    // Replay projection changes before the current live projection. Otherwise
+    // a catching-up peer can insert the new Agent reply first, then tombstone
+    // it while applying the earlier revision event.
+    for event in revision_events {
+        let _ = state.ws_broadcast.send(WsMessage::MessageRevised {
+            shared_discussion_id: shared_id.to_string(),
+            event_id: event.id,
+            target_message_id: event.target_message_id,
+            previous_content_hash: event.previous_content_hash,
+            expected_revision: event.expected_revision,
+            revision: event.revision,
+            content: event.content,
+            target_agent: event.target_agent,
+            idempotency_key: event.idempotency_key,
+            from_pseudo: our_pseudo.clone(),
+            from_invite_code: our_invite_code.clone(),
+        });
+        sent += 1;
+    }
     for m in messages
         .into_iter()
         .filter(|m| m.timestamp.timestamp_millis() > since_timestamp)
@@ -329,6 +393,94 @@ pub async fn fetch_and_store_attachment(
         from_invite_code: host_invite_code.to_string(),
         pending: false, // F15+ ready: binary stored → front swaps placeholder for the file
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::config::default_config;
+    use crate::db::Database;
+    use crate::models::{DiscussionMessage, MessageRole};
+    use crate::DEFAULT_MAX_CONCURRENT_AGENTS;
+    use chrono::Utc;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn sync_replays_revisions_before_current_projection_messages() {
+        let db = Arc::new(Database::open_in_memory().expect("in-memory DB"));
+        db.with_conn(|conn| {
+            let now = Utc::now();
+            let now_text = now.to_rfc3339();
+            conn.execute(
+                "INSERT INTO projects (id, name, path, created_at, updated_at)
+                 VALUES ('p-sync-revision', 'Sync revision', '/tmp', ?1, ?1)",
+                [&now_text],
+            )?;
+            conn.execute(
+                "INSERT INTO discussions (
+                     id, project_id, title, shared_id, created_at, updated_at
+                 ) VALUES (
+                     'd-sync-revision', 'p-sync-revision', 'Sync revision',
+                     'shared-sync-revision', ?1, ?1
+                 )",
+                [&now_text],
+            )?;
+            crate::db::discussions::insert_message(
+                conn,
+                "d-sync-revision",
+                &DiscussionMessage {
+                    id: "user-sync-revision".into(),
+                    role: MessageRole::User,
+                    content: "current projection".into(),
+                    timestamp: now,
+                    model: None,
+                    lint_report: None,
+                    agent_type: None,
+                    tokens_used: 0,
+                    auth_mode: None,
+                    model_tier: None,
+                    cost_usd: None,
+                    author_pseudo: None,
+                    author_avatar_email: None,
+                    source_msg_id: None,
+                    duration_ms: None,
+                },
+            )?;
+            conn.execute(
+                "INSERT INTO message_revision_events (
+                     id, discussion_id, target_message_id, previous_content_hash,
+                     expected_revision, revision, content, idempotency_key,
+                     sort_order, created_at
+                 ) VALUES (
+                     'revision-sync-event', 'd-sync-revision',
+                     'user-sync-revision', 'previous-hash', 'previous-revision',
+                     ?1, 'current projection', 'revision-sync-key', 2, ?1
+                 )",
+                [&now_text],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let state = AppState::new_defaults(
+            Arc::new(RwLock::new(default_config())),
+            db,
+            DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let mut receiver = state.ws_broadcast.subscribe();
+
+        respond_to_sync_request(&state, "shared-sync-revision", 0).await;
+
+        assert!(matches!(
+            receiver.try_recv().expect("revision frame"),
+            WsMessage::MessageRevised { .. }
+        ));
+        assert!(matches!(
+            receiver.try_recv().expect("projection frame"),
+            WsMessage::ChatMessage { .. }
+        ));
+    }
 }
 
 /// Transfer cap for a fetched F8 attachment: 2× the announced size, clamped

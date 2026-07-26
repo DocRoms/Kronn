@@ -511,8 +511,19 @@ pub async fn orchestrate(
 
                         // Save to DB — always runs even if client is gone
                         {
+                            // KT-37 — stamp the concrete model this round ran on.
+                            // The round config passes NO model_override, so the
+                            // runner resolves from the tier alone — mirror that
+                            // exactly (never disc.model: it belongs to the primary
+                            // agent, not to every debate participant).
+                            let round_model = runner::effective_model_flag(
+                                None,
+                                agent_type,
+                                disc_tier,
+                                Some(&model_tiers_config),
+                            );
                             let msg = DiscussionMessage {
-                                model: None,
+                                model: round_model,
                                 lint_report: None,
                                 id: Uuid::new_v4().to_string(),
                                 role: MessageRole::Agent,
@@ -620,8 +631,17 @@ pub async fn orchestrate(
 
                     // Save synthesis to DB — always runs even if client is gone
                     {
+                        // KT-37 — stamp the concrete model the synthesis ran on.
+                        // The synthesis config passes NO model_override either, so
+                        // resolve from the tier alone, matching the runner.
+                        let synthesis_model = runner::effective_model_flag(
+                            None,
+                            &primary_agent_type,
+                            disc_tier,
+                            Some(&model_tiers_config),
+                        );
                         let msg = DiscussionMessage {
-                            model: None,
+                            model: synthesis_model,
                             lint_report: None,
                             id: Uuid::new_v4().to_string(),
                             role: MessageRole::Agent,

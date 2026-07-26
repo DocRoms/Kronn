@@ -310,6 +310,22 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => tracing::warn!("Registry sync failed: {}", e),
     }
 
+    // Durable agent-dispatch recovery runs before the legacy awaiting scan.
+    // A Running row means the process died mid-turn; return it to Pending so
+    // the worker can either resume execution or observe an already-persisted
+    // reply without spending tokens twice.
+    match state
+        .db
+        .with_conn(kronn::db::agent_dispatch::reset_running_after_restart)
+        .await
+    {
+        Ok(count) if count > 0 => {
+            tracing::warn!("Agent dispatch recovery: requeued {count} interrupted job(s)")
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Agent dispatch recovery failed: {error}"),
+    }
+
     // Partial-response recovery — agents whose `full_response` was being
     // checkpointed into discussions.partial_response when the previous
     // process died. Convert each into an Agent message with an "interrupted"
@@ -369,6 +385,8 @@ async fn main() -> anyhow::Result<()> {
         Ok(_) => {}
         Err(e) => tracing::warn!("Awaiting-agent reconcile failed: {}", e),
     }
+
+    kronn::api::discussions::start_agent_dispatcher(state.clone());
 
     // 0.8.11 (B7) — opt-in run retention. Only when the operator set
     // `run_retention_days > 0`; parent runs referenced by a retained child are

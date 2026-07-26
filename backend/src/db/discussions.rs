@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
+use sha2::{Digest, Sha256};
 
 use super::parse_dt;
 use crate::models::{ModelTier, *};
@@ -22,22 +23,37 @@ pub fn count_discussions(conn: &Connection) -> Result<u32> {
 ///   Subsequent checkpoints preserve the original timestamp — critical for
 ///   `recover_partial_responses` to place the recovered Agent message
 ///   chronologically before any later user message posted after restart.
-/// - Setting `None` clears BOTH columns (normal completion).
-pub fn set_partial_response(conn: &Connection, disc_id: &str, partial: Option<&str>) -> Result<()> {
+/// - Setting `None` clears ALL checkpoint columns (normal completion).
+///
+/// `provenance` (KT-37) carries the agent + concrete attempted model so a
+/// recovery after restart reconstructs the message WITH its provenance instead
+/// of an anonymous, model-less bubble. `None` (or a legacy pre-089 checkpoint)
+/// leaves both NULL — `recover_partial_responses` degrades gracefully.
+pub fn set_partial_response(
+    conn: &Connection,
+    disc_id: &str,
+    partial: Option<&str>,
+    provenance: Option<(&AgentType, Option<&str>)>,
+) -> Result<()> {
     match partial {
         Some(text) => {
+            let agent_type = provenance.map(|(agent, _)| format_agent_type(agent));
+            let model = provenance.and_then(|(_, model)| model);
             conn.execute(
                 "UPDATE discussions \
                  SET partial_response = ?2, \
-                     partial_response_started_at = COALESCE(partial_response_started_at, ?3) \
+                     partial_response_started_at = COALESCE(partial_response_started_at, ?3), \
+                     partial_response_agent_type = ?4, \
+                     partial_response_model = ?5 \
                  WHERE id = ?1",
-                params![disc_id, text, Utc::now().to_rfc3339()],
+                params![disc_id, text, Utc::now().to_rfc3339(), agent_type, model],
             )?;
         }
         None => {
             conn.execute(
                 "UPDATE discussions \
-                 SET partial_response = NULL, partial_response_started_at = NULL \
+                 SET partial_response = NULL, partial_response_started_at = NULL, \
+                     partial_response_agent_type = NULL, partial_response_model = NULL \
                  WHERE id = ?1",
                 params![disc_id],
             )?;
@@ -93,7 +109,13 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
     let candidates: Vec<String> = {
         let mut stmt = conn.prepare(
             "SELECT id FROM discussions \
-             WHERE awaiting_agent = 1 AND partial_response IS NULL",
+             WHERE awaiting_agent = 1
+               AND partial_response IS NULL
+               AND NOT EXISTS (
+                   SELECT 1 FROM agent_dispatch_jobs
+                   WHERE agent_dispatch_jobs.discussion_id = discussions.id
+                     AND agent_dispatch_jobs.status IN ('Pending', 'Running')
+               )",
         )?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         rows.filter_map(|r| r.ok()).collect()
@@ -170,9 +192,17 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
 }
 
 pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
-    let triples: Vec<(String, String, Option<String>)> = {
+    type PartialRow = (
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+    let triples: Vec<PartialRow> = {
         let mut stmt = conn.prepare(
-            "SELECT id, partial_response, partial_response_started_at \
+            "SELECT id, partial_response, partial_response_started_at, \
+                    partial_response_agent_type, partial_response_model \
              FROM discussions WHERE partial_response IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |row| {
@@ -180,6 +210,8 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
             ))
         })?;
         rows.filter_map(|r| r.ok()).collect()
@@ -193,8 +225,12 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
         Voici ce qu'il avait écrit jusque-là. Relancez la discussion pour reprendre.";
 
     let mut recovered = Vec::with_capacity(triples.len());
-    for (disc_id, partial, started_at_str) in triples {
+    for (disc_id, partial, started_at_str, agent_type_str, model) in triples {
         let content = format!("{}{}", partial.trim_end(), FOOTER);
+        // Restore the checkpoint's provenance (KT-37). Legacy pre-089
+        // checkpoints have NULL agent/model → the recovered bubble stays
+        // anonymous, exactly as before.
+        let recovered_agent = agent_type_str.as_deref().map(parse_agent_type);
         // Use the checkpoint's start time so the recovered message sits
         // BEFORE any later user message. Fall back to now() only if the
         // column is empty (shouldn't happen after migration 032, but
@@ -206,12 +242,12 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             .map(|d| d.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
         let msg = DiscussionMessage {
-            model: None,
+            model,
             lint_report: None,
             id: uuid::Uuid::new_v4().to_string(),
             role: MessageRole::Agent,
             content,
-            agent_type: None,
+            agent_type: recovered_agent,
             timestamp: ts,
             tokens_used: 0,
             auth_mode: None,
@@ -222,15 +258,19 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             source_msg_id: None,
             duration_ms: None,
         };
-        match insert_message(conn, &disc_id, &msg) {
-            Ok(_) => {
-                if let Err(e) = set_partial_response(conn, &disc_id, None) {
-                    tracing::warn!(
-                        "Cleared partial after recovery but failed to wipe column for {}: {}",
-                        disc_id,
-                        e
-                    );
-                }
+        let recovery_result = (|| -> Result<()> {
+            let transaction = conn.unchecked_transaction()?;
+            insert_message(&transaction, &disc_id, &msg)?;
+            transaction.execute(
+                "UPDATE messages SET recovered_partial = 1 WHERE id = ?1",
+                [&msg.id],
+            )?;
+            set_partial_response(&transaction, &disc_id, None, None)?;
+            transaction.commit()?;
+            Ok(())
+        })();
+        match recovery_result {
+            Ok(()) => {
                 recovered.push(disc_id);
             }
             Err(e) => {
@@ -716,32 +756,200 @@ fn content_with_agent_handoff(content: &str, from: &str, to: &str) -> String {
 /// Insert the first user message after an agent switch and consume the pending
 /// handoff in the same transaction. The marker stays in the durable raw
 /// message for local and MCP agents, while the frontend hides it from humans.
+#[derive(Debug, Clone)]
+pub enum InsertUserMessageOutcome {
+    Inserted {
+        message: Box<DiscussionMessage>,
+        sort_order: i64,
+        dispatch_job: Option<Box<super::agent_dispatch::AgentDispatchJob>>,
+    },
+    Duplicate {
+        sort_order: i64,
+    },
+    PartialPending,
+}
+
 pub fn insert_user_message_with_agent_handoff(
     conn: &Connection,
     discussion_id: &str,
     msg: &DiscussionMessage,
-) -> Result<DiscussionMessage> {
+) -> Result<InsertUserMessageOutcome> {
+    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, None)
+}
+
+/// Same acceptance transaction as [`insert_user_message_with_agent_handoff`],
+/// plus a durable agent-dispatch obligation. The message, sequence number,
+/// handoff consumption, awaiting marker and Pending job commit together: a
+/// process crash can therefore never leave an accepted user turn unowned.
+pub fn insert_user_message_with_dispatch(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    dispatch_job_id: &str,
+    agent_override: Option<&AgentType>,
+) -> Result<InsertUserMessageOutcome> {
+    insert_user_message_with_agent_handoff_inner(
+        conn,
+        discussion_id,
+        msg,
+        Some((dispatch_job_id, agent_override)),
+    )
+}
+
+/// Persist any live turn (including a joined MCP peer's Agent reply) together
+/// with the native principal's durable response obligation.
+pub fn insert_message_with_dispatch(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    dispatch_job_id: &str,
+) -> Result<i64> {
+    let transaction = conn.unchecked_transaction()?;
+    let sort_order = insert_message(&transaction, discussion_id, msg)?;
+    let empty_chain = Vec::new();
+    super::agent_dispatch::enqueue(
+        &transaction,
+        super::agent_dispatch::NewAgentDispatchJob {
+            id: dispatch_job_id,
+            discussion_id,
+            trigger_message_id: &msg.id,
+            trigger_sort_order: sort_order,
+            dedupe_key: &format!("message:{}", msg.id),
+            agent_override: None,
+            chain_prompt_ids: &empty_chain,
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )?;
+    set_awaiting_agent(&transaction, discussion_id, true)?;
+    transaction.commit()?;
+    Ok(sort_order)
+}
+
+/// Persist a live peer append together with a durable dispatch obligation for
+/// an EXPLICITLY MENTIONED agent (`@agent` structured `target_agent`). Unlike
+/// [`insert_message_with_dispatch`], the job carries an `agent_override` so the
+/// mentioned agent answers even while the native principal is live — the fix
+/// for a joined peer's `@ollama` being dropped. The `mention:{msg}:{target}`
+/// dedupe key makes a re-posted mention idempotent and keeps exactly one job
+/// per (message, target).
+pub fn insert_message_with_targeted_dispatch(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    dispatch_job_id: &str,
+    target_agent: &AgentType,
+) -> Result<i64> {
+    let transaction = conn.unchecked_transaction()?;
+    let sort_order = insert_message(&transaction, discussion_id, msg)?;
+    let empty_chain = Vec::new();
+    super::agent_dispatch::enqueue(
+        &transaction,
+        super::agent_dispatch::NewAgentDispatchJob {
+            id: dispatch_job_id,
+            discussion_id,
+            trigger_message_id: &msg.id,
+            trigger_sort_order: sort_order,
+            dedupe_key: &format!("mention:{}:{:?}", msg.id, target_agent),
+            agent_override: Some(target_agent),
+            chain_prompt_ids: &empty_chain,
+            batch_item: None,
+            group_id: None,
+            group_concurrency_limit: None,
+        },
+    )?;
+    set_awaiting_agent(&transaction, discussion_id, true)?;
+    transaction.commit()?;
+    Ok(sort_order)
+}
+
+fn insert_user_message_with_agent_handoff_inner(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    dispatch: Option<(&str, Option<&AgentType>)>,
+) -> Result<InsertUserMessageOutcome> {
     let tx = conn.unchecked_transaction()?;
-    let handoff = tx
+
+    let existing = tx
         .query_row(
-            "SELECT pending_agent_handoff_from, agent
-             FROM discussions WHERE id = ?1",
-            [discussion_id],
-            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            "SELECT discussion_id, role, sort_order FROM messages WHERE id = ?1",
+            [&msg.id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
         )
         .optional()?;
+    if let Some((existing_discussion_id, role, sort_order)) = existing {
+        if existing_discussion_id == discussion_id && role == "User" {
+            return Ok(InsertUserMessageOutcome::Duplicate { sort_order });
+        }
+        anyhow::bail!("message id already belongs to another message");
+    }
+
+    let handoff = tx
+        .query_row(
+            "SELECT pending_agent_handoff_from, agent, partial_response IS NOT NULL
+             FROM discussions WHERE id = ?1",
+            [discussion_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((pending_from, current_agent, has_partial)) = handoff else {
+        anyhow::bail!("discussion not found");
+    };
+    if has_partial {
+        return Ok(InsertUserMessageOutcome::PartialPending);
+    }
 
     let mut stored = msg.clone();
-    if let Some((Some(from), to)) = handoff {
-        stored.content = content_with_agent_handoff(&stored.content, &from, &to);
+    if let Some(from) = pending_from {
+        stored.content = content_with_agent_handoff(&stored.content, &from, &current_agent);
     }
-    insert_message(&tx, discussion_id, &stored)?;
+    let sort_order = insert_message(&tx, discussion_id, &stored)?;
     tx.execute(
         "UPDATE discussions SET pending_agent_handoff_from = NULL WHERE id = ?1",
         [discussion_id],
     )?;
+    let dispatch_job = if let Some((job_id, agent_override)) = dispatch {
+        let empty_chain = Vec::new();
+        super::agent_dispatch::enqueue(
+            &tx,
+            super::agent_dispatch::NewAgentDispatchJob {
+                id: job_id,
+                discussion_id,
+                trigger_message_id: &stored.id,
+                trigger_sort_order: sort_order,
+                dedupe_key: &format!("message:{}", stored.id),
+                agent_override,
+                chain_prompt_ids: &empty_chain,
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        set_awaiting_agent(&tx, discussion_id, true)?;
+        super::agent_dispatch::claim(&tx, job_id)?.map(Box::new)
+    } else {
+        None
+    };
     tx.commit()?;
-    Ok(stored)
+    Ok(InsertUserMessageOutcome::Inserted {
+        message: Box::new(stored),
+        sort_order,
+        dispatch_job,
+    })
 }
 
 pub fn update_discussion_directive_ids(
@@ -1084,9 +1292,41 @@ pub fn insert_message(
     discussion_id: &str,
     msg: &DiscussionMessage,
 ) -> Result<i64> {
-    // Get the next sort_order for this discussion
+    // 0.9.2-H — an Agent message carrying a `kronn-plan-action` fence persists
+    // proposals in the SAME unit as the message row. Callers pass either a
+    // Transaction OR a bare &Connection (autocommit), so a SAVEPOINT — nestable
+    // inside a tx and self-starting standalone — guarantees the message + its
+    // proposals commit together or roll back together. The fence-free common
+    // path skips it entirely (zero overhead on bulk inserts).
+    if matches!(msg.role, crate::models::MessageRole::Agent)
+        && msg.content.contains("kronn-plan-action")
+    {
+        conn.execute_batch("SAVEPOINT insert_message_h")?;
+        return match insert_message_inner(conn, discussion_id, msg) {
+            Ok(order) => {
+                conn.execute_batch("RELEASE insert_message_h")?;
+                Ok(order)
+            }
+            Err(e) => {
+                let _ =
+                    conn.execute_batch("ROLLBACK TO insert_message_h; RELEASE insert_message_h");
+                Err(e)
+            }
+        };
+    }
+    insert_message_inner(conn, discussion_id, msg)
+}
+
+fn insert_message_inner(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+) -> Result<i64> {
     let next_order: i64 = conn.query_row(
-        "SELECT COALESCE(MAX(sort_order), 0) + 1 FROM messages WHERE discussion_id = ?1",
+        "UPDATE discussions
+         SET next_message_seq = next_message_seq + 1
+         WHERE id = ?1
+         RETURNING next_message_seq - 1",
         params![discussion_id],
         |row| row.get(0),
     )?;
@@ -1129,6 +1369,19 @@ pub fn insert_message(
     )?;
 
     update_discussion_timestamp(conn, discussion_id)?;
+
+    // 0.9.2-H — persist any `kronn-plan-action` proposals this Agent message
+    // carries, in THIS transaction, so a proposal exists iff its message does.
+    // Idempotent (deterministic IDs + INSERT OR IGNORE); no-op without a fence.
+    if matches!(msg.role, crate::models::MessageRole::Agent) {
+        super::planning_proposals::ingest_message_proposals(
+            conn,
+            discussion_id,
+            &msg.id,
+            &msg.content,
+        )?;
+    }
+
     Ok(next_order)
 }
 
@@ -1215,6 +1468,474 @@ pub fn edit_last_user_message(
     // Invalidate cached summary since conversation content changed
     let _ = invalidate_summary_cache(conn, discussion_id);
     Ok(affected > 0)
+}
+
+#[derive(Debug)]
+pub enum ReviseMessageError {
+    NotFound,
+    Conflict { current_revision: String },
+    IdempotencyConflict,
+    DispatchInProgress,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for ReviseMessageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(formatter, "message not found"),
+            Self::Conflict { .. } => write!(formatter, "message revision conflict"),
+            Self::IdempotencyConflict => write!(formatter, "idempotency key reused divergently"),
+            Self::DispatchInProgress => write!(formatter, "an agent dispatch is already active"),
+            Self::Other(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for ReviseMessageError {}
+
+impl From<anyhow::Error> for ReviseMessageError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Other(error)
+    }
+}
+
+impl From<rusqlite::Error> for ReviseMessageError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Other(error.into())
+    }
+}
+
+#[derive(Debug)]
+pub struct ReviseMessageOutcome {
+    pub receipt: MessageRevisionReceipt,
+    pub event: MessageRevisionEvent,
+    /// Present only for the first request that atomically claimed a local job.
+    pub claimed_dispatch: Option<crate::db::agent_dispatch::AgentDispatchJob>,
+}
+
+#[derive(Debug)]
+pub struct ReviseMessageParams<'a> {
+    pub discussion_id: &'a str,
+    pub message_id: &'a str,
+    pub content: &'a str,
+    pub expected_revision: &'a str,
+    pub idempotency_key: &'a str,
+    pub target_agent: Option<&'a AgentType>,
+    pub needs_local_dispatch: bool,
+    pub dispatch_job_id: &'a str,
+}
+
+pub(crate) fn content_hash(content: &str) -> String {
+    Sha256::digest(content.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn map_revision_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRevisionEvent> {
+    let target_agent_json: Option<String> = row.get(7)?;
+    Ok(MessageRevisionEvent {
+        id: row.get(0)?,
+        discussion_id: row.get(1)?,
+        target_message_id: row.get(2)?,
+        previous_content_hash: row.get(3)?,
+        expected_revision: row.get(4)?,
+        revision: row.get(5)?,
+        content: row.get(6)?,
+        target_agent: target_agent_json
+            .map(|value| {
+                serde_json::from_str(&value).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        7,
+                        rusqlite::types::Type::Text,
+                        error.into(),
+                    )
+                })
+            })
+            .transpose()?,
+        idempotency_key: row.get(8)?,
+        sort_order: row.get(9)?,
+        dispatch_job_id: row.get(10)?,
+        created_at: parse_dt(row.get(11)?),
+    })
+}
+
+const REVISION_EVENT_COLUMNS: &str = "id, discussion_id, target_message_id,
+    previous_content_hash, expected_revision, revision, content,
+    target_agent_json, idempotency_key, sort_order, dispatch_job_id, created_at";
+
+pub fn get_revision_event_by_idempotency_key(
+    conn: &Connection,
+    idempotency_key: &str,
+) -> Result<Option<MessageRevisionEvent>> {
+    conn.query_row(
+        &format!(
+            "SELECT {REVISION_EVENT_COLUMNS}
+             FROM message_revision_events WHERE idempotency_key = ?1"
+        ),
+        [idempotency_key],
+        map_revision_event,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+/// Replace the last User turn and create its resend obligation in one SQLite
+/// transaction. Trailing Agent/System rows are copied to `message_tombstones`
+/// before being removed from the live projection; their original sequence is
+/// therefore auditable while all existing transcript readers remain clean.
+pub fn revise_message_with_dispatch(
+    conn: &Connection,
+    request: ReviseMessageParams<'_>,
+) -> std::result::Result<ReviseMessageOutcome, ReviseMessageError> {
+    let transaction = conn.unchecked_transaction()?;
+
+    if let Some(existing) =
+        get_revision_event_by_idempotency_key(&transaction, request.idempotency_key)?
+    {
+        if existing.discussion_id != request.discussion_id
+            || existing.target_message_id != request.message_id
+            || existing.expected_revision != request.expected_revision
+            || existing.content != request.content
+            || existing.target_agent.as_ref() != request.target_agent
+        {
+            return Err(ReviseMessageError::IdempotencyConflict);
+        }
+        let receipt = MessageRevisionReceipt {
+            event_id: existing.id.clone(),
+            message_id: existing.target_message_id.clone(),
+            revision: existing.revision.clone(),
+            sort_order: existing.sort_order,
+            duplicate: true,
+            dispatch_job_id: existing.dispatch_job_id.clone(),
+        };
+        transaction.commit()?;
+        return Ok(ReviseMessageOutcome {
+            receipt,
+            event: existing,
+            claimed_dispatch: None,
+        });
+    }
+
+    if crate::db::agent_dispatch::has_active_for_discussion(&transaction, request.discussion_id)? {
+        return Err(ReviseMessageError::DispatchInProgress);
+    }
+
+    let target = transaction
+        .query_row(
+            "SELECT content, timestamp, sort_order, role
+             FROM messages
+             WHERE id = ?1 AND discussion_id = ?2",
+            params![request.message_id, request.discussion_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?
+        .ok_or(ReviseMessageError::NotFound)?;
+
+    let has_later_user: bool = transaction.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM messages
+             WHERE discussion_id = ?1 AND role = 'User' AND sort_order > ?2
+         )",
+        params![request.discussion_id, target.2],
+        |row| row.get(0),
+    )?;
+    if target.3 != "User" || has_later_user {
+        return Err(ReviseMessageError::NotFound);
+    }
+    if target.1 != request.expected_revision {
+        return Err(ReviseMessageError::Conflict {
+            current_revision: target.1,
+        });
+    }
+
+    let event_id = uuid::Uuid::new_v4().to_string();
+    let revision = Utc::now().to_rfc3339();
+    let previous_content_hash = content_hash(&target.0);
+    let event_sort_order: i64 = transaction.query_row(
+        "UPDATE discussions
+         SET next_message_seq = next_message_seq + 1
+         WHERE id = ?1
+         RETURNING next_message_seq - 1",
+        [request.discussion_id],
+        |row| row.get(0),
+    )?;
+
+    transaction.execute(
+        "INSERT INTO message_tombstones (
+             id, discussion_id, role, content, agent_type, timestamp, sort_order,
+             tokens_used, auth_mode, model_tier, cost_usd, author_pseudo,
+             author_avatar_email, source_msg_id, duration_ms, lint_report, model,
+             received_at, recovered_partial, agent_run_succeeded,
+             agent_dispatch_job_id, revision_event_id, tombstoned_at
+         )
+         SELECT id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                tokens_used, auth_mode, model_tier, cost_usd, author_pseudo,
+                author_avatar_email, source_msg_id, duration_ms, lint_report, model,
+                received_at, recovered_partial, agent_run_succeeded,
+                agent_dispatch_job_id, ?3, ?4
+         FROM messages
+         WHERE discussion_id = ?1 AND sort_order > ?2
+           AND role IN ('Agent', 'System')",
+        params![request.discussion_id, target.2, event_id, revision,],
+    )?;
+    transaction.execute(
+        "DELETE FROM messages
+         WHERE discussion_id = ?1 AND sort_order > ?2
+           AND role IN ('Agent', 'System')",
+        params![request.discussion_id, target.2],
+    )?;
+
+    let updated = transaction.execute(
+        "UPDATE messages
+         SET content = ?1, timestamp = ?2
+         WHERE id = ?3 AND discussion_id = ?4 AND timestamp = ?5",
+        params![
+            request.content,
+            revision,
+            request.message_id,
+            request.discussion_id,
+            request.expected_revision,
+        ],
+    )?;
+    if updated != 1 {
+        let current_revision = transaction
+            .query_row(
+                "SELECT timestamp FROM messages WHERE id = ?1",
+                [request.message_id],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        return Err(ReviseMessageError::Conflict { current_revision });
+    }
+
+    let target_agent_json = request
+        .target_agent
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(anyhow::Error::from)?;
+    let mut claimed_dispatch = None;
+    let dispatch_job_id = if request.needs_local_dispatch {
+        let dedupe_key = format!("revision:{}", request.idempotency_key);
+        let job = crate::db::agent_dispatch::enqueue(
+            &transaction,
+            crate::db::agent_dispatch::NewAgentDispatchJob {
+                id: request.dispatch_job_id,
+                discussion_id: request.discussion_id,
+                trigger_message_id: request.message_id,
+                trigger_sort_order: target.2,
+                dedupe_key: &dedupe_key,
+                agent_override: request.target_agent,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )?;
+        claimed_dispatch = crate::db::agent_dispatch::claim(&transaction, &job.id)?;
+        crate::db::discussions::set_awaiting_agent(&transaction, request.discussion_id, true)?;
+        Some(job.id)
+    } else {
+        crate::db::discussions::set_awaiting_agent(&transaction, request.discussion_id, false)?;
+        None
+    };
+
+    transaction.execute(
+        "INSERT INTO message_revision_events (
+             id, discussion_id, target_message_id, previous_content_hash,
+             expected_revision, revision, content, target_agent_json,
+             idempotency_key, sort_order, dispatch_job_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?6)",
+        params![
+            event_id,
+            request.discussion_id,
+            request.message_id,
+            previous_content_hash,
+            request.expected_revision,
+            revision,
+            request.content,
+            target_agent_json,
+            request.idempotency_key,
+            event_sort_order,
+            dispatch_job_id,
+        ],
+    )?;
+
+    transaction.execute(
+        "UPDATE discussions SET message_count = (
+             SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
+         ) WHERE id = ?1",
+        [request.discussion_id],
+    )?;
+    invalidate_summary_cache(&transaction, request.discussion_id)?;
+    update_discussion_timestamp(&transaction, request.discussion_id)?;
+    transaction.commit()?;
+
+    let event = MessageRevisionEvent {
+        id: event_id.clone(),
+        discussion_id: request.discussion_id.to_string(),
+        target_message_id: request.message_id.to_string(),
+        previous_content_hash,
+        expected_revision: request.expected_revision.to_string(),
+        revision: revision.clone(),
+        content: request.content.to_string(),
+        target_agent: request.target_agent.cloned(),
+        idempotency_key: request.idempotency_key.to_string(),
+        sort_order: event_sort_order,
+        dispatch_job_id: dispatch_job_id.clone(),
+        created_at: parse_dt(revision.clone()),
+    };
+    Ok(ReviseMessageOutcome {
+        receipt: MessageRevisionReceipt {
+            event_id,
+            message_id: request.message_id.to_string(),
+            revision,
+            sort_order: event_sort_order,
+            duplicate: false,
+            dispatch_job_id,
+        },
+        event,
+        claimed_dispatch,
+    })
+}
+
+/// Apply a revision received from a trusted shared-discussion peer. The wire
+/// CAS uses the previous content hash rather than the sender's timestamp
+/// representation, so mirrors with millisecond-normalized timestamps still
+/// converge safely. Returns `false` for an idempotent duplicate or a divergent
+/// local projection; callers only relay newly-applied events.
+pub fn apply_remote_message_revision(
+    conn: &Connection,
+    event: &MessageRevisionEvent,
+) -> Result<bool> {
+    let transaction = conn.unchecked_transaction()?;
+    if get_revision_event_by_idempotency_key(&transaction, &event.idempotency_key)?.is_some() {
+        return Ok(false);
+    }
+
+    let Some((current_content, target_sort_order)) = transaction
+        .query_row(
+            "SELECT content, sort_order FROM messages
+             WHERE id = ?1 AND discussion_id = ?2 AND role = 'User'",
+            params![event.target_message_id, event.discussion_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+    else {
+        return Ok(false);
+    };
+    if content_hash(&current_content) != event.previous_content_hash {
+        return Ok(false);
+    }
+
+    let local_sort_order: i64 = transaction.query_row(
+        "UPDATE discussions
+         SET next_message_seq = next_message_seq + 1
+         WHERE id = ?1
+         RETURNING next_message_seq - 1",
+        [&event.discussion_id],
+        |row| row.get(0),
+    )?;
+    transaction.execute(
+        "INSERT INTO message_tombstones (
+             id, discussion_id, role, content, agent_type, timestamp, sort_order,
+             tokens_used, auth_mode, model_tier, cost_usd, author_pseudo,
+             author_avatar_email, source_msg_id, duration_ms, lint_report, model,
+             received_at, recovered_partial, agent_run_succeeded,
+             agent_dispatch_job_id, revision_event_id, tombstoned_at
+         )
+         SELECT id, discussion_id, role, content, agent_type, timestamp, sort_order,
+                tokens_used, auth_mode, model_tier, cost_usd, author_pseudo,
+                author_avatar_email, source_msg_id, duration_ms, lint_report, model,
+                received_at, recovered_partial, agent_run_succeeded,
+                agent_dispatch_job_id, ?3, ?4
+         FROM messages
+         WHERE discussion_id = ?1 AND sort_order > ?2
+           AND role IN ('Agent', 'System')",
+        params![
+            event.discussion_id,
+            target_sort_order,
+            event.id,
+            event.revision,
+        ],
+    )?;
+    transaction.execute(
+        "DELETE FROM messages
+         WHERE discussion_id = ?1 AND sort_order > ?2
+           AND role IN ('Agent', 'System')",
+        params![event.discussion_id, target_sort_order],
+    )?;
+    transaction.execute(
+        "UPDATE messages SET content = ?1, timestamp = ?2
+         WHERE id = ?3 AND discussion_id = ?4",
+        params![
+            event.content,
+            event.revision,
+            event.target_message_id,
+            event.discussion_id,
+        ],
+    )?;
+    let target_agent_json = event
+        .target_agent
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()?;
+    transaction.execute(
+        "INSERT INTO message_revision_events (
+             id, discussion_id, target_message_id, previous_content_hash,
+             expected_revision, revision, content, target_agent_json,
+             idempotency_key, sort_order, dispatch_job_id, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL, ?11)",
+        params![
+            event.id,
+            event.discussion_id,
+            event.target_message_id,
+            event.previous_content_hash,
+            event.expected_revision,
+            event.revision,
+            event.content,
+            target_agent_json,
+            event.idempotency_key,
+            local_sort_order,
+            event.created_at.to_rfc3339(),
+        ],
+    )?;
+    transaction.execute(
+        "UPDATE discussions SET message_count = (
+             SELECT COUNT(*) FROM messages WHERE discussion_id = ?1
+         ) WHERE id = ?1",
+        [&event.discussion_id],
+    )?;
+    invalidate_summary_cache(&transaction, &event.discussion_id)?;
+    update_discussion_timestamp(&transaction, &event.discussion_id)?;
+    transaction.commit()?;
+    Ok(true)
+}
+
+pub fn list_revision_events_after(
+    conn: &Connection,
+    discussion_id: &str,
+    since_timestamp_millis: i64,
+) -> Result<Vec<MessageRevisionEvent>> {
+    let mut statement = conn.prepare(&format!(
+        "SELECT {REVISION_EVENT_COLUMNS}
+         FROM message_revision_events
+         WHERE discussion_id = ?1
+           AND unixepoch(created_at, 'subsec') * 1000 > ?2
+         ORDER BY sort_order"
+    ))?;
+    let rows = statement.query_map(
+        params![discussion_id, since_timestamp_millis],
+        map_revision_event,
+    )?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
 }
 
 /// Save a conversation summary cache for a discussion.

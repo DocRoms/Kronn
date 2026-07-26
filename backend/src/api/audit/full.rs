@@ -36,9 +36,11 @@ use super::{SseStream, PROMPT_PREAMBLE};
 /// Armed at pipeline start, disarmed on every normal ending. Drop can't do
 /// async work, so the cleanup is spawned onto the runtime.
 ///
-/// Also owns the macOS power assertion (`caffeinate -i`): default `pmset`
-/// puts the machine to sleep mid-audit (a 1h27 freeze was measured when the
-/// operator moved with the laptop), cf. TD-20260717-run-power-assertion.
+/// Also holds the shared power assertion (`core::power_guard`): default
+/// `pmset` puts the machine to sleep mid-audit (a 1h27 freeze was measured
+/// when the operator moved with the laptop), cf.
+/// TD-20260717-run-power-assertion-sleep. The lease is refcounted, so a
+/// concurrent workflow/agent run keeps the machine awake past this audit.
 pub(super) struct AuditDropGuard {
     armed: bool,
     db: std::sync::Arc<crate::db::Database>,
@@ -47,7 +49,7 @@ pub(super) struct AuditDropGuard {
     /// the guard then only clears the tracker (+ power assertion).
     run_id: Option<String>,
     project_id: String,
-    caffeinate: Option<std::process::Child>,
+    power: Option<crate::core::power_guard::PowerLease>,
     /// Whether this guard owns the project's audit lease. When true, Drop
     /// releases it on EVERY exit path (normal, cancel, abandonment) — so no
     /// early `return` in the pipeline can leak a lease and wedge the project.
@@ -61,23 +63,13 @@ impl AuditDropGuard {
         run_id: Option<String>,
         project_id: String,
     ) -> Self {
-        let caffeinate = if cfg!(target_os = "macos") {
-            sync_cmd("caffeinate")
-                .arg("-i")
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .spawn()
-                .ok()
-        } else {
-            None
-        };
         Self {
             armed: true,
             db,
             tracker,
             run_id,
             project_id,
-            caffeinate,
+            power: Some(crate::core::power_guard::acquire()),
             leased: false,
         }
     }
@@ -102,20 +94,23 @@ impl AuditDropGuard {
     }
 
     fn release_power_assertion(&mut self) {
-        if let Some(mut child) = self.caffeinate.take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        // Dropping the lease decrements the shared refcount; the OS assertion
+        // is released only once the last active run lets go.
+        self.power = None;
     }
 }
 
 impl Drop for AuditDropGuard {
     fn drop(&mut self) {
+        // Power assertion FIRST, by design: the run's real work is already
+        // over (the SSE consumer vanished), only the ms-scale DB finalization
+        // below remains, so there is nothing left to keep the machine awake
+        // for. Distinct from the AUDIT lease just below, which is different.
         self.release_power_assertion();
-        // Order matters everywhere here: the lease is released LAST, only
-        // once this run's terminal state is settled — otherwise a successor
-        // could start while the old run still reads as Running (two Running
-        // rows) or have its fresh progress wiped by a late clear.
+        // Order matters for the AUDIT (project) lease: it is released LAST,
+        // only once this run's terminal state is settled — otherwise a
+        // successor could start while the old run still reads as Running (two
+        // Running rows) or have its fresh progress wiped by a late clear.
         if self.armed {
             tracing::warn!(
                 "Audit for {} dropped mid-flight (SSE consumer vanished) — cleaning up (run: {:?})",

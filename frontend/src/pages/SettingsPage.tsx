@@ -68,6 +68,23 @@ import { UserContextEditor } from '../components/UserContextEditor';
 import { MatrixText } from '../components/MatrixText';
 import './SettingsPage.css';
 
+const KRONN_REPOSITORY_URL = 'https://github.com/DocRoms/Kronn';
+const KRONN_RELEASES_URL = `${KRONN_REPOSITORY_URL}/releases`;
+
+function KronnVersionLinks({ sourceLabel }: { sourceLabel: string }) {
+  return (
+    <>
+      <a href={KRONN_RELEASES_URL} target="_blank" rel="noopener noreferrer">
+        Kronn v{appVersion}
+      </a>
+      <span aria-hidden="true">—</span>
+      <a href={KRONN_REPOSITORY_URL} target="_blank" rel="noopener noreferrer">
+        {sourceLabel}
+      </a>
+    </>
+  );
+}
+
 /** Output languages for agents (sent to backend, not related to UI i18n) */
 const LANGUAGES: { code: string; label: string; flag: string }[] = [
   { code: 'fr', label: 'Français', flag: 'FR' },
@@ -422,6 +439,9 @@ export function SettingsPage({
             {s.live && <span className="set-nav-live-dot" aria-hidden="true" />}
           </button>
         ))}
+          <div className="set-nav-version" data-testid="settings-nav-version">
+            <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} />
+          </div>
         </nav>
 
         <div className="set-content">
@@ -1766,7 +1786,7 @@ export function SettingsPage({
         </div>
       </div>
       <div className="set-footer">
-        Kronn v{appVersion} — <a href="https://github.com/DocRoms/Kronn" target="_blank" rel="noopener noreferrer">Source code (AGPL-3.0)</a>
+        <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} />
       </div>
     </div>
   );

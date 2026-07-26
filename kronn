@@ -222,33 +222,30 @@ cmd_start_dev() {
     # Preflight: native mode needs Rust (cargo) + Node + pnpm on the host. The
     # decision of WHAT is missing is a pure, unit-tested helper (dev_missing_tools);
     # here we just resolve real presence and render install hints.
-    local have_cargo=0 have_node=0 have_pnpm=0
+    local have_cargo=0 have_node=0 have_pnpm=0 have_watchexec=0 readiness_status
     command -v cargo >/dev/null 2>&1 && have_cargo=1
     command -v node  >/dev/null 2>&1 && have_node=1
     command -v pnpm  >/dev/null 2>&1 && have_pnpm=1
+    command -v watchexec >/dev/null 2>&1 && have_watchexec=1
 
     local missing
-    missing="$(dev_missing_tools "$have_cargo" "$have_node" "$have_pnpm")"
+    missing="$(dev_missing_tools "$have_cargo" "$have_node" "$have_pnpm" "$have_watchexec")"
     if [[ -n "$missing" ]]; then
         fail "Missing native-dev prerequisite(s):$missing"
         [[ "$have_cargo" == "1" ]] || printf "  ${DIM}  cargo → curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${RESET}\n"
         [[ "$have_node"  == "1" ]] || printf "  ${DIM}  node  → brew install node   (macOS) · Node ≥ 24${RESET}\n"
         [[ "$have_pnpm"  == "1" ]] || printf "  ${DIM}  pnpm  → npm install -g pnpm   (or: corepack enable)${RESET}\n"
-        return 1
-    fi
-
-    # cargo-watch is optional: without it `make dev-backend` fails. Check + hint.
-    if ! cargo watch --version >/dev/null 2>&1; then
-        warn "cargo-watch not found — required by 'make dev-backend' (hot-reload)."
-        printf "  ${DIM}  install → cargo install cargo-watch${RESET}\n"
+        [[ "$have_watchexec" == "1" ]] || printf "  ${DIM}  watchexec → brew install watchexec   (macOS) · cargo install watchexec-cli (other)${RESET}\n"
         return 1
     fi
 
     # Clean start: reap any orphaned NATIVE backend from a previous start-dev
-    # (cargo-watch's kronn grandchild survives a bare Ctrl+C) BEFORE we launch —
+    # (the watcher's kronn grandchild can survive a bare Ctrl+C) BEFORE launch —
     # otherwise it still owns :3140 + the data-dir lock and this run dies with a
-    # cryptic bind/lock error. `cargo watch -x run` then rebuilds fresh anyway.
-    if pgrep -f "target/debug/kronn" >/dev/null 2>&1 || pgrep -f "cargo[- ]watch" >/dev/null 2>&1; then
+    # cryptic bind/lock error. Watchexec then rebuilds fresh anyway.
+    local watcher_pattern
+    watcher_pattern="$(dev_backend_watcher_pattern)"
+    if pgrep -f "target/debug/kronn" >/dev/null 2>&1 || pgrep -f "$watcher_pattern" >/dev/null 2>&1; then
         info "A previous native Kronn backend is still running — stopping it first."
         reap_native_backend
         success "Previous native backend stopped."
@@ -278,7 +275,7 @@ cmd_start_dev() {
 
     # Backend (API :3140) in the background; frontend (Vite :5173, which proxies
     # /api → :3140) in the foreground. Ctrl+C ends the foreground frontend; the
-    # trap then stops the backend so we never leak a detached cargo-watch.
+    # trap then stops the backend so we never leak a detached watcher.
     #
     # Tell the backend its startup banner should point users at the Vite UI:
     # in native dev :3140 serves the API ONLY, so an unqualified "→ :3140" in the
@@ -291,10 +288,32 @@ cmd_start_dev() {
     # trap fires on Ctrl+C (INT, still in-function) or at script EXIT.
     KRONN_DEV_BACKEND_PID=$!
     # Teardown must kill the whole native stack, not just the `make` pid: the
-    # actual backend is a cargo-watch grandchild that survives a single-pid kill
+    # actual backend is a watcher grandchild that survives a single-pid kill
     # (the leak that stranded orphaned backends holding the data-dir lock). Kill
     # the direct child, then reap the grandchildren by pattern. Quiet on Ctrl+C.
     trap 'kill "${KRONN_DEV_BACKEND_PID:-}" 2>/dev/null || true; reap_native_backend >/dev/null 2>&1 || true' EXIT INT TERM
+
+    # Do not start Vite until the API really answers. Starting both processes
+    # concurrently made a fresh Rust build flood the UI with proxy ECONNREFUSED
+    # errors and could open a half-initialised application (#111).
+    info "Waiting for backend readiness on :3140..."
+    if wait_for_process_http_ready \
+        "http://localhost:3140/api/health" \
+        "$KRONN_DEV_BACKEND_PID" \
+        "${KRONN_DEV_READY_ATTEMPTS:-300}" \
+        "${KRONN_DEV_READY_INTERVAL:-1}"; then
+        success "Backend ready — starting the UI."
+    else
+        readiness_status=$?
+        if [[ "$readiness_status" == "2" ]]; then
+            fail "Backend watcher exited before /api/health became ready."
+        else
+            fail "Backend did not become ready before the startup timeout."
+        fi
+        kill "$KRONN_DEV_BACKEND_PID" 2>/dev/null || true
+        reap_native_backend >/dev/null 2>&1 || true
+        return 1
+    fi
 
     # Open the browser once Vite is actually serving (cross-platform via
     # open_url: open/wslview/xdg-open). OSC 8 links aren't clickable in every
@@ -644,19 +663,18 @@ cmd_init() {
     init_repo "$target"
 }
 
-# Stop any orphaned NATIVE (start-dev) backend + its cargo-watch/make wrappers.
+# Stop any orphaned NATIVE (start-dev) backend + its watchexec/make wrappers.
 # `make stop` only tears down Docker; start-dev's real backend runs as a
-# cargo-watch GRANDCHILD (`make dev-backend` → sh → cargo watch → cargo → kronn)
+# watcher GRANDCHILD (`make dev-backend` → sh → watchexec → cargo → kronn)
 # that survives a plain Ctrl+C, so without this it leaks — still bound to :3140
 # and (since 0.9.x) still holding the data-dir lock, which blocks the next
 # start. Pattern-matched (not process-group / setsid, which macOS lacks) and a
 # no-op when nothing native is running. Never matches this script itself: its
 # cmdline is `bash …/kronn`, which contains none of these patterns.
-# NOTE on patterns: the watcher runs as `cargo-watch watch -x run` (the binary
-# is `cargo-watch`, hyphen) — NOT `cargo watch …` — so `cargo[- ]watch` is used
-# to catch both invocation forms. Killing the backend alone is not enough: a
-# surviving cargo-watch RESPAWNS it on the next file change and re-grabs the
-# data-dir lock, so the watcher MUST be reaped too.
+# NOTE on patterns: match `watchexec … cargo run`, never bare `watchexec`, so
+# stopping Kronn cannot kill an unrelated watcher. Killing the backend alone is
+# not enough: a surviving watcher respawns it on the next file change and
+# re-grabs the data-dir lock, so the watcher MUST be reaped too.
 #
 # Frontend: `make dev-frontend` spawns `vite` as a node grandchild that
 # survives/wedges the same way (process alive but no longer bound to :5173 → the
@@ -664,7 +682,9 @@ cmd_init() {
 # `vite/bin/vite` is reaped directly too — the specific path avoids matching
 # unrelated "vite" processes.
 reap_native_backend() {
-    local pats=("target/debug/kronn" "target/release/kronn" "cargo[- ]watch" "make dev-backend" "make dev-frontend" "vite/bin/vite")
+    local watcher_pattern
+    watcher_pattern="$(dev_backend_watcher_pattern)"
+    local pats=("target/debug/kronn" "target/release/kronn" "$watcher_pattern" "make dev-backend" "make dev-frontend" "vite/bin/vite")
     local found=0 p
     for p in "${pats[@]}"; do
         pgrep -f "$p" >/dev/null 2>&1 && found=1
@@ -672,11 +692,11 @@ reap_native_backend() {
     [[ "$found" == "0" ]] && return 0
 
     # Kill the watcher(s) FIRST so nothing respawns the backend under us.
-    pkill -f "cargo[- ]watch" 2>/dev/null || true
+    pkill -f "$watcher_pattern" 2>/dev/null || true
     for p in "${pats[@]}"; do pkill -f "$p" 2>/dev/null || true; done
     sleep 1  # let them release :3140 / :5173 + the data-dir lock
     # Escalate on any survivor so the next start can't hit the lock/port.
-    for p in "cargo[- ]watch" "target/debug/kronn" "target/release/kronn" "vite/bin/vite"; do
+    for p in "$watcher_pattern" "target/debug/kronn" "target/release/kronn" "vite/bin/vite"; do
         pkill -9 -f "$p" 2>/dev/null || true
     done
     return 0
@@ -684,7 +704,7 @@ reap_native_backend() {
 
 cmd_stop() {
     step "Stopping Kronn"
-    reap_native_backend                 # native start-dev stack (cargo-watch + kronn)
+    reap_native_backend                 # native start-dev stack (watchexec + kronn)
     (cd "$KRONN_DIR" && make stop)      # Docker stack
     success "Kronn stopped."
 }

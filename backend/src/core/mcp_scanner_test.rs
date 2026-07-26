@@ -2742,8 +2742,9 @@ args = ["@example/old-mcp"]
     // it's the single place that fans out to Claude / Kiro / Gemini /
     // Vibe writes. The test boots an empty in-memory DB, runs the
     // function against a tmp dir, and asserts every produced file
-    // carries the kronn-internal entry except the Vibe TOML, which
-    // doesn't speak MCP.
+    // carries the kronn-internal entry, including Vibe's TOML. The
+    // Kronn-launched Vibe SDK runner still uses slash markers, but the
+    // host Vibe CLI supports stdio MCPs and must be able to `disc_join`.
 
     // The Codex helper is pub(crate) — bring it into scope explicitly
     // so we can drive it from this test module.
@@ -3102,6 +3103,7 @@ args = ["@example/old-mcp"]
             (".kiro/settings/mcp.json", "Kiro (canonical)"),
             (".ai/mcp/mcp.json", "Kiro (.ai variant)"),
             (".gemini/settings.json", "Gemini CLI"),
+            (".vibe/config.toml", "Vibe CLI"),
         ] {
             let file = tmp.join(path);
             assert!(

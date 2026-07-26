@@ -43,7 +43,11 @@ function makeDiscussion(overrides: Partial<Discussion> = {}): Discussion {
   };
 }
 
-function renderHeader(pendingFilesCount: number, disc: Discussion = makeDiscussion()) {
+function renderHeader(
+  pendingFilesCount: number,
+  disc: Discussion = makeDiscussion(),
+  pendingProposalItemCount = 0,
+) {
   return render(
     <ChatHeader
       discussion={disc}
@@ -53,6 +57,8 @@ function renderHeader(pendingFilesCount: number, disc: Discussion = makeDiscussi
       isMobile={false}
       sending={false}
       pendingFilesCount={pendingFilesCount}
+      pendingProposalCount={pendingProposalItemCount > 0 ? 1 : 0}
+      pendingProposalItemCount={pendingProposalItemCount}
       onRequestTestMode={noop}
       onToggleGitPanel={noop}
       onToggleSettingsPanel={noop}
@@ -118,5 +124,10 @@ describe('ChatHeader — pending files badge', () => {
     // No project_id → no git button at all, so obviously no badge.
     renderHeader(5, makeDiscussion({ project_id: null }));
     expect(document.querySelector('.disc-icon-btn-badge')).toBeNull();
+  });
+
+  it('shows pending planning items inside the plan button', () => {
+    const { container } = renderHeader(0, makeDiscussion(), 3);
+    expect(container.querySelector('.disc-plan-pending')?.textContent).toBe('3');
   });
 });

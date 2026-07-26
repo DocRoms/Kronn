@@ -140,7 +140,7 @@ fn env_or_default<T: std::str::FromStr + std::fmt::Display>(var: &str, default: 
 
 /// True when the newest existing backup is younger than half the schedule
 /// interval — a fresh tick then adds nothing but churn. Guards against
-/// restart loops (cargo-watch, container crash loop): the immediate
+/// restart loops (dev watcher, container crash loop): the immediate
 /// first interval tick would otherwise write one backup per process start
 /// and, with count-based pruning, wipe a week of history in minutes.
 fn should_skip_backup(newest_age: Duration, interval: Duration) -> bool {

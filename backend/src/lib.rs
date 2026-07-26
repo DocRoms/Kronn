@@ -201,6 +201,7 @@ pub struct AppState {
     /// the bounded source scan is reused between overview visits.
     pub git_language_cache:
         Arc<tokio::sync::Mutex<HashMap<String, crate::models::CachedProjectLanguages>>>,
+    pub agent_dispatch_notify: Arc<tokio::sync::Notify>,
     /// Handle to the kronn-docs Python sidecar (PDF/DOCX/XLSX/… gen).
     /// Always allocated — whether the sidecar is actually running is
     /// stored INSIDE the handle. Routes in `api::docs` probe it at
@@ -239,6 +240,7 @@ impl AppState {
             oauth2_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             dependency_update_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             git_language_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            agent_dispatch_notify: Arc::new(tokio::sync::Notify::new()),
             docs_sidecar: Arc::new(crate::core::docs_sidecar::DocsSidecar::new()),
         }
     }
@@ -711,6 +713,19 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/plan/changes",
             get(api::planning::task_changes),
+        )
+        // ── Planning proposals (0.9.2-H durable inbox) ──
+        .route(
+            "/api/planning/proposals",
+            get(api::planning::list_proposals),
+        )
+        .route(
+            "/api/planning/proposals/{id}",
+            get(api::planning::get_proposal),
+        )
+        .route(
+            "/api/planning/proposals/{id}/items/{item_id}/decision",
+            post(api::planning::decide_proposal_item),
         )
         // ── Projects ──
         .route("/api/projects", get(api::projects::list))
@@ -1247,6 +1262,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/messages",
             post(api::discussions::send_message),
+        )
+        .route(
+            "/api/discussions/{id}/messages/revise",
+            post(api::discussions::revise_message),
         )
         .route(
             "/api/discussions/{id}/messages/last",

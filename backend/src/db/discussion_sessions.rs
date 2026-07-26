@@ -50,6 +50,149 @@ pub struct DiscussionSession {
     /// yet). Expiry is applied at read time — an expired activity is None
     /// here, callers never see a stale placeholder.
     pub activity: Option<String>,
+    /// KT-37 — the model a JOIN participant DECLARED it runs on. Declared at
+    /// join, durable, never inferred. `None` = not declared (the UI shows it as
+    /// such, never a guessed default).
+    pub model: Option<String>,
+}
+
+/// 0.9.2-G — honest presence state, server-derived (never a bare "connected"
+/// badge inferred from a lingering session row). See [`derive_presence_state`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PresenceState {
+    /// A dispatch job is Running for this agent — actively generating.
+    Running,
+    /// A long-poll was open within its TTL window — true read-liveness now.
+    Listening,
+    /// No open poll, but the next poll is contractually due and the peer is
+    /// expected to relaunch it. "En veille, revient."
+    Dormant,
+    /// No open poll and past the pacing deadline (or paused/left): nothing will
+    /// wake this participant on its own. The UI says "reconnexion requise",
+    /// never "connecté".
+    Offline,
+}
+
+/// Tri-state write-liveness. Never inferred `false` from silence — `Unknown`
+/// until a write is observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WriteState {
+    /// A recent append by this session succeeded.
+    Ok,
+    /// The bridge reported an authentic write failure.
+    Failed,
+    /// No write observed yet, or the last one aged out of the window.
+    Unknown,
+}
+
+impl WriteState {
+    fn parse(s: &str) -> WriteState {
+        match s {
+            "ok" => WriteState::Ok,
+            "failed" => WriteState::Failed,
+            _ => WriteState::Unknown,
+        }
+    }
+}
+
+/// How a participant can be woken. In 0.9.2 every session row is a joined
+/// external CLI peer (Kronn can persist an obligation but cannot force it to
+/// resume); `NativeDispatch` is reserved for the future obligation-participant
+/// surface where Kronn owns the runner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum WakeMode {
+    /// Kronn owns the runner and can re-spawn/wake it (native + one-shot model).
+    NativeDispatch,
+    /// External CLI: Kronn persists the obligation but cannot force resume.
+    ExternalPoll,
+}
+
+/// A participant enriched with the honest-presence contract (0.9.2-G). Carries
+/// the legacy session fields so the UI keeps working during the transition,
+/// plus the server-derived state the UI switches to.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct ParticipantView {
+    pub id: i64,
+    pub disc_id: String,
+    pub agent_type: String,
+    pub session_id: Option<String>,
+    pub role: String,
+    pub status: String,
+    pub joined_at: String,
+    pub left_at: Option<String>,
+    pub last_seen: Option<String>,
+    pub activity: Option<String>,
+    pub presence_state: PresenceState,
+    pub read_live: bool,
+    pub write_state: WriteState,
+    pub wake_mode: WakeMode,
+    pub next_poll_at: Option<String>,
+    pub last_write_at: Option<String>,
+    /// KT-37 — model DECLARED by this participant at join (durable, never
+    /// inferred). `None` = not declared; the UI shows it as declared-at-join,
+    /// never as a live/guessed value.
+    pub model: Option<String>,
+}
+
+/// Parse an RFC3339 (or SQLite `%Y-%m-%d %H:%M:%S`) timestamp, returning `None`
+/// on failure — deliberately NOT the `Utc::now()` fallback of `db::parse_dt`,
+/// because a bad `next_poll_at` must degrade a participant to `offline`, never
+/// silently read as "due right now".
+fn parse_ts_opt(s: Option<&str>) -> Option<DateTime<Utc>> {
+    let s = s?;
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|ndt| DateTime::<Utc>::from_naive_utc_and_offset(ndt, Utc))
+}
+
+/// Grace beyond `next_poll_at` before a silent peer is called `offline`. Mirrors
+/// the frontend `AWAY_MARGIN_MS` so backend and UI agree on the boundary.
+const NEXT_POLL_GRACE: Duration = Duration::seconds(120);
+
+/// How recent a successful append must be for `write_state` to still read `ok`.
+/// Beyond this, a stored success decays to `unknown` — an old write is not
+/// proof the append path works right now.
+const WRITE_LIVENESS_WINDOW: Duration = Duration::seconds(120);
+
+/// Pure honest-presence derivation (unit-testable without a DB). `activity` is
+/// the ALREADY read-time-expired value (`None` once its TTL passed).
+#[allow(clippy::too_many_arguments)]
+pub fn derive_presence_state(
+    status: &str,
+    activity: Option<&str>,
+    next_poll_at: Option<&str>,
+    now: DateTime<Utc>,
+    has_running_job: bool,
+) -> PresenceState {
+    if status == "paused" || status == "left" {
+        return PresenceState::Offline;
+    }
+    if has_running_job {
+        return PresenceState::Running;
+    }
+    // An unexpired listening/reading placeholder means a wait was open within
+    // its TTL window — genuine read-liveness.
+    if matches!(activity, Some("listening") | Some("reading")) {
+        return PresenceState::Listening;
+    }
+    // No open poll. Dormant only while the next poll is still contractually due
+    // (peer expected to relaunch); once past the deadline + grace it decrocheé.
+    if let Some(npa) = parse_ts_opt(next_poll_at) {
+        if now <= npa + NEXT_POLL_GRACE {
+            return PresenceState::Dormant;
+        }
+    }
+    PresenceState::Offline
 }
 
 /// Metadata returned by `create_invite_token`. The plain `token` field
@@ -141,6 +284,19 @@ pub fn set_session_status(conn: &Connection, session_pk: i64, status: &str) -> R
     Ok(())
 }
 
+/// KT-37 — record the model a JOIN participant DECLARES it runs on. Declared
+/// at join, durable, never inferred. This writer is only ever called with a
+/// real (trimmed, bounded) value, so an omitted declaration on a later rebind
+/// leaves any previously-declared model untouched — the caller must not invoke
+/// it for an absent/blank declaration.
+pub fn set_session_model(conn: &Connection, session_pk: i64, model: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions SET model = ?2 WHERE id = ?1",
+        params![session_pk, model],
+    )?;
+    Ok(())
+}
+
 /// List participants for a disc, ordered by `joined_at`. Default
 /// `include_left=false` matches the header rendering (we only want
 /// active+paused). Audit views pass `true`.
@@ -150,12 +306,12 @@ pub fn list_sessions(
     include_left: bool,
 ) -> Result<Vec<DiscussionSession>> {
     let sql = if include_left {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model
            FROM discussion_sessions
           WHERE disc_id = ?1
           ORDER BY joined_at ASC"
     } else {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model
            FROM discussion_sessions
           WHERE disc_id = ?1 AND status != 'left'
           ORDER BY joined_at ASC"
@@ -174,9 +330,184 @@ pub fn list_sessions(
                 left_at: r.get(7)?,
                 last_seen: r.get(8)?,
                 activity: activity_of_row(r.get(9)?, r.get(10)?),
+                model: r.get(11)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 0.9.2-G — participants enriched with the honest-presence contract. Same
+/// non-left rows as [`list_sessions`], each carrying a server-derived
+/// `presence_state` (never a bare "connected" badge from a lingering row) plus
+/// read/write liveness. `count_live_participants` (the sticky dispatch gate) is
+/// deliberately untouched — this is a display layer above it.
+pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<ParticipantView>> {
+    let now = Utc::now();
+    let mut stmt = conn.prepare(
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at,
+                last_seen, activity, activity_expires_at, next_poll_at, last_write_at, write_state, model
+           FROM discussion_sessions
+          WHERE disc_id = ?1 AND status != 'left'
+          ORDER BY joined_at ASC",
+    )?;
+    let mut rows = stmt
+        .query_map(params![disc_id], |r| {
+            let agent_type: String = r.get(2)?;
+            let status: String = r.get(5)?;
+            let activity = activity_of_row(r.get(9)?, r.get(10)?);
+            let next_poll_at: Option<String> = r.get(11)?;
+            let last_write_at: Option<String> = r.get(12)?;
+            let stored_write = WriteState::parse(&r.get::<_, String>(13)?);
+            // A session row is always an external CLI peer; a native Codex/Ollama
+            // runner is a DIFFERENT instance, so a dispatch job never proves THIS
+            // participant is generating. `Running` is reserved for a future
+            // obligation-participant surface — never synthesised here (0.9.2).
+            let presence_state = derive_presence_state(
+                &status,
+                activity.as_deref(),
+                next_poll_at.as_deref(),
+                now,
+                false,
+            );
+            // read_live = an OPEN read channel — `Listening` only. `Running`
+            // would be generation, not reading.
+            let read_live = matches!(presence_state, PresenceState::Listening);
+            // Honest write-liveness: a stored `ok` counts only while
+            // `last_write_at` is recent — a stale success is not current
+            // liveness, so it decays to `unknown`. `failed` stays explicit.
+            let write_state = match stored_write {
+                WriteState::Failed => WriteState::Failed,
+                WriteState::Ok => match parse_ts_opt(last_write_at.as_deref()) {
+                    Some(t) if now - t <= WRITE_LIVENESS_WINDOW => WriteState::Ok,
+                    _ => WriteState::Unknown,
+                },
+                WriteState::Unknown => WriteState::Unknown,
+            };
+            Ok(ParticipantView {
+                id: r.get(0)?,
+                disc_id: r.get(1)?,
+                agent_type,
+                session_id: r.get(3)?,
+                role: r.get(4)?,
+                status,
+                joined_at: r.get(6)?,
+                left_at: r.get(7)?,
+                last_seen: r.get(8)?,
+                activity,
+                presence_state,
+                read_live,
+                write_state,
+                // Every session row is a joined external CLI peer in 0.9.2.
+                wake_mode: WakeMode::ExternalPoll,
+                next_poll_at,
+                last_write_at,
+                model: r.get(14)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // The header is a presence projection, not a session audit log. A CLI may
+    // rejoin with a fresh session id after a backend restart or an expired
+    // invite, leaving older rows to decay to Offline. Rendering every one of
+    // those rows produces contradictory chips ("Vibe listening" next to
+    // "Vibe offline") and grows without bound across reconnects.
+    //
+    // Preserve genuinely concurrent reachable sessions, but hide their stale
+    // Offline siblings. When every session for an agent is Offline, retain
+    // only the newest row so the actionable "reconnection required" state
+    // remains visible exactly once. `list_sessions(include_left=true)` stays
+    // untouched for audit/history use-cases.
+    let agents_with_reachable_session: std::collections::HashSet<String> = rows
+        .iter()
+        .filter(|participant| participant.presence_state != PresenceState::Offline)
+        .map(|participant| participant.agent_type.clone())
+        .collect();
+    rows.retain(|participant| {
+        participant.presence_state != PresenceState::Offline
+            || !agents_with_reachable_session.contains(&participant.agent_type)
+    });
+    let newest_offline_by_agent: std::collections::HashMap<String, i64> = rows
+        .iter()
+        .filter(|participant| participant.presence_state == PresenceState::Offline)
+        .fold(
+            std::collections::HashMap::new(),
+            |mut newest, participant| {
+                newest
+                    .entry(participant.agent_type.clone())
+                    .and_modify(|id| *id = (*id).max(participant.id))
+                    .or_insert(participant.id);
+                newest
+            },
+        );
+    rows.retain(|participant| {
+        participant.presence_state != PresenceState::Offline
+            || newest_offline_by_agent.get(&participant.agent_type) == Some(&participant.id)
+    });
+
+    // 0.9.2-G — surface DEFERRED obligations for ABSENT agents as honest
+    // "waiting for a runtime" participants instead of letting them vanish. A
+    // dispatch that hit `RuntimeUnavailable` is kept Pending (durable
+    // obligation, see `defer_runtime_unavailable`) with a
+    // `runtime_unavailable:` last_error and a future `available_at`. If its
+    // target agent has no live session, synthesise a dormant, Kronn-wakeable
+    // participant so the room shows the pending call rather than nothing.
+    let mut obligation_stmt = conn.prepare(
+        "SELECT agent_override_json, available_at
+           FROM agent_dispatch_jobs
+          WHERE discussion_id = ?1 AND status = 'Pending'
+            AND agent_override_json IS NOT NULL
+            AND last_error LIKE 'runtime_unavailable%'
+          ORDER BY available_at ASC",
+    )?;
+    let obligations: Vec<(String, Option<String>)> = obligation_stmt
+        .query_map(params![disc_id], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut seen_obligation: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut synth_id = -1_i64;
+    for (agent_json, available_at) in obligations {
+        let Ok(agent) = serde_json::from_str::<crate::models::AgentType>(&agent_json) else {
+            continue;
+        };
+        let agent_type = format!("{agent:?}");
+        // Skip an agent that already has a genuinely live session (it is not
+        // absent) or a second obligation for the same agent (one chip per
+        // agent). A lingering Offline row is not proof of reachability: replace
+        // it with the actionable native obligation instead of masking that
+        // obligation or rendering two contradictory chips.
+        let has_live_session = rows
+            .iter()
+            .any(|p| p.agent_type == agent_type && p.presence_state != PresenceState::Offline);
+        if has_live_session || !seen_obligation.insert(agent_type.clone()) {
+            continue;
+        }
+        rows.retain(|p| p.agent_type != agent_type || p.presence_state != PresenceState::Offline);
+        rows.push(ParticipantView {
+            id: synth_id,
+            disc_id: disc_id.to_string(),
+            agent_type,
+            session_id: None,
+            role: "obligation".to_string(),
+            status: "pending".to_string(),
+            joined_at: now.to_rfc3339(),
+            left_at: None,
+            last_seen: None,
+            activity: None,
+            presence_state: PresenceState::Dormant,
+            read_live: false,
+            write_state: WriteState::Unknown,
+            // Kronn owns this runner and re-drains when a runtime returns.
+            wake_mode: WakeMode::NativeDispatch,
+            next_poll_at: available_at,
+            last_write_at: None,
+            // A synthesised obligation is not a joined session — nothing declared.
+            model: None,
+        });
+        synth_id -= 1;
+    }
+
     Ok(rows)
 }
 
@@ -191,7 +522,7 @@ pub fn find_active_session(
 ) -> Result<Option<DiscussionSession>> {
     let row = conn
         .query_row(
-            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at
+            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model
                FROM discussion_sessions
               WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'
               LIMIT 1",
@@ -208,6 +539,7 @@ pub fn find_active_session(
                     left_at: r.get(7)?,
                     last_seen: r.get(8)?,
                     activity: activity_of_row(r.get(9)?, r.get(10)?),
+                    model: r.get(11)?,
                 })
             },
         )
@@ -311,6 +643,48 @@ pub fn set_session_activity(
     Ok(())
 }
 
+/// 0.9.2-G — record when this session's NEXT long-poll is contractually due, so
+/// the participants surface can tell `dormant` (poll still pending, peer
+/// expected to relaunch) from `offline` (blew past its own pacing deadline).
+/// Session-scoped like [`set_session_activity`].
+pub fn set_next_poll_at(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: Option<&str>,
+    next_poll_at: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET next_poll_at = ?3
+          WHERE disc_id = ?1 AND agent_type = ?2 AND status = 'active'
+            AND (?4 IS NULL OR session_id = ?4)",
+        params![disc_id, agent_type, next_poll_at.to_rfc3339(), session_id],
+    )?;
+    Ok(())
+}
+
+/// 0.9.2-G — mark a SUCCESSFUL append: write-liveness becomes `ok` and
+/// `last_write_at` advances. Tracked separately from the read-side activity
+/// placeholder, so a broken append path can surface `write_state != ok` while
+/// the peer is still reading (a split seen live during dogfooding).
+pub fn mark_write_ok(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+    session_id: Option<&str>,
+    at: DateTime<Utc>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions
+            SET write_state = 'ok', last_write_at = ?3
+          WHERE disc_id = ?1 AND agent_type = ?2 AND status = 'active'
+            AND (?4 IS NULL OR session_id = ?4)",
+        params![disc_id, agent_type, at.to_rfc3339(), session_id],
+    )?;
+    Ok(())
+}
+
 /// Clear the activity — the agent replied (`disc_append`) or left: the
 /// placeholder must vanish the instant its cause disappears. Same
 /// session scoping as the setter; a broad clear (None) is the SAFE
@@ -372,6 +746,64 @@ pub fn count_live_participants(conn: &Connection, disc_id: &str) -> Result<i64> 
         params![disc_id],
         |r| r.get(0),
     )?;
+    Ok(n)
+}
+
+/// Count active responders of one concrete agent type. Targeted `@agent`
+/// messages use this narrower gate: an active Claude session must not suppress
+/// a requested local Codex run, while an already-active Codex session still
+/// prevents a duplicate responder.
+pub fn count_live_participants_for_agent(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+) -> Result<i64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM discussion_sessions
+          WHERE disc_id = ?1 AND agent_type = ?2 AND status = 'active'",
+        params![disc_id, agent_type],
+        |r| r.get(0),
+    )?;
+    Ok(n)
+}
+
+/// Responder eligibility (0.9.2-G) — DISTINCT from sticky membership above
+/// (`count_live_participants*`, deliberately unchanged: an idle-but-`active`
+/// peer stays a member and its test stays green). A session is an *eligible
+/// responder* only while the server has FRESH proof it is actively watching:
+/// an UNEXPIRED `listening` (open long-poll) or `reading` (message delivered,
+/// reply in progress) activity. A sticky-but-idle member — attached with no
+/// live activity — is NOT counted here, so it can never force the room into
+/// silence: the durable dispatch obligation falls back to the local worker
+/// instead of waiting forever on a peer that may be gone. (`waiting` +
+/// `next_poll_at`-grace eligibility lands in a later G slice, once
+/// `next_poll_at` is persisted per session.) `unixepoch` parses both RFC3339
+/// and SQLite datetime, so mixed timestamp formats compare safely.
+const RESPONDER_ELIGIBLE_PREDICATE: &str = "status = 'active'
+        AND activity IN ('listening', 'reading')
+        AND activity_expires_at IS NOT NULL
+        AND unixepoch(activity_expires_at) > unixepoch(?1)";
+
+pub fn count_eligible_responders(conn: &Connection, disc_id: &str) -> Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let sql = format!(
+        "SELECT COUNT(*) FROM discussion_sessions WHERE disc_id = ?2 AND {RESPONDER_ELIGIBLE_PREDICATE}"
+    );
+    let n: i64 = conn.query_row(&sql, params![now, disc_id], |r| r.get(0))?;
+    Ok(n)
+}
+
+pub fn count_eligible_responders_for_agent(
+    conn: &Connection,
+    disc_id: &str,
+    agent_type: &str,
+) -> Result<i64> {
+    let now = Utc::now().to_rfc3339();
+    let sql = format!(
+        "SELECT COUNT(*) FROM discussion_sessions
+          WHERE disc_id = ?2 AND agent_type = ?3 AND {RESPONDER_ELIGIBLE_PREDICATE}"
+    );
+    let n: i64 = conn.query_row(&sql, params![now, disc_id, agent_type], |r| r.get(0))?;
     Ok(n)
 }
 
@@ -709,19 +1141,28 @@ pub fn resume_disc_session(
     // client-prepared successor (response-loss replay). A divergent successor
     // cannot match and is rejected, so concurrent writers never silently
     // overwrite the credential another bridge persisted.
-    let row: Option<(i64, String, String)> = tx
+    let row: Option<(i64, String, String, String)> = tx
         .query_row(
-            "SELECT id, disc_id, resume_token_hash FROM discussion_sessions
+            "SELECT id, disc_id, resume_token_hash, agent_type FROM discussion_sessions
               WHERE resume_token_hash IN (?1, ?2)
-                AND agent_type = ?3 AND status != 'left'
+                AND status != 'left'
               ORDER BY CASE WHEN resume_token_hash = ?1 THEN 0 ELSE 1 END
               LIMIT 1",
-            params![&old_hash, &next_hash, agent_type],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            params![&old_hash, &next_hash],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?;
-    let (session_pk, disc_id, stored_hash) =
+    let (session_pk, disc_id, stored_hash, stored_agent_type) =
         row.ok_or_else(|| anyhow!("resume credential invalid, replayed, or no longer active"))?;
+    // The opaque credential authenticates exactly one session row. It may
+    // repair the historical fallback identity once a reloaded bridge can
+    // finally identify itself (notably Vibe on macOS), but it must never
+    // rewrite one known agent into another.
+    if stored_agent_type != agent_type && stored_agent_type != "Unknown" {
+        return Err(anyhow!(
+            "resume credential invalid, replayed, or no longer active"
+        ));
+    }
 
     let updated = if stored_hash == old_hash {
         tx.execute(
@@ -731,9 +1172,17 @@ pub fn resume_disc_session(
                     activity = NULL,
                     activity_expires_at = NULL,
                     resume_token_hash = ?4,
-                    resume_rotated_at = ?3
+                    resume_rotated_at = ?3,
+                    agent_type = ?6
               WHERE id = ?1 AND resume_token_hash = ?5 AND status != 'left'",
-            params![session_pk, new_session_id, &now, &next_hash, &old_hash],
+            params![
+                session_pk,
+                new_session_id,
+                &now,
+                &next_hash,
+                &old_hash,
+                agent_type
+            ],
         )?
     } else {
         // Exact replay after the first transaction committed but its response
@@ -744,9 +1193,10 @@ pub fn resume_disc_session(
                 SET session_id = ?2,
                     last_seen = ?3,
                     activity = NULL,
-                    activity_expires_at = NULL
+                    activity_expires_at = NULL,
+                    agent_type = ?5
               WHERE id = ?1 AND resume_token_hash = ?4 AND status != 'left'",
-            params![session_pk, new_session_id, &now, &next_hash],
+            params![session_pk, new_session_id, &now, &next_hash, agent_type],
         )?
     };
     if updated != 1 {
@@ -867,6 +1317,221 @@ mod tests {
         )
         .unwrap();
         conn
+    }
+
+    #[test]
+    fn derive_presence_state_is_honest() {
+        let now = Utc::now();
+        let future = (now + Duration::seconds(60)).to_rfc3339();
+        let past = (now - Duration::seconds(600)).to_rfc3339();
+        // A Running dispatch outranks everything.
+        assert_eq!(
+            derive_presence_state("active", None, None, now, true),
+            PresenceState::Running
+        );
+        // An unexpired open-wait placeholder = genuine read-liveness.
+        assert_eq!(
+            derive_presence_state("active", Some("listening"), None, now, false),
+            PresenceState::Listening
+        );
+        assert_eq!(
+            derive_presence_state("active", Some("reading"), None, now, false),
+            PresenceState::Listening
+        );
+        // No open poll but the next poll is still due → dormant.
+        assert_eq!(
+            derive_presence_state("active", None, Some(&future), now, false),
+            PresenceState::Dormant
+        );
+        // No open poll AND past the deadline → offline (the anti-"connecté" case).
+        assert_eq!(
+            derive_presence_state("active", None, Some(&past), now, false),
+            PresenceState::Offline
+        );
+        // Never scheduled a poll → offline, never a lingering "connected".
+        assert_eq!(
+            derive_presence_state("active", None, None, now, false),
+            PresenceState::Offline
+        );
+        // paused/left project to offline even with a fresh activity + running job.
+        assert_eq!(
+            derive_presence_state("paused", Some("listening"), Some(&future), now, true),
+            PresenceState::Offline
+        );
+    }
+
+    #[test]
+    fn participant_view_walks_listening_dormant_offline() {
+        let conn = setup_db();
+        create_session(&conn, "d1", "Codex", Some("s1"), "peer").unwrap();
+
+        // Fresh join, nothing proves reachability yet → offline / unknown.
+        let v = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].presence_state, PresenceState::Offline);
+        assert_eq!(v[0].write_state, WriteState::Unknown);
+        assert_eq!(v[0].wake_mode, WakeMode::ExternalPoll);
+        assert!(!v[0].read_live);
+
+        // Open wait → listening + read_live.
+        set_session_activity(&conn, "d1", "Codex", Some("s1"), "listening", 90).unwrap();
+        let v = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(v[0].presence_state, PresenceState::Listening);
+        assert!(v[0].read_live);
+
+        // Pacing pause: activity expired but next poll still due → dormant.
+        set_session_activity(&conn, "d1", "Codex", Some("s1"), "listening", -1).unwrap();
+        set_next_poll_at(
+            &conn,
+            "d1",
+            "Codex",
+            Some("s1"),
+            Utc::now() + Duration::seconds(60),
+        )
+        .unwrap();
+        let v = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(v[0].presence_state, PresenceState::Dormant);
+        assert!(!v[0].read_live, "dormant is not currently reading");
+
+        // A landed append flips write-liveness to ok (independent of read side).
+        mark_write_ok(&conn, "d1", "Codex", Some("s1"), Utc::now()).unwrap();
+        let v = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(v[0].write_state, WriteState::Ok);
+        assert!(v[0].last_write_at.is_some());
+
+        // A STALE success decays to unknown — an old write is not current
+        // liveness (Codex review #191.2). Backdate last_write_at past the window.
+        conn.execute(
+            "UPDATE discussion_sessions SET last_write_at = ?1 WHERE disc_id = 'd1'",
+            params![(Utc::now() - Duration::seconds(600)).to_rfc3339()],
+        )
+        .unwrap();
+        let v = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(
+            v[0].write_state,
+            WriteState::Unknown,
+            "a stale ok must not read as current write-liveness"
+        );
+
+        // Blew past the deadline → offline, never a lingering "connecté".
+        set_next_poll_at(
+            &conn,
+            "d1",
+            "Codex",
+            Some("s1"),
+            Utc::now() - Duration::seconds(600),
+        )
+        .unwrap();
+        let v = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(v[0].presence_state, PresenceState::Offline);
+    }
+
+    #[test]
+    fn participant_view_hides_offline_siblings_when_same_agent_is_reachable() {
+        let conn = setup_db();
+        let old_id = create_session(&conn, "d1", "Vibe", Some("v-old"), "peer").unwrap();
+        let live_id = create_session(&conn, "d1", "Vibe", Some("v-live"), "peer").unwrap();
+        set_session_activity(&conn, "d1", "Vibe", Some("v-live"), "listening", 90).unwrap();
+
+        let vibe: Vec<_> = list_participant_views(&conn, "d1")
+            .unwrap()
+            .into_iter()
+            .filter(|participant| participant.agent_type == "Vibe")
+            .collect();
+        assert_eq!(
+            vibe.len(),
+            1,
+            "a reachable Vibe session must mask its stale offline sibling"
+        );
+        assert_eq!(vibe[0].id, live_id);
+        assert_ne!(vibe[0].id, old_id);
+        assert_eq!(vibe[0].presence_state, PresenceState::Listening);
+    }
+
+    #[test]
+    fn participant_view_keeps_only_newest_when_all_same_agent_sessions_are_offline() {
+        let conn = setup_db();
+        create_session(&conn, "d1", "Vibe", Some("v1"), "peer").unwrap();
+        create_session(&conn, "d1", "Vibe", Some("v2"), "peer").unwrap();
+        let newest_id = create_session(&conn, "d1", "Vibe", Some("v3"), "peer").unwrap();
+
+        let vibe: Vec<_> = list_participant_views(&conn, "d1")
+            .unwrap()
+            .into_iter()
+            .filter(|participant| participant.agent_type == "Vibe")
+            .collect();
+        assert_eq!(
+            vibe.len(),
+            1,
+            "offline reconnect history must project as one actionable chip"
+        );
+        assert_eq!(vibe[0].id, newest_id);
+        assert_eq!(vibe[0].presence_state, PresenceState::Offline);
+    }
+
+    #[test]
+    fn deferred_obligation_for_absent_agent_surfaces_as_dormant_participant() {
+        // 0.9.2-G tie-in: a dispatch deferred by `RuntimeUnavailable` (Pending +
+        // runtime_unavailable last_error) for an agent with no live session must
+        // appear as an honest "waiting for a runtime" participant, not vanish.
+        let conn = setup_db();
+        let msg = crate::models::DiscussionMessage {
+            model: None,
+            lint_report: None,
+            id: "u1".to_string(),
+            role: crate::models::MessageRole::User,
+            content: "@ollama?".to_string(),
+            agent_type: None,
+            timestamp: Utc::now(),
+            tokens_used: 0,
+            auth_mode: None,
+            model_tier: None,
+            cost_usd: None,
+            author_pseudo: None,
+            author_avatar_email: None,
+            source_msg_id: None,
+            duration_ms: None,
+        };
+        crate::db::discussions::insert_message(&conn, "d1", &msg).unwrap();
+        let available_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs
+                 (id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key,
+                  agent_override_json, status, available_at, last_error, created_at, updated_at)
+             VALUES ('j1', 'd1', 'u1', 0, 'mention:u1:Ollama',
+                  '\"Ollama\"', 'Pending', ?1, 'runtime_unavailable: Binary not found', ?2, ?2)",
+            params![available_at, now],
+        )
+        .unwrap();
+
+        let v = list_participant_views(&conn, "d1").unwrap();
+        let ob = v
+            .iter()
+            .find(|p| p.agent_type == "Ollama")
+            .expect("the deferred obligation must surface as a participant");
+        assert_eq!(ob.presence_state, PresenceState::Dormant);
+        assert_eq!(ob.wake_mode, WakeMode::NativeDispatch);
+        assert_eq!(ob.session_id, None);
+        assert!(!ob.read_live);
+        assert_eq!(ob.next_poll_at.as_deref(), Some(available_at.as_str()));
+
+        // A lingering offline row must not mask the native obligation or create
+        // a contradictory duplicate chip.
+        create_session(&conn, "d1", "Ollama", Some("os1"), "peer").unwrap();
+        let v2 = list_participant_views(&conn, "d1").unwrap();
+        let ollama: Vec<_> = v2.iter().filter(|p| p.agent_type == "Ollama").collect();
+        assert_eq!(ollama.len(), 1, "one actionable chip per absent agent");
+        assert_eq!(ollama[0].wake_mode, WakeMode::NativeDispatch);
+
+        // Once the external peer really opens its read channel, it suppresses
+        // the synthetic obligation.
+        set_session_activity(&conn, "d1", "Ollama", Some("os1"), "listening", 90).unwrap();
+        let v3 = list_participant_views(&conn, "d1").unwrap();
+        let ollama: Vec<_> = v3.iter().filter(|p| p.agent_type == "Ollama").collect();
+        assert_eq!(ollama.len(), 1, "a live session must not be duplicated");
+        assert_eq!(ollama[0].presence_state, PresenceState::Listening);
+        assert_eq!(ollama[0].wake_mode, WakeMode::ExternalPoll);
     }
 
     #[test]
@@ -1026,6 +1691,36 @@ mod tests {
 
         let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
         assert_eq!(row.session_id.as_deref(), Some("after-response-loss"));
+    }
+
+    #[test]
+    fn resume_credential_promotes_unknown_agent_but_never_rewrites_known_agent() {
+        let conn = setup_db();
+        let invite = create_invite_token(&conn, "d1").unwrap();
+        let joined = join_via_token(&conn, &invite.token, "Unknown", "vibe-before").unwrap();
+
+        let resumed = resume_disc_session(
+            &conn,
+            "Vibe",
+            &joined.resume_token,
+            "vibe-after",
+            Some("kr-resume-dddddddddddddddddddddddddddddddd"),
+        )
+        .unwrap();
+        assert_eq!(resumed.session_pk, joined.session_pk);
+        let row = list_sessions(&conn, "d1", false).unwrap().pop().unwrap();
+        assert_eq!(row.agent_type, "Vibe");
+        assert_eq!(row.session_id.as_deref(), Some("vibe-after"));
+
+        let rewrite = resume_disc_session(
+            &conn,
+            "Codex",
+            &resumed.resume_token,
+            "wrong-agent",
+            Some("kr-resume-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
+        )
+        .unwrap_err();
+        assert!(rewrite.to_string().contains("invalid, replayed"));
     }
 
     #[test]
@@ -1286,6 +1981,36 @@ mod tests {
         assert_eq!(list[0].agent_type, "Codex");
         assert_eq!(list[0].role, "peer");
         assert_eq!(list[0].status, "active");
+        // KT-37 — a fresh session has no declared model (never a guess).
+        assert_eq!(list[0].model, None);
+    }
+
+    #[test]
+    fn set_session_model_records_and_updates_declared_model() {
+        // KT-37 — a JOIN participant may DECLARE its model. Declared at join,
+        // durable: a real value sets it, a later explicit value updates it, and
+        // the list + participant view both surface it. Omission never reaches
+        // this writer (the join handler only calls it for a real declaration),
+        // so a prior value is never overwritten by an absent one.
+        let conn = setup_db();
+        let id = create_session(&conn, "d1", "Codex", Some("sess-1"), "peer").unwrap();
+        assert_eq!(list_sessions(&conn, "d1", false).unwrap()[0].model, None);
+
+        set_session_model(&conn, id, "gpt-5-codex").unwrap();
+        assert_eq!(
+            list_sessions(&conn, "d1", false).unwrap()[0]
+                .model
+                .as_deref(),
+            Some("gpt-5-codex")
+        );
+
+        set_session_model(&conn, id, "gpt-5-codex-high").unwrap();
+        let views = list_participant_views(&conn, "d1").unwrap();
+        assert_eq!(
+            views.iter().find(|v| v.id == id).unwrap().model.as_deref(),
+            Some("gpt-5-codex-high"),
+            "the participant view surfaces the declared model"
+        );
     }
 
     #[test]
@@ -1382,6 +2107,33 @@ mod tests {
     }
 
     #[test]
+    fn count_live_participants_for_agent_is_target_specific() {
+        let conn = setup_db();
+        create_session(&conn, "d1", "ClaudeCode", Some("claude"), "owner").unwrap();
+        let codex = create_session(&conn, "d1", "Codex", Some("codex"), "peer").unwrap();
+
+        assert_eq!(
+            count_live_participants_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
+            1
+        );
+        assert_eq!(
+            count_live_participants_for_agent(&conn, "d1", "Codex").unwrap(),
+            1
+        );
+        assert_eq!(
+            count_live_participants_for_agent(&conn, "d1", "GeminiCli").unwrap(),
+            0
+        );
+
+        set_session_status(&conn, codex, "paused").unwrap();
+        assert_eq!(
+            count_live_participants_for_agent(&conn, "d1", "Codex").unwrap(),
+            0,
+            "a paused target cannot answer the mention"
+        );
+    }
+
+    #[test]
     fn count_live_participants_is_presence_sticky() {
         // PRESENCE-STICKY (2026-06-08): an `active` session counts no matter
         // how old its last_seen is — a turn-based CLI peer idles for many
@@ -1417,6 +2169,66 @@ mod tests {
             count_live_participants(&conn, "d1").unwrap(),
             0,
             "left no longer a live responder"
+        );
+    }
+
+    #[test]
+    fn eligible_responders_track_activity_not_sticky_membership() {
+        // 0.9.2-G: responder eligibility is DISTINCT from sticky membership.
+        // A member (`active`) with no fresh server activity is still counted
+        // as a member (sticky, unchanged) but is NOT an eligible responder —
+        // so it can't force the room into silence.
+        let conn = setup_db();
+        let claude = create_session(&conn, "d1", "ClaudeCode", Some("a"), "owner").unwrap();
+        let _codex = create_session(&conn, "d1", "Codex", Some("b"), "peer").unwrap();
+
+        // Freshly joined: both are sticky members, but neither has a live
+        // long-poll yet → zero eligible responders.
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 2);
+        assert_eq!(
+            count_eligible_responders(&conn, "d1").unwrap(),
+            0,
+            "a member with no live activity is not an eligible responder"
+        );
+
+        // Codex opens a long-poll (listening, fresh) → eligible; Claude idle.
+        set_session_activity(&conn, "d1", "Codex", Some("b"), "listening", 90).unwrap();
+        assert_eq!(count_eligible_responders(&conn, "d1").unwrap(), 1);
+        assert_eq!(
+            count_eligible_responders_for_agent(&conn, "d1", "Codex").unwrap(),
+            1
+        );
+        assert_eq!(
+            count_eligible_responders_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
+            0,
+            "an idle member is not an eligible responder for its @mention"
+        );
+        // Sticky membership is unchanged by eligibility.
+        assert_eq!(count_live_participants(&conn, "d1").unwrap(), 2);
+
+        // `reading` (delivered, reply in progress) is eligible too.
+        set_session_activity(&conn, "d1", "ClaudeCode", Some("a"), "reading", 90).unwrap();
+        assert_eq!(count_eligible_responders(&conn, "d1").unwrap(), 2);
+
+        // Expired activity → no longer eligible, but STILL a sticky member.
+        set_session_activity(&conn, "d1", "Codex", Some("b"), "listening", -100).unwrap();
+        assert_eq!(
+            count_eligible_responders_for_agent(&conn, "d1", "Codex").unwrap(),
+            0,
+            "expired activity is not an eligible responder"
+        );
+        assert_eq!(
+            count_live_participants_for_agent(&conn, "d1", "Codex").unwrap(),
+            1,
+            "expired activity remains a sticky member"
+        );
+
+        // paused drops out of both.
+        set_session_status(&conn, claude, "paused").unwrap();
+        assert_eq!(
+            count_eligible_responders_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
+            0,
+            "paused is neither a member nor an eligible responder"
         );
     }
 

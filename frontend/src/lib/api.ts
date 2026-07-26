@@ -20,8 +20,11 @@ import type {
   Discussion,
   DiscussionMeta,
   DiscussionSession,
+  ParticipantView,
   CreateDiscussionRequest,
   SendMessageRequest,
+  ReviseMessageRequest,
+  MessageRevisionReceipt,
   OrchestrationRequest,
   AgentDetection,
   AgentType,
@@ -113,6 +116,10 @@ import type {
   PlanningTaskListResponse,
   PlanningTaskPriority,
   PlanningTaskStatus,
+  PlanningProposal,
+  ProposalDecisionRequest,
+  ProposalDecisionResponse,
+  ProposalListResponse,
   UpdatePlanningDodItemRequest,
   UpdatePlanningTaskRequest,
 } from '../types/generated';
@@ -1260,7 +1267,7 @@ export const discussions = {
    *  Powers the header chips + `[+ Inviter]` button. `left` sessions
    *  are excluded server-side (audit history only). */
   participants: (id: string) =>
-    api<DiscussionSession[]>('GET', `/discussions/${id}/participants`),
+    api<(ParticipantView | DiscussionSession)[]>('GET', `/discussions/${id}/participants`),
   /** 0.8.6 phase 2 — mint a one-shot invite token bound to this disc.
    *  Returns the PLAIN token (only place it ever appears outside the
    *  agent's tool-call wire) + the human-readable instruction the
@@ -1288,6 +1295,12 @@ export const discussions = {
     signal?: AbortSignal,
     onStart?: () => void,
     onLog?: (text: string) => void,
+    onAccepted?: (receipt: {
+      message_id: string;
+      sort_order: number;
+      duplicate: boolean;
+    }) => void,
+    onRevised?: (receipt: MessageRevisionReceipt) => void,
   ) => {
     let finished = false;
     const done = () => { if (!finished) { finished = true; onDone(); } };
@@ -1300,11 +1313,45 @@ export const discussions = {
       { method: 'POST', headers: hdrs, body: body ? JSON.stringify(body) : undefined, signal },
       {
         onEvent: (type, payload) => {
-          const parsed = payload as { text?: string; error?: string };
+          const parsed = payload as {
+            text?: string;
+            error?: string;
+            message_id?: string;
+            sort_order?: number;
+            duplicate?: boolean;
+            event_id?: string;
+            revision?: string;
+            dispatch_job_id?: string | null;
+          };
           if (type === 'chunk' && parsed.text !== undefined) {
             onChunk(parsed.text);
           } else if (type === 'log' && parsed.text !== undefined) {
             if (onLog) onLog(parsed.text);
+          } else if (
+            type === 'accepted'
+            && parsed.message_id !== undefined
+            && parsed.sort_order !== undefined
+          ) {
+            onAccepted?.({
+              message_id: parsed.message_id,
+              sort_order: parsed.sort_order,
+              duplicate: parsed.duplicate ?? false,
+            });
+          } else if (
+            type === 'message_revised'
+            && parsed.event_id !== undefined
+            && parsed.message_id !== undefined
+            && parsed.revision !== undefined
+            && parsed.sort_order !== undefined
+          ) {
+            onRevised?.({
+              event_id: parsed.event_id,
+              message_id: parsed.message_id,
+              revision: parsed.revision,
+              sort_order: parsed.sort_order,
+              duplicate: parsed.duplicate ?? false,
+              dispatch_job_id: parsed.dispatch_job_id ?? null,
+            });
           } else if (type === 'done') {
             done();
           } else if (type === 'error') {
@@ -1314,7 +1361,8 @@ export const discussions = {
         onDone: done,
         onError,
       },
-      // Response received — backend has processed the request (user message added)
+      // Response headers only mean the SSE stream opened. Persistence is
+      // confirmed separately by the `accepted` event.
       () => { if (onStart) onStart(); },
     );
   },
@@ -1383,6 +1431,30 @@ export const discussions = {
   /** Edit the last user message content. */
   editLastUserMessage: (id: string, content: string) => api<void>('PATCH', `/discussions/${id}/messages/last`, { content } as SendMessageRequest),
 
+  /** Atomically edit a User turn, archive its trailing replies and resend. */
+  reviseMessageStream: (
+    id: string,
+    req: ReviseMessageRequest,
+    onChunk: (text: string) => void,
+    onDone: () => void,
+    onError: (error: string) => void,
+    signal?: AbortSignal,
+    onStart?: () => void,
+    onLog?: (text: string) => void,
+    onRevised?: (receipt: MessageRevisionReceipt) => void,
+  ) => discussions._streamSSE(
+    `${_apiBase}/api/discussions/${id}/messages/revise`,
+    req,
+    onChunk,
+    onDone,
+    onError,
+    signal,
+    onStart,
+    onLog,
+    undefined,
+    onRevised,
+  ),
+
   /** Send a user message then stream the agent response. */
   sendMessageStream: (
     id: string,
@@ -1393,7 +1465,22 @@ export const discussions = {
     signal?: AbortSignal,
     onStart?: () => void,
     onLog?: (text: string) => void,
-  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/messages`, req, onChunk, onDone, onError, signal, onStart, onLog),
+    onAccepted?: (receipt: {
+      message_id: string;
+      sort_order: number;
+      duplicate: boolean;
+    }) => void,
+  ) => discussions._streamSSE(
+    `${_apiBase}/api/discussions/${id}/messages`,
+    req,
+    onChunk,
+    onDone,
+    onError,
+    signal,
+    onStart,
+    onLog,
+    onAccepted,
+  ),
 
   /** Trigger agent on existing messages (used after create). */
   runAgent: (
@@ -1403,7 +1490,17 @@ export const discussions = {
     onError: (error: string) => void,
     signal?: AbortSignal,
     onLog?: (text: string) => void,
-  ) => discussions._streamSSE(`${_apiBase}/api/discussions/${id}/run`, null, onChunk, onDone, onError, signal, undefined, onLog),
+    idempotencyKey?: string,
+  ) => discussions._streamSSE(
+    `${_apiBase}/api/discussions/${id}/run`,
+    idempotencyKey ? { idempotency_key: idempotencyKey } : null,
+    onChunk,
+    onDone,
+    onError,
+    signal,
+    undefined,
+    onLog,
+  ),
 
   /** Launch multi-agent orchestration debate. */
   orchestrate: async (
@@ -1545,6 +1642,28 @@ export const planning = {
     ),
   discussionPlan: (discussionId: string) =>
     api<DiscussionPlan>('GET', `/discussions/${encodeURIComponent(discussionId)}/plan`),
+  proposals: (discussionId: string, pendingOnly = true) => {
+    const query = new URLSearchParams({
+      discussion_id: discussionId,
+      pending_only: String(pendingOnly),
+    });
+    return api<ProposalListResponse>('GET', `/planning/proposals?${query.toString()}`);
+  },
+  proposal: (proposalId: string) =>
+    api<PlanningProposal>(
+      'GET',
+      `/planning/proposals/${encodeURIComponent(proposalId)}`,
+    ),
+  decideProposalItem: (
+    proposalId: string,
+    itemId: string,
+    request: ProposalDecisionRequest,
+  ) =>
+    api<ProposalDecisionResponse>(
+      'POST',
+      `/planning/proposals/${encodeURIComponent(proposalId)}/items/${encodeURIComponent(itemId)}/decision`,
+      request,
+    ),
   changes: (discussionId: string, since?: string) => {
     const suffix = since ? `?since=${encodeURIComponent(since)}` : '';
     return api<PlanningTaskChange[]>(

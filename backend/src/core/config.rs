@@ -243,7 +243,7 @@ fn acquire_lock_in(dir: &std::path::Path) -> Result<std::fs::File> {
              ({}). Only one backend may use it at a time.\n\
              \u{2192} Stop the other one first:\n\
              \u{2022}  Docker:  kronn stop\n\
-             \u{2022}  native:  pkill -f 'target/debug/kronn' ; pkill -f 'cargo watch -x run'\n\
+             \u{2022}  native:  ./kronn stop\n\
              then start Kronn again. (lock: {e})",
             dir.display()
         )

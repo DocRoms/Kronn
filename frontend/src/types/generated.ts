@@ -1012,7 +1012,13 @@ export type DirectiveCategory = "Output" | "Language";
  * because it's how the dedup pass works — without it we'd duplicate
  * every message on every reconnect.
  */
-export type DiscAppendMessage = { source_msg_id: string, role: MessageRole, content: string, agent_type?: AgentType | null, };
+export type DiscAppendMessage = { source_msg_id: string, role: MessageRole, content: string, agent_type?: AgentType | null,
+/**
+ * Explicit one-shot responder requested by a structured `@agent`
+ * mention. The append transaction consumes this as a durable dispatch
+ * override; ordinary prose must leave it unset.
+ */
+target_agent?: AgentType | null, };
 
 export type DiscAppendRequest = { disc_id: string, messages: Array<DiscAppendMessage>,
 /**
@@ -1332,7 +1338,16 @@ poll_policy: PollBackoffPolicy,
  */
 pacing?: PacingState, project_id: string | null, };
 
-export type DiscussionPlan = { discussion_id: string, primary_objective: PlanningTaskSummary | null, active: Array<PlanningDiscussionRelation>, later: Array<PlanningDiscussionRelation>, completed_active: number, total_active: number, };
+export type DiscussionPlan = { discussion_id: string, primary_objective: PlanningTaskSummary | null, active: Array<PlanningDiscussionRelation>, later: Array<PlanningDiscussionRelation>,
+/**
+ * Retained aliases (== `stats.done` / sum of the five Active buckets) so
+ * existing MCP/UI consumers keep working during the KT-30 split.
+ */
+completed_active: number, total_active: number,
+/**
+ * KT-30 — bucketed Active counts + the Later count.
+ */
+stats: PlanningPlanStats, };
 
 /**
  * A row of `discussion_sessions` — one live (or historical)
@@ -1352,7 +1367,13 @@ last_seen: string | null,
  * yet). Expiry is applied at read time — an expired activity is None
  * here, callers never see a stale placeholder.
  */
-activity: string | null, };
+activity: string | null,
+/**
+ * KT-37 — the model a JOIN participant DECLARED it runs on. Declared at
+ * join, durable, never inferred. `None` = not declared (the UI shows it as
+ * such, never a guessed default).
+ */
+model: string | null, };
 
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
@@ -1843,6 +1864,8 @@ export type McpTransport = { "Stdio": { command: string, args: Array<string>, } 
  */
 export type MessageAttachment = { id: string, filename: string, mime_type: string, disk_path: string | null, };
 
+export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
+
 export type MessageRole = "User" | "Agent" | "System";
 
 /**
@@ -2041,6 +2064,19 @@ has_more_path: string, max_pages?: number | null, };
 export type PartialAuditRequest = { agent: AgentType, steps: Array<number>, };
 
 /**
+ * A participant enriched with the honest-presence contract (0.9.2-G). Carries
+ * the legacy session fields so the UI keeps working during the transition,
+ * plus the server-derived state the UI switches to.
+ */
+export type ParticipantView = { id: number, disc_id: string, agent_type: string, session_id: string | null, role: string, status: string, joined_at: string, left_at: string | null, last_seen: string | null, activity: string | null, presence_state: PresenceState, read_live: boolean, write_state: WriteState, wake_mode: WakeMode, next_poll_at: string | null, last_write_at: string | null,
+/**
+ * KT-37 — model DECLARED by this participant at join (durable, never
+ * inferred). `None` = not declared; the UI shows it as declared-at-join,
+ * never as a live/guessed value.
+ */
+model: string | null, };
+
+/**
  * Body of `POST /api/discussions/peer-join`. The token is the
  * plaintext returned by `invite_peer`. `agent_type` + `session_id`
  * identify the calling CLI session so the bridge can rebind a
@@ -2056,7 +2092,14 @@ agent_type: string,
  * CLI-assigned session id. UUID-like for Claude Code, numeric or
  * string for others. Treated as an opaque identifier.
  */
-session_id: string, };
+session_id: string,
+/**
+ * KT-37 — the model the joining CLI declares it runs on (e.g.
+ * `"claude-opus-4"`). Optional, self-declared, never inferred: trimmed and
+ * bounded, stored as declared-at-join. Omitted or blank preserves any
+ * value declared on a previous join/rebind (legacy bridges omit it).
+ */
+model?: string | null, };
 
 /**
  * Wire shape returned by `peer-join`. Carries the disc id (so the
@@ -2136,11 +2179,59 @@ export type PlanningActor = { kind: PlanningActorKind, id: string | null, source
 
 export type PlanningActorKind = "human" | "agent";
 
-export type PlanningDiscussionRelation = { placement: PlanningPlacement, is_primary: boolean, position: number, task: PlanningTaskSummary, };
+/**
+ * KT-30 — minimal, read-only dependency reference for the plan projection.
+ * Just enough to render a blocked task's active blockers (and, later, the
+ * dependency neighbourhood) WITHOUT loading each blocker's full detail. Never
+ * recursive: a blocker's own blockers are not expanded here.
+ */
+export type PlanningDependencySummary = { id: string, reference: string, title: string, status: PlanningTaskStatus, project_ids: Array<string>, discussion_ids: Array<string>, };
+
+export type PlanningDiscussionRelation = { placement: PlanningPlacement, is_primary: boolean, position: number, task: PlanningTaskSummary,
+/**
+ * KT-30 — this task's ACTIVE blockers (status not done/archived), loaded in
+ * one batched pass for the whole plan. Empty when nothing blocks it.
+ */
+active_blockers: Array<PlanningDependencySummary>,
+/**
+ * KT-30 — ready to pick up: an ACTIVE relation whose task is `Todo` with no
+ * active blocker. A Later relation, or one that is done/blocked/in-progress
+ * (or a mere `Idea`), is never `actionable`. The API does NOT pre-select a
+ * "next" set — it delivers plan order + this flag; the UI takes the first N.
+ */
+actionable: boolean, };
 
 export type PlanningDodItem = { id: string, sentence: string, completed: boolean, position: number, };
 
 export type PlanningPlacement = "active" | "later";
+
+/**
+ * KT-30 — bucketed counts over the ACTIVE relations of a discussion plan,
+ * under a strict precedence so every Active task lands in exactly one bucket:
+ * `done` > `blocked` > `in_progress` > `ideas` > `ready`. The five Active
+ * buckets sum to `DiscussionPlan::total_active`; `later` is the separate Later
+ * count.
+ *
+ * `ready` is exactly the `actionable` relations — a `Todo` with no active
+ * blocker — so a UI "X ready" label never overcounts. A nascent `Idea` (not
+ * yet started, not actionable) has its own `ideas` bucket rather than
+ * inflating `ready`.
+ */
+export type PlanningPlanStats = { ready: number, blocked: number, in_progress: number, ideas: number, done: number, later: number, };
+
+/**
+ * A durable proposal: one `kronn-plan-action` fence from an Agent message.
+ */
+export type PlanningProposal = { id: string, discussion_id: string, source_message_id: string, fence_index: number, aggregate_state: ProposalAggregateState, items: Array<PlanningProposalItem>, created_at: string, updated_at: string, };
+
+/**
+ * One item of a proposal, with its validation state + idempotent result.
+ */
+export type PlanningProposalItem = { id: string, item_index: number, action: ProposalItemAction, payload: ProposalItemPayload, state: ProposalItemState, rejected_reason?: string,
+/**
+ * The task created/updated on acceptance (the idempotent result).
+ */
+result_task_id?: string, decided_at?: string, };
 
 export type PlanningTaskChange = { task_id: string, task_reference: string, task_title: string, id: string, action: string, actor_kind: PlanningActorKind, actor_id: string | null, changes: JsonValue, source_message_id: string | null, created_at: string, };
 
@@ -2176,6 +2267,12 @@ hot_poll_seconds: number,
  * How long a User message keeps the room in the hot regime.
  */
 user_attention_lease_seconds: number, };
+
+/**
+ * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
+ * badge inferred from a lingering session row). See [`derive_presence_state`].
+ */
+export type PresenceState = "running" | "listening" | "dormant" | "offline";
 
 /**
  * One preserved branch on a workflow run. Mirrors `workspace::PreservedBranch`
@@ -2256,6 +2353,59 @@ required: boolean,
  * malformed pattern; logged).
  */
 pattern?: string | null, };
+
+/**
+ * Aggregate over a proposal's item states.
+ */
+export type ProposalAggregateState = "pending" | "partial" | "applied" | "dismissed";
+
+/**
+ * A human's decision on one item.
+ */
+export type ProposalDecision = "accept" | "reject";
+
+/**
+ * `POST /api/planning/proposals/:id/items/:item_id/decision` body. The
+ * `idempotency_key` makes a retry (or double-click, or a second client)
+ * return the same result instead of applying twice.
+ */
+export type ProposalDecisionRequest = { decision: ProposalDecision, reason?: string, idempotency_key: string, };
+
+/**
+ * Decision result: the updated item + the proposal's recomputed aggregate.
+ */
+export type ProposalDecisionResponse = { item: PlanningProposalItem, aggregate_state: ProposalAggregateState, };
+
+/**
+ * The mutation an item requests. `open` is a local navigation, never persisted.
+ */
+export type ProposalItemAction = "create" | "status" | "complete" | "unblock";
+
+/**
+ * The proposed fields for one item — a flat union covering every action
+ * (create carries title/description/priority/placement/is_primary; the
+ * mutations carry task_id and, for `status`, the target status).
+ */
+export type ProposalItemPayload = { title?: string, description?: string, priority?: string, placement?: string, is_primary?: boolean, task_id?: string, status?: string, };
+
+/**
+ * Per-item validation state.
+ */
+export type ProposalItemState = "pending" | "accepted" | "rejected";
+
+/**
+ * `GET /api/planning/proposals?discussion_id=…` — the inbox snapshot. Counts
+ * drive the header chip ("N propositions · M tâches à valider").
+ */
+export type ProposalListResponse = { proposals: Array<PlanningProposal>,
+/**
+ * Proposals with at least one pending item.
+ */
+pending_proposal_count: number,
+/**
+ * Items still pending across the returned proposals.
+ */
+pending_item_count: number, };
 
 export type ProposeResult = { accepted: boolean, reason: string | null, warnings: Array<string>, evidence_checks: Array<EvidenceCheck>, learning: Learning | null, };
 
@@ -2380,6 +2530,13 @@ export type ResumeRunResponse = { run_id: string, new_status: RunStatus, };
 
 export type RetryConfig = { max_retries: number, backoff: string, };
 
+/**
+ * Atomic edit/resend request. `expected_revision` is the opaque timestamp
+ * exposed on the target message. `idempotency_key` is generated once by the
+ * UI and reused when the same HTTP request is retried.
+ */
+export type ReviseMessageRequest = { message_id: string, content: string, expected_revision: string, idempotency_key: string, target_agent?: AgentType | null, };
+
 export type RtkActivateRequest = {
 /**
  * Agents the frontend wants RTK hooks on. The backend filters this
@@ -2460,6 +2617,13 @@ update_available: boolean,
  */
 update_command: string, };
 
+export type RunAgentRequest = {
+/**
+ * Stable per-click key. Reusing it after a transport retry returns the
+ * original durable obligation instead of launching a second agent turn.
+ */
+idempotency_key?: string | null, };
+
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/:id/run`. Lets the user
  * launch a saved QuickApi standalone (Run drawer in the Quick APIs page),
@@ -2497,7 +2661,7 @@ export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
  */
 scan_depth: number, };
 
-export type SendMessageRequest = { content: string, target_agent?: AgentType | null, };
+export type SendMessageRequest = { content: string, target_agent?: AgentType | null, client_message_id?: string | null, };
 
 export type ServerConfig = { host: string, port: number,
 /**
@@ -3159,7 +3323,12 @@ export type WaitForPeerMessage = { sort_order: number, role: string, agent_type:
  * treat a same-`agent_type` peer (e.g. another ClaudeCode instance) as a
  * real peer instead of filtering it out as "self".
  */
-author_pseudo: string | null, };
+author_pseudo: string | null,
+/**
+ * Present for projection-change events that are cursor-visible but not
+ * rendered as transcript messages.
+ */
+event_type?: string | null, target_message_id?: string | null, };
 
 export type WaitForPeerResponse = {
 /**
@@ -3194,6 +3363,14 @@ pacing: PacingState,
  * caller replies now, not later).
  */
 next_poll_at: string | null, };
+
+/**
+ * How a participant can be woken. In 0.9.2 every session row is a joined
+ * external CLI peer (Kronn can persist an obligation but cannot force it to
+ * resume); `NativeDispatch` is reserved for the future obligation-participant
+ * surface where Kronn owns the runner.
+ */
+export type WakeMode = "native_dispatch" | "external_poll";
 
 export type Workflow = { id: string, name: string, project_id: string | null, trigger: WorkflowTrigger, steps: Array<WorkflowStep>, actions: Array<WorkflowAction>, safety: WorkflowSafety, workspace_config: WorkspaceConfig | null, concurrency_limit: number | null,
 /**
@@ -3723,6 +3900,12 @@ require_isolation: boolean, };
 export type WorkspaceHooks = { after_create?: string | null, before_run?: string | null, after_run?: string | null, before_remove?: string | null, };
 
 /**
+ * Tri-state write-liveness. Never inferred `false` from silence — `Unknown`
+ * until a write is observed.
+ */
+export type WriteState = "ok" | "failed" | "unknown";
+
+/**
  * Real-time message exchanged between Kronn instances via WebSocket.
  */
 export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_code: string, online: boolean, } | { "type": "ping", timestamp: number, } | { "type": "pong", timestamp: number, } | { "type": "chat_message", shared_discussion_id: string, message_id: string, from_pseudo: string, from_avatar_email: string | null, from_invite_code: string, content: string, timestamp: number,
@@ -3733,7 +3916,7 @@ export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_c
  * (no field on the wire) decoding to the historical behaviour
  * (role=User, agent_type=None).
  */
-role: MessageRole, agent_type: AgentType | null, } | { "type": "discussion_invite", shared_discussion_id: string, title: string, from_pseudo: string, from_invite_code: string, } | { "type": "disc_sync_request", shared_discussion_id: string,
+role: MessageRole, agent_type: AgentType | null, } | { "type": "message_revised", shared_discussion_id: string, event_id: string, target_message_id: string, previous_content_hash: string, expected_revision: string, revision: string, content: string, target_agent: AgentType | null, idempotency_key: string, from_pseudo: string, from_invite_code: string, } | { "type": "discussion_invite", shared_discussion_id: string, title: string, from_pseudo: string, from_invite_code: string, } | { "type": "disc_sync_request", shared_discussion_id: string,
 /**
  * Unix-millis of the newest message the requester already has for this
  * shared disc (0 if none). The responder sends everything strictly

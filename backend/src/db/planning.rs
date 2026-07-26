@@ -8,16 +8,75 @@ use uuid::Uuid;
 use crate::models::{
     AddPlanningBlockerRequest, CreatePlanningDodItem, CreatePlanningTaskLink,
     CreatePlanningTaskRequest, DiscussionPlan, LinkPlanningDiscussionRequest, PlanningActor,
-    PlanningActorKind, PlanningDiscussionRelation, PlanningDodItem, PlanningPlacement,
-    PlanningTaskChange, PlanningTaskDetail, PlanningTaskEvent, PlanningTaskLink,
-    PlanningTaskListQuery, PlanningTaskListResponse, PlanningTaskPriority, PlanningTaskStatus,
-    PlanningTaskSummary, UpdatePlanningDodItemRequest, UpdatePlanningTaskRequest,
+    PlanningActorKind, PlanningDependencySummary, PlanningDiscussionRelation, PlanningDodItem,
+    PlanningPlacement, PlanningPlanStats, PlanningTaskChange, PlanningTaskDetail,
+    PlanningTaskEvent, PlanningTaskLink, PlanningTaskListQuery, PlanningTaskListResponse,
+    PlanningTaskPriority, PlanningTaskStatus, PlanningTaskSummary, UpdatePlanningDodItemRequest,
+    UpdatePlanningTaskRequest,
 };
 
 fn parse_dt(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
         .map(|date| date.with_timezone(&Utc))
         .unwrap_or_else(|_| Utc::now())
+}
+
+/// A transaction that is nesting-aware: it runs a real `BEGIN`/`COMMIT` when the
+/// connection is in autocommit, or a `SAVEPOINT`/`RELEASE` when it is already
+/// inside a transaction. This lets a mutation fn (create/update/link) be called
+/// standalone OR composed inside a larger transaction (e.g. the planning-proposal
+/// decision applies task mutation + item state + receipt atomically) without the
+/// "cannot start a transaction within a transaction" error. Rolls back on drop
+/// unless `commit()` was called. Derefs to `Connection` so bodies are unchanged.
+struct NestableTx<'c> {
+    conn: &'c Connection,
+    savepoint: bool,
+    committed: bool,
+}
+
+impl<'c> NestableTx<'c> {
+    fn begin(conn: &'c Connection) -> Result<Self> {
+        let savepoint = !conn.is_autocommit();
+        conn.execute_batch(if savepoint {
+            "SAVEPOINT planning_mut"
+        } else {
+            "BEGIN"
+        })?;
+        Ok(Self {
+            conn,
+            savepoint,
+            committed: false,
+        })
+    }
+
+    fn commit(mut self) -> Result<()> {
+        self.conn.execute_batch(if self.savepoint {
+            "RELEASE planning_mut"
+        } else {
+            "COMMIT"
+        })?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for NestableTx<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = self.conn.execute_batch(if self.savepoint {
+                "ROLLBACK TO planning_mut; RELEASE planning_mut"
+            } else {
+                "ROLLBACK"
+            });
+        }
+    }
+}
+
+impl std::ops::Deref for NestableTx<'_> {
+    type Target = Connection;
+    fn deref(&self) -> &Connection {
+        self.conn
+    }
 }
 
 fn validate_actor(actor: &PlanningActor) -> Result<()> {
@@ -490,7 +549,7 @@ pub fn create_task(
         ensure_parent_is_valid(conn, None, parent_id)?;
     }
 
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = NestableTx::begin(conn)?;
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
     let task_number: i64 = transaction.query_row(
@@ -805,7 +864,7 @@ pub fn update_task(
         .map(|tags| normalize_tags(tags))
         .transpose()?;
 
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = NestableTx::begin(conn)?;
     let existing = get_task(&transaction, task_id)?.context("Planning task not found")?;
     let should_rebalance = request.rank.is_some()
         || request
@@ -879,7 +938,7 @@ pub fn update_dod_item(
 ) -> Result<PlanningTaskDetail> {
     let task_id = resolve_task_id(conn, task_reference)?;
     validate_actor(&request.actor)?;
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = NestableTx::begin(conn)?;
     let changed = transaction.execute(
         "UPDATE planning_task_dod_items
          SET completed = ?3, updated_at = ?4
@@ -920,7 +979,7 @@ pub fn link_discussion(
         bail!("Discussion not found");
     }
 
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = NestableTx::begin(conn)?;
     let is_primary = request.is_primary && request.placement == PlanningPlacement::Active;
     if is_primary {
         transaction.execute(
@@ -1000,7 +1059,7 @@ pub fn add_blocker(
         bail!("Task dependency cycle detected");
     }
 
-    let transaction = conn.unchecked_transaction()?;
+    let transaction = NestableTx::begin(conn)?;
     transaction.execute(
         "INSERT OR IGNORE INTO planning_task_blockers
          (task_id, blocker_task_id, created_at) VALUES (?1, ?2, ?3)",
@@ -1098,11 +1157,13 @@ pub fn get_discussion_plan(conn: &Connection, discussion_id: &str) -> Result<Dis
     }
 
     let mut statement = conn.prepare(
-        "SELECT task_id, placement, is_primary, position
-         FROM planning_task_discussions
-         WHERE discussion_id = ?1
-         ORDER BY placement = 'later', position, created_at,
-                  (SELECT task_number FROM planning_tasks WHERE id = task_id)",
+        "SELECT relation.task_id, relation.placement, relation.is_primary, relation.position
+         FROM planning_task_discussions relation
+         JOIN planning_tasks task ON task.id = relation.task_id
+         WHERE relation.discussion_id = ?1
+           AND task.status <> 'archived'
+         ORDER BY relation.placement = 'later', relation.position, relation.created_at,
+                  task.task_number",
     )?;
     let rows = statement
         .query_map([discussion_id], |row| {
@@ -1115,40 +1176,351 @@ pub fn get_discussion_plan(conn: &Connection, discussion_id: &str) -> Result<Dis
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    // KT-30 — batch the projection instead of per-relation `get_summary`
+    // (which fired 4 queries per task → ~4N+1). Both loads run a FIXED number
+    // of query families regardless of the number of relations.
+    let summaries = load_summaries_for_discussion(conn, discussion_id)?;
+    let mut dependencies = load_active_dependencies_for_discussion(conn, discussion_id)?;
+
     let mut primary_objective = None;
     let mut active = Vec::new();
     let mut later = Vec::new();
+    let mut stats = PlanningPlanStats::default();
     for (task_id, placement, is_primary, position) in rows {
-        let Some(task) = get_summary(conn, &task_id)? else {
+        let Some(task) = summaries.get(&task_id).cloned() else {
             continue;
         };
         if is_primary {
             primary_objective = Some(task.clone());
         }
+        let placement = PlanningPlacement::from_str(&placement)?;
+        let active_blockers = dependencies.remove(&task_id).unwrap_or_default();
+        let is_active = placement == PlanningPlacement::Active;
+        // Active-only bucket, strict precedence done > blocked > in_progress >
+        // ideas > ready. `blocked` = an explicit Blocked status OR any active
+        // blocker (`blocker_count` already counts only non done/archived
+        // blockers). A nascent `Idea` has its own bucket so `ready` stays equal
+        // to the actionable count. `ready` is the residual = Todo, no active
+        // blocker. See PlanningPlanStats.
+        let has_active_blocker = task.blocker_count > 0;
+        if is_active {
+            match task.status {
+                PlanningTaskStatus::Done => stats.done += 1,
+                PlanningTaskStatus::Blocked => stats.blocked += 1,
+                _ if has_active_blocker => stats.blocked += 1,
+                PlanningTaskStatus::InProgress => stats.in_progress += 1,
+                PlanningTaskStatus::Idea => stats.ideas += 1,
+                _ => stats.ready += 1,
+            }
+        } else {
+            stats.later += 1;
+        }
+        // Actionable: strictly a Todo with no active blocker, and only on the
+        // Active side. A Later relation, an Idea, or anything started/blocked is
+        // never actionable.
+        let actionable =
+            is_active && task.status == PlanningTaskStatus::Todo && !has_active_blocker;
         let relation = PlanningDiscussionRelation {
-            placement: PlanningPlacement::from_str(&placement)?,
+            placement,
             is_primary,
             position,
             task,
+            active_blockers,
+            actionable,
         };
-        if relation.placement == PlanningPlacement::Active {
+        if is_active {
             active.push(relation);
         } else {
             later.push(relation);
         }
     }
-    let completed_active = active
-        .iter()
-        .filter(|relation| relation.task.status == PlanningTaskStatus::Done)
-        .count() as u32;
     Ok(DiscussionPlan {
         discussion_id: discussion_id.to_string(),
         primary_objective,
+        // Retained aliases: total = the five Active buckets, completed = done.
         total_active: active.len() as u32,
-        completed_active,
+        completed_active: stats.done,
         active,
         later,
+        stats,
     })
+}
+
+/// KT-30 — load every linked task's [`PlanningTaskSummary`] for a discussion in
+/// a FIXED number of queries (main aggregate + projects + discussions + tags),
+/// grouping the multi-valued columns in Rust. Filters through
+/// `planning_task_discussions` by `discussion_id` so there is no per-task query
+/// and no unbounded `IN (…)` parameter list.
+fn load_summaries_for_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<std::collections::HashMap<String, PlanningTaskSummary>> {
+    let projects = load_grouped_by_task(
+        conn,
+        "SELECT ptd.task_id, ptp.project_id
+           FROM planning_task_discussions ptd
+           JOIN planning_task_projects ptp ON ptp.task_id = ptd.task_id
+          WHERE ptd.discussion_id = ?1
+         UNION
+         SELECT ptd.task_id, d.project_id
+           FROM planning_task_discussions ptd
+           JOIN planning_task_discussions link ON link.task_id = ptd.task_id
+           JOIN discussions d ON d.id = link.discussion_id
+          WHERE ptd.discussion_id = ?1 AND d.project_id IS NOT NULL
+          ORDER BY 1, 2",
+        discussion_id,
+    )?;
+    let discussions = load_grouped_by_task(
+        conn,
+        "SELECT ptd.task_id, link.discussion_id
+           FROM planning_task_discussions ptd
+           JOIN planning_task_discussions link ON link.task_id = ptd.task_id
+          WHERE ptd.discussion_id = ?1
+          ORDER BY 1, 2",
+        discussion_id,
+    )?;
+    let tags = load_grouped_by_task(
+        conn,
+        "SELECT ptd.task_id, tg.tag
+           FROM planning_task_discussions ptd
+           JOIN planning_task_tags tg ON tg.task_id = ptd.task_id
+          WHERE ptd.discussion_id = ?1
+          ORDER BY ptd.task_id, tg.tag COLLATE NOCASE",
+        discussion_id,
+    )?;
+
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.task_number, t.parent_id, p.task_number, p.title,
+                t.title, t.status, t.priority, t.rank, t.created_at, t.updated_at,
+                COUNT(c.id),
+                COALESCE(SUM(CASE WHEN c.status = 'done' THEN 1 ELSE 0 END), 0),
+                (SELECT COUNT(*)
+                 FROM planning_task_blockers b
+                 JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
+                 WHERE b.task_id = t.id
+                   AND blocker.status NOT IN ('done', 'archived'))
+         FROM planning_task_discussions ptd
+         JOIN planning_tasks t ON t.id = ptd.task_id
+         LEFT JOIN planning_tasks p ON p.id = t.parent_id
+         LEFT JOIN planning_tasks c ON c.parent_id = t.id
+         WHERE ptd.discussion_id = ?1
+         GROUP BY t.id",
+    )?;
+    // Collect raw rows first, then parse the enums OUTSIDE the rusqlite closure
+    // so a corrupt status/priority propagates an error (`?`) instead of silently
+    // defaulting — matching the old per-task `get_summary`.
+    type RawSummary = (
+        String,         // id
+        i64,            // task_number
+        Option<String>, // parent_id
+        Option<i64>,    // parent_task_number
+        Option<String>, // parent_title
+        String,         // title
+        String,         // status
+        String,         // priority
+        i64,            // rank
+        String,         // created_at
+        String,         // updated_at
+        i64,            // total_subtasks
+        i64,            // completed_subtasks
+        i64,            // blocker_count
+    );
+    let raw_rows: Vec<RawSummary> = stmt
+        .query_map([discussion_id], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+                row.get(8)?,
+                row.get(9)?,
+                row.get(10)?,
+                row.get(11)?,
+                row.get(12)?,
+                row.get(13)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut summaries = std::collections::HashMap::new();
+    for raw in raw_rows {
+        let (
+            id,
+            task_number,
+            parent_id,
+            parent_task_number,
+            parent_title,
+            title,
+            status,
+            priority,
+            rank,
+            created_at,
+            updated_at,
+            total_subtasks,
+            completed_subtasks,
+            blocker_count,
+        ) = raw;
+        let summary = PlanningTaskSummary {
+            project_ids: projects.get(&id).cloned().unwrap_or_default(),
+            discussion_ids: discussions.get(&id).cloned().unwrap_or_default(),
+            tags: tags.get(&id).cloned().unwrap_or_default(),
+            reference: format!("KT-{task_number}"),
+            parent_id,
+            parent_reference: parent_task_number.map(|n| format!("KT-{n}")),
+            parent_title,
+            title,
+            status: PlanningTaskStatus::from_str(&status)?,
+            priority: PlanningTaskPriority::from_str(&priority)?,
+            rank,
+            completed_subtasks: completed_subtasks as u32,
+            total_subtasks: total_subtasks as u32,
+            blocker_count: blocker_count as u32,
+            created_at: parse_dt(created_at),
+            updated_at: parse_dt(updated_at),
+            id,
+        };
+        summaries.insert(summary.id.clone(), summary);
+    }
+    Ok(summaries)
+}
+
+/// KT-30 — load every linked task's ACTIVE blockers (status not done/archived)
+/// as minimal, non-recursive [`PlanningDependencySummary`] rows, grouped by the
+/// blocked task. Three fixed queries: the blocker cores, then the blockers'
+/// projects and discussions (grouped in Rust) — never one query per task.
+fn load_active_dependencies_for_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<std::collections::HashMap<String, Vec<PlanningDependencySummary>>> {
+    // (blocked_task_id, blocker_id, blocker_number, title, status), plan order.
+    let mut stmt = conn.prepare(
+        "SELECT ptd.task_id, blocker.id, blocker.task_number, blocker.title, blocker.status
+           FROM planning_task_discussions ptd
+           JOIN planning_task_blockers b ON b.task_id = ptd.task_id
+           JOIN planning_tasks blocker ON blocker.id = b.blocker_task_id
+          WHERE ptd.discussion_id = ?1
+            AND blocker.status NOT IN ('done', 'archived')
+          ORDER BY ptd.task_id, blocker.task_number",
+    )?;
+    let rows = stmt
+        .query_map([discussion_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    // The blockers' own project/discussion ids, batched over the distinct
+    // blocker set (one query each; the blocker's own blockers are NOT expanded).
+    let blocker_ids: Vec<Value> = {
+        let mut seen = std::collections::HashSet::new();
+        rows.iter()
+            .filter(|(_, blocker_id, ..)| seen.insert(blocker_id.clone()))
+            .map(|(_, blocker_id, ..)| Value::Text(blocker_id.clone()))
+            .collect()
+    };
+    let placeholders = vec!["?"; blocker_ids.len()].join(",");
+    // The UNION references the id set in BOTH arms, so bind it twice, in order.
+    let blocker_ids_twice: Vec<Value> = blocker_ids
+        .iter()
+        .cloned()
+        .chain(blocker_ids.iter().cloned())
+        .collect();
+    let blocker_projects = load_grouped_by_task(
+        conn,
+        &format!(
+            "SELECT task_id, project_id
+               FROM planning_task_projects WHERE task_id IN ({placeholders})
+             UNION
+             SELECT link.task_id, d.project_id
+               FROM planning_task_discussions link
+               JOIN discussions d ON d.id = link.discussion_id
+              WHERE link.task_id IN ({placeholders}) AND d.project_id IS NOT NULL
+              ORDER BY 1, 2"
+        ),
+        BindTasks::Ids(&blocker_ids_twice),
+    )?;
+    let blocker_discussions = load_grouped_by_task(
+        conn,
+        &format!(
+            "SELECT task_id, discussion_id FROM planning_task_discussions
+              WHERE task_id IN ({placeholders}) ORDER BY task_id, discussion_id"
+        ),
+        BindTasks::Ids(&blocker_ids),
+    )?;
+
+    let mut by_task: std::collections::HashMap<String, Vec<PlanningDependencySummary>> =
+        std::collections::HashMap::new();
+    for (blocked_id, blocker_id, blocker_number, title, status) in rows {
+        by_task
+            .entry(blocked_id)
+            .or_default()
+            .push(PlanningDependencySummary {
+                project_ids: blocker_projects
+                    .get(&blocker_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                discussion_ids: blocker_discussions
+                    .get(&blocker_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                reference: format!("KT-{blocker_number}"),
+                title,
+                status: PlanningTaskStatus::from_str(&status)?,
+                id: blocker_id,
+            });
+    }
+    Ok(by_task)
+}
+
+/// Binding strategy for [`load_grouped_by_task`]: either a single discussion id
+/// (the query filters through `planning_task_discussions`) or an explicit list
+/// of task ids bound to an `IN (…)` placeholder set the caller already built.
+enum BindTasks<'a> {
+    Discussion(&'a str),
+    Ids(&'a [Value]),
+}
+
+impl<'a> From<&'a str> for BindTasks<'a> {
+    fn from(discussion_id: &'a str) -> Self {
+        BindTasks::Discussion(discussion_id)
+    }
+}
+
+/// Run a `(task_id, value)` query and group the values per task, preserving the
+/// query's row order within each task. One statement, whatever the row count.
+fn load_grouped_by_task<'a>(
+    conn: &Connection,
+    sql: &str,
+    bind: impl Into<BindTasks<'a>>,
+) -> Result<std::collections::HashMap<String, Vec<String>>> {
+    let mut stmt = conn.prepare(sql)?;
+    let map_row = |row: &rusqlite::Row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
+    let pairs: Vec<(String, String)> = match bind.into() {
+        BindTasks::Discussion(id) => stmt
+            .query_map([id], map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+        BindTasks::Ids(ids) => stmt
+            .query_map(params_from_iter(ids.iter()), map_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    };
+    let mut grouped: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for (task_id, value) in pairs {
+        grouped.entry(task_id).or_default().push(value);
+    }
+    Ok(grouped)
 }
 
 #[cfg(test)]
@@ -1330,6 +1702,54 @@ mod tests {
             change_count_since_last_agent(&connection, "disc-1").unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn discussion_plan_excludes_archived_tasks() {
+        let connection = connection();
+        connection
+            .execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('disc-archived-plan', 'Plan', ?1, ?1)",
+                [Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        let task = create_task(&connection, &request("Archived")).unwrap();
+        link_discussion(
+            &connection,
+            &task.summary.id,
+            &LinkPlanningDiscussionRequest {
+                discussion_id: "disc-archived-plan".into(),
+                placement: PlanningPlacement::Later,
+                is_primary: false,
+                position: None,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        update_task(
+            &connection,
+            &task.summary.id,
+            &UpdatePlanningTaskRequest {
+                title: None,
+                description: None,
+                status: Some(PlanningTaskStatus::Archived),
+                priority: None,
+                parent_id: None,
+                blocked_reason: None,
+                rank: None,
+                project_ids: None,
+                tags: None,
+                definition_of_done: None,
+                links: None,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+
+        let plan = get_discussion_plan(&connection, "disc-archived-plan").unwrap();
+        assert!(plan.active.is_empty());
+        assert!(plan.later.is_empty());
     }
 
     #[test]
@@ -1655,5 +2075,424 @@ mod tests {
         )
         .unwrap();
         assert!(updated.definition_of_done.iter().all(|item| item.completed));
+    }
+
+    // ── KT-30A — compact bounded plan projection ────────────────────────────
+    fn seed_disc(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO discussions (id, title, created_at, updated_at) VALUES (?1, 'Plan', ?2, ?2)",
+            rusqlite::params![id, Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+    }
+
+    fn linked_task(
+        conn: &Connection,
+        disc: &str,
+        title: &str,
+        status: PlanningTaskStatus,
+        placement: PlanningPlacement,
+    ) -> String {
+        let mut req = request(title);
+        req.status = status;
+        let task = create_task(conn, &req).unwrap();
+        link_discussion(
+            conn,
+            &task.summary.id,
+            &LinkPlanningDiscussionRequest {
+                discussion_id: disc.into(),
+                placement,
+                is_primary: false,
+                position: None,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        task.summary.id
+    }
+
+    #[test]
+    fn discussion_plan_stats_partition_active_by_strict_precedence() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        linked_task(
+            &conn,
+            "d",
+            "ready",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        linked_task(
+            &conn,
+            "d",
+            "wip",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        linked_task(
+            &conn,
+            "d",
+            "done",
+            PlanningTaskStatus::Done,
+            PlanningPlacement::Active,
+        );
+        linked_task(
+            &conn,
+            "d",
+            "blk",
+            PlanningTaskStatus::Blocked,
+            PlanningPlacement::Active,
+        );
+        // An Idea counts as `ready` (not-yet-started residual) but is NOT actionable.
+        linked_task(
+            &conn,
+            "d",
+            "idea",
+            PlanningTaskStatus::Idea,
+            PlanningPlacement::Active,
+        );
+        // in_progress WITH an active blocker → precedence classifies it `blocked`.
+        let wip_blocked = linked_task(
+            &conn,
+            "d",
+            "wip-blocked",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        let blocker = create_task(&conn, &request("blocker")).unwrap();
+        add_blocker(
+            &conn,
+            &wip_blocked,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.summary.id,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        linked_task(
+            &conn,
+            "d",
+            "later",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Later,
+        );
+
+        let plan = get_discussion_plan(&conn, "d").unwrap();
+        assert_eq!(plan.stats.ready, 1, "only the pure Todo-no-blocker");
+        assert_eq!(
+            plan.stats.ideas, 1,
+            "the Idea has its own bucket, never counted as ready"
+        );
+        assert_eq!(plan.stats.in_progress, 1);
+        assert_eq!(plan.stats.done, 1);
+        assert_eq!(
+            plan.stats.blocked, 2,
+            "explicit Blocked + in_progress-with-active-blocker"
+        );
+        assert_eq!(plan.stats.later, 1);
+        // Retained aliases stay consistent with the partition.
+        assert_eq!(
+            plan.total_active,
+            plan.stats.ready
+                + plan.stats.blocked
+                + plan.stats.in_progress
+                + plan.stats.ideas
+                + plan.stats.done
+        );
+        assert_eq!(plan.total_active, 6);
+        assert_eq!(plan.completed_active, plan.stats.done);
+        // Only the pure ready Todo is actionable (not idea, not later, not blocked).
+        let actionable: Vec<&str> = plan
+            .active
+            .iter()
+            .filter(|r| r.actionable)
+            .map(|r| r.task.title.as_str())
+            .collect();
+        assert_eq!(actionable, vec!["ready"]);
+        // The `ready` bucket is exactly the actionable count — never inflated.
+        assert_eq!(plan.stats.ready, actionable.len() as u32);
+        assert!(
+            plan.later.iter().all(|r| !r.actionable),
+            "Later is never actionable"
+        );
+    }
+
+    #[test]
+    fn discussion_plan_surfaces_active_blockers_and_excludes_satisfied() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let blocked = linked_task(
+            &conn,
+            "d",
+            "blocked",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        let active_blocker = create_task(&conn, &request("active-blocker")).unwrap();
+        let done_blocker = {
+            let mut r = request("done-blocker");
+            r.status = PlanningTaskStatus::Done;
+            create_task(&conn, &r).unwrap()
+        };
+        let archived_blocker = {
+            let mut r = request("archived-blocker");
+            r.status = PlanningTaskStatus::Archived;
+            create_task(&conn, &r).unwrap()
+        };
+        for b in [&active_blocker, &done_blocker, &archived_blocker] {
+            add_blocker(
+                &conn,
+                &blocked,
+                &AddPlanningBlockerRequest {
+                    blocker_task_id: b.summary.id.clone(),
+                    actor: PlanningActor::default(),
+                },
+            )
+            .unwrap();
+        }
+
+        let plan = get_discussion_plan(&conn, "d").unwrap();
+        let rel = plan
+            .active
+            .iter()
+            .find(|r| r.task.title == "blocked")
+            .unwrap();
+        assert_eq!(
+            rel.active_blockers.len(),
+            1,
+            "both done AND archived blockers are satisfied → only the active one surfaces"
+        );
+        assert_eq!(rel.active_blockers[0].title, "active-blocker");
+        assert_eq!(rel.active_blockers[0].status, PlanningTaskStatus::Todo);
+        assert!(!rel.actionable, "an active blocker makes it non-actionable");
+        assert_eq!(plan.stats.blocked, 1);
+    }
+
+    #[test]
+    fn discussion_plan_preserves_plan_position_order_not_priority() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let low = {
+            let mut r = request("A-low");
+            r.priority = PlanningTaskPriority::Low;
+            create_task(&conn, &r).unwrap()
+        };
+        let high = {
+            let mut r = request("B-high");
+            r.priority = PlanningTaskPriority::Critical;
+            create_task(&conn, &r).unwrap()
+        };
+        // Link low at position 0, high at position 1 — plan order must ignore the
+        // higher global priority of B.
+        for (task, pos) in [(&low, 0_i64), (&high, 1_i64)] {
+            link_discussion(
+                &conn,
+                &task.summary.id,
+                &LinkPlanningDiscussionRequest {
+                    discussion_id: "d".into(),
+                    placement: PlanningPlacement::Active,
+                    is_primary: false,
+                    position: Some(pos),
+                    actor: PlanningActor::default(),
+                },
+            )
+            .unwrap();
+        }
+        let plan = get_discussion_plan(&conn, "d").unwrap();
+        let order: Vec<&str> = plan.active.iter().map(|r| r.task.title.as_str()).collect();
+        assert_eq!(
+            order,
+            vec!["A-low", "B-high"],
+            "plan position wins over global priority"
+        );
+    }
+
+    #[test]
+    fn dependency_summary_carries_external_navigation_ids() {
+        let conn = connection();
+        seed_disc(&conn, "d");
+        seed_disc(&conn, "other");
+        let blocked = linked_task(
+            &conn,
+            "d",
+            "blocked",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        // A blocker with its own project AND linked to ANOTHER discussion → both
+        // its project_ids and discussion_ids surface so the UI can offer real
+        // links to it (a ghost row), never an invented one.
+        conn.execute(
+            "INSERT INTO projects (id, name, path, created_at, updated_at)
+             VALUES ('proj-ext', 'Ext', '/tmp/ext', ?1, ?1)",
+            [Utc::now().to_rfc3339()],
+        )
+        .unwrap();
+        let blocker = {
+            let mut r = request("ext-blocker");
+            r.project_ids = vec!["proj-ext".into()];
+            create_task(&conn, &r).unwrap()
+        };
+        link_discussion(
+            &conn,
+            &blocker.summary.id,
+            &LinkPlanningDiscussionRequest {
+                discussion_id: "other".into(),
+                placement: PlanningPlacement::Active,
+                is_primary: false,
+                position: None,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+        add_blocker(
+            &conn,
+            &blocked,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: blocker.summary.id,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+
+        let plan = get_discussion_plan(&conn, "d").unwrap();
+        let rel = plan
+            .active
+            .iter()
+            .find(|r| r.task.title == "blocked")
+            .unwrap();
+        assert_eq!(rel.active_blockers.len(), 1);
+        assert!(
+            rel.active_blockers[0]
+                .discussion_ids
+                .contains(&"other".to_string()),
+            "external blocker's discussion is navigable from the dependency summary"
+        );
+        assert!(
+            rel.active_blockers[0]
+                .project_ids
+                .contains(&"proj-ext".to_string()),
+            "external blocker's project is navigable too"
+        );
+    }
+
+    #[test]
+    fn discussion_plan_propagates_a_corrupt_task_enum_instead_of_defaulting() {
+        // KT-30A.2 — a corrupt status/priority in the DB must surface as an
+        // explicit error, never be silently read as Idea/Normal by the batched
+        // loaders (the guard against `unwrap_or_default` creeping back).
+        let conn = connection();
+        seed_disc(&conn, "d");
+        let id = linked_task(
+            &conn,
+            "d",
+            "t",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        conn.execute(
+            "UPDATE planning_tasks SET status = 'bogus-status' WHERE id = ?1",
+            [&id],
+        )
+        .unwrap();
+        let err = get_discussion_plan(&conn, "d").unwrap_err();
+        assert!(
+            err.to_string().contains("Unknown planning task status"),
+            "a corrupt status must propagate, got: {err}"
+        );
+    }
+
+    static STMT_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn count_stmt(event: rusqlite::trace::TraceEvent<'_>) {
+        if matches!(event, rusqlite::trace::TraceEvent::Stmt(..)) {
+            STMT_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn get_discussion_plan_statement_count_is_invariant_to_plan_size() {
+        use std::sync::atomic::Ordering;
+        let conn = connection();
+
+        // Small plan (2 relations) WITH an active blocker so every query family fires.
+        seed_disc(&conn, "small");
+        let s1 = linked_task(
+            &conn,
+            "small",
+            "s1",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        linked_task(
+            &conn,
+            "small",
+            "s2",
+            PlanningTaskStatus::InProgress,
+            PlanningPlacement::Active,
+        );
+        let sb = create_task(&conn, &request("s-blocker")).unwrap();
+        add_blocker(
+            &conn,
+            &s1,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: sb.summary.id,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+
+        // Large plan (1 000 relations) also WITH a blocker.
+        seed_disc(&conn, "large");
+        let first = linked_task(
+            &conn,
+            "large",
+            "L0",
+            PlanningTaskStatus::Todo,
+            PlanningPlacement::Active,
+        );
+        for i in 1..1000 {
+            linked_task(
+                &conn,
+                "large",
+                &format!("L{i}"),
+                PlanningTaskStatus::Todo,
+                PlanningPlacement::Active,
+            );
+        }
+        let lb = create_task(&conn, &request("l-blocker")).unwrap();
+        add_blocker(
+            &conn,
+            &first,
+            &AddPlanningBlockerRequest {
+                blocker_task_id: lb.summary.id,
+                actor: PlanningActor::default(),
+            },
+        )
+        .unwrap();
+
+        conn.trace_v2(
+            rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_stmt),
+        );
+        STMT_COUNT.store(0, Ordering::Relaxed);
+        let small = get_discussion_plan(&conn, "small").unwrap();
+        let small_stmts = STMT_COUNT.load(Ordering::Relaxed);
+        STMT_COUNT.store(0, Ordering::Relaxed);
+        let large = get_discussion_plan(&conn, "large").unwrap();
+        let large_stmts = STMT_COUNT.load(Ordering::Relaxed);
+        conn.trace_v2(rusqlite::trace::TraceEventCodes::empty(), None);
+
+        // Correctness at scale: all 1 000 relations present, plan order preserved,
+        // nothing truncated.
+        assert_eq!(large.active.len(), 1000);
+        assert_eq!(large.active.first().unwrap().task.title, "L0");
+        assert_eq!(large.active.last().unwrap().task.title, "L999");
+        assert_eq!(small.active.len(), 2);
+        // The projection issues a FIXED number of SQL statements regardless of N —
+        // the architectural proof there is no N+1, with no fragile timing.
+        assert_eq!(
+            small_stmts, large_stmts,
+            "statement count must not grow with plan size (N+1 guard): small={small_stmts} large={large_stmts}"
+        );
     }
 }

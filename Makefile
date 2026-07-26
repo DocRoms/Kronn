@@ -231,9 +231,9 @@ build:
 ## Backend dev with hot reload
 dev-backend:
 	@echo "$(GREEN)▸ Starting backend (watch mode)...$(RESET)"
-	cd backend && cargo watch -x run
+	cd backend && watchexec --restart --exts rs,toml,lock --stop-timeout 10s -- cargo run
 
-# Exploitation mode: NO watcher. cargo watch SIGTERMs the backend on any
+# Exploitation mode: NO watcher. A dev watcher SIGTERMs the backend on any
 # repo file change — it killed live audits mid-run. Use this whenever
 # agents/audits must survive edits to the repo.
 # NB: .cargo/config.toml shares target-dir at the repo root — the binary

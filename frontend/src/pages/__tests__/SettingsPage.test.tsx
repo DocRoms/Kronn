@@ -228,6 +228,21 @@ describe('SettingsPage', () => {
     expect(appearance?.hasAttribute('aria-current')).toBe(false);
   });
 
+  it('shows the current version under the settings menu with stable release links', async () => {
+    await wrap(<SettingsPage {...defaultProps} />);
+
+    const nav = screen.getByRole('navigation', { name: 'Sections' });
+    const versionCard = nav.querySelector('[data-testid="settings-nav-version"]');
+    expect(versionCard).toBeTruthy();
+    expect(versionCard!.textContent).toContain('Kronn v');
+
+    const links = [...versionCard!.querySelectorAll<HTMLAnchorElement>('a')];
+    expect(links).toHaveLength(2);
+    expect(links[0].href).toBe('https://github.com/DocRoms/Kronn/releases');
+    expect(links[1].href).toBe('https://github.com/DocRoms/Kronn');
+    expect(links[1].textContent).toBe('Source code (AGPL-3.0)');
+  });
+
   it('renders skill cards after opening accordion', async () => {
     await wrap(<SettingsPage {...defaultProps} />);
     // Skills are behind an accordion — find and click the header

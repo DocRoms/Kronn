@@ -16,6 +16,7 @@ use std::time::Duration;
 
 use axum::response::sse::{Event, Sse};
 use chrono::Utc;
+use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::agents::runner;
@@ -148,53 +149,40 @@ pub(super) fn classify_tool_call(tool: &str, input: &str) -> ToolRecord {
     }
 }
 
-/// Bump a batch run's counters for a finished child — delivered OR failed
-/// to start — and broadcast the matching progress/finished WS event. Batch
-/// children run server-side with no SSE consumer: this event is the only
-/// thing that moves the sidebar pill and clears the child's indicator, so
-/// EVERY child outcome must route through here or the run sticks at n-1/N.
-async fn bump_batch_progress(state: &AppState, run_id: &str, disc_id: &str, child_succeeded: bool) {
-    let run_id_inner = run_id.to_string();
-    let batch_updated = state
-        .db
-        .with_conn(move |conn| {
-            crate::db::workflows::increment_batch_progress(conn, &run_id_inner, child_succeeded)
-        })
-        .await;
-    match batch_updated {
-        Ok(Some(updated_run)) => {
-            let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
-            let event = if is_final {
-                WsMessage::BatchRunFinished {
-                    run_id: updated_run.id.clone(),
-                    discussion_id: disc_id.to_string(),
-                    batch_name: updated_run.batch_name.clone(),
-                    batch_total: updated_run.batch_total,
-                    batch_completed: updated_run.batch_completed,
-                    batch_failed: updated_run.batch_failed,
-                }
-            } else {
-                WsMessage::BatchRunProgress {
-                    run_id: updated_run.id.clone(),
-                    discussion_id: disc_id.to_string(),
-                    batch_total: updated_run.batch_total,
-                    batch_completed: updated_run.batch_completed,
-                    batch_failed: updated_run.batch_failed,
-                }
-            };
-            let _ = state.ws_broadcast.send(event);
-            if is_final {
-                tracing::info!(
-                    "Batch run {} finished: {}/{} ok, {} failed",
-                    updated_run.id,
-                    updated_run.batch_completed,
-                    updated_run.batch_total,
-                    updated_run.batch_failed
-                );
-            }
+/// Broadcast a batch state that was already persisted by the caller.
+///
+/// Durable dispatch settlement updates the dispatch job and its parent batch
+/// counters in one transaction. Keeping the broadcast separate lets that path
+/// notify the UI after commit without incrementing the counters a second time.
+pub(crate) fn broadcast_batch_progress(state: &AppState, disc_id: &str, updated_run: &WorkflowRun) {
+    let is_final = matches!(updated_run.status, RunStatus::Success | RunStatus::Failed);
+    let event = if is_final {
+        WsMessage::BatchRunFinished {
+            run_id: updated_run.id.clone(),
+            discussion_id: disc_id.to_string(),
+            batch_name: updated_run.batch_name.clone(),
+            batch_total: updated_run.batch_total,
+            batch_completed: updated_run.batch_completed,
+            batch_failed: updated_run.batch_failed,
         }
-        Ok(None) => {}
-        Err(e) => tracing::error!("Failed to update batch progress: {e}"),
+    } else {
+        WsMessage::BatchRunProgress {
+            run_id: updated_run.id.clone(),
+            discussion_id: disc_id.to_string(),
+            batch_total: updated_run.batch_total,
+            batch_completed: updated_run.batch_completed,
+            batch_failed: updated_run.batch_failed,
+        }
+    };
+    let _ = state.ws_broadcast.send(event);
+    if is_final {
+        tracing::info!(
+            "Batch run {} finished: {}/{} ok, {} failed",
+            updated_run.id,
+            updated_run.batch_completed,
+            updated_run.batch_total,
+            updated_run.batch_failed
+        );
     }
 }
 
@@ -211,31 +199,95 @@ pub(crate) async fn make_agent_stream(
     discussion_id: String,
     agent_override: Option<AgentType>,
 ) -> Sse<SseStream> {
-    make_agent_stream_inner(state, discussion_id, agent_override, None).await
+    make_agent_stream_inner(state, discussion_id, agent_override, None, None, None).await
 }
 
-/// Wake the discussion's native agent without racing another active run.
-///
-/// Unlike [`make_agent_stream`], this claims the discussion id synchronously
-/// before spawning. That matters for MCP rooms: two peers may append messages
-/// within the same scheduler tick, and only one native principal must answer.
-pub(crate) fn spawn_agent_stream_if_idle(state: AppState, discussion_id: String) -> bool {
-    let Some(cancel_guard) =
-        crate::CancelGuard::try_insert(&state.cancel_registry, discussion_id.clone())
-    else {
-        return false;
-    };
-    tokio::spawn(async move {
-        let _ = make_agent_stream_inner(state, discussion_id, None, Some(cancel_guard)).await;
-    });
-    true
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AgentExecutionOutcome {
+    Finished { success: bool },
+    PreflightFailed,
+    RuntimeUnavailable { reason: String },
+}
+
+fn agent_start_failure_outcome(error: &str) -> AgentExecutionOutcome {
+    if error.starts_with("Project path not found:") {
+        AgentExecutionOutcome::PreflightFailed
+    } else {
+        AgentExecutionOutcome::RuntimeUnavailable {
+            reason: error.to_string(),
+        }
+    }
+}
+
+fn finish_tracked_preflight(
+    completion_tx: &mut Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
+) {
+    if let Some(sender) = completion_tx.take() {
+        let _ = sender.send(AgentExecutionOutcome::PreflightFailed);
+    }
+}
+
+pub(crate) async fn make_agent_stream_tracked(
+    state: AppState,
+    discussion_id: String,
+    agent_override: Option<AgentType>,
+    dispatch_job_id: String,
+) -> (
+    Sse<SseStream>,
+    tokio::sync::oneshot::Receiver<AgentExecutionOutcome>,
+) {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let stream = make_agent_stream_inner(
+        state,
+        discussion_id,
+        agent_override,
+        Some(dispatch_job_id),
+        None,
+        Some(completion_tx),
+    )
+    .await;
+    (stream, completion_rx)
+}
+
+pub(crate) async fn make_agent_stream_tracked_with_initial_event(
+    state: AppState,
+    discussion_id: String,
+    agent_override: Option<AgentType>,
+    dispatch_job_id: String,
+    initial_event: Event,
+) -> (
+    Sse<SseStream>,
+    tokio::sync::oneshot::Receiver<AgentExecutionOutcome>,
+) {
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+    let stream = make_agent_stream_inner(
+        state,
+        discussion_id,
+        agent_override,
+        Some(dispatch_job_id),
+        Some(initial_event),
+        Some(completion_tx),
+    )
+    .await;
+    (stream, completion_rx)
+}
+
+fn prepend_initial_event(stream: SseStream, initial_event: Option<Event>) -> SseStream {
+    match initial_event {
+        Some(event) => {
+            Box::pin(futures::stream::once(async move { Ok::<_, Infallible>(event) }).chain(stream))
+        }
+        None => stream,
+    }
 }
 
 async fn make_agent_stream_inner(
     state: AppState,
     discussion_id: String,
     agent_override: Option<AgentType>,
-    preclaimed_cancel_guard: Option<crate::CancelGuard>,
+    dispatch_job_id: Option<String>,
+    mut initial_event: Option<Event>,
+    mut completion_tx: Option<tokio::sync::oneshot::Sender<AgentExecutionOutcome>>,
 ) -> Sse<SseStream> {
     // 0.8.5 — capture the agent-run start wallclock. The delta between
     // this and the moment we commit the Agent message gives us the
@@ -255,6 +307,7 @@ async fn make_agent_stream_inner(
         .flatten();
 
     if disc.is_none() {
+        finish_tracked_preflight(&mut completion_tx);
         let stream: SseStream = Box::pin(futures::stream::once(async {
             Ok::<_, Infallible>(
                 Event::default()
@@ -262,12 +315,13 @@ async fn make_agent_stream_inner(
                     .data("{\"error\":\"Discussion not found\"}"),
             )
         }));
-        return Sse::new(stream);
+        return Sse::new(prepend_initial_event(stream, initial_event.take()));
     }
 
     let disc = match disc {
         Some(d) => d,
         None => {
+            finish_tracked_preflight(&mut completion_tx);
             let stream: SseStream = Box::pin(futures::stream::once(async {
                 Ok::<_, Infallible>(
                     Event::default()
@@ -275,7 +329,7 @@ async fn make_agent_stream_inner(
                         .data(serde_json::json!({ "error": "Discussion not found" }).to_string()),
                 )
             }));
-            return Sse::new(stream);
+            return Sse::new(prepend_initial_event(stream, initial_event.take()));
         }
     };
     let agent_type = agent_override.unwrap_or_else(|| disc.agent.clone());
@@ -287,11 +341,6 @@ async fn make_agent_stream_inner(
     let directive_ids = disc.directive_ids.clone();
     let profile_ids = disc.profile_ids.clone();
     let mut workspace_path = disc.workspace_path.clone();
-    // Captured for the batch progress hook at the end of the stream — if
-    // this disc was spawned by a batch run, we increment its counters and
-    // broadcast a WS event when it finishes.
-    let batch_run_id = disc.workflow_run_id.clone();
-
     let project_path = if let Some(ref pid) = disc.project_id {
         let pid = pid.clone();
         state
@@ -351,12 +400,9 @@ async fn make_agent_stream_inner(
                         format!("Failed to re-create worktree: {}", e)
                     };
                     // Same terminal handling as the agent-start-failed arm.
-                    // A batch child is fire-and-forget (nobody reads this SSE
-                    // error): without persisting the error, clearing the
-                    // enqueue-time awaiting marker and bumping the batch
-                    // counters, the child looks dead, the run sticks at
-                    // n-1/N and the next boot mislabels a preflight error
-                    // as an interruption.
+                    // Persist the error and clear the enqueue-time awaiting
+                    // marker. Durable dispatch settlement owns batch progress
+                    // atomically with the job's terminal state.
                     let persisted_err = DiscussionMessage {
                         model: None,
                         lint_report: None,
@@ -389,9 +435,6 @@ async fn make_agent_stream_inner(
                     {
                         tracing::error!("Failed to persist re-lock preflight error: {db_err}");
                     }
-                    if let Some(ref run_id) = batch_run_id {
-                        bump_batch_progress(&state, run_id, &discussion_id, false).await;
-                    }
                     let stream: SseStream = Box::pin(futures::stream::once(async move {
                         Ok::<_, Infallible>(
                             Event::default()
@@ -399,7 +442,8 @@ async fn make_agent_stream_inner(
                                 .data(serde_json::json!({ "error": err_msg }).to_string()),
                         )
                     }));
-                    return Sse::new(stream);
+                    finish_tracked_preflight(&mut completion_tx);
+                    return Sse::new(prepend_initial_event(stream, initial_event.take()));
                 }
             }
         }
@@ -468,9 +512,6 @@ async fn make_agent_stream_inner(
                             "Failed to persist validation redaction preflight error: {db_error}"
                         );
                     }
-                    if let Some(ref run_id) = batch_run_id {
-                        bump_batch_progress(&state, run_id, &discussion_id, false).await;
-                    }
                     let stream: SseStream = Box::pin(futures::stream::once(async move {
                         Ok::<_, Infallible>(
                             Event::default()
@@ -478,7 +519,8 @@ async fn make_agent_stream_inner(
                                 .data(serde_json::json!({ "error": safe_error }).to_string()),
                         )
                     }));
-                    return Sse::new(stream);
+                    finish_tracked_preflight(&mut completion_tx);
+                    return Sse::new(prepend_initial_event(stream, initial_event.take()));
                 }
                 Some((root, targets))
             }
@@ -519,9 +561,6 @@ async fn make_agent_stream_inner(
                         "Failed to persist validation-link preflight error: {db_error}"
                     );
                 }
-                if let Some(ref run_id) = batch_run_id {
-                    bump_batch_progress(&state, run_id, &discussion_id, false).await;
-                }
                 let stream: SseStream = Box::pin(futures::stream::once(async move {
                     Ok::<_, Infallible>(
                         Event::default()
@@ -529,7 +568,8 @@ async fn make_agent_stream_inner(
                             .data(serde_json::json!({ "error": safe_error }).to_string()),
                     )
                 }));
-                return Sse::new(stream);
+                finish_tracked_preflight(&mut completion_tx);
+                return Sse::new(prepend_initial_event(stream, initial_event.take()));
             }
         }
     } else {
@@ -805,6 +845,18 @@ async fn make_agent_stream_inner(
 
     let auth_mode_str = auth_mode_for(&agent_type, &tokens);
 
+    // KT-37 — resolve the concrete model this run will ATTEMPT, once, with the
+    // same precedence the runner uses (per-disc/QP override → tier → provider
+    // default). Reused by the terminal message, the mid-stream checkpoint, and
+    // the spawn-error provenance so all three agree. `None` = provider-default
+    // run with no --model flag.
+    let attempted_model = runner::effective_model_flag(
+        disc_model.as_deref(),
+        &agent_type,
+        disc_tier,
+        Some(&model_tiers_config),
+    );
+
     let disc_id = discussion_id.clone();
     let disc_project_id = disc.project_id.clone();
 
@@ -839,8 +891,7 @@ async fn make_agent_stream_inner(
     // UI (POST /api/discussions/:id/stop) can trigger it. The CancelGuard
     // removes the entry from the registry when this task's scope exits —
     // either on normal completion or via panic/early return.
-    let cancel_guard = preclaimed_cancel_guard
-        .unwrap_or_else(|| crate::CancelGuard::insert(&state.cancel_registry, disc_id.clone()));
+    let cancel_guard = crate::CancelGuard::insert(&state.cancel_registry, disc_id.clone());
     let cancel_token = cancel_guard.token.clone();
 
     // Spawn background task — always saves to DB even if client disconnects
@@ -858,24 +909,14 @@ async fn make_agent_stream_inner(
                         data: serde_json::json!({ "error": "Server shutting down" }),
                     })
                     .await;
+                if let Some(sender) = completion_tx.take() {
+                    let _ = sender.send(AgentExecutionOutcome::RuntimeUnavailable {
+                        reason: "server_shutting_down".to_string(),
+                    });
+                }
                 return;
             }
         };
-
-        // ── Batch child START hook ──────────────────────────────────────
-        // Symmetric to the BatchRunProgress/BatchRunFinished broadcast at the
-        // end of the stream. Batch children run server-side with no SSE
-        // consumer, so this WS event is what flips the client's queued dot
-        // to the running spinner. It MUST fire here, after the global
-        // permit — broadcast at make_agent_stream entry, every spawned child
-        // showed "running" while still waiting for an agent slot, and a
-        // preflight failure left a spinner nothing would ever clear.
-        if let Some(ref run_id) = batch_run_id {
-            let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
-                run_id: run_id.clone(),
-                discussion_id: discussion_id.clone(),
-            });
-        }
 
         let _ = tx.send(AgentStreamEvent::Start).await;
         let _ = tx
@@ -884,6 +925,7 @@ async fn make_agent_stream_inner(
             })
             .await;
 
+        let mut tracked_execution_succeeded = false;
         match runner::start_agent_with_config(runner::AgentStartConfig {
             work_dir: workspace_path.as_deref(),
             full_access,
@@ -937,10 +979,16 @@ async fn make_agent_stream_inner(
                 const CHECKPOINT_CHUNKS: usize = 100;
                 let checkpoint_disc_id = disc_id.clone();
                 let checkpoint_db = state.db.clone();
+                // KT-37 — carry the agent + attempted model into every checkpoint
+                // so a restart-time recovery rebuilds the message with provenance.
+                let checkpoint_agent = agent_type.clone();
+                let checkpoint_model = attempted_model.clone();
                 // Helper: best-effort flush, never propagates DB errors to the agent loop.
                 let do_checkpoint = |partial: String| {
                     let did = checkpoint_disc_id.clone();
                     let db = checkpoint_db.clone();
+                    let agent = checkpoint_agent.clone();
+                    let model = checkpoint_model.clone();
                     tokio::spawn(async move {
                         if let Err(e) = db
                             .with_conn(move |conn| {
@@ -948,6 +996,7 @@ async fn make_agent_stream_inner(
                                     conn,
                                     &did,
                                     Some(&partial),
+                                    Some((&agent, model.as_deref())),
                                 )
                             })
                             .await
@@ -1452,18 +1501,13 @@ async fn make_agent_stream_inner(
                 // below — reused by the batch-progress hook so an empty-but-
                 // clean-exit child isn't mis-counted as a batch success.
                 let child_run_was_success = child_run_counts_as_success(success, &full_response);
+                tracked_execution_succeeded = child_run_was_success;
 
-                // Concrete model this reply ran on — resolved with the SAME
-                // precedence the runner used (per-disc/QP override → tier →
-                // OllamaCard default → built-in). Stored per-message so the UI
+                // Concrete model this reply ran on — resolved once before spawn
+                // (`attempted_model`) so a non-zero exit / stall / cancel with
+                // partial output still carries it. Stored per-message so the UI
                 // can show "Ollama · qwen3:32b" even when the model changes
                 // mid-thread. `None` for provider-default runs with no flag.
-                let effective_model = runner::effective_model_flag(
-                    disc_model.as_deref(),
-                    &agent_type,
-                    disc_tier,
-                    Some(&model_tiers_config),
-                );
                 let agent_msg = DiscussionMessage {
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::Agent,
@@ -1473,7 +1517,7 @@ async fn make_agent_stream_inner(
                     tokens_used,
                     auth_mode: Some(auth_mode_str.clone()),
                     model_tier: tier_label,
-                    model: effective_model,
+                    model: attempted_model.clone(),
                     cost_usd,
                     author_pseudo: None,
                     author_avatar_email: None,
@@ -1491,7 +1535,22 @@ async fn make_agent_stream_inner(
                 let msg = agent_msg.clone();
                 if let Err(e) = state
                     .db
-                    .with_conn(move |conn| crate::db::discussions::insert_message(conn, &did, &msg))
+                    .with_conn(move |conn| {
+                        let transaction = conn.unchecked_transaction()?;
+                        crate::db::discussions::insert_message(&transaction, &did, &msg)?;
+                        transaction.execute(
+                            "UPDATE messages
+                             SET agent_run_succeeded = ?2, agent_dispatch_job_id = ?3
+                             WHERE id = ?1",
+                            rusqlite::params![
+                                msg.id,
+                                child_run_was_success as i64,
+                                dispatch_job_id
+                            ],
+                        )?;
+                        transaction.commit()?;
+                        Ok(())
+                    })
                     .await
                 {
                     tracing::error!("Failed to save agent message: {e}");
@@ -1718,8 +1777,9 @@ async fn make_agent_stream_inner(
                         // Attempt both clears even if the first fails — a `?` here
                         // would leave the awaiting marker stale on a partial-clear
                         // error and trigger needless boot reconcile work.
-                        let partial =
-                            crate::db::discussions::set_partial_response(conn, &did_clear, None);
+                        let partial = crate::db::discussions::set_partial_response(
+                            conn, &did_clear, None, None,
+                        );
                         let awaiting =
                             crate::db::discussions::set_awaiting_agent(conn, &did_clear, false);
                         partial.and(awaiting)
@@ -1777,17 +1837,6 @@ async fn make_agent_stream_inner(
                             ),
                         }
                     }
-                }
-
-                // ── Batch progress hook ────────────────────────────────
-                // If this disc was spawned by a batch workflow run, bump
-                // its counters. Broadcast a progress or finished event so
-                // the sidebar pill + any open batch monitor updates live.
-                // Empty-but-clean-exit children are NOT successes (Codex
-                // silent-exit bug). Computed above, before `full_response`
-                // was moved into the persisted message.
-                if let Some(ref run_id) = batch_run_id {
-                    bump_batch_progress(&state, run_id, &disc_id, child_run_was_success).await;
                 }
 
                 // Detect KRONN:BRIEFING_COMPLETE marker
@@ -1867,13 +1916,34 @@ async fn make_agent_stream_inner(
             Err(e) => {
                 tracing::error!("Agent start failed: {}", e);
 
+                let tracked_outcome = completion_tx
+                    .as_ref()
+                    .map(|_| agent_start_failure_outcome(&e));
+                if matches!(
+                    &tracked_outcome,
+                    Some(AgentExecutionOutcome::RuntimeUnavailable { .. })
+                ) {
+                    // A durable dispatch still owes this run. Keep awaiting_agent
+                    // set and avoid persisting a System error on every retry;
+                    // the completion observer returns the claim to Pending.
+                    let err = serde_json::json!({ "error": e });
+                    let _ = tx.send(AgentStreamEvent::Error { data: err }).await;
+                    if let (Some(sender), Some(outcome)) = (completion_tx.take(), tracked_outcome) {
+                        let _ = sender.send(outcome);
+                    }
+                    return;
+                }
+
+                // KT-37 — a genuine spawn failure (NOT owed/retried: that path
+                // returned above) carries the agent + attempted model so the UI
+                // can label the failed turn's provenance. Role stays System.
                 let err_msg = DiscussionMessage {
-                    model: None,
+                    model: attempted_model.clone(),
                     lint_report: None,
                     id: Uuid::new_v4().to_string(),
                     role: MessageRole::System,
                     content: format!("Erreur: {}", e),
-                    agent_type: None,
+                    agent_type: Some(agent_type.clone()),
                     timestamp: Utc::now(),
                     tokens_used: 0,
                     auth_mode: None,
@@ -1906,17 +1976,17 @@ async fn make_agent_stream_inner(
                 // F1 — let the peer see the turn failed instead of silence.
                 crate::api::federation::federate_message(&state, &disc_id, &err_msg_fed).await;
 
-                // A batch child that never started still counts as done
-                // (failed). Without this bump the run sticks at n-1/N: no
-                // Finished event, wait_for_completion hangs to its timeout
-                // and the child's sidebar indicator never clears.
-                if let Some(ref run_id) = batch_run_id {
-                    bump_batch_progress(&state, run_id, &disc_id, false).await;
-                }
-
                 let err = serde_json::json!({ "error": e });
                 let _ = tx.send(AgentStreamEvent::Error { data: err }).await;
+                if let (Some(sender), Some(outcome)) = (completion_tx.take(), tracked_outcome) {
+                    let _ = sender.send(outcome);
+                }
             }
+        }
+        if let Some(sender) = completion_tx.take() {
+            let _ = sender.send(AgentExecutionOutcome::Finished {
+                success: tracked_execution_succeeded,
+            });
         }
     });
 
@@ -1951,6 +2021,7 @@ async fn make_agent_stream_inner(
         }
     });
 
+    let stream = prepend_initial_event(stream, initial_event.take());
     Sse::new(crate::core::sse_limits::bounded(stream))
 }
 
@@ -2316,8 +2387,9 @@ mod pretty_kronn_args_tests {
 #[cfg(test)]
 mod agent_lifecycle_tests {
     use super::{
-        cap_agent_response, child_run_counts_as_success, effective_stall_timeout,
-        AGENT_GLOBAL_TIMEOUT, NON_STREAMING_STALL_TIMEOUT,
+        agent_start_failure_outcome, cap_agent_response, child_run_counts_as_success,
+        effective_stall_timeout, AgentExecutionOutcome, AGENT_GLOBAL_TIMEOUT,
+        NON_STREAMING_STALL_TIMEOUT,
     };
     use std::time::Duration;
 
@@ -2417,6 +2489,26 @@ mod agent_lifecycle_tests {
                                                // No panic + still valid UTF-8 (String guarantees it if no panic).
         assert!(out.contains("tronqué"));
         assert!(out.len() <= 1001 + 80);
+    }
+
+    #[test]
+    fn missing_runtime_is_retryable_but_invalid_project_path_is_not() {
+        assert_eq!(
+            agent_start_failure_outcome("Binary 'codex' not found"),
+            AgentExecutionOutcome::RuntimeUnavailable {
+                reason: "Binary 'codex' not found".into()
+            }
+        );
+        assert_eq!(
+            agent_start_failure_outcome("Ollama unreachable at http://localhost:11434"),
+            AgentExecutionOutcome::RuntimeUnavailable {
+                reason: "Ollama unreachable at http://localhost:11434".into()
+            }
+        );
+        assert_eq!(
+            agent_start_failure_outcome("Project path not found: /missing"),
+            AgentExecutionOutcome::PreflightFailed
+        );
     }
 }
 

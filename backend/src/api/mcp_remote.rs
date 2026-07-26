@@ -560,6 +560,9 @@ pub async fn qp_run(
                     author_avatar_email,
                     language: "fr".into(),
                     workspace_mode: "Direct".into(),
+                    chain_prompt_ids: Vec::new(),
+                    chain_batch_items: Vec::new(),
+                    group_concurrency_limit: None,
                 },
             )
         })
@@ -578,24 +581,10 @@ pub async fn qp_run(
         }
     };
 
-    // Fire-and-forget agent kickoff. We spawn a task that builds the SSE
-    // stream and immediately drops it ; the internal agent task uses
-    // `let _ = tx.send(...)` so the dropped receiver does not cancel
-    // the run. The agent's reply still lands in the DB ; the MCP caller
-    // reads it via `disc_load_other(disc_id)` once `next_check` elapsed.
-    let kickoff_state = state.clone();
-    let kickoff_disc_id = disc_id.clone();
-    tokio::spawn(async move {
-        let _sse = crate::api::discussions::streaming::make_agent_stream(
-            kickoff_state,
-            kickoff_disc_id,
-            None,
-        )
-        .await;
-        // Dropping `_sse` here drops the SSE receiver ; the spawned
-        // agent task inside `make_agent_stream` keeps running and
-        // persists its result to DB regardless.
-    });
+    // `create_batch_run` committed the Pending dispatch obligation together
+    // with the child discussion. Wake the durable worker; results remain
+    // readable through `disc_load_other`.
+    state.agent_dispatch_notify.notify_waiters();
 
     // Smart polling — pull the avg from qp_versions metrics, take the
     // sum-across-all-versions as the dominant signal (the user typically
@@ -788,6 +777,9 @@ pub async fn qp_batch_run(
                     author_avatar_email,
                     language: "fr".into(),
                     workspace_mode: "Direct".into(),
+                    chain_prompt_ids: Vec::new(),
+                    chain_batch_items: Vec::new(),
+                    group_concurrency_limit: None,
                 },
             )
         })
@@ -803,26 +795,14 @@ pub async fn qp_batch_run(
     // crashed (no spinner) until their turn. Each is cleared by its own
     // BatchRunProgress / BatchRunFinished event on completion.
     for disc_id in &outcome.discussion_ids {
-        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildStarted {
+        let _ = state.ws_broadcast.send(WsMessage::BatchRunChildQueued {
             run_id: outcome.run_id.clone(),
             discussion_id: disc_id.clone(),
         });
     }
 
-    // Kick off every child agent fire-and-forget (semaphore-throttled in the
-    // runner). The MCP caller doesn't await SSE — results land in the DB.
-    for disc_id in &outcome.discussion_ids {
-        let kickoff_state = state.clone();
-        let kickoff_disc_id = disc_id.clone();
-        tokio::spawn(async move {
-            let _sse = crate::api::discussions::streaming::make_agent_stream(
-                kickoff_state,
-                kickoff_disc_id,
-                None,
-            )
-            .await;
-        });
-    }
+    // Every child already owns a durable Pending dispatch job.
+    state.agent_dispatch_notify.notify_waiters();
 
     // ETA baseline from QP version metrics (per-item single launch).
     let qp_id_for_metrics = req.qp_id.clone();

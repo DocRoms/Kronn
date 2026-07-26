@@ -13,17 +13,84 @@ import remarkEmoji from 'remark-emoji';
 import '../pages/DiscussionsPage.css';
 import type { DiscussionMessage, AgentType, QuickPrompt, ContextFile } from '../types/generated';
 import { MessageAttachments } from './MessageAttachments';
-import { agentColor } from '../lib/constants';
+import { AGENT_MENTIONS, agentColor } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import {
   Cpu, AlertTriangle, Zap, Loader2, Pause, Play,
   Key, Settings, Send, Pencil, RotateCcw, Check, Copy, Clock, ShieldCheck,
-  ChevronRight,
+  ChevronRight, ListTodo,
 } from 'lucide-react';
 
 // Hoisted regexes (avoid creating new RegExp objects per message per render)
 const RE_AUTH_ERROR = /api.?key|invalid.*key|key.*not.*config|authenticat|unauthori|login|sign.?in/i;
 const RE_PARTIAL_RESPONSE = /Réponse partielle.*interrompu|Timeout d'inactivité/i;
+
+interface MentionMdNode {
+  type: string;
+  value?: string;
+  url?: string;
+  children?: MentionMdNode[];
+}
+
+const AGENT_MENTION_BY_TRIGGER = new Map(
+  AGENT_MENTIONS.map(mention => [mention.trigger.toLowerCase(), mention]),
+);
+const AGENT_MENTION_TRIGGERS = AGENT_MENTIONS
+  .map(({ trigger }) => trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+  .join('|');
+
+function splitAgentMentionText(value: string): MentionMdNode[] {
+  const pattern = new RegExp(
+    `(^|[\\s([{])(${AGENT_MENTION_TRIGGERS})(?=$|[\\s\\])},.!?;:])`,
+    'gi',
+  );
+  const nodes: MentionMdNode[] = [];
+  let last = 0;
+  for (const match of value.matchAll(pattern)) {
+    const leading = match[1] ?? '';
+    const trigger = match[2];
+    const mention = AGENT_MENTION_BY_TRIGGER.get(trigger.toLowerCase());
+    if (!mention) continue;
+    const mentionStart = (match.index ?? 0) + leading.length;
+    if (mentionStart > last) {
+      nodes.push({ type: 'text', value: value.slice(last, mentionStart) });
+    }
+    nodes.push({
+      type: 'link',
+      url: `#kronn-agent-${mention.type}`,
+      children: [{ type: 'text', value: trigger }],
+    });
+    last = mentionStart + trigger.length;
+  }
+  if (last < value.length) nodes.push({ type: 'text', value: value.slice(last) });
+  return nodes.length > 0 ? nodes : [{ type: 'text', value }];
+}
+
+function remarkAgentMentions() {
+  return (tree: MentionMdNode) => {
+    const walk = (node: MentionMdNode) => {
+      if (!node.children) return;
+      const next: MentionMdNode[] = [];
+      for (const child of node.children) {
+        if (child.type === 'text' && child.value) {
+          next.push(...splitAgentMentionText(child.value));
+        } else {
+          if (
+            child.type !== 'link'
+            && child.type !== 'linkReference'
+            && child.type !== 'inlineCode'
+            && child.type !== 'code'
+          ) {
+            walk(child);
+          }
+          next.push(child);
+        }
+      }
+      node.children = next;
+    };
+    walk(tree);
+  };
+}
 
 // 0.8.5 (#qp-improver UX follow-up) — Kronn-emitted "seed" envelope.
 // When the QP AI Improver / Workflow Architect / Bootstrap Architect
@@ -281,6 +348,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
   // (which carry summary-cache notices or errors) so the user
   // recognises tool activity at a glance.
   const isKronnTool = msg.role === 'System' && msg.content.startsWith('[kronn-internal:');
+  const isKronnPlanning = msg.role === 'System' && msg.content.startsWith('[kronn-planning:');
   const kronnToolMatch = isKronnTool
     ? /^\[kronn-internal: ([a-z_]+)(?:\(([^)]*)\))?(?: → (.*))?\]$/s.exec(msg.content.trim())
     : null;
@@ -292,6 +360,7 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
         data-role={isUser ? 'user' : msg.role === 'System' ? 'system' : 'agent'}
         data-variant={msg.role === 'System' ? (
           isKronnTool ? 'kronn-tool'
+          : isKronnPlanning ? 'kronn-planning'
           : msg.content.startsWith('summary cached') ? 'summary'
           : 'error'
         ) : undefined}
@@ -385,9 +454,37 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
               </div>
             )}
             {msg.role === 'System' && !isKronnTool && (
-              <div className="disc-msg-agent-label" style={{ color: msg.content.startsWith('summary cached') ? 'var(--kr-success)' : 'var(--kr-error)' }}>
-                {msg.content.startsWith('summary cached') ? <Zap size={10} /> : <AlertTriangle size={10} />}
-                {' '}{msg.content.startsWith('summary cached') ? t('disc.summaryCached') : t('disc.system')}
+              <div
+                className="disc-msg-agent-label"
+                style={{
+                  color: isKronnPlanning
+                    ? 'var(--kr-accent-ink)'
+                    : msg.content.startsWith('summary cached')
+                      ? 'var(--kr-success)'
+                      : 'var(--kr-error)',
+                }}
+              >
+                {isKronnPlanning
+                  ? <ListTodo size={10} />
+                  : msg.content.startsWith('summary cached')
+                    ? <Zap size={10} />
+                    : <AlertTriangle size={10} />}
+                {' '}
+                {isKronnPlanning
+                  ? t('planning.receipt')
+                  : msg.content.startsWith('summary cached')
+                    ? t('disc.summaryCached')
+                    : t('disc.system')}
+                {(msg.agent_type || msg.model) && (
+                  <span
+                    className="disc-msg-attempted-model"
+                    data-testid="disc-msg-attempted-model"
+                    title={msg.model ? t('disc.attemptedModel', msg.model) : undefined}
+                  >
+                    · {msg.agent_type ?? defaultAgent}
+                    {msg.model ? ` · ${msg.model}` : ''}
+                  </span>
+                )}
                 {msg.content.startsWith('summary cached') && summaryCache && (
                   <button
                     className="disc-summary-toggle"
@@ -465,7 +562,15 @@ export const MessageBubble = memo(function MessageBubble(props: MessageBubblePro
             const cleaned = visible.replace(/KRONN:(BRIEFING_COMPLETE|VALIDATION_COMPLETE|BOOTSTRAP_COMPLETE|WORKFLOW_READY|REPO_READY|ARCHITECTURE_READY|PLAN_READY|STRUCTURE_READY|ISSUES_READY|ISSUES_CREATED|QP_IMPROVED|BUNDLE_READY|CHAIN_QP:[0-9a-fA-F-]+)/gi, '').trim();
             return (
               <>
-                <MessageBody content={cleaned} discussionId={discussionId} />
+                {isUser || msg.role === 'Agent'
+                  ? (
+                      <MentionAwareMessageBody
+                        content={cleaned}
+                        discussionId={discussionId}
+                        sourceMessageId={msg.role === 'Agent' ? msg.id : undefined}
+                      />
+                    )
+                  : <MessageBody content={cleaned} discussionId={discussionId} />}
                 {seed && <KronnSeedToggle seed={seed} />}
               </>
             );
@@ -767,6 +872,29 @@ type MdProps = {
   href?: string;
 };
 
+function MarkdownLink({ href, children }: MdProps) {
+  const agentType = href?.startsWith('#kronn-agent-')
+    ? href.slice('#kronn-agent-'.length) as AgentType
+    : null;
+  const mention = agentType
+    ? AGENT_MENTIONS.find(candidate => candidate.type === agentType)
+    : null;
+  if (mention) {
+    const color = agentColor(mention.type);
+    return (
+      <span
+        className="disc-agent-mention-chip"
+        data-agent={mention.type}
+        style={{ color, borderColor: color, backgroundColor: `${color}18` }}
+      >
+        <Cpu size={10} aria-hidden="true" />
+        {children}
+      </span>
+    );
+  }
+  return <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>;
+}
+
 const mdComponents = {
   p: ({ children }: MdProps) => <p>{children}</p>,
   h1: ({ children }: MdProps) => <h1>{children}</h1>,
@@ -795,7 +923,7 @@ const mdComponents = {
   td: ({ children }: MdProps) => <td>{children}</td>,
   blockquote: ({ children }: MdProps) => <blockquote>{children}</blockquote>,
   hr: () => <hr />,
-  a: ({ href, children }: MdProps) => <a href={href} target="_blank" rel="noopener noreferrer">{children}</a>,
+  a: MarkdownLink,
   strong: ({ children }: MdProps) => <strong>{children}</strong>,
 };
 
@@ -805,6 +933,7 @@ const mdComponents = {
 // and full-text search still see `tada` in the DB. Keeps the agent prompt
 // portable (some CLIs choke on raw multi-byte emoji sequences).
 const remarkPluginsList = [remarkGfm, remarkEmoji];
+const mentionRemarkPluginsList = [remarkGfm, remarkEmoji, remarkAgentMentions];
 
 /** Above this, a message is NOT sent through ReactMarkdown + remark-gfm +
  *  syntax highlight: those are super-linear in input size and a multi-MB
@@ -848,7 +977,25 @@ const LargeMessageFallback = memo(({ content }: { content: string }) => {
   );
 });
 
-export const MarkdownContent = memo(({ content, discussionId }: { content: string; discussionId?: string }) => {
+export const MarkdownContent = memo(({
+  content,
+  discussionId,
+  sourceMessageId,
+  agentMentions = false,
+}: {
+  content: string;
+  discussionId?: string;
+  sourceMessageId?: string;
+  agentMentions?: boolean;
+}) => {
+  const proposalFenceLines = useMemo(() => {
+    const lines: number[] = [];
+    content.split('\n').forEach((line, index) => {
+      if (/^\s*`{3,}\s*kronn-plan-action\s*$/.test(line)) lines.push(index + 1);
+    });
+    return lines;
+  }, [content]);
+
   // Override the `pre` handler when we have a discussion id: fenced
   // blocks tagged `kronn-doc-preview` get replaced with the DocPreview
   // component (sandboxed iframe + export buttons). Everything else
@@ -861,7 +1008,13 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
     if (!discussionId) return mdComponents;
     return {
       ...mdComponents,
-      pre: ({ children }: { children?: ReactNode }) => {
+      pre: ({
+        children,
+        node,
+      }: {
+        children?: ReactNode;
+        node?: { position?: { start?: { line?: number } } };
+      }) => {
         // ReactMarkdown renders <pre><code>…</code></pre>; the outer pre
         // gets a child element whose props carry the language class.
         // We need access to that child's `props`, which ReactNode
@@ -908,7 +1061,18 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
           try {
             const proposal = parsePlanningProposal(JSON.parse(text));
             if (proposal) {
-              return <PlanningActionCard proposal={proposal} discussionId={discussionId} />;
+              const line = node?.position?.start?.line;
+              const fenceIndex = line === undefined
+                ? undefined
+                : proposalFenceLines.indexOf(line);
+              return (
+                <PlanningActionCard
+                  proposal={proposal}
+                  discussionId={discussionId}
+                  sourceMessageId={sourceMessageId}
+                  fenceIndex={fenceIndex !== undefined && fenceIndex >= 0 ? fenceIndex : undefined}
+                />
+              );
             }
           } catch {
             // Malformed proposals stay visible as raw code.
@@ -921,7 +1085,7 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
         );
       },
     };
-  }, [discussionId]);
+  }, [discussionId, proposalFenceLines, sourceMessageId]);
 
   // Guard against multi-MB messages crashing the tab — see MAX_MARKDOWN_CHARS.
   // Placed AFTER all hooks (the useMemo above) to satisfy rules-of-hooks.
@@ -931,7 +1095,10 @@ export const MarkdownContent = memo(({ content, discussionId }: { content: strin
 
   return (
     <div className="disc-md">
-      <ReactMarkdown remarkPlugins={remarkPluginsList} components={components}>
+      <ReactMarkdown
+        remarkPlugins={agentMentions ? mentionRemarkPluginsList : remarkPluginsList}
+        components={components}
+      >
         {content}
       </ReactMarkdown>
     </div>
@@ -994,10 +1161,27 @@ const InjectedContextCard = memo(({ title, body, discussionId }: { title: string
 /** Render a message body: instructions as markdown, each injected-context
  *  block as a collapsible card. The fast path (no marker) is byte-identical
  *  to the previous direct `<MarkdownContent>` render. */
-export const MessageBody = memo(({ content, discussionId }: { content: string; discussionId?: string }) => {
+export const MessageBody = memo(({
+  content,
+  discussionId,
+  sourceMessageId,
+  agentMentions = false,
+}: {
+  content: string;
+  discussionId?: string;
+  sourceMessageId?: string;
+  agentMentions?: boolean;
+}) => {
   const segs = useMemo(() => splitInjectedContext(content), [content]);
   if (segs.length === 1 && segs[0].kind === 'text') {
-    return <MarkdownContent content={content} discussionId={discussionId} />;
+    return (
+      <MarkdownContent
+        content={content}
+        discussionId={discussionId}
+        sourceMessageId={sourceMessageId}
+        agentMentions={agentMentions}
+      />
+    );
   }
   return (
     <>
@@ -1005,10 +1189,37 @@ export const MessageBody = memo(({ content, discussionId }: { content: string; d
         s.kind === 'context'
           ? <InjectedContextCard key={i} title={s.title} body={s.body} discussionId={discussionId} />
           : (s.body.trim()
-              ? <MarkdownContent key={i} content={s.body} discussionId={discussionId} />
+              ? (
+                  <MarkdownContent
+                    key={i}
+                    content={s.body}
+                    discussionId={discussionId}
+                    sourceMessageId={sourceMessageId}
+                    agentMentions={agentMentions}
+                  />
+                )
               : null),
       )}
     </>
+  );
+});
+
+const MentionAwareMessageBody = memo(({
+  content,
+  discussionId,
+  sourceMessageId,
+}: {
+  content: string;
+  discussionId?: string;
+  sourceMessageId?: string;
+}) => {
+  return (
+    <MessageBody
+      content={content}
+      discussionId={discussionId}
+      sourceMessageId={sourceMessageId}
+      agentMentions
+    />
   );
 });
 

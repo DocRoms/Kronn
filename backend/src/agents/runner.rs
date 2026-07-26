@@ -541,9 +541,12 @@ pub(crate) fn resolve_model_flag(
         (AgentType::GeminiCli, ModelTier::Economy) => Some("gemini-2.5-flash".into()),
         (AgentType::GeminiCli, ModelTier::Default) => None, // Gemini default is fine
         (AgentType::GeminiCli, ModelTier::Reasoning) => Some("gemini-3.1-pro-preview".into()),
-        (AgentType::CopilotCli, ModelTier::Economy) => Some("gpt-4o-mini".into()),
-        (AgentType::CopilotCli, ModelTier::Default) => None, // Copilot default is fine
-        (AgentType::CopilotCli, ModelTier::Reasoning) => Some("o4-mini".into()),
+        // Copilot's available model set is account/policy-dependent. The old
+        // hard-coded `gpt-4o-mini` / `o4-mini` values are no longer accepted
+        // by Copilot CLI 1.0.x and made an otherwise valid prompt fail before
+        // execution. Let the CLI select its current account-compatible model
+        // unless the user explicitly configured a tier override.
+        (AgentType::CopilotCli, _) => None,
         // Ollama: the user normally picks a model per tier via the OllamaCard
         // (override above). These are the pulled-tag fallbacks when none is set,
         // deliberately portability-first (NOT tuned for a beefy machine):
@@ -1946,7 +1949,7 @@ fn agent_command(
             )
         }
         AgentType::CopilotCli => {
-            let mut args: Vec<String> = vec!["-p".into()];
+            let mut args: Vec<String> = Vec::new();
             if let Some(model) = model_flag {
                 args.push("--model".into());
                 args.push(model.into());
@@ -1960,6 +1963,11 @@ fn agent_command(
             } else {
                 format!("{}\n\n{}", mcp_context, prompt)
             };
+            // Keep `-p <prompt>` adjacent and last. Copilot consumes the
+            // argument immediately after `-p` as the prompt; putting options
+            // between them makes the CLI reject the real prompt as extra
+            // unquoted words.
+            args.push("-p".into());
             args.push(full_prompt);
             (
                 "copilot",

@@ -322,6 +322,58 @@ pub struct SendMessageRequest {
     pub content: String,
     #[serde(default)]
     pub target_agent: Option<AgentType>,
+    #[serde(default)]
+    pub client_message_id: Option<String>,
+}
+
+/// Atomic edit/resend request. `expected_revision` is the opaque timestamp
+/// exposed on the target message. `idempotency_key` is generated once by the
+/// UI and reused when the same HTTP request is retried.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct ReviseMessageRequest {
+    pub message_id: String,
+    pub content: String,
+    pub expected_revision: String,
+    pub idempotency_key: String,
+    #[serde(default)]
+    pub target_agent: Option<AgentType>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, TS)]
+#[ts(export)]
+pub struct RunAgentRequest {
+    /// Stable per-click key. Reusing it after a transport retry returns the
+    /// original durable obligation instead of launching a second agent turn.
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct MessageRevisionReceipt {
+    pub event_id: String,
+    pub message_id: String,
+    pub revision: String,
+    pub sort_order: i64,
+    pub duplicate: bool,
+    pub dispatch_job_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MessageRevisionEvent {
+    pub id: String,
+    pub discussion_id: String,
+    pub target_message_id: String,
+    pub previous_content_hash: String,
+    pub expected_revision: String,
+    pub revision: String,
+    pub content: String,
+    pub target_agent: Option<AgentType>,
+    pub idempotency_key: String,
+    pub sort_order: i64,
+    pub dispatch_job_id: Option<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, TS)]

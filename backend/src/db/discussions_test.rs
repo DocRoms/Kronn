@@ -4,6 +4,8 @@ mod tests {
     use crate::db::migrations;
     use chrono::Utc;
     use rusqlite::Connection;
+    use std::sync::{Arc, Barrier};
+    use std::time::Duration;
 
     /// Create an in-memory database with all migrations applied
     fn test_conn() -> Connection {
@@ -312,6 +314,85 @@ mod tests {
     }
 
     #[test]
+    fn deleted_tail_does_not_reuse_message_sequence() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-sequence")).unwrap();
+
+        assert_eq!(
+            insert_message(
+                &conn,
+                "d-sequence",
+                &make_message("m1", MessageRole::User, None)
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            insert_message(
+                &conn,
+                "d-sequence",
+                &make_message("m2", MessageRole::Agent, Some(AgentType::Codex))
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(delete_last_agent_messages(&conn, "d-sequence").unwrap(), 1);
+        assert_eq!(
+            insert_message(
+                &conn,
+                "d-sequence",
+                &make_message("m3", MessageRole::Agent, Some(AgentType::Codex))
+            )
+            .unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn concurrent_writers_allocate_distinct_message_sequences() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sequence.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;")
+            .unwrap();
+        migrations::run(&conn).unwrap();
+        insert_discussion(&conn, &make_discussion("d-concurrent-sequence")).unwrap();
+        drop(conn);
+
+        let writers = 8;
+        let barrier = Arc::new(Barrier::new(writers));
+        let handles = (0..writers)
+            .map(|idx| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let conn = Connection::open(path).unwrap();
+                    conn.busy_timeout(Duration::from_secs(5)).unwrap();
+                    barrier.wait();
+                    insert_message(
+                        &conn,
+                        "d-concurrent-sequence",
+                        &make_message(&format!("concurrent-{idx}"), MessageRole::User, None),
+                    )
+                    .unwrap()
+                })
+            })
+            .collect::<Vec<_>>();
+
+        let mut allocated = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+        allocated.sort_unstable();
+        assert_eq!(allocated, (1..=writers as i64).collect::<Vec<_>>());
+
+        let conn = Connection::open(path).unwrap();
+        let stored = list_messages(&conn, "d-concurrent-sequence").unwrap();
+        assert_eq!(stored.len(), writers);
+    }
+
+    #[test]
     fn delete_last_agent_messages_preserves_earlier_agent_messages() {
         let conn = test_conn();
         insert_discussion(&conn, &make_discussion("d1")).unwrap();
@@ -393,6 +474,217 @@ mod tests {
 
         let messages = list_messages(&conn, "d1").unwrap();
         assert_eq!(messages[0].content, "new content");
+    }
+
+    #[test]
+    fn atomic_revision_tombstones_tail_and_enqueues_exactly_one_job() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-revise")).unwrap();
+        let mut user = make_message("u-revise", MessageRole::User, None);
+        user.content = "before".into();
+        insert_message(&conn, "d-revise", &user).unwrap();
+        insert_message(
+            &conn,
+            "d-revise",
+            &make_message("a-revise", MessageRole::Agent, Some(AgentType::Codex)),
+        )
+        .unwrap();
+        update_summary_cache(&conn, "d-revise", "stale summary", 2).unwrap();
+        let expected_revision = list_messages(&conn, "d-revise").unwrap()[0]
+            .timestamp
+            .to_rfc3339();
+
+        let first = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-revise",
+                message_id: "u-revise",
+                content: "after",
+                expected_revision: &expected_revision,
+                idempotency_key: "revise-key-1",
+                target_agent: Some(&AgentType::Codex),
+                needs_local_dispatch: true,
+                dispatch_job_id: "dispatch-revise-1",
+            },
+        )
+        .unwrap();
+        assert!(!first.receipt.duplicate);
+        assert_eq!(
+            first.claimed_dispatch.as_ref().map(|job| job.id.as_str()),
+            Some("dispatch-revise-1")
+        );
+        assert_eq!(
+            first.claimed_dispatch.as_ref().map(|job| job.status),
+            Some(crate::db::agent_dispatch::DispatchStatus::Running)
+        );
+
+        let projected = list_messages(&conn, "d-revise").unwrap();
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0].id, "u-revise");
+        assert_eq!(projected[0].content, "after");
+        let tombstones: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_tombstones
+                 WHERE discussion_id = 'd-revise' AND id = 'a-revise' AND sort_order = 2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tombstones, 1);
+        let message_count: i64 = conn
+            .query_row(
+                "SELECT message_count FROM discussions WHERE id = 'd-revise'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(message_count, 1);
+        let summary: Option<String> = conn
+            .query_row(
+                "SELECT summary_cache FROM discussions WHERE id = 'd-revise'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(summary.is_none());
+
+        let duplicate = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-revise",
+                message_id: "u-revise",
+                content: "after",
+                expected_revision: &expected_revision,
+                idempotency_key: "revise-key-1",
+                target_agent: Some(&AgentType::Codex),
+                needs_local_dispatch: true,
+                dispatch_job_id: "dispatch-revise-2",
+            },
+        )
+        .unwrap();
+        assert!(duplicate.receipt.duplicate);
+        assert!(duplicate.claimed_dispatch.is_none());
+        let jobs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+                 WHERE dedupe_key = 'revision:revise-key-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_revision_events
+                 WHERE idempotency_key = 'revise-key-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(jobs, 1);
+        assert_eq!(events, 1);
+    }
+
+    #[test]
+    fn atomic_revision_without_local_dispatch_uses_cas_and_no_job() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-peer-revise")).unwrap();
+        let mut user = make_message("u-peer", MessageRole::User, None);
+        user.content = "before".into();
+        insert_message(&conn, "d-peer-revise", &user).unwrap();
+        let expected_revision = list_messages(&conn, "d-peer-revise").unwrap()[0]
+            .timestamp
+            .to_rfc3339();
+
+        let first = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-peer-revise",
+                message_id: "u-peer",
+                content: "first edit",
+                expected_revision: &expected_revision,
+                idempotency_key: "peer-revision-1",
+                target_agent: None,
+                needs_local_dispatch: false,
+                dispatch_job_id: "unused-job",
+            },
+        )
+        .unwrap();
+        assert!(first.claimed_dispatch.is_none());
+        assert!(first.receipt.dispatch_job_id.is_none());
+
+        let conflict = revise_message_with_dispatch(
+            &conn,
+            ReviseMessageParams {
+                discussion_id: "d-peer-revise",
+                message_id: "u-peer",
+                content: "divergent edit",
+                expected_revision: &expected_revision,
+                idempotency_key: "peer-revision-2",
+                target_agent: None,
+                needs_local_dispatch: false,
+                dispatch_job_id: "unused-job-2",
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(conflict, ReviseMessageError::Conflict { .. }));
+        let jobs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM agent_dispatch_jobs", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(jobs, 0);
+        assert_eq!(
+            list_messages(&conn, "d-peer-revise").unwrap()[0].content,
+            "first edit"
+        );
+    }
+
+    #[test]
+    fn remote_revision_converges_by_content_hash_and_is_idempotent() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-remote-revise")).unwrap();
+        let mut user = make_message("u-remote", MessageRole::User, None);
+        user.content = "same content on both mirrors".into();
+        insert_message(&conn, "d-remote-revise", &user).unwrap();
+        insert_message(
+            &conn,
+            "d-remote-revise",
+            &make_message("a-remote", MessageRole::Agent, Some(AgentType::ClaudeCode)),
+        )
+        .unwrap();
+
+        let previous_content_hash = content_hash("same content on both mirrors");
+        let event = MessageRevisionEvent {
+            id: "remote-event".into(),
+            discussion_id: "d-remote-revise".into(),
+            target_message_id: "u-remote".into(),
+            previous_content_hash,
+            // Deliberately unrelated to the mirror's timestamp: federation
+            // CAS is content-hash based because wire timestamps are millis.
+            expected_revision: "sender-opaque-revision".into(),
+            revision: Utc::now().to_rfc3339(),
+            content: "remote edit".into(),
+            target_agent: Some(AgentType::Codex),
+            idempotency_key: "remote-key".into(),
+            sort_order: 99,
+            dispatch_job_id: None,
+            created_at: Utc::now(),
+        };
+
+        assert!(apply_remote_message_revision(&conn, &event).unwrap());
+        assert!(!apply_remote_message_revision(&conn, &event).unwrap());
+        let messages = list_messages(&conn, "d-remote-revise").unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content, "remote edit");
+        let events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM message_revision_events
+                 WHERE idempotency_key = 'remote-key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(events, 1);
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -679,7 +971,11 @@ mod tests {
         update_discussion_agent(&conn, "handoff-msg", &AgentType::Codex).unwrap();
 
         let msg = make_message("handoff-user", MessageRole::User, None);
-        let stored = insert_user_message_with_agent_handoff(&conn, "handoff-msg", &msg).unwrap();
+        let stored =
+            match insert_user_message_with_agent_handoff(&conn, "handoff-msg", &msg).unwrap() {
+                InsertUserMessageOutcome::Inserted { message, .. } => message,
+                other => panic!("expected inserted message, got {other:?}"),
+            };
         assert!(stored
             .content
             .starts_with("<!-- KRONN_AGENT_HANDOFF: ClaudeCode -> Codex."));
@@ -699,8 +995,192 @@ mod tests {
 
         let second = make_message("handoff-user-2", MessageRole::User, None);
         let stored_second =
-            insert_user_message_with_agent_handoff(&conn, "handoff-msg", &second).unwrap();
+            match insert_user_message_with_agent_handoff(&conn, "handoff-msg", &second).unwrap() {
+                InsertUserMessageOutcome::Inserted { message, .. } => message,
+                other => panic!("expected inserted message, got {other:?}"),
+            };
         assert_eq!(stored_second.content, "Content of handoff-user-2");
+    }
+
+    #[test]
+    fn duplicate_user_message_is_idempotent_and_does_not_consume_handoff() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("dedupe-msg")).unwrap();
+        let msg = make_message("stable-client-id", MessageRole::User, None);
+
+        let first = insert_user_message_with_agent_handoff(&conn, "dedupe-msg", &msg).unwrap();
+        assert!(matches!(
+            first,
+            InsertUserMessageOutcome::Inserted { sort_order: 1, .. }
+        ));
+
+        update_discussion_agent(&conn, "dedupe-msg", &AgentType::Codex).unwrap();
+        let duplicate = insert_user_message_with_agent_handoff(&conn, "dedupe-msg", &msg).unwrap();
+        assert!(matches!(
+            duplicate,
+            InsertUserMessageOutcome::Duplicate { sort_order: 1 }
+        ));
+        assert_eq!(list_messages(&conn, "dedupe-msg").unwrap().len(), 1);
+
+        let pending: Option<String> = conn
+            .query_row(
+                "SELECT pending_agent_handoff_from FROM discussions WHERE id = ?1",
+                ["dedupe-msg"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending.as_deref(), Some("ClaudeCode"));
+    }
+
+    #[test]
+    fn user_message_and_dispatch_job_commit_atomically() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("dispatch-msg")).unwrap();
+        let msg = make_message("dispatch-user", MessageRole::User, None);
+
+        let outcome = insert_user_message_with_dispatch(
+            &conn,
+            "dispatch-msg",
+            &msg,
+            "dispatch-job",
+            Some(&AgentType::Codex),
+        )
+        .unwrap();
+        let claimed = match outcome {
+            InsertUserMessageOutcome::Inserted {
+                sort_order: 1,
+                dispatch_job: Some(job),
+                ..
+            } => job,
+            other => panic!("expected atomically claimed dispatch, got {other:?}"),
+        };
+        assert_eq!(claimed.id, "dispatch-job");
+
+        let job = crate::db::agent_dispatch::get(&conn, "dispatch-job")
+            .unwrap()
+            .expect("dispatch job");
+        assert_eq!(job.trigger_message_id, "dispatch-user");
+        assert_eq!(job.trigger_sort_order, 1);
+        assert_eq!(job.agent_override, Some(AgentType::Codex));
+        assert_eq!(
+            job.status,
+            crate::db::agent_dispatch::DispatchStatus::Running
+        );
+        let awaiting: i64 = conn
+            .query_row(
+                "SELECT awaiting_agent FROM discussions WHERE id = 'dispatch-msg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(awaiting, 1);
+
+        let queued = insert_user_message_with_dispatch(
+            &conn,
+            "dispatch-msg",
+            &make_message("dispatch-user-2", MessageRole::User, None),
+            "dispatch-job-2",
+            None,
+        )
+        .unwrap();
+        assert!(matches!(
+            queued,
+            InsertUserMessageOutcome::Inserted {
+                dispatch_job: None,
+                sort_order: 2,
+                ..
+            }
+        ));
+        assert_eq!(
+            crate::db::agent_dispatch::get(&conn, "dispatch-job-2")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+    }
+
+    #[test]
+    fn dispatch_insert_failure_rolls_back_the_user_message() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("dispatch-source")).unwrap();
+        insert_discussion(&conn, &make_discussion("dispatch-target")).unwrap();
+        insert_user_message_with_dispatch(
+            &conn,
+            "dispatch-source",
+            &make_message("dispatch-source-user", MessageRole::User, None),
+            "shared-job-id",
+            None,
+        )
+        .unwrap();
+
+        let error = insert_user_message_with_dispatch(
+            &conn,
+            "dispatch-target",
+            &make_message("must-rollback", MessageRole::User, None),
+            "shared-job-id",
+            None,
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("UNIQUE constraint failed: agent_dispatch_jobs.id"));
+        assert!(
+            list_messages(&conn, "dispatch-target").unwrap().is_empty(),
+            "the accepted message must roll back with its dispatch obligation"
+        );
+    }
+
+    #[test]
+    fn reused_message_id_outside_same_discussion_user_is_rejected() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("collision-a")).unwrap();
+        insert_discussion(&conn, &make_discussion("collision-b")).unwrap();
+
+        let cross_disc = make_message("cross-disc-id", MessageRole::User, None);
+        insert_message(&conn, "collision-a", &cross_disc).unwrap();
+        let err =
+            insert_user_message_with_agent_handoff(&conn, "collision-b", &cross_disc).unwrap_err();
+        assert!(err.to_string().contains("already belongs"));
+
+        let role_collision = make_message(
+            "role-collision-id",
+            MessageRole::Agent,
+            Some(AgentType::Codex),
+        );
+        insert_message(&conn, "collision-a", &role_collision).unwrap();
+        let user_with_same_id = make_message("role-collision-id", MessageRole::User, None);
+        let err = insert_user_message_with_agent_handoff(&conn, "collision-a", &user_with_same_id)
+            .unwrap_err();
+        assert!(err.to_string().contains("already belongs"));
+    }
+
+    #[test]
+    fn pending_partial_rejects_new_message_without_consuming_sequence() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("partial-msg")).unwrap();
+        set_partial_response(&conn, "partial-msg", Some("recover me"), None).unwrap();
+
+        let outcome = insert_user_message_with_agent_handoff(
+            &conn,
+            "partial-msg",
+            &make_message("blocked-user", MessageRole::User, None),
+        )
+        .unwrap();
+        assert!(matches!(outcome, InsertUserMessageOutcome::PartialPending));
+        assert!(list_messages(&conn, "partial-msg").unwrap().is_empty());
+
+        set_partial_response(&conn, "partial-msg", None, None).unwrap();
+        let inserted = insert_user_message_with_agent_handoff(
+            &conn,
+            "partial-msg",
+            &make_message("accepted-user", MessageRole::User, None),
+        )
+        .unwrap();
+        assert!(matches!(
+            inserted,
+            InsertUserMessageOutcome::Inserted { sort_order: 1, .. }
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1447,6 +1927,35 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_leaves_durable_dispatch_jobs_for_the_worker() {
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-durable")).unwrap();
+        insert_user_message_with_dispatch(
+            &conn,
+            "d-durable",
+            &make_message("u-durable", MessageRole::User, None),
+            "j-durable",
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            reconcile_awaiting_agents(&conn).unwrap().is_empty(),
+            "durable work is resumed by the dispatcher, not marked interrupted"
+        );
+        let disc = get_discussion(&conn, "d-durable").unwrap().unwrap();
+        assert_eq!(disc.messages.len(), 1);
+        assert!(disc.awaiting_agent);
+        assert_eq!(
+            crate::db::agent_dispatch::get(&conn, "j-durable")
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::db::agent_dispatch::DispatchStatus::Running
+        );
+    }
+
+    #[test]
     fn reconcile_skips_a_disc_already_answered() {
         // Flag left set but the agent DID answer (last message is Agent):
         // no notice, no re-flag, just housekeeping-clear the stale flag.
@@ -1490,7 +1999,7 @@ mod tests {
         )
         .unwrap();
         set_awaiting_agent(&conn, "d-partial", true).unwrap();
-        set_partial_response(&conn, "d-partial", Some("half a reply")).unwrap();
+        set_partial_response(&conn, "d-partial", Some("half a reply"), None).unwrap();
 
         let marked = reconcile_awaiting_agents(&conn).unwrap();
         assert!(
@@ -1504,6 +2013,49 @@ mod tests {
             1,
             "no notice, no conversion — recovery owns it"
         );
+    }
+
+    #[test]
+    fn recover_partial_response_restores_agent_and_model_provenance() {
+        // KT-37 — a mid-stream checkpoint carries the agent + attempted model,
+        // so the recovered message is attributed instead of anonymous +
+        // model-less.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-prov")).unwrap();
+        set_partial_response(
+            &conn,
+            "d-prov",
+            Some("half an answer"),
+            Some((&AgentType::Ollama, Some("qwen3:32b"))),
+        )
+        .unwrap();
+
+        let recovered = recover_partial_responses(&conn).unwrap();
+        assert_eq!(recovered, vec!["d-prov".to_string()]);
+
+        let disc = get_discussion(&conn, "d-prov").unwrap().unwrap();
+        let msg = disc.messages.last().unwrap();
+        assert_eq!(msg.role, MessageRole::Agent);
+        assert!(msg.content.contains("half an answer"));
+        assert_eq!(msg.agent_type, Some(AgentType::Ollama));
+        assert_eq!(msg.model.as_deref(), Some("qwen3:32b"));
+        // The checkpoint is cleared after recovery.
+        assert!(!has_pending_partial(&conn, "d-prov").unwrap());
+    }
+
+    #[test]
+    fn recover_partial_response_without_provenance_stays_anonymous() {
+        // Legacy pre-089 checkpoints have no agent/model — recovery degrades
+        // gracefully, never invents one.
+        let conn = test_conn();
+        insert_discussion(&conn, &make_discussion("d-legacy")).unwrap();
+        set_partial_response(&conn, "d-legacy", Some("legacy text"), None).unwrap();
+
+        recover_partial_responses(&conn).unwrap();
+        let disc = get_discussion(&conn, "d-legacy").unwrap().unwrap();
+        let msg = disc.messages.last().unwrap();
+        assert_eq!(msg.agent_type, None);
+        assert_eq!(msg.model, None);
     }
 
     #[test]

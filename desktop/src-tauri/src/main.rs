@@ -569,6 +569,19 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
         }
     }
 
+    // Requeue durable agent jobs interrupted by the previous desktop process.
+    match state
+        .db
+        .with_conn(kronn::db::agent_dispatch::reset_running_after_restart)
+        .await
+    {
+        Ok(count) if count > 0 => {
+            tracing::warn!("Agent dispatch recovery: requeued {count} interrupted job(s)")
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!("Agent dispatch recovery failed: {error}"),
+    }
+
     // Partial response recovery: convert dangling checkpoints to Agent messages.
     let recovered = state
         .db
@@ -584,6 +597,23 @@ async fn start_backend(port: u16, dist_dir: std::path::PathBuf) -> anyhow::Resul
                 });
         }
     }
+
+    let awaiting = state
+        .db
+        .with_conn(kronn::db::discussions::reconcile_awaiting_agents)
+        .await;
+    if let Ok(ids) = awaiting {
+        if !ids.is_empty() {
+            tracing::warn!("Awaiting-agent reconcile: {} discussion(s)", ids.len());
+            let _ = state
+                .ws_broadcast
+                .send(kronn::models::WsMessage::AgentRunsInterrupted {
+                    discussion_ids: ids,
+                });
+        }
+    }
+
+    kronn::api::discussions::start_agent_dispatcher(state.clone());
 
     // Auto-discover API keys
     {

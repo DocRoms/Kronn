@@ -116,6 +116,17 @@ action-like cards. Initial actions are:
 - unblock;
 - open the discussion plan.
 
+Mutation proposals are durable: valid fences from Agent messages are ingested
+with their source message, and `create_many` becomes one independently
+reviewable item per task. The discussion plan panel acts as a validation inbox.
+Each item can be accepted or rejected (with an optional reason), partial
+decisions survive reloads, and the header shows the remaining item count.
+Acceptance is idempotent across retries and clients; the planning mutation,
+attributed event, item state and compact System receipt are committed as one
+unit. `open` remains local navigation and never enters the inbox. Agents can
+read pending proposals through compact/full MCP reads but cannot accept or
+reject them: that decision stays human-only.
+
 When intent is unambiguous an agent may update a task directly through MCP. When
 it is ambiguous it should propose an action and leave the click as the human
 gate. Agent task edits appear as compact grouped discussion events, including

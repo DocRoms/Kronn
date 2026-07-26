@@ -214,6 +214,12 @@ pub async fn execute_batch_quick_prompt_step(
     });
     let qp_for_tx = qp.clone();
     let workspace_mode_for_tx = workspace_mode.clone();
+    let chain_prompt_ids_for_tx = step.batch_chain_prompt_ids.clone();
+    let chain_batch_items_for_tx = item_titles.iter().cloned().map(Some).collect();
+    let group_concurrency_limit_for_tx = step
+        .batch_concurrent_limit
+        .unwrap_or(DEFAULT_BATCH_CONCURRENT_LIMIT)
+        .clamp(1, MAX_BATCH_CONCURRENT_LIMIT);
     let outcome = match state
         .db
         .with_conn(move |conn| {
@@ -229,6 +235,9 @@ pub async fn execute_batch_quick_prompt_step(
                     author_avatar_email,
                     language: "fr".into(),
                     workspace_mode: workspace_mode_for_tx,
+                    chain_prompt_ids: chain_prompt_ids_for_tx,
+                    chain_batch_items: chain_batch_items_for_tx,
+                    group_concurrency_limit: Some(group_concurrency_limit_for_tx),
                 },
             )
         })
@@ -282,9 +291,9 @@ pub async fn execute_batch_quick_prompt_step(
     // all inside the same conversation thread. Each chain QP receives the
     // SAME raw batch item (e.g. "EW-1234") as its first variable, so an
     // `analyse → review → summary` chain all runs on the same ticket.
-    // The batch progress counter only bumps when the ENTIRE chain
-    // finishes (the last `make_agent_stream` hits the batch_run_id hook
-    // in discussions.rs).
+    // The batch progress counter only bumps when the ENTIRE chain finishes:
+    // durable dispatch settles its terminal job and parent batch counter in
+    // one transaction.
     let concurrent_limit = step
         .batch_concurrent_limit
         .unwrap_or(DEFAULT_BATCH_CONCURRENT_LIMIT)

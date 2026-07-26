@@ -9,8 +9,9 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import { ChatInput } from '../ChatInput';
-import type { Discussion } from '../../types/generated';
+import type { AgentDetection, Discussion } from '../../types/generated';
 import { loadDraft, saveDraft, CHAT_DRAFT_CONFIG } from '../../lib/chat-drafts';
+import { publishMessageSendSettled } from '../../lib/messageSendLifecycle';
 
 // ─── Mocks: heavy dependencies ChatInput transitively loads ─────────────
 
@@ -100,6 +101,130 @@ describe('ChatInput draft persistence', () => {
     expect(localStorage.getItem(CHAT_DRAFT_CONFIG.KEY_PREFIX + 'd-1')).not.toBeNull();
   });
 
+  it('uses each agent color in the mention autocomplete', () => {
+    render(
+      <ChatInput
+        discussion={baseDiscussion}
+        agents={[
+          {
+            agent_type: 'Codex',
+            installed: true,
+            runtime_available: false,
+            enabled: true,
+          } as AgentDetection,
+        ]}
+        sending={false}
+        disabled={false}
+        ttsEnabled={false}
+        ttsState="idle"
+        worktreeError={null}
+        availableSkills={[]}
+        availableDirectives={[]}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()}
+        onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()}
+        isAgentRestricted={() => false}
+        contextFiles={[]}
+        uploadingFiles={false}
+        toast={vi.fn() as never}
+        t={(k: string) => k}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } });
+    const trigger = screen.getByText('@codex');
+    expect(trigger.style.color).toBe('#10a37f');
+  });
+
+  it('autocompletes and routes an agent mention in the middle of a message', () => {
+    const onSend = vi.fn();
+    render(
+      <ChatInput
+        discussion={baseDiscussion}
+        agents={[
+          {
+            agent_type: 'Codex',
+            installed: true,
+            runtime_available: false,
+            enabled: true,
+          } as AgentDetection,
+        ]}
+        sending={false}
+        disabled={false}
+        ttsEnabled={false}
+        ttsState="idle"
+        worktreeError={null}
+        availableSkills={[]}
+        availableDirectives={[]}
+        onSend={onSend}
+        onStop={vi.fn()}
+        onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()}
+        onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()}
+        isAgentRestricted={() => false}
+        contextFiles={[]}
+        uploadingFiles={false}
+        toast={vi.fn() as never}
+        t={(k: string) => k}
+      />,
+    );
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'peux-tu @co' } });
+    fireEvent.mouseDown(screen.getByText('@codex'));
+
+    expect(textarea.value).toBe('peux-tu @codex ');
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+    expect(onSend).toHaveBeenCalledWith('peux-tu @codex', 'Codex');
+  });
+
+  it('offers and routes @ollama when the local agent is usable', () => {
+    const onSend = vi.fn();
+    render(
+      <ChatInput
+        discussion={baseDiscussion}
+        agents={[
+          {
+            agent_type: 'Ollama',
+            installed: true,
+            runtime_available: false,
+            enabled: true,
+          } as AgentDetection,
+        ]}
+        sending={false}
+        disabled={false}
+        ttsEnabled={false}
+        ttsState="idle"
+        worktreeError={null}
+        availableSkills={[]}
+        availableDirectives={[]}
+        onSend={onSend}
+        onStop={vi.fn()}
+        onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()}
+        onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()}
+        isAgentRestricted={() => false}
+        contextFiles={[]}
+        uploadingFiles={false}
+        toast={vi.fn() as never}
+        t={(k: string) => k}
+      />,
+    );
+
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: '@oll' } });
+    fireEvent.mouseDown(screen.getByText('@ollama'));
+
+    expect(textarea.value).toBe('@ollama ');
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+    expect(onSend).toHaveBeenCalledWith('@ollama', 'Ollama');
+  });
+
   it('restores the draft into the textarea on remount (the reported bug)', () => {
     // User typed + the page was unmounted before the debounce flushed — mimic
     // by seeding storage directly.
@@ -151,6 +276,85 @@ describe('ChatInput draft persistence', () => {
     fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
 
     expect(onSend).toHaveBeenCalledWith('about to send', undefined);
+    expect(loadDraft('d-1')?.text).toBe('about to send');
+    publishMessageSendSettled('d-1', 'about to send', 'accepted');
+    expect(loadDraft('d-1')).toBeNull();
+  });
+
+  it('restores a refused send without overwriting text typed while it was in flight', () => {
+    const onSend = vi.fn();
+    render(
+      <ChatInput
+        discussion={baseDiscussion}
+        agents={[]}
+        sending={false}
+        disabled={false}
+        ttsEnabled={false}
+        ttsState="idle"
+        worktreeError={null}
+        availableSkills={[]}
+        availableDirectives={[]}
+        onSend={onSend}
+        onStop={vi.fn()}
+        onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()}
+        onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()}
+        isAgentRestricted={() => false}
+        contextFiles={[]}
+        uploadingFiles={false}
+        toast={vi.fn() as never}
+        t={(k: string) => k}
+      />,
+    );
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'message refused by 502' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+    expect(textarea.value).toBe('');
+
+    fireEvent.change(textarea, { target: { value: 'new draft already started' } });
+    publishMessageSendSettled('d-1', 'message refused by 502', 'refused');
+
+    expect(textarea.value).toBe(
+      'message refused by 502\n\nnew draft already started',
+    );
+    expect(loadDraft('d-1')?.text).toBe(textarea.value);
+  });
+
+  it('clears an accepted submission after the user switches discussions', () => {
+    const { rerender } = renderChatInput(baseDiscussion);
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: 'sent before room switch' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', shiftKey: false });
+    expect(loadDraft('d-1')?.text).toBe('sent before room switch');
+
+    const otherDisc = { ...baseDiscussion, id: 'd-2' } as Discussion;
+    rerender(
+      <ChatInput
+        discussion={otherDisc}
+        agents={[]}
+        sending={false}
+        disabled={false}
+        ttsEnabled={false}
+        ttsState="idle"
+        worktreeError={null}
+        availableSkills={[]}
+        availableDirectives={[]}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        onOrchestrate={vi.fn()}
+        onTtsToggle={vi.fn()}
+        onWorktreeErrorDismiss={vi.fn()}
+        onWorktreeRetry={vi.fn()}
+        isAgentRestricted={() => false}
+        contextFiles={[]}
+        uploadingFiles={false}
+        toast={vi.fn() as never}
+        t={(k: string) => k}
+      />,
+    );
+
+    publishMessageSendSettled('d-1', 'sent before room switch', 'accepted');
     expect(loadDraft('d-1')).toBeNull();
   });
 

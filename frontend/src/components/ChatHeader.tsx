@@ -27,6 +27,8 @@ export interface ChatHeaderProps {
   planCompleted?: number;
   planTotal?: number;
   planLater?: number;
+  pendingProposalCount?: number;
+  pendingProposalItemCount?: number;
   isMobile: boolean;
   sending: boolean;
   /// Number of uncommitted files in the discussion worktree (Isolated mode
@@ -57,6 +59,8 @@ export function ChatHeader({
   planCompleted = 0,
   planTotal = 0,
   planLater = 0,
+  pendingProposalCount = 0,
+  pendingProposalItemCount = 0,
   isMobile,
   sending,
   pendingFilesCount,
@@ -334,6 +338,18 @@ export function ChatHeader({
           <span>{t('planning.short')}</span>
           <span className="disc-plan-count">{planCompleted}/{planTotal}</span>
           {planLater > 0 && <span className="disc-plan-later">+{planLater}</span>}
+          {pendingProposalItemCount > 0 && (
+            <span
+              className="disc-plan-pending"
+              title={t(
+                'planning.pendingProposalTitle',
+                pendingProposalCount,
+                pendingProposalItemCount,
+              )}
+            >
+              {pendingProposalItemCount}
+            </span>
+          )}
         </button>
 
         {discussion.project_id && (

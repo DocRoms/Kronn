@@ -1703,22 +1703,14 @@ Suite de la réponse.";
         assert_eq!(bin, "copilot");
         assert_eq!(npx, Some("@github/copilot"));
         assert_eq!(env_key, "GH_TOKEN");
-        assert!(args.contains(&"-p".to_string()), "Should have -p flag");
-        assert!(args.contains(&"hello".to_string()), "Should contain prompt");
-        assert!(
-            !args.contains(&"--allow-all-tools".to_string()),
-            "Should not have full_access flag"
-        );
+        assert_eq!(args, vec!["-p", "hello"]);
     }
 
     #[test]
     fn copilot_agent_command_full_access() {
         let (_, _, args, _, _, _) =
-            super::super::agent_command(&AgentType::CopilotCli, "hello", true, "", None);
-        assert!(
-            args.contains(&"--allow-all-tools".to_string()),
-            "Full access should add --allow-all-tools"
-        );
+            super::super::agent_command(&AgentType::CopilotCli, "hello world", true, "", None);
+        assert_eq!(args, vec!["--allow-all-tools", "-p", "hello world"]);
     }
 
     #[test]
@@ -1730,8 +1722,28 @@ Suite de la réponse.";
             "",
             Some("gpt-4o-mini"),
         );
-        assert!(args.contains(&"--model".to_string()));
-        assert!(args.contains(&"gpt-4o-mini".to_string()));
+        assert_eq!(args, vec!["--model", "gpt-4o-mini", "-p", "hello"]);
+    }
+
+    #[test]
+    fn copilot_agent_command_keeps_options_before_prompt_pair() {
+        let (_, _, args, _, _, _) = super::super::agent_command(
+            &AgentType::CopilotCli,
+            "prompt with several words",
+            true,
+            "",
+            Some("gpt-4o-mini"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--model",
+                "gpt-4o-mini",
+                "--allow-all-tools",
+                "-p",
+                "prompt with several words",
+            ]
+        );
     }
 
     #[test]
@@ -1761,13 +1773,26 @@ Suite de la réponse.";
     fn copilot_model_tiers() {
         let economy =
             super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Economy, None);
-        assert_eq!(economy, Some("gpt-4o-mini".into()));
+        assert_eq!(economy, None);
         let default =
             super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Default, None);
         assert_eq!(default, None); // Use Copilot's default
         let reasoning =
             super::super::resolve_model_flag(&AgentType::CopilotCli, ModelTier::Reasoning, None);
-        assert_eq!(reasoning, Some("o4-mini".into()));
+        assert_eq!(reasoning, None);
+    }
+
+    #[test]
+    fn copilot_explicit_tier_override_is_preserved() {
+        let mut overrides = crate::models::ModelTiersConfig::default();
+        overrides.copilot_cli.reasoning = Some("gpt-5".into());
+
+        let reasoning = super::super::resolve_model_flag(
+            &AgentType::CopilotCli,
+            ModelTier::Reasoning,
+            Some(&overrides),
+        );
+        assert_eq!(reasoning, Some("gpt-5".into()));
     }
 
     // ─── Cross-platform: is_wsl detection ───────────────────────────────────

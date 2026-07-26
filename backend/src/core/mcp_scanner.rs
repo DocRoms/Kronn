@@ -1271,7 +1271,8 @@ pub fn sync_project_mcps_to_disk(
                 write_owned_mcp_json_to_subpath(&project.path, filename, &empty)?;
             }
         }
-        // Vibe has no kronn-internal bridge. Remove only sidecar-owned entries.
+        // Vibe's host CLI supports stdio MCPs. The sync helper injects the
+        // kronn-internal bridge even when the project has no user MCPs.
         sync_vibe_project_config(&project.path, &configs, &server_map, secret, true)?;
     } else {
         // ── Claude Code: .mcp.json ──
@@ -1600,6 +1601,13 @@ fn sync_vibe_project_config(
     let mut entries = Vec::new();
 
     for config in configs {
+        // The bridge is a reserved, runtime-derived entry. Never copy a
+        // detected/imported version from the DB: its script path may be stale
+        // after an upgrade or reinstall. The canonical entry is appended
+        // below from the currently resolvable shared path.
+        if config.label.eq_ignore_ascii_case("kronn-internal") {
+            continue;
+        }
         let server = match server_map.get(&config.server_id) {
             Some(s) => s,
             None => continue,
@@ -1643,6 +1651,17 @@ fn sync_vibe_project_config(
             McpTransport::ApiOnly => continue,
         };
         entries.push(entry);
+    }
+
+    if let Some(script) = crate::agents::runner::disc_introspection_mcp_path_for_shared_config() {
+        entries.push(VibeMcpEntry {
+            name: "kronn-internal".into(),
+            transport: "stdio".into(),
+            command: Some("python3".into()),
+            args: Some(vec![script]),
+            url: None,
+            env: HashMap::new(),
+        });
     }
 
     let resolved = resolve_host_path(project_path);

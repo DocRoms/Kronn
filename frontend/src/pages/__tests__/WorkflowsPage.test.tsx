@@ -671,6 +671,43 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
     enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
   });
 
+  it('switches back to workflows when an external workflow selection arrives', async () => {
+    mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
+    mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
+    mockWorkflowsApi.listRuns.mockResolvedValue([]);
+    mockWorkflowsApi.countRuns.mockResolvedValue(0);
+    const onInitialSelectionConsumed = vi.fn();
+    const page = await wrap(
+      <WorkflowsPage
+        projects={[]}
+        installedAgentTypes={['ClaudeCode']}
+        agentAccess={fullConfig}
+      />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /Quick Prompts/ }));
+    expect(screen.getByRole('button', { name: /Quick Prompts/ })).toHaveAttribute('data-active', 'true');
+
+    await act(async () => {
+      page.rerender(
+        <I18nProvider>
+          <WorkflowsPage
+            projects={[]}
+            installedAgentTypes={['ClaudeCode']}
+            agentAccess={fullConfig}
+            initialSelectedWorkflowId="wf-lab"
+            onInitialSelectionConsumed={onInitialSelectionConsumed}
+          />
+        </I18nProvider>
+      );
+    });
+
+    await waitFor(() => expect(mockWorkflowsApi.get).toHaveBeenCalledWith('wf-lab'));
+    await waitFor(() => expect(onInitialSelectionConsumed).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: /Workflows/ })).toHaveAttribute('data-active', 'true');
+    expect(screen.getByText('Éditer')).toBeInTheDocument();
+  });
+
   it('Lancer sur un WF à variables ouvre la popup, bloque les requis vides, puis déclenche avec les valeurs', async () => {
     mockWorkflowsApi.list.mockResolvedValue([labSummary()]);
     mockWorkflowsApi.get.mockResolvedValue(labWorkflow());
