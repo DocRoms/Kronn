@@ -115,7 +115,13 @@ pub fn validate_step_output(
         return (cli_success, None);
     }
 
-    let dst_path = project_path.join(target_file);
+    // Resolve the `docs/` prefix against the project's ACTUAL doc-IA dir, which
+    // is the legacy `ai/` on older projects (mirrors `detect_docs_dir` /
+    // `anti_hallu_step`). Without this, an `ai/`-layout project false-negatives:
+    // the agent correctly writes `ai/onboarding.md` but we'd check the
+    // non-existent `docs/onboarding.md` and report "missing or empty".
+    let rel = target_file.strip_prefix("docs/").unwrap_or(target_file);
+    let dst_path = crate::core::scanner::detect_docs_dir(project_path).join(rel);
     let template_path = template_source_for(target_file);
 
     // Get the on-disk size, treating "missing" as 0.
@@ -1068,6 +1074,36 @@ mod tests {
                 .join("docs/inconsistencies-security.partial.bak")
                 .exists(),
             "no sidecar noise either"
+        );
+    }
+
+    #[test]
+    #[serial]
+    #[serial(kronn_templates_env)]
+    fn ai_layout_project_resolves_target_to_legacy_docs_dir() {
+        // Regression: a project on the legacy `ai/` doc-IA layout. The audit
+        // step targets `docs/onboarding.md`, but the agent correctly wrote
+        // `ai/onboarding.md`. The validator must resolve the `docs/` prefix to
+        // the project's real doc-IA dir (`ai/`), not false-negative on a
+        // non-existent `docs/onboarding.md`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let project = tmp.path().join("project");
+        std::fs::create_dir_all(project.join("ai")).unwrap();
+        std::fs::write(
+            project.join("ai/onboarding.md"),
+            "# Registre\n\n## Un sujet\n- **Type** : tronc\n",
+        )
+        .unwrap();
+        std::env::set_var("KRONN_TEMPLATES_DIR", tmp.path().join("nope"));
+
+        let (success, warn) = validate_step_output(true, &project, "docs/onboarding.md");
+        assert!(
+            success,
+            "ai/onboarding.md is present → step must count as produced"
+        );
+        assert!(
+            warn.is_none(),
+            "no false 'missing or empty' warning on an ai/-layout project"
         );
     }
 }

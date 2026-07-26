@@ -191,6 +191,31 @@ pub struct ServerConfig {
     /// discs keep their saved value (no retroactive change).
     #[serde(default = "default_summary_strategy_off")]
     pub default_summary_strategy: crate::models::SummaryStrategy,
+    /// Mode Mentor — id of the parameterized "mentor→censeur turn" workflow a
+    /// parcours triggers on each learner submission. Instance-specific (the
+    /// workflow is created per Kronn instance), so no compile-time default:
+    /// `None` = the live mentor turn isn't wired yet (the parcours still works
+    /// as a viewer + deterministic state machine). See docs/design/mentor-mode.md.
+    #[serde(default)]
+    pub mentor_turn_workflow_id: Option<String>,
+    /// Mode Mentor — id of the "parcours generator" workflow that drafts a
+    /// parcours (objective/criteria/resources/target) from a Jira ticket or a
+    /// free subject. Instance-specific; `None` = no AI generation (the tutor
+    /// fills the draft by hand). See docs/design/mentor-mode.md.
+    #[serde(default)]
+    pub mentor_generator_workflow_id: Option<String>,
+    /// Mode Mentor — id of the onboarding "course generator" workflow (drafts a
+    /// chapter-based course). Instance-specific; `None` = no AI course generation.
+    #[serde(default)]
+    pub mentor_course_workflow_id: Option<String>,
+    /// Mode Mentor — id of the graded "hint" workflow (mentor nudge → censeur).
+    /// Instance-specific; `None` = the hint button just bumps the counter.
+    #[serde(default)]
+    pub mentor_hint_workflow_id: Option<String>,
+    /// Mode Mentor — id of the "closure synthesis" workflow (mentor recaps what
+    /// was learned once the parcours completes). `None` = no synthesis generated.
+    #[serde(default)]
+    pub mentor_bilan_workflow_id: Option<String>,
 }
 
 /// Serde default for [`ServerConfig::default_summary_strategy`].
@@ -602,6 +627,19 @@ pub struct ServerConfigPublic {
     /// `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
     /// when to re-enable (small-context agents without MCP access).
     pub default_summary_strategy: crate::models::SummaryStrategy,
+    /// Mode Mentor — mirrors `ServerConfig.mentor_turn_workflow_id` so the
+    /// frontend can trigger the mentor→censeur workflow (via the existing
+    /// workflows API) without an extra round-trip. `None` = not wired yet.
+    pub mentor_turn_workflow_id: Option<String>,
+    /// Mode Mentor — mirrors `ServerConfig.mentor_generator_workflow_id`.
+    /// `None` = no AI draft generation available.
+    pub mentor_generator_workflow_id: Option<String>,
+    /// Mode Mentor — mirrors `ServerConfig.mentor_course_workflow_id`.
+    pub mentor_course_workflow_id: Option<String>,
+    /// Mode Mentor — mirrors `ServerConfig.mentor_hint_workflow_id`.
+    pub mentor_hint_workflow_id: Option<String>,
+    /// Mode Mentor — mirrors `ServerConfig.mentor_bilan_workflow_id`.
+    pub mentor_bilan_workflow_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -622,4 +660,20 @@ pub struct UpdateServerConfigRequest {
     /// `None` keeps the existing value.
     #[serde(default)]
     pub default_summary_strategy: Option<crate::models::SummaryStrategy>,
+    /// Mode Mentor — `Some(id)` wires (or rewires) the mentor→censeur turn
+    /// workflow ; empty string clears it ; `None` keeps the existing value.
+    #[serde(default)]
+    pub mentor_turn_workflow_id: Option<String>,
+    /// Mode Mentor — same PATCH semantic for the parcours-generator workflow.
+    #[serde(default)]
+    pub mentor_generator_workflow_id: Option<String>,
+    /// Mode Mentor — same PATCH semantic for the onboarding course-generator.
+    #[serde(default)]
+    pub mentor_course_workflow_id: Option<String>,
+    /// Mode Mentor — same PATCH semantic for the graded hint workflow.
+    #[serde(default)]
+    pub mentor_hint_workflow_id: Option<String>,
+    /// Mode Mentor — same PATCH semantic for the closure-synthesis workflow.
+    #[serde(default)]
+    pub mentor_bilan_workflow_id: Option<String>,
 }

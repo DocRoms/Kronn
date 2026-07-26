@@ -8,7 +8,7 @@ import { canRunAudit, canRunBriefing } from '../lib/agentCapabilities';
 import { AiDocViewer } from './AiDocViewer';
 import { unseenBasis } from './SwipeableDiscItem';
 import AuditRecapPanel from './AuditRecapPanel';
-import type { AuditKind } from '../types/AuditKind';
+import type { AuditKind } from '../types/generated';
 import { ProjectSkills } from './ProjectSkills';
 import { ProjectLinkedRepos } from './ProjectLinkedRepos';
 import {
@@ -1335,6 +1335,22 @@ export function ProjectCard({
                 <AlertTriangle size={9} /> {proj.tech_debt_count} TD
               </span>
             )}
+            {/* Onboarding badge — N course topics in docs/onboarding.md. Click
+                deep-links the docs viewer to the registry. */}
+            {!auditActive && (proj.onboarding_count ?? 0) > 0 && (
+              <span
+                className="dash-badge-onboarding"
+                title={t('projects.onboardingBadge', proj.onboarding_count!)}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (!isOpen) onToggleOpen();
+                  setExpandedTab('docAi');
+                  setDocDeepLink('docs/onboarding.md');
+                }}
+              >
+                <BookOpen size={9} /> {proj.onboarding_count} onboarding
+              </span>
+            )}
             {/* Drift badge — hidden during active audit (#326 / F6) */}
             {!auditActive && driftStatus && driftStatus.stale_sections.length > 0 && (
               <>
@@ -2324,6 +2340,7 @@ export function ProjectCard({
                         <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
                         <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
                         <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
+                        <option value="Onboarding" disabled>{t('audit.kind.Onboarding')} {t('audit.kind.afterFull')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
@@ -2447,6 +2464,7 @@ export function ProjectCard({
                         <option value="Database" disabled>{t('audit.kind.Database')} {t('audit.kind.afterFull')}</option>
                         <option value="ApiDesign" disabled>{t('audit.kind.ApiDesign')} {t('audit.kind.afterFull')}</option>
                         <option value="CodeQuality" disabled>{t('audit.kind.CodeQuality')} {t('audit.kind.afterFull')}</option>
+                        <option value="Onboarding" disabled>{t('audit.kind.Onboarding')} {t('audit.kind.afterFull')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"
@@ -2534,6 +2552,7 @@ export function ProjectCard({
                           <option value="Database">{t('audit.kind.Database')}</option>
                           <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
                           <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
+                          <option value="Onboarding">{t('audit.kind.Onboarding')}</option>
                         </select>
                         <button
                           className="dash-icon-btn dash-btn-accent-border"
@@ -2601,7 +2620,8 @@ export function ProjectCard({
                         <option value="Rgaa">{t('audit.kind.Rgaa')}</option>
                         <option value="Database">{t('audit.kind.Database')}</option>
                         <option value="ApiDesign">{t('audit.kind.ApiDesign')}</option>
-                          <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
+                        <option value="CodeQuality">{t('audit.kind.CodeQuality')}</option>
+                        <option value="Onboarding">{t('audit.kind.Onboarding')}</option>
                       </select>
                       <button
                         className="dash-icon-btn dash-btn-accent-border"

@@ -44,6 +44,7 @@ const runningWf = (over: Partial<WorkflowSummary> & { runId?: string }): Workflo
     tokens_used: 0,
   },
   created_at: new Date().toISOString(),
+  is_system: false,
 });
 
 const idleWf = (id: string): WorkflowSummary => ({
@@ -64,6 +65,7 @@ const idleWf = (id: string): WorkflowSummary => ({
     tokens_used: 100,
   },
   created_at: new Date().toISOString(),
+  is_system: false,
 });
 
 describe('ActiveRunsPopover', () => {

@@ -551,6 +551,25 @@ html[data-density="large"] .dash-main {
   background: rgba(var(--kr-warning-rgb), 0.2);
 }
 
+.dash-badge-onboarding {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 7px;
+  border-radius: var(--kr-r-sm);
+  font-size: var(--kr-fs-xs);
+  font-weight: 600;
+  background: var(--kr-bg-card);
+  color: var(--kr-accent);
+  border: 1px solid var(--kr-accent);
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.dash-badge-onboarding:hover {
+  opacity: 0.85;
+}
+
 /* Docs section state banners (0.8.1): shown inside the AiDocViewer
    when audit_status isn't yet Validated. Tone matches the message
    urgency — info for "you can audit", warn for "validate to finalize". */

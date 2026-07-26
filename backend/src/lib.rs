@@ -916,6 +916,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::ai_docs::read_doc_asset),
         )
         .route(
+            "/api/projects/{id}/repo-file",
+            get(api::ai_docs::read_repo_file),
+        )
+        .route(
             "/api/projects/{id}/git-status",
             get(api::projects::git_status),
         )
@@ -1095,6 +1099,10 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
             get(api::workflows::get)
                 .put(api::workflows::update)
                 .delete(api::workflows::delete),
+        )
+        .route(
+            "/api/workflows/{id}/reset-to-seed",
+            post(api::workflows::reset_to_seed),
         )
         .route("/api/workflows/test-step", post(api::workflows::test_step))
         .route(
@@ -1345,6 +1353,52 @@ pub fn build_router_with_auth(state: AppState, enable_auth: bool) -> Router {
         .route(
             "/api/discussions/{id}/orchestrate",
             post(api::discussions::orchestrate),
+        )
+        // ── Mode Mentor (parcours d'apprentissage socratique) ──
+        // Increment 2a: read/write the typed parcours state on a disc.
+        .route("/api/mentor/parcours", get(api::mentor::list_parcours))
+        .route(
+            "/api/mentor/parcours/generate",
+            post(api::mentor::generate_parcours),
+        )
+        .route(
+            "/api/mentor/parcours/{disc_id}",
+            get(api::mentor::get_parcours).delete(api::mentor::delete_parcours),
+        )
+        // Increment 2b-i: deterministic state-machine transitions.
+        .route(
+            "/api/mentor/parcours/{disc_id}/submit",
+            post(api::mentor::submit_block),
+        )
+        .route(
+            "/api/mentor/parcours/{disc_id}/turn",
+            post(api::mentor::run_turn),
+        )
+        .route(
+            "/api/mentor/parcours/{disc_id}/advance",
+            post(api::mentor::advance_block),
+        )
+        .route(
+            "/api/mentor/parcours/{disc_id}/resource-read",
+            post(api::mentor::set_resource_read),
+        )
+        .route(
+            "/api/mentor/parcours/{disc_id}/hint",
+            post(api::mentor::request_hint),
+        )
+        .route(
+            "/api/mentor/parcours/{disc_id}/bilan",
+            post(api::mentor::regenerate_bilan),
+        )
+        // O3: onboarding posture — mark a chapter completed.
+        .route(
+            "/api/mentor/parcours/{disc_id}/chapter",
+            post(api::mentor::complete_chapter),
+        )
+        // O4: onboarding registry catalogue (docs/onboarding.md).
+        .route(
+            "/api/mentor/onboarding-catalog/{project_id}",
+            get(api::mentor::onboarding_catalog),
         )
         .route("/api/discussions/{id}/share", post(api::discussions::share))
         // 0.8.6 phase 2 — cross-agent collab : invite a peer agent.

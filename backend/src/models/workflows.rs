@@ -1287,6 +1287,12 @@ pub struct WorkflowSummary {
     pub pinned: bool,
     pub last_run: Option<WorkflowRunSummary>,
     pub created_at: DateTime<Utc>,
+    /// True for builtin system workflows (currently the Mode Mentor seeds).
+    /// The Workflows page groups these under a collapsed "Système" section and
+    /// offers "reset to seed" instead of a destructive delete. Derived from the
+    /// id prefix (see `db::workflows::is_system_workflow_id`), not stored.
+    #[serde(default)]
+    pub is_system: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, TS)]
@@ -1370,6 +1376,13 @@ pub struct TriggerWorkflowRequest {
     #[serde(default)]
     #[ts(type = "Record<string, string>")]
     pub variables: ::std::collections::HashMap<String, String>,
+    /// Optional per-run project override. When set, the run executes against
+    /// this project's checkout (cwd + MCP context) instead of the workflow's
+    /// own `project_id`. Used by project-less seeded workflows (e.g. the Mode
+    /// Mentor course/parcours generators) so a generation anchors on the real
+    /// files of the project the user picked. `None` = keep `wf.project_id`.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// Self-contained envelope produced by `GET /api/workflows/:id/export`.
@@ -1422,6 +1435,22 @@ pub struct TestStepRequest {
 #[cfg(test)]
 mod step_deserialization_tests {
     use super::*;
+
+    #[test]
+    fn trigger_request_project_id_is_optional_and_parses() {
+        // Legacy body (variables only) → project_id defaults to None.
+        let legacy: TriggerWorkflowRequest =
+            serde_json::from_str(r#"{"variables":{"subject":"x"}}"#).unwrap();
+        assert_eq!(legacy.project_id, None);
+        // New body with the per-run project anchor.
+        let modern: TriggerWorkflowRequest =
+            serde_json::from_str(r#"{"variables":{},"project_id":"proj-42"}"#).unwrap();
+        assert_eq!(modern.project_id.as_deref(), Some("proj-42"));
+        // Empty body → both default.
+        let empty: TriggerWorkflowRequest = serde_json::from_str("{}").unwrap();
+        assert!(empty.variables.is_empty());
+        assert_eq!(empty.project_id, None);
+    }
 
     #[test]
     fn workspace_config_require_isolation_defaults_false_for_legacy_rows() {

@@ -198,6 +198,7 @@ fn sample_project(id: &str, name: &str) -> Project {
         audit_status: AiAuditStatus::NoTemplate,
         ai_todo_count: 0,
         tech_debt_count: 0,
+        onboarding_count: 0,
         needs_docs_migration: false,
         path_exists: true,
         default_skill_ids: vec![],
@@ -606,6 +607,34 @@ fn disc_no_agent_flag_round_trips() {
         !crate::db::discussions::disc_is_no_agent(&conn, "d1").unwrap(),
         "flag cleared"
     );
+}
+
+#[test]
+fn list_for_ui_hides_mentor_parcours() {
+    let conn = test_db();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("plain", None)).unwrap();
+    crate::db::discussions::insert_discussion(&conn, &sample_discussion("parcours", None)).unwrap();
+    // Turn one discussion into a Mode Mentor parcours.
+    crate::db::discussions::set_mentor_state(&conn, "parcours", Some("{\"status\":\"open\"}"))
+        .unwrap();
+
+    // The full list still sees both (export / MCP / audit-internal path).
+    assert_eq!(
+        crate::db::discussions::list_discussions(&conn)
+            .unwrap()
+            .len(),
+        2
+    );
+    // The UI list hides the parcours — only the plain discussion remains.
+    let ui = crate::db::discussions::list_discussions_for_ui(&conn).unwrap();
+    assert_eq!(ui.len(), 1);
+    assert_eq!(ui[0].id, "plain");
+    // The paginated UI variant applies the same filter.
+    let ui_paged =
+        crate::db::discussions::list_discussions_paginated_for_ui(&conn, Some(50), Some(0))
+            .unwrap();
+    assert_eq!(ui_paged.len(), 1);
+    assert_eq!(ui_paged[0].id, "plain");
 }
 
 #[test]
@@ -2769,6 +2798,72 @@ fn batch_placeholder_workflow_is_hidden_from_list() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].id, "real-wf");
     // But get_workflow can still fetch it by id if needed (placeholder row exists)
+}
+
+#[test]
+fn mentor_seed_workflows_are_flagged_system() {
+    let conn = test_db();
+    // A normal, user-authored workflow...
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("real-wf")).unwrap();
+    // ...alongside the five builtin Mode Mentor seed workflows.
+    crate::db::workflows::ensure_mentor_workflows(&conn).unwrap();
+
+    // The list exposes everything — the Workflows page now surfaces the seeds in
+    // a collapsed "Système" group rather than hiding them.
+    let all = crate::db::workflows::list_workflows(&conn).unwrap();
+    assert_eq!(
+        all.len(),
+        6,
+        "list_workflows must return the real wf + 5 mentor seeds"
+    );
+
+    // Only the mentor seeds are classified as system; the user workflow is not.
+    assert!(
+        !crate::db::workflows::is_system_workflow_id("real-wf"),
+        "a user workflow must not be flagged system"
+    );
+    assert!(
+        all.iter()
+            .filter(|w| crate::db::workflows::is_system_workflow_id(&w.id))
+            .count()
+            == 5,
+        "exactly the 5 mentor seeds must be flagged system"
+    );
+}
+
+#[test]
+fn reset_workflow_to_seed_restores_bundled_definition() {
+    let conn = test_db();
+    crate::db::workflows::ensure_mentor_workflows(&conn).unwrap();
+
+    // Operator edits a seed's name...
+    let mut edited =
+        crate::db::workflows::get_workflow(&conn, crate::db::workflows::MENTOR_TURN_WORKFLOW_ID)
+            .unwrap()
+            .unwrap();
+    let original_name = edited.name.clone();
+    edited.name = "hacked name".to_string();
+    crate::db::workflows::update_workflow(&conn, &edited).unwrap();
+
+    // ...reset brings the bundled definition back.
+    let applied = crate::db::workflows::reset_workflow_to_seed(
+        &conn,
+        crate::db::workflows::MENTOR_TURN_WORKFLOW_ID,
+    )
+    .unwrap();
+    assert!(applied);
+    let restored =
+        crate::db::workflows::get_workflow(&conn, crate::db::workflows::MENTOR_TURN_WORKFLOW_ID)
+            .unwrap()
+            .unwrap();
+    assert_eq!(
+        restored.name, original_name,
+        "reset must restore the seed name"
+    );
+
+    // A non-system id is refused (no silent clobber of user workflows).
+    crate::db::workflows::insert_workflow(&conn, &sample_workflow("real-wf")).unwrap();
+    assert!(!crate::db::workflows::reset_workflow_to_seed(&conn, "real-wf").unwrap());
 }
 
 #[test]

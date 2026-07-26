@@ -242,6 +242,7 @@ describe('WorkflowsPage', () => {
       pinned: false,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
+      is_system: false,
     }];
 
     mockWorkflowsApi.list.mockResolvedValue(summaries);
@@ -525,6 +526,7 @@ describe('WorkflowsPage', () => {
         tokens_used: 0,
       },
       created_at: '2026-01-01T00:00:00Z',
+      is_system: false,
     };
     const idleSummary: WorkflowSummary = {
       id: 'wf-idle',
@@ -544,6 +546,7 @@ describe('WorkflowsPage', () => {
         tokens_used: 42,
       },
       created_at: '2026-01-01T00:00:00Z',
+      is_system: false,
     };
     mockWorkflowsApi.list.mockResolvedValue([runningSummary, idleSummary]);
     mockWorkflowsApi.cancelRun.mockClear();
@@ -581,6 +584,7 @@ describe('WorkflowsPage', () => {
         tokens_used: 0,
       },
       created_at: '2026-01-01T00:00:00Z',
+      is_system: false,
     };
     mockWorkflowsApi.list.mockResolvedValue([runningSummary]);
     // If openDetail fires, workflows.get would be called — we assert it is NOT.
@@ -617,6 +621,7 @@ describe('WorkflowsPage', () => {
       pinned: false,
       last_run: null,
       created_at: '2026-01-01T00:00:00Z',
+      is_system: false,
     };
     mockWorkflowsApi.list.mockResolvedValue([summary]);
     mockWorkflowsApi.delete.mockClear();
@@ -668,7 +673,7 @@ describe('workflow launch modal + disabled-state UX (0.8.11)', () => {
   const labSummary = (over: Partial<WorkflowSummary> = {}): WorkflowSummary => ({
     id: 'wf-lab', name: 'PR Review LAB', project_id: null, project_name: null,
     trigger_type: 'manual', step_count: 1, misconfigured_step_count: 0,
-    enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', ...over,
+    enabled: true, pinned: false, last_run: null, created_at: '2026-01-01T00:00:00Z', is_system: false, ...over,
   });
 
   it('switches back to workflows when an external workflow selection arrives', async () => {

@@ -31,6 +31,12 @@ scope: HostScope,
  */
 name: string, };
 
+/**
+ * `POST /api/mentor/parcours/{id}/advance` body. `force` is the self-serve
+ * "Passer outre" override — bypass the read/approval gates (default false).
+ */
+export type AdvanceBlockRequest = { block: MentorPhase, force?: boolean, };
+
 export type AgentApiCallRequest = {
 /**
  * `KRONN_DISCUSSION_ID` of the disc making the call, when the
@@ -404,7 +410,7 @@ export type AuditInfo = { files: Array<AuditFileInfo>, todos: Array<AuditTodo>, 
  * (single step). All variants are wired through `kind_to_steps()` in
  * `api::audit`.
  */
-export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Custom";
+export type AuditKind = "Full" | "Drift" | "Security" | "Docker" | "Performance" | "Accessibility" | "Rgaa" | "Database" | "ApiDesign" | "CodeQuality" | "Onboarding" | "Custom";
 
 /**
  * Live progress of a running audit, exposed via `GET /api/projects/:id/audit-status`.
@@ -654,6 +660,22 @@ parent_workflow_id: string | null, parent_workflow_name: string | null,
  */
 parent_run_sequence: number | null, };
 
+/**
+ * The mentor's "closure synthesis" for a completed parcours — a recap of what
+ * was learned, generated server-side once the learner finishes. Persisted so it
+ * survives navigating away and keeps running in the background. Reuses
+ * [`HintStatus`] for its lifecycle (`filtered` is unused — no censeur here).
+ */
+export type BilanSynthesis = { status: HintStatus,
+/**
+ * The recap (Markdown) — set only when `status == Ready`.
+ */
+text?: string | null,
+/**
+ * Human-readable error — set only when `status == Failed`.
+ */
+error?: string | null, };
+
 export type BootstrapProjectRequest = { name: string, description: string, agent: AgentType, mcp_config_ids?: Array<string>, skill_ids?: Array<string>, };
 
 export type BootstrapProjectResponse = { project_id: string, discussion_id: string, };
@@ -768,6 +790,49 @@ workflow: BundleWorkflowCreated, };
 export type BundleWorkflowCreated = { id: string, name: string, };
 
 /**
+ * One chapter of an onboarding course: an explanation (the "why" + real code),
+ * an optional checkpoint, and whether the learner has completed it.
+ */
+export type Chapter = { title: string, explanation: string,
+/**
+ * Legacy SINGLE checkpoint (pre-multi-question). Kept only so courses
+ * generated before `checkpoints` still deserialize; folded into the list by
+ * [`Chapter::effective_checkpoints`]. New courses populate `checkpoints`.
+ */
+checkpoint?: Checkpoint | null,
+/**
+ * Checkpoints for this chapter (1..N). A content chapter carries one; the
+ * final "Révision" chapter carries a cumulative quiz of several.
+ */
+checkpoints?: Array<Checkpoint>, done: boolean,
+/**
+ * The learner's own answer to an open-question checkpoint, kept so a
+ * completed chapter shows what they wrote. `None` for quizzes / no answer.
+ */
+learner_answer?: string | null,
+/**
+ * Per-learner flag: set when the learner needed more than one attempt to
+ * pass a quiz in this chapter. Drives the end-of-course spaced re-test — a
+ * review pass replays only the chapters flagged here (retrieval practice on
+ * the weak items). Cleared when the chapter is re-passed cleanly.
+ */
+needs_review: boolean, };
+
+/**
+ * A comprehension checkpoint at the end of an onboarding chapter. A quiz has
+ * non-empty `options` + an `answer` index; a free "try it yourself" exercise
+ * leaves `options` empty and uses `reveal` for the expected takeaway.
+ */
+export type Checkpoint = { question: string, options: Array<string>, answer?: number | null,
+/**
+ * Per-option feedback, parallel to `options` (same index/length): why each
+ * choice is right or wrong. Shown after the learner picks, so a wrong answer
+ * teaches (addresses the misconception) instead of just being marked wrong.
+ * Empty (legacy row / none authored) → generic feedback.
+ */
+explanations: Array<string>, reveal?: string | null, };
+
+/**
  * Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
  * host the room behind this invite code?". Authenticated by `from_invite_code`
  * matching one of our contacts — the same self-auth credential as the WS
@@ -812,6 +877,21 @@ new_path: string, };
 export type CloneProjectRequest = { url: string, name?: string | null, agent: AgentType, };
 
 export type CloneProjectResponse = { project_id: string, discussion_id: string | null, };
+
+/**
+ * `POST /api/mentor/parcours/{id}/chapter` body — mark an onboarding chapter
+ * completed (unlocks the next one). Index is 0-based into `chapters`.
+ */
+export type CompleteChapterRequest = { index: number,
+/**
+ * Learner's answer to an open-question checkpoint (persisted for review).
+ */
+answer?: string | null,
+/**
+ * True when the learner needed more than one attempt on a quiz in this
+ * chapter — flags it for the end-of-course spaced re-test (#4b).
+ */
+needs_review?: boolean, };
 
 export type ConditionAction = { "type": "Stop" } | { "type": "Skip" } | { "type": "Goto", step_name: string, max_iterations?: number | null, };
 
@@ -860,6 +940,30 @@ export type CreateMcpConfigRequest = { server_id: string, label: string, env: Re
  * description + docs_url + fields and figures out auth itself.
  */
 custom_spec?: CustomApiPayload | null, };
+
+/**
+ * `POST /api/mentor/parcours` body — create a new parcours (a discussion + a
+ * fresh draft state).
+ */
+export type CreateParcoursRequest = { title: string, project_id?: string | null, source: MentorSource, objective: string, criteria?: Array<string>,
+/**
+ * Optional pre-filled content (e.g. produced by the generator workflow).
+ * Empty/None on a bare manual create.
+ */
+resources?: Array<MentorResource>, target_archi?: string | null, target_tests?: string | null,
+/**
+ * Posture (defaults to `Mentor`). `Onboarding` builds a chapter-based course.
+ */
+mode?: MentorMode,
+/**
+ * Course chapters, used when `mode == Onboarding` (e.g. from the generator).
+ */
+chapters?: Array<Chapter>, };
+
+/**
+ * Response of `POST /api/mentor/parcours`: the created disc id + its state.
+ */
+export type CreateParcoursResponse = { disc_id: string, state: MentorState, };
 
 export type CreatePlanningDodItem = { id: string | null, sentence: string, completed: boolean, };
 
@@ -1553,6 +1657,40 @@ text: string,
  */
 reason: string, };
 
+/**
+ * `POST /api/mentor/parcours/generate` body — kick off background AI generation.
+ * A placeholder parcours (status `generating`) is created and returned at once;
+ * a background task runs the generator workflow and fills it in.
+ */
+export type GenerateParcoursRequest = { title: string, project_id?: string | null, source: MentorSource,
+/**
+ * Placeholder objective shown while generating (the subject or title).
+ */
+objective: string,
+/**
+ * Posture: `Mentor` runs the parcours generator, `Onboarding` the course generator.
+ */
+mode?: MentorMode,
+/**
+ * Generator launch variable — free subject (empty for a Jira source).
+ */
+subject?: string,
+/**
+ * Generator launch variable — Jira ticket key (empty for a free subject).
+ */
+ticket_key?: string,
+/**
+ * Source onboarding topic id (from the registry) — persisted on the parcours
+ * so the catalogue can offer "reprendre" instead of a duplicate. `None` for a
+ * free mentor parcours.
+ */
+topic_id?: string | null,
+/**
+ * Registry level / curriculum kind of the source topic — persisted on the
+ * parcours so the landing list can badge it. `None` for a free parcours.
+ */
+level?: string | null, kind?: string | null, };
+
 export type GitBlameLine = { line_number: number, commit: string, author: string, author_time: number, };
 
 export type GitBlameQuery = { path: string, };
@@ -1704,6 +1842,39 @@ export type GitSwitchBranchRequest = { branch: string, };
  * event so the frontend can render the right badge / toast / explainer.
  */
 export type GuardKind = { "type": "Timeout" } | { "type": "MaxLlmCalls" } | { "type": "LoopDetection", step_name: string, };
+
+/**
+ * The most recent "Coup de pouce" requested on a block. Persisted on the
+ * parcours so the nudge survives navigating away and back, and so the run
+ * keeps going server-side even if the learner closes the page.
+ */
+export type HintState = {
+/**
+ * The learner block this hint was requested on (a hint from another block
+ * is not shown on the current one).
+ */
+block: MentorPhase,
+/**
+ * The hint-ladder rung this nudge corresponds to (1..=HINT_MAX).
+ */
+level: number,
+/**
+ * Generation lifecycle.
+ */
+status: HintStatus,
+/**
+ * The vetted nudge text — set only when `status == Ready`.
+ */
+text?: string | null,
+/**
+ * Human-readable error — set only when `status == Failed`.
+ */
+error?: string | null, };
+
+/**
+ * Lifecycle of a "Coup de pouce" (graded hint) generated server-side.
+ */
+export type HintStatus = "pending" | "ready" | "filtered" | "failed";
 
 export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "value": { project_path: string, } } | { "kind": "Gemini" } | { "kind": "Codex" } | { "kind": "Copilot" };
 
@@ -2066,6 +2237,161 @@ export type McpSource = "Registry" | "Detected" | "Manual" | "HostImported";
 export type McpTransport = { "Stdio": { command: string, args: Array<string>, } } | { "Sse": { url: string, } } | { "Streamable": { url: string, } } | "ApiOnly";
 
 /**
+ * Generic state of a learner-driven block (comprehension / plan / code /
+ * bilan): whether it is unlocked (gating), validated by the mentor, the
+ * learner's submitted content, and how many revisions were submitted.
+ */
+export type MentorBlock = { unlocked: boolean, validated: boolean,
+/**
+ * Set by the turn's `evaluateur` verdict: the mentor deems the learner's
+ * submission good enough to move on. Precondition for `advance` on a learner
+ * block (hard gate) — reset on each turn, overridable via the self-serve
+ * "Passer outre" escape hatch.
+ */
+mentor_approved: boolean, learner?: string | null, revisions: number,
+/**
+ * Persisted dialogue for this block: each learner submission and the
+ * mentor's vetted reply. Kept so the exchange survives validation and page
+ * reloads (the live turn is otherwise ephemeral). Newest last, bounded.
+ */
+turns: Array<MentorTurn>,
+/**
+ * Set when the learner used the self-serve "Passer outre" override to move
+ * past the mentor-approval gate. Surfaced so a manually-unblocked pass is
+ * never mistaken for the mentor's own sign-off. Sticky once set.
+ */
+forced: boolean, };
+
+/**
+ * Which posture a parcours runs in. `Mentor` = socratic, strict, censor-gated
+ * (default → back-compat for existing rows). `Onboarding` = expository course
+ * (chapters + checkpoints), no censor. See docs/design/mentor-mode.md.
+ */
+export type MentorMode = "mentor" | "onboarding";
+
+/**
+ * The six blocks/phases of a parcours, in order.
+ */
+export type MentorPhase = "comprehension" | "resources" | "target" | "plan" | "code" | "bilan";
+
+/**
+ * A resource curated by the mentor (block ② Resources) — a pointer to read,
+ * never the how-to itself.
+ */
+export type MentorResource = { title: string, url: string,
+/**
+ * "doc" | "article" | "repo" | ...
+ */
+kind: string, read: boolean, };
+
+/**
+ * Where the parcours comes from: a tracker ticket, or a free-form subject.
+ */
+export type MentorSource = {
+/**
+ * "jira" | "free".
+ */
+type: string,
+/**
+ * Ticket key when `kind == "jira"` (e.g. "EW-2481"); `None` for free subjects.
+ */
+ticket_key?: string | null, };
+
+/**
+ * Full structured state of a Mode Mentor parcours, stored as JSON in
+ * `discussions.mentor_state`.
+ */
+export type MentorState = { status: MentorStatus, source: MentorSource,
+/**
+ * The objective in one or two sentences.
+ */
+objective: string,
+/**
+ * Success criteria (the "done").
+ */
+criteria: Array<string>,
+/**
+ * The block the learner is currently on.
+ */
+phase: MentorPhase, comprehension: MentorBlock,
+/**
+ * Block ② — curated resources.
+ */
+resources: Array<MentorResource>,
+/**
+ * Block ③ — target architecture ("where we're going"), strict-absolu safe.
+ */
+target_archi?: string | null,
+/**
+ * Block ③ — acceptance tests ("how we know it's done").
+ */
+target_tests?: string | null, plan: MentorBlock, code: MentorBlock, bilan: MentorBlock,
+/**
+ * Hint-ladder level consumed on the current block (0 = none given yet).
+ */
+hint_level: number,
+/**
+ * The most recent "Coup de pouce" — generated server-side, vetted by the
+ * censeur, persisted so it survives a reload and keeps running if the
+ * learner navigates away. Reset when the block advances.
+ */
+last_hint?: HintState | null,
+/**
+ * The most recent live mentor→censeur→evaluateur turn — run server-side and
+ * censeur-vetted before anything reaches the browser. `Pending` while the run
+ * is in flight; the UI polls until it settles. Reset when the block advances.
+ */
+last_turn?: TurnState | null,
+/**
+ * The mentor's closure synthesis — generated when the parcours completes
+ * (learner-first in mentor mode, direct recap in onboarding). `None` until
+ * completion; persisted so it survives a reload.
+ */
+bilan_synthesis?: BilanSynthesis | null,
+/**
+ * Pedagogical posture. Defaults to `Mentor` (back-compat for existing rows).
+ */
+mode: MentorMode,
+/**
+ * Course chapters — used when `mode == Onboarding`. Empty in mentor mode.
+ */
+chapters: Array<Chapter>,
+/**
+ * Set when a background generation run failed — the parcours stays in
+ * `Generating` status and the UI shows the error (with a delete affordance).
+ */
+generation_error?: string | null,
+/**
+ * Source onboarding topic id (from the registry) this parcours was generated
+ * from — `None` for a free mentor parcours. Lets the catalogue detect an
+ * existing parcours for a topic (resume instead of duplicate). See
+ * `OnboardingTopic::topic_id`.
+ */
+topic_id?: string | null,
+/**
+ * Registry topic level ("débutant" / "intermédiaire" / "avancé" — free
+ * string) this parcours was generated from. Carried so the landing list can
+ * badge it without re-reading the registry. `None` for a free parcours.
+ */
+level?: string | null,
+/**
+ * Registry topic curriculum kind ("tronc" / "branche" / "capstone" /
+ * "culture") — same purpose as `level`. `None` for a free parcours.
+ */
+kind?: string | null, };
+
+/**
+ * Lifecycle of a parcours.
+ */
+export type MentorStatus = "generating" | "draft" | "validated" | "open" | "done";
+
+/**
+ * One recorded exchange on a learner block: what the learner submitted and the
+ * mentor's vetted reply (`None` when the censeur filtered it out).
+ */
+export type MentorTurn = { submission: string, reply?: string | null, };
+
+/**
  * Lean attachment descriptor surfaced to agents via `disc_get_message`. The
  * `disk_path` lets a file-tool-capable agent open the image directly.
  */
@@ -2255,6 +2581,52 @@ export type OllamaModel = { name: string, size: string, modified: string, };
 export type OllamaModelsResponse = { models: Array<OllamaModel>, };
 
 /**
+ * A curated onboarding topic from a project's `docs/onboarding.md` registry.
+ * The registry is a doc-IA artifact (like `inconsistencies-tech-debt.md`):
+ * human-curated AND proposed by the onboarding audit agent (O4b). The
+ * onboarding posture reads these as a catalogue → generates a chapter course
+ * anchored on the referenced files. Parsed by `core::onboarding_registry`.
+ */
+export type OnboardingTopic = { title: string,
+/**
+ * Stable identifier for the topic — an explicit `**ID**` bullet if the
+ * registry pins one, else a deterministic slug of the title. Lets a
+ * generated parcours be matched back to its source topic (dedup / resume)
+ * independently of the display title. See `core::onboarding_registry`.
+ */
+topic_id: string,
+/**
+ * Curriculum role, normalized to "tronc" | "branche" | "capstone" | "culture"
+ * (else the raw lowercased value). `None` when the topic carries no `Type`
+ * bullet. Lets the catalogue group a flat registry into a trunk → branches →
+ * capstone → culture curriculum. Back-compat: absent on legacy rows.
+ */
+kind?: string | null,
+/**
+ * "débutant" | "intermédiaire" | "avancé" | free text; None if unspecified.
+ */
+level?: string | null,
+/**
+ * One-line scope ("périmètre").
+ */
+scope?: string | null, prerequisites?: string | null,
+/**
+ * Reference files/docs to anchor the generated course.
+ */
+references: Array<string>,
+/**
+ * Free-form description below the labelled bullets.
+ */
+description?: string | null,
+/**
+ * Repo-relative path to the persisted course (`docs/onboarding/NN-slug.md`),
+ * present once the onboarding posture has generated its chapters. `None`
+ * while the topic is only catalogued (course not generated yet). Written
+ * from a `- **Cours** :` bullet by `core::onboarding_registry`.
+ */
+course_path?: string | null, };
+
+/**
  * What happens when `TypedSchema` validation still fails after a
  * single repair attempt. `Continue` = 0.7.0 behavior (warn + raw),
  * `Fail` = 0.8.3 strict mode for contract steps.
@@ -2299,6 +2671,37 @@ next_path: string, max_pages?: number | null, } | { "type": "LinkHeader", page_s
  * JSONPath to a boolean / truthy "has more" indicator.
  */
 has_more_path: string, max_pages?: number | null, };
+
+/**
+ * One row of the parcours landing list (`GET /api/mentor/parcours`): enough to
+ * render a card and open it, without shipping the whole `MentorState`.
+ */
+export type ParcoursSummary = { disc_id: string, title: string, mode: MentorMode, status: MentorStatus, objective: string, source: MentorSource, progress_done: number, progress_total: number,
+/**
+ * ISO-8601 last-updated timestamp (for ordering / "reprendre" hints).
+ */
+updated_at: string,
+/**
+ * Set when a background generation failed (status stays `generating`) — lets
+ * the card show a failed state instead of a spinner.
+ */
+generation_error?: string | null,
+/**
+ * Linked project (onboarding is always project-scoped; mentor is usually
+ * null) — lets the landing list group parcours by project.
+ */
+project_id?: string | null, project_name?: string | null,
+/**
+ * Source onboarding topic id (if generated from a registry topic) — lets the
+ * catalogue match a topic to its existing parcours (resume vs duplicate).
+ */
+topic_id?: string | null,
+/**
+ * Registry level / curriculum kind (from the source topic) — lets the
+ * landing card badge a parcours' difficulty and role at a glance. `None` for
+ * a free parcours (no source topic).
+ */
+level?: string | null, kind?: string | null, };
 
 export type PartialAuditRequest = { agent: AgentType, steps: Array<number>, };
 
@@ -2611,6 +3014,15 @@ export type Project = { id: string, name: string, path: string, repo_url: string
  */
 tech_debt_count: number,
 /**
+ * Number of onboarding course topics parsed from the project's
+ * `docs/onboarding.md` registry (0 = none / no registry). Computed by
+ * `enrich_audit_status` via `onboarding_registry::parse_registry`. Surfaced
+ * as an "Onboarding" badge on the project card, and used by the Mentor
+ * onboarding catalogue to list ONLY projects that actually have onboarding.
+ * Not persisted in DB.
+ */
+onboarding_count: number,
+/**
  * True when the project still uses the legacy `ai/index.md` layout
  * and no migrated `docs/AGENTS.md` exists. Computed by
  * `enrich_audit_status` — drives the migration banner on
@@ -2835,6 +3247,13 @@ export type RemoteRepo = { name: string, full_name: string, clone_url: string, s
 export type RepoSource = { id: string, label: string, provider: string, };
 
 /**
+ * `POST /api/mentor/parcours/{id}/hint` body — request a graded "Coup de
+ * pouce" on `block`. `submission` is what the learner has typed so far (may be
+ * empty). The `subject` and project anchor are derived server-side.
+ */
+export type RequestHintRequest = { block: MentorPhase, submission?: string, };
+
+/**
  * Response for [`resume_interrupted`].
  */
 export type ResumeRunResponse = { run_id: string, new_status: RunStatus, };
@@ -2967,6 +3386,15 @@ envelope: JsonValue | null,
 error: string | null, };
 
 export type RunStatus = "Pending" | "Running" | "Success" | "Failed" | "Cancelled" | "WaitingApproval" | "StoppedByGuard" | "Interrupted";
+
+/**
+ * `POST /api/mentor/parcours/{id}/turn` body — run a live mentor→censeur→
+ * evaluateur turn on `block` for the learner's `submission`. The mentor answer
+ * is generated + censeur-vetted SERVER-SIDE; the client sends only the raw
+ * submission and never receives (nor supplies) an unvetted reply. Returns the
+ * parcours with `last_turn.status == "pending"`; poll `getParcours` to settle.
+ */
+export type RunTurnRequest = { block: MentorPhase, submission: string, };
 
 export type SaveApiKeyRequest = { id?: string | null, name: string, provider: string, value: string, };
 
@@ -3110,7 +3538,37 @@ default_model_tier: ModelTier,
  * Strict semantic — only consulted on NEW disc creation. Existing
  * discs keep their saved value (no retroactive change).
  */
-default_summary_strategy: SummaryStrategy, };
+default_summary_strategy: SummaryStrategy,
+/**
+ * Mode Mentor — id of the parameterized "mentor→censeur turn" workflow a
+ * parcours triggers on each learner submission. Instance-specific (the
+ * workflow is created per Kronn instance), so no compile-time default:
+ * `None` = the live mentor turn isn't wired yet (the parcours still works
+ * as a viewer + deterministic state machine). See docs/design/mentor-mode.md.
+ */
+mentor_turn_workflow_id: string | null,
+/**
+ * Mode Mentor — id of the "parcours generator" workflow that drafts a
+ * parcours (objective/criteria/resources/target) from a Jira ticket or a
+ * free subject. Instance-specific; `None` = no AI generation (the tutor
+ * fills the draft by hand). See docs/design/mentor-mode.md.
+ */
+mentor_generator_workflow_id: string | null,
+/**
+ * Mode Mentor — id of the onboarding "course generator" workflow (drafts a
+ * chapter-based course). Instance-specific; `None` = no AI course generation.
+ */
+mentor_course_workflow_id: string | null,
+/**
+ * Mode Mentor — id of the graded "hint" workflow (mentor nudge → censeur).
+ * Instance-specific; `None` = the hint button just bumps the counter.
+ */
+mentor_hint_workflow_id: string | null,
+/**
+ * Mode Mentor — id of the "closure synthesis" workflow (mentor recaps what
+ * was learned once the parcours completes). `None` = no synthesis generated.
+ */
+mentor_bilan_workflow_id: string | null, };
 
 export type ServerConfigPublic = { host: string, port: number, domain: string | null, max_concurrent_agents: number, agent_stall_timeout_min: number, auth_enabled: boolean, pseudo: string | null, avatar_email: string | null, bio: string | null, debug_mode: boolean,
 /**
@@ -3126,7 +3584,30 @@ default_model_tier: ModelTier,
  * `Off` by default in 0.8.6 onwards. UI surfaces an explanation of
  * when to re-enable (small-context agents without MCP access).
  */
-default_summary_strategy: SummaryStrategy, };
+default_summary_strategy: SummaryStrategy,
+/**
+ * Mode Mentor — mirrors `ServerConfig.mentor_turn_workflow_id` so the
+ * frontend can trigger the mentor→censeur workflow (via the existing
+ * workflows API) without an extra round-trip. `None` = not wired yet.
+ */
+mentor_turn_workflow_id: string | null,
+/**
+ * Mode Mentor — mirrors `ServerConfig.mentor_generator_workflow_id`.
+ * `None` = no AI draft generation available.
+ */
+mentor_generator_workflow_id: string | null,
+/**
+ * Mode Mentor — mirrors `ServerConfig.mentor_course_workflow_id`.
+ */
+mentor_course_workflow_id: string | null,
+/**
+ * Mode Mentor — mirrors `ServerConfig.mentor_hint_workflow_id`.
+ */
+mentor_hint_workflow_id: string | null,
+/**
+ * Mode Mentor — mirrors `ServerConfig.mentor_bilan_workflow_id`.
+ */
+mentor_bilan_workflow_id: string | null, };
 
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
 
@@ -3144,6 +3625,12 @@ export type SetRecoveryResponse = {
  * encryption key survives total loss of the machine / keychain / data dir.
  */
 recovery_code: string, };
+
+/**
+ * `POST /api/mentor/parcours/{id}/resource-read` body — mark curated resource
+ * #index read/unread. Index is 0-based into `resources`.
+ */
+export type SetResourceReadRequest = { index: number, read: boolean, };
 
 export type SetScanPathsRequest = { paths: Array<string>, };
 
@@ -3337,6 +3824,11 @@ child_run_id?: string | null, };
 
 export type StepType = { "type": "Agent" } | { "type": "ApiCall" } | { "type": "BatchQuickPrompt" } | { "type": "Notify" } | { "type": "Gate" } | { "type": "Exec" } | { "type": "BatchApiCall" } | { "type": "JsonData" } | { "type": "SubWorkflow" };
 
+/**
+ * `POST /api/mentor/parcours/{id}/submit` body.
+ */
+export type SubmitBlockRequest = { block: MentorPhase, content: string, };
+
 export type SummarizeRequest = {
 /**
  * 0-based start index (inclusive). `None` = start of transcript.
@@ -3507,7 +3999,37 @@ export type TrackerSourceConfig = { "type": "GitHub", owner: string, repo: strin
  * "trigger with no variables" flow working — back-compat for tracker
  * triggers that don't need variables.
  */
-export type TriggerWorkflowRequest = { variables?: Record<string, string>, };
+export type TriggerWorkflowRequest = { variables?: Record<string, string>,
+/**
+ * Optional per-run project override. When set, the run executes against
+ * this project's checkout (cwd + MCP context) instead of the workflow's
+ * own `project_id`. Used by project-less seeded workflows (e.g. the Mode
+ * Mentor course/parcours generators) so a generation anchors on the real
+ * files of the project the user picked. `None` = keep `wf.project_id`.
+ */
+project_id?: string | null, };
+
+/**
+ * The most recent live mentor→censeur→evaluateur turn on a learner block. The
+ * turn runs SERVER-SIDE (see `api::mentor::run_turn`) so the mentor's RAW answer
+ * never reaches the browser — the client only ever sees the censeur-vetted reply
+ * folded into `block.turns`. Persisted (like [`HintState`]) so the turn survives
+ * navigating away and the UI can poll until it settles.
+ */
+export type TurnState = {
+/**
+ * The learner block this turn ran on.
+ */
+block: MentorPhase,
+/**
+ * Reuses the hint lifecycle: `Pending` → `Ready` (reply kept) / `Filtered`
+ * (censeur blocked it, fail-closed) / `Failed`.
+ */
+status: HintStatus,
+/**
+ * Human-readable error — set only when `status == Failed`.
+ */
+error?: string | null, };
 
 /**
  * `PUT /api/mcps/custom/:server_id` — 0.8.6 — update a Custom API
@@ -4276,7 +4798,14 @@ misconfigured_step_count: number, enabled: boolean,
 /**
  * User-pinned / favorite — the list surfaces pinned workflows first.
  */
-pinned: boolean, last_run: WorkflowRunSummary | null, created_at: string, };
+pinned: boolean, last_run: WorkflowRunSummary | null, created_at: string,
+/**
+ * True for builtin system workflows (currently the Mode Mentor seeds).
+ * The Workflows page groups these under a collapsed "Système" section and
+ * offers "reset to seed" instead of a destructive delete. Derived from the
+ * id prefix (see `db::workflows::is_system_workflow_id`), not stored.
+ */
+is_system: boolean, };
 
 export type WorkflowTrigger = { "type": "Cron", schedule: string, } | { "type": "Tracker", source: TrackerSourceConfig, query: string, labels: Array<string>, interval: string, } | { "type": "Manual" };
 
