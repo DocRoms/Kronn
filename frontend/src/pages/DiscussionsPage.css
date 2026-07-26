@@ -1933,6 +1933,29 @@
   white-space: nowrap;
 }
 
+.planning-proposal-task-list {
+  display: grid;
+  gap: 3px;
+  max-height: 132px;
+  margin: 6px 0 0;
+  padding: 0 4px 0 20px;
+  overflow-y: auto;
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+}
+
+.planning-proposal-task-list li {
+  padding-left: 2px;
+  overflow-wrap: anywhere;
+}
+
+.planning-proposal-task-list li::marker {
+  color: var(--kr-accent-ink);
+  font-family: var(--kr-font-mono);
+  font-size: 10px;
+}
+
 .planning-proposal-main > small {
   color: var(--kr-error);
 }

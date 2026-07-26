@@ -74,6 +74,15 @@ export function PlanningActionCard({ proposal, discussionId }: Props) {
       <div className="planning-proposal-main">
         <span>{t('planning.agentProposal')}</span>
         <strong>{title}</strong>
+        {proposal.action === 'create_many' && (
+          <ol className="planning-proposal-task-list">
+            {proposal.tasks.map((task, index) => (
+              <li key={`${task.title}-${index}`} title={task.title.trim()}>
+                {task.title.trim()}
+              </li>
+            ))}
+          </ol>
+        )}
         {error && <small>{error}</small>}
       </div>
       <button type="button" onClick={() => void apply()} disabled={state !== 'idle'}>
