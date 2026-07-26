@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { freshnessOf, presenceFromActivity } from '../discPresence';
+import {
+  freshnessForPresence,
+  freshnessOf,
+  honestPresenceState,
+  presenceFromActivity,
+  secondsUntil,
+} from '../discPresence';
 
 const AWAY = 600_000; // 480s cap + 2min margin
 
@@ -35,5 +41,37 @@ describe('presenceFromActivity (presence-gap fix)', () => {
   it('an unknown/future activity token does NOT fake presence', () => {
     // Forward-compat: only the known live set outranks the heartbeat.
     expect(presenceFromActivity('pondering', stale, AWAY)).toBe('away');
+  });
+});
+
+describe('honestPresenceState (0.9.2 server contract + legacy fallback)', () => {
+  const recent = new Date(Date.now() - 30_000).toISOString();
+  const stale = new Date(Date.now() - 20 * 60_000).toISOString();
+
+  it('trusts a known server state but always projects paused to offline', () => {
+    expect(honestPresenceState('listening', 'active', null, stale, AWAY)).toBe('listening');
+    expect(honestPresenceState('dormant', 'active', 'listening', recent, AWAY)).toBe('dormant');
+    expect(honestPresenceState('listening', 'paused', 'listening', recent, AWAY)).toBe('offline');
+  });
+
+  it('never claims a legacy heartbeat alone means listening', () => {
+    expect(honestPresenceState(undefined, 'active', null, recent, AWAY)).toBe('dormant');
+    expect(honestPresenceState(undefined, 'active', null, stale, AWAY)).toBe('offline');
+    expect(honestPresenceState(undefined, 'active', 'waiting', stale, AWAY)).toBe('dormant');
+    expect(honestPresenceState(undefined, 'active', 'reading', stale, AWAY)).toBe('listening');
+  });
+
+  it('maps honest states to the legacy color freshness scale', () => {
+    expect(freshnessForPresence('running')).toBe('fresh');
+    expect(freshnessForPresence('listening')).toBe('fresh');
+    expect(freshnessForPresence('dormant')).toBe('idle');
+    expect(freshnessForPresence('offline')).toBe('away');
+  });
+
+  it('computes a safe non-negative next-poll delay', () => {
+    expect(secondsUntil(null)).toBeNull();
+    expect(secondsUntil('not-a-date')).toBeNull();
+    expect(secondsUntil(new Date(Date.now() - 1_000).toISOString())).toBe(0);
+    expect(secondsUntil(new Date(Date.now() + 30_000).toISOString())).toBeGreaterThan(0);
   });
 });

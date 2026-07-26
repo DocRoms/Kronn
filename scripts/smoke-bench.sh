@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Smoke-bench process manager — the guard born from the 0.8.11 smoke P1:
 # a `pgrep target/debug/kronn | head -1` killed PRODUCTION (same binary,
-# running under cargo watch) instead of the bench instance.
+# running under the native dev watcher) instead of the bench instance.
 #
 # Contract:
 #   start <bench_dir>   spawn the backend on the bench dir, CAPTURE the pid

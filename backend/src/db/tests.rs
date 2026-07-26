@@ -3041,6 +3041,9 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
             author_avatar_email: Some("test@example.com".into()),
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     )
     .unwrap();
@@ -3071,6 +3074,16 @@ fn create_batch_run_pure_fn_roundtrip_toplevel() {
             format!("Analyse le ticket EW-{} en profondeur", 100 + i)
         );
         assert_eq!(disc.messages[0].author_pseudo.as_deref(), Some("TestUser"));
+        let dispatch = crate::db::agent_dispatch::find_active_for_discussion(&conn, disc_id)
+            .unwrap()
+            .expect("batch child owns a durable dispatch job");
+        assert_eq!(dispatch.trigger_message_id, disc.messages[0].id);
+        assert_eq!(dispatch.group_id.as_deref(), Some(outcome.run_id.as_str()));
+        assert_eq!(
+            dispatch.status,
+            crate::db::agent_dispatch::DispatchStatus::Pending
+        );
+        assert!(disc.awaiting_agent);
     }
 }
 
@@ -3114,6 +3127,9 @@ fn create_batch_run_chained_from_linear_parent() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     )
     .unwrap();
@@ -3182,7 +3198,7 @@ fn partial_response_set_then_recover_inserts_agent_message() {
 
     // Simulate the agent task checkpointing some thinking
     let partial = "I am in the middle of analyzing the issue. Let me look at the code...";
-    crate::db::discussions::set_partial_response(&conn, "disc-pr-1", Some(partial)).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-pr-1", Some(partial), None).unwrap();
 
     // Verify it's there
     let stored: Option<String> = conn
@@ -3221,11 +3237,18 @@ fn partial_response_set_then_recover_inserts_agent_message() {
         )
         .unwrap();
     assert_eq!(msg_count, 1);
-    let (role, content): (String, String) = conn
+    let (role, content, recovered_partial): (String, String, i64) = conn
         .query_row(
-            "SELECT role, content FROM messages WHERE discussion_id = 'disc-pr-1'",
+            "SELECT role, content, recovered_partial
+             FROM messages WHERE discussion_id = 'disc-pr-1'",
             [],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, i64>(2)?,
+                ))
+            },
         )
         .unwrap();
     assert_eq!(role, "Agent");
@@ -3236,6 +3259,10 @@ fn partial_response_set_then_recover_inserts_agent_message() {
     assert!(
         content.contains("Réflexion interrompue"),
         "Footer must be appended"
+    );
+    assert_eq!(
+        recovered_partial, 1,
+        "recovered output must never satisfy a dispatch completion lookup"
     );
 }
 
@@ -3294,7 +3321,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
 
     // First checkpoint sets the started_at
-    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v1")).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v1"), None).unwrap();
     let first_ts: String = conn
         .query_row(
             "SELECT partial_response_started_at FROM discussions WHERE id = 'disc-ts'",
@@ -3310,7 +3337,7 @@ fn partial_response_preserves_started_at_across_checkpoints() {
     // Wait a tick (in real life: 30s of agent thinking) — second checkpoint
     // updates `partial_response` but MUST NOT shift `started_at`.
     std::thread::sleep(std::time::Duration::from_millis(20));
-    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v2 longer"))
+    crate::db::discussions::set_partial_response(&conn, "disc-ts", Some("draft v2 longer"), None)
         .unwrap();
     let second_ts: String = conn
         .query_row(
@@ -3386,9 +3413,9 @@ fn has_pending_partial_returns_true_when_set() {
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
     assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
-    crate::db::discussions::set_partial_response(&conn, "disc-pending", Some("hi")).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-pending", Some("hi"), None).unwrap();
     assert!(crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
-    crate::db::discussions::set_partial_response(&conn, "disc-pending", None).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-pending", None, None).unwrap();
     assert!(!crate::db::discussions::has_pending_partial(&conn, "disc-pending").unwrap());
 }
 
@@ -3431,8 +3458,8 @@ fn partial_response_clear_with_none_wipes_column() {
         updated_at: now,
     };
     crate::db::discussions::insert_discussion(&conn, &disc).unwrap();
-    crate::db::discussions::set_partial_response(&conn, "disc-clear", Some("draft")).unwrap();
-    crate::db::discussions::set_partial_response(&conn, "disc-clear", None).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-clear", Some("draft"), None).unwrap();
+    crate::db::discussions::set_partial_response(&conn, "disc-clear", None, None).unwrap();
     let (after, after_ts): (Option<String>, Option<String>) = conn.query_row(
         "SELECT partial_response, partial_response_started_at FROM discussions WHERE id = 'disc-clear'",
         [], |r| Ok((r.get(0)?, r.get(1)?)),
@@ -3487,6 +3514,9 @@ fn delete_batch_run_cascades_discussions_and_messages() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     )
     .unwrap();
@@ -3613,6 +3643,9 @@ fn create_batch_run_isolated_mode_persists_on_children() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "Isolated".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     )
     .unwrap();
@@ -3649,6 +3682,9 @@ fn create_batch_run_direct_mode_is_default_when_empty() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     )
     .unwrap();
@@ -3684,6 +3720,9 @@ fn create_batch_run_sets_workflow_run_id_on_discussions() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     )
     .unwrap();
@@ -5056,6 +5095,9 @@ fn create_batch_run_rolls_back_on_discussion_fk_violation() {
             author_avatar_email: Some("test@example.com".into()),
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     );
 
@@ -5131,6 +5173,9 @@ fn create_batch_run_subsequent_call_after_rollback_succeeds_cleanly() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     );
     assert!(bad.is_err());
@@ -5152,6 +5197,9 @@ fn create_batch_run_subsequent_call_after_rollback_succeeds_cleanly() {
             author_avatar_email: None,
             language: "fr".into(),
             workspace_mode: "Direct".into(),
+            chain_prompt_ids: Vec::new(),
+            chain_batch_items: Vec::new(),
+            group_concurrency_limit: None,
         },
     );
     assert!(good.is_ok(), "subsequent call after rollback must succeed");

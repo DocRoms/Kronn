@@ -4,8 +4,12 @@
  *  the contract between the agent (which writes the fence) and the
  *  UI (which renders the preview + export button). */
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MarkdownContent } from '../MessageBubble';
+
+const mocks = vi.hoisted(() => ({
+  proposal: vi.fn(),
+}));
 
 // DocPreview + DocDataExport both talk to /api/docs — stub the module
 // to avoid hitting the network in these pure-rendering tests.
@@ -16,6 +20,10 @@ vi.mock('../../lib/api', () => ({
     generateXlsx: vi.fn(),
     generateCsv: vi.fn(),
     generatePptx: vi.fn(),
+  },
+  planning: {
+    proposal: mocks.proposal,
+    decideProposalItem: vi.fn(),
   },
 }));
 
@@ -148,5 +156,49 @@ describe('MarkdownContent — kronn-doc-data fence', () => {
 
     expect(screen.queryByRole('button', { name: /export/i })).toBeNull();
     expect(document.querySelector('pre')).not.toBeNull();
+  });
+});
+
+describe('MarkdownContent — durable planning fence identity', () => {
+  it('maps multiple fences to deterministic message-local indices', async () => {
+    mocks.proposal.mockImplementation((id: string) => Promise.resolve({
+      id,
+      discussion_id: 'disc-1',
+      source_message_id: 'message-1',
+      fence_index: Number(id.split(':').at(-1)),
+      aggregate_state: 'pending',
+      items: [{
+        id: `${id}:item:0`,
+        item_index: 0,
+        action: 'create',
+        payload: { title: id.endsWith(':0') ? 'First task' : 'Second task' },
+        state: 'pending',
+      }],
+      created_at: '2026-07-26T00:00:00Z',
+      updated_at: '2026-07-26T00:00:00Z',
+    }));
+    const md = [
+      '```kronn-plan-action',
+      '{"action":"create","title":"First task"}',
+      '```',
+      '',
+      'Some explanation.',
+      '',
+      '```kronn-plan-action',
+      '{"action":"create","title":"Second task"}',
+      '```',
+    ].join('\n');
+
+    render(
+      <MarkdownContent
+        content={md}
+        discussionId="disc-1"
+        sourceMessageId="message-1"
+      />,
+    );
+
+    await waitFor(() => expect(mocks.proposal).toHaveBeenCalledTimes(2));
+    expect(mocks.proposal).toHaveBeenNthCalledWith(1, 'proposal:message-1:0');
+    expect(mocks.proposal).toHaveBeenNthCalledWith(2, 'proposal:message-1:1');
   });
 });

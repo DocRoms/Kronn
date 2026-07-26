@@ -7,7 +7,86 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.9.1]
+## [0.9.2] - 2026-07-27
+
+### Added
+
+- **Durable Planning proposals with human-gated validation.** An agent's
+  `kronn-plan-action` fence is parsed and persisted the instant its message is
+  stored — so a proposal exists in the inbox even if nobody opens the message —
+  and validated item by item by a human. Each item is accepted or rejected (with
+  an optional reason); acceptance applies the underlying task mutation and links
+  it to the discussion in one transaction, idempotently (a retry with the same
+  key returns the same result, never a duplicate; a contradictory decision on an
+  already-decided item is refused). A light, non-error `[kronn-planning: …]`
+  receipt is posted after each decision, and the discussion-plan panel gains a
+  validation inbox with a pending counter in the header. Read-only `proposal_list`
+  / `proposal_get` MCP tools let agents SEE proposals; only a human ever decides.
+- **Honest agent presence.** Participants show a truthful state — `listening` (a
+  poll is genuinely open), `dormant` (a next poll is due), `offline` (nothing
+  will wake it) — instead of a lingering "connected". Read- and write-liveness
+  are tracked separately, a duplicate reconnect no longer leaves a phantom
+  offline twin, and an absent mentioned agent's obligation surfaces as "waiting
+  for a runtime".
+- **Targeted `@agent` mentions between peers.** A structured `@agent` mention in
+  a peer's message routes a durable one-shot response to that agent (including a
+  local model), instead of being dropped or answered by the wrong agent.
+- **Model provenance on every turn.** A reply now records the concrete model it
+  ran on — including a non-zero exit, a stall, a cancel, and a partial recovered
+  after a restart — and a failed agent launch labels the model it tried. Debate
+  rounds and their synthesis are stamped too. A joining CLI peer may self-declare
+  the model it runs on, shown in the participant header as declared-at-join;
+  Kronn never guesses one.
+- **Focused discussion plan with dependency context.** The plan panel opens on
+  what matters — the primary objective, up to 3 in-progress tasks and the next 5
+  actionable ones in plan order, with a compact ready / blocked / done summary. A
+  searchable "all tasks" view virtualizes the full plan (bounded DOM at hundreds
+  or thousands of rows, keyboard-navigable) and, on selecting a task, shows its
+  dependency neighbourhood (blockers → task → blocked tasks), with real links to
+  an external blocker's own discussion or project.
+
+### Changed
+
+- **Reliability core.** Durable per-discussion message sequence with an SSE
+  acceptance receipt and idempotent re-submits; a durable agent-dispatch queue
+  that survives restarts (Running jobs requeue with their attempt count
+  preserved) and defers — rather than loses — a dispatch whose runtime is
+  momentarily unavailable; atomic edit/resend guarded by a compare-and-set (409
+  on a stale revision); a refcounted shared power guard; and a stabler
+  serve/readiness path.
+- **Release gate.** A stateful integration suite exercises restart, double-
+  submit, cancel and a real old-schema→current migration on a populated
+  database, so "no lost or duplicated message/job" is enforced, not assumed.
+- **Consistent Planning contract across agent surfaces.** The prompt injected into
+  Kronn-launched agents and the `kronn-internal` MCP instructions now state the
+  same contract — read the plan, apply an unambiguous change directly, otherwise
+  propose a human-gated fence; only a human decides a durable proposal — pinned by
+  a shared-invariant test so the two surfaces cannot drift.
+- **Discussion-plan projection no longer fans out per task.** The plan loads in a
+  fixed number of SQL queries whatever its size (the previous per-relation
+  fan-out is gone), and each relation now carries its active blockers and an
+  `actionable` flag so the UI never re-derives them.
+- **Planning summaries are actionable.** Ready, blocked, completed and later
+  counters now filter the complete plan directly. Selecting a task keeps its
+  detail in an independently scrollable lower pane while the task list retains
+  its own position.
+
+### Fixed
+
+- A message could be lost when the backend errored on send (HTTP 502); the draft
+  is now preserved instead of discarded.
+- Ollama and other mentioned agents reliably respond when addressed; the GitHub
+  Copilot CLI launches with the correct arguments and model.
+- Newly-installed CLI agents (e.g. Mistral Vibe) receive their Kronn MCP config,
+  are detected on macOS, and heal a stale `Unknown` identity to their real one on
+  reconnect without leaving a duplicate participant.
+- Agent-authored `@agent` mentions render as chips, like human messages.
+- The discussion header keeps the invite action pinned and clickable when three
+  or more long offline-agent chips overflow on narrow screens.
+- The expanded Git panel keeps long changed-file lists independently scrollable,
+  so every file remains reachable beside the diff.
+
+## [0.9.1] - 2026-07-26
 
 ### Added
 
@@ -78,7 +157,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every public current-version marker, while `make check-version` and CI reject
   stale release metadata.
 
-## [0.9.0]
+## [0.9.0] - 2026-07-25
 
 ### Added
 

@@ -59,6 +59,12 @@ pub struct PeerJoinRequest {
     /// CLI-assigned session id. UUID-like for Claude Code, numeric or
     /// string for others. Treated as an opaque identifier.
     pub session_id: String,
+    /// KT-37 — the model the joining CLI declares it runs on (e.g.
+    /// `"claude-opus-4"`). Optional, self-declared, never inferred: trimmed and
+    /// bounded, stored as declared-at-join. Omitted or blank preserves any
+    /// value declared on a previous join/rebind (legacy bridges omit it).
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Wire shape returned by `peer-join`. Carries the disc id (so the
@@ -152,6 +158,19 @@ pub async fn peer_join(
     if req.session_id.trim().is_empty() {
         return Json(ApiResponse::err("session_id required"));
     }
+    // KT-37 — a declared model is recorded verbatim, never silently truncated.
+    // An over-long declaration is rejected with a clear message (the client can
+    // retry without it or shorten it) rather than storing a mangled name.
+    if req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|m| m.chars().count() > 200)
+    {
+        return Json(ApiResponse::err(
+            "model declaration too long (max 200 chars) — omit it or shorten it",
+        ));
+    }
 
     let token = req.token.clone();
     let agent_type = req.agent_type.clone();
@@ -183,6 +202,27 @@ pub async fn peer_join(
             }
         }
     };
+
+    // KT-37 — record the optionally-declared model. Declared at join, explicit
+    // updates only: a blank/omitted value never overwrites an existing one, so
+    // we only write when the joiner actually declared something. Trimmed but
+    // never truncated (length already validated above).
+    if let Some(model) = req
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|m| !m.is_empty())
+        .map(str::to_string)
+    {
+        let pk = session_pk;
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| db::discussion_sessions::set_session_model(conn, pk, &model))
+            .await
+        {
+            tracing::warn!("peer_join: failed to record declared model: {e}");
+        }
+    }
 
     // Build the response from the resolved disc (shared by local + mirror paths).
     let res = state
@@ -534,6 +574,12 @@ pub struct WaitForPeerMessage {
     /// treat a same-`agent_type` peer (e.g. another ClaudeCode instance) as a
     /// real peer instead of filtering it out as "self".
     pub author_pseudo: Option<String>,
+    /// Present for projection-change events that are cursor-visible but not
+    /// rendered as transcript messages.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -690,10 +736,23 @@ pub async fn wait_for_peer(
                 // exclude_agent_type in Rust to avoid threading an
                 // Option<String> through the SQL binder.
                 let mut stmt = conn.prepare(
-                    "SELECT sort_order, role, agent_type, content, timestamp, author_pseudo
-                       FROM messages
-                      WHERE discussion_id = ?1 AND sort_order > ?2
-                      ORDER BY sort_order ASC",
+                    "SELECT sort_order, role, agent_type, content, timestamp,
+                            author_pseudo, event_type, target_message_id
+                     FROM (
+                         SELECT sort_order, role, agent_type, content, timestamp,
+                                author_pseudo, NULL AS event_type,
+                                NULL AS target_message_id
+                         FROM messages
+                         WHERE discussion_id = ?1 AND sort_order > ?2
+                         UNION ALL
+                         SELECT sort_order, 'System' AS role, NULL AS agent_type,
+                                '[message_revised] ' || target_message_id || char(10) || content,
+                                created_at AS timestamp, NULL AS author_pseudo,
+                                'message_revised' AS event_type, target_message_id
+                         FROM message_revision_events
+                         WHERE discussion_id = ?1 AND sort_order > ?2
+                     )
+                     ORDER BY sort_order ASC",
                 )?;
                 let rows: Vec<WaitForPeerMessage> = stmt
                     .query_map(rusqlite::params![&disc_id_clone, since], |r| {
@@ -704,6 +763,8 @@ pub async fn wait_for_peer(
                             content: r.get(3)?,
                             timestamp: r.get(4)?,
                             author_pseudo: r.get(5)?,
+                            event_type: r.get(6)?,
+                            target_message_id: r.get(7)?,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -778,6 +839,8 @@ pub async fn wait_for_peer(
             // next-poll instant back to the MCP caller for its scheduling.
             let next_poll_at = if let Some(ref agent_type) = exclude {
                 let waiting_ttl = pacing.next_delay_seconds as i64 + ACTIVITY_WAITING_MARGIN_SECS;
+                let next_poll_instant = chrono::Utc::now()
+                    + chrono::Duration::seconds(pacing.next_delay_seconds as i64);
                 if let Some(caller_session_id) = session_id.as_ref() {
                     let disc_id_w = disc_id.clone();
                     let agent_w = agent_type.clone();
@@ -792,18 +855,26 @@ pub async fn wait_for_peer(
                                 Some(&sess_w),
                                 "waiting",
                                 waiting_ttl,
+                            )?;
+                            // 0.9.2-G: persist the next-poll instant so the
+                            // participants surface tells `dormant` (poll still
+                            // due) from `offline` (blew past the deadline).
+                            crate::db::discussion_sessions::set_next_poll_at(
+                                conn,
+                                &disc_id_w,
+                                &agent_w,
+                                Some(&sess_w),
+                                next_poll_instant,
                             )
                         })
                         .await
                     {
-                        tracing::warn!("wait_for_peer: failed to set waiting activity: {e}");
+                        tracing::warn!(
+                            "wait_for_peer: failed to set waiting activity / next_poll_at: {e}"
+                        );
                     }
                 }
-                Some(
-                    (chrono::Utc::now()
-                        + chrono::Duration::seconds(pacing.next_delay_seconds as i64))
-                    .to_rfc3339(),
-                )
+                Some(next_poll_instant.to_rfc3339())
             } else {
                 None
             };
@@ -828,10 +899,10 @@ pub async fn wait_for_peer(
 pub async fn list_participants(
     State(state): State<AppState>,
     Path(disc_id): Path<String>,
-) -> Json<ApiResponse<Vec<db::discussion_sessions::DiscussionSession>>> {
+) -> Json<ApiResponse<Vec<db::discussion_sessions::ParticipantView>>> {
     let res = state
         .db
-        .with_conn(move |conn| db::discussion_sessions::list_sessions(conn, &disc_id, false))
+        .with_conn(move |conn| db::discussion_sessions::list_participant_views(conn, &disc_id))
         .await;
     match res {
         Ok(list) => Json(ApiResponse::ok(list)),
@@ -1393,6 +1464,7 @@ mod tests {
                 token,
                 agent_type: "Codex".into(),
                 session_id: "sess-cdx-1".into(),
+                model: None,
             }),
         )
         .await;
@@ -1432,6 +1504,7 @@ mod tests {
                 token,
                 agent_type: "Codex".into(),
                 session_id: "child-before-reload".into(),
+                model: None,
             }),
         )
         .await
@@ -1516,6 +1589,7 @@ mod tests {
                 token,
                 agent_type: "Codex".into(),
                 session_id: "before".into(),
+                model: None,
             }),
         )
         .await
@@ -1584,6 +1658,7 @@ mod tests {
                 token,
                 agent_type: "Codex".into(),
                 session_id: "sess-pace".into(),
+                model: None,
             }),
         )
         .await;
@@ -1650,6 +1725,7 @@ mod tests {
                 token: "kr-join-bogus".into(),
                 agent_type: "Codex".into(),
                 session_id: "sess".into(),
+                model: None,
             }),
         )
         .await;
@@ -1666,21 +1742,81 @@ mod tests {
                 token: "".into(),
                 agent_type: "Codex".into(),
                 session_id: "s".into(),
+                model: None,
             },
             PeerJoinRequest {
                 token: "kr-join-x".into(),
                 agent_type: "".into(),
                 session_id: "s".into(),
+                model: None,
             },
             PeerJoinRequest {
                 token: "kr-join-x".into(),
                 agent_type: "Codex".into(),
                 session_id: "".into(),
+                model: None,
             },
         ] {
             let resp = peer_join(State(state.clone()), Json(bad)).await;
             assert!(!resp.0.success);
         }
+    }
+
+    #[tokio::test]
+    async fn peer_join_records_declared_model_and_rejects_overlong() {
+        // KT-37 — a JOIN may self-declare its model (recorded verbatim as
+        // declared-at-join, trimmed); an over-long declaration is refused, never
+        // silently truncated.
+        let state = make_state_with_disc("d-join-model").await;
+        let invite = invite_peer(State(state.clone()), Path("d-join-model".to_string())).await;
+        let token = invite.0.data.unwrap().token;
+
+        let ok = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token: token.clone(),
+                agent_type: "Codex".into(),
+                session_id: "sess-model".into(),
+                model: Some("  gpt-5-codex  ".into()),
+            }),
+        )
+        .await;
+        assert!(
+            ok.0.success,
+            "join with a declared model must succeed: {:?}",
+            ok.0.error
+        );
+        let sessions = state
+            .db
+            .with_conn(|conn| {
+                crate::db::discussion_sessions::list_sessions(conn, "d-join-model", false)
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.session_id.as_deref() == Some("sess-model"))
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("gpt-5-codex"),
+            "declared model is trimmed + recorded verbatim (no truncation)"
+        );
+
+        // Over-long → clean refusal, never a mangled name.
+        let rejected = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token: token.clone(),
+                agent_type: "Codex".into(),
+                session_id: "sess-long".into(),
+                model: Some("m".repeat(201)),
+            }),
+        )
+        .await;
+        assert!(!rejected.0.success);
+        assert!(rejected.0.error.unwrap().contains("too long"));
     }
 
     #[tokio::test]
@@ -1705,6 +1841,7 @@ mod tests {
                     token: token.clone(),
                     agent_type: agent.into(),
                     session_id: sess.into(),
+                    model: None,
                 }),
             )
             .await;
@@ -1777,6 +1914,7 @@ mod tests {
                 token: token_a,
                 agent_type: "ClaudeCode".into(),
                 session_id: "sess-A".into(),
+                model: None,
             }),
         )
         .await;
@@ -1814,6 +1952,7 @@ mod tests {
                 token: token_b,
                 agent_type: "Codex".into(),
                 session_id: "sess-B".into(),
+                model: None,
             }),
         )
         .await;
@@ -1926,6 +2065,7 @@ mod tests {
                     token,
                     agent_type: agent.into(),
                     session_id: sess.into(),
+                    model: None,
                 }),
             )
             .await;
@@ -1954,6 +2094,7 @@ mod tests {
                 token,
                 agent_type: "Codex".into(),
                 session_id: "sess-Z".into(),
+                model: None,
             }),
         )
         .await;
@@ -2060,6 +2201,56 @@ mod tests {
         assert_eq!(data.messages.len(), 1);
         assert_eq!(data.messages[0].content, "hello peer");
         assert_eq!(data.latest_sort_order, 5);
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_observes_message_revision_event_beyond_cursor() {
+        let state = make_state_with_disc("d-wait-revision").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO message_revision_events (
+                         id, discussion_id, target_message_id,
+                         previous_content_hash, expected_revision, revision,
+                         content, idempotency_key, sort_order, created_at
+                     ) VALUES (
+                         'rev-event', 'd-wait-revision', 'user-target',
+                         'hash-before', 'opaque-before', ?1,
+                         'edited content', 'revision-key', 4, ?1
+                     )",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = wait_for_peer(
+            State(state),
+            Path("d-wait-revision".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(3),
+                timeout_secs: Some(5),
+                exclude_agent_type: None,
+                session_id: None,
+            }),
+        )
+        .await;
+        let data = response.0.data.unwrap();
+        assert!(!data.timed_out);
+        assert_eq!(data.latest_sort_order, 4);
+        assert_eq!(data.messages.len(), 1);
+        assert_eq!(
+            data.messages[0].event_type.as_deref(),
+            Some("message_revised")
+        );
+        assert_eq!(
+            data.messages[0].target_message_id.as_deref(),
+            Some("user-target")
+        );
+        assert!(data.messages[0].content.contains("edited content"));
     }
 
     #[tokio::test]
@@ -2401,6 +2592,7 @@ mod tests {
                 token,
                 agent_type: "Codex".into(),
                 session_id: "sess-X".into(),
+                model: None,
             }),
         )
         .await;

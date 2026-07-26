@@ -118,9 +118,51 @@ describe('MessageBubble — role-based bubble variant', () => {
     expect(container.querySelector('.disc-msg-bubble')?.getAttribute('data-variant')).toBe('summary');
     expect(screen.getByText('disc.summaryCached')).toBeInTheDocument();
   });
+
+  it('renders a planning receipt as an informational System message', () => {
+    const { container } = renderBubble(
+      makeMessage({
+        role: 'System',
+        content: '[kronn-planning:proposal-1:item-1] accepted KT-28',
+      }),
+    );
+    expect(container.querySelector('.disc-msg-bubble')?.getAttribute('data-variant'))
+      .toBe('kronn-planning');
+    expect(screen.getByText('planning.receipt')).toBeInTheDocument();
+    expect(screen.queryByText('disc.system')).not.toBeInTheDocument();
+  });
 });
 
 describe('MessageBubble — author pseudo / avatar (User)', () => {
+  it('renders a leading agent mention as a color-coded chip', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User', content: '@codex vérifie ce patch' }),
+    );
+    const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
+    expect(chip).not.toBeNull();
+    expect(chip?.dataset.agent).toBe('Codex');
+    expect(chip?.textContent).toBe('@codex');
+    expect(chip?.style.color).toBe('#10a37f');
+    expect(screen.getByText('vérifie ce patch')).toBeInTheDocument();
+  });
+
+  it('renders an agent mention inline wherever it appears in the message', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User', content: 'demande à @codex plus tard' }),
+    );
+    const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
+    expect(chip?.textContent).toBe('@codex');
+    expect(container).toHaveTextContent('demande à @codex plus tard');
+  });
+
+  it('does not turn an unknown word or code literal into an agent chip', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User', content: 'garde @inconnu et `@codex` littéraux' }),
+    );
+    expect(container.querySelector('.disc-agent-mention-chip')).toBeNull();
+    expect(container).toHaveTextContent('garde @inconnu et @codex littéraux');
+  });
+
   it('renders gravatar <img> when author_avatar_email is set', () => {
     const { container } = renderBubble(
       makeMessage({ role: 'User', content: 'hello', author_pseudo: 'PeerAlpha', author_avatar_email: 'peer@example.com' }),
@@ -150,6 +192,29 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
     expect(author).not.toBeNull();
     expect(author?.textContent).toContain('anonyme');
     expect(author?.textContent).toContain('humain');
+  });
+});
+
+describe('MessageBubble — agent mentions', () => {
+  it('renders a mention written by an Agent with the same chip as a User mention', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', content: 'Je demande à @vibe de vérifier.' }),
+    );
+    const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
+    expect(chip).not.toBeNull();
+    expect(chip?.dataset.agent).toBe('Vibe');
+    expect(chip?.textContent).toBe('@vibe');
+    expect(container).toHaveTextContent('Je demande à @vibe de vérifier.');
+  });
+
+  it('keeps mentions in Agent code literals unstyled', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', content: 'Utilise `@vibe` mais appelle @codex.' }),
+    );
+    const chips = container.querySelectorAll<HTMLElement>('.disc-agent-mention-chip');
+    expect(chips).toHaveLength(1);
+    expect(chips[0]?.dataset.agent).toBe('Codex');
+    expect(container.querySelector('code')).toHaveTextContent('@vibe');
   });
 });
 

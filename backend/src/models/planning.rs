@@ -218,6 +218,42 @@ pub struct PlanningTaskDetail {
     pub events: Vec<PlanningTaskEvent>,
 }
 
+/// KT-30 — minimal, read-only dependency reference for the plan projection.
+/// Just enough to render a blocked task's active blockers (and, later, the
+/// dependency neighbourhood) WITHOUT loading each blocker's full detail. Never
+/// recursive: a blocker's own blockers are not expanded here.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningDependencySummary {
+    pub id: String,
+    pub reference: String,
+    pub title: String,
+    pub status: PlanningTaskStatus,
+    pub project_ids: Vec<String>,
+    pub discussion_ids: Vec<String>,
+}
+
+/// KT-30 — bucketed counts over the ACTIVE relations of a discussion plan,
+/// under a strict precedence so every Active task lands in exactly one bucket:
+/// `done` > `blocked` > `in_progress` > `ideas` > `ready`. The five Active
+/// buckets sum to `DiscussionPlan::total_active`; `later` is the separate Later
+/// count.
+///
+/// `ready` is exactly the `actionable` relations — a `Todo` with no active
+/// blocker — so a UI "X ready" label never overcounts. A nascent `Idea` (not
+/// yet started, not actionable) has its own `ideas` bucket rather than
+/// inflating `ready`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PlanningPlanStats {
+    pub ready: u32,
+    pub blocked: u32,
+    pub in_progress: u32,
+    pub ideas: u32,
+    pub done: u32,
+    pub later: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct PlanningDiscussionRelation {
@@ -225,6 +261,14 @@ pub struct PlanningDiscussionRelation {
     pub is_primary: bool,
     pub position: i64,
     pub task: PlanningTaskSummary,
+    /// KT-30 — this task's ACTIVE blockers (status not done/archived), loaded in
+    /// one batched pass for the whole plan. Empty when nothing blocks it.
+    pub active_blockers: Vec<PlanningDependencySummary>,
+    /// KT-30 — ready to pick up: an ACTIVE relation whose task is `Todo` with no
+    /// active blocker. A Later relation, or one that is done/blocked/in-progress
+    /// (or a mere `Idea`), is never `actionable`. The API does NOT pre-select a
+    /// "next" set — it delivers plan order + this flag; the UI takes the first N.
+    pub actionable: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -234,8 +278,12 @@ pub struct DiscussionPlan {
     pub primary_objective: Option<PlanningTaskSummary>,
     pub active: Vec<PlanningDiscussionRelation>,
     pub later: Vec<PlanningDiscussionRelation>,
+    /// Retained aliases (== `stats.done` / sum of the five Active buckets) so
+    /// existing MCP/UI consumers keep working during the KT-30 split.
     pub completed_active: u32,
     pub total_active: u32,
+    /// KT-30 — bucketed Active counts + the Later count.
+    pub stats: PlanningPlanStats,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

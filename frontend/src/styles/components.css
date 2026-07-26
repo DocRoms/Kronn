@@ -311,10 +311,40 @@ select.input option {
 
 .disc-participants-row {
   display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+  margin-right: 8px;
+}
+
+.disc-participants-list {
+  display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 4px;
-  margin-right: 8px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+  .disc-participants-row {
+  width: 100%;
+  margin-right: 0;
+}
+
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+  .disc-participants-list {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 1px;
+  scrollbar-width: none;
+}
+
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+  .disc-participants-list::-webkit-scrollbar {
+  display: none;
 }
 
 .disc-participants-empty {
@@ -325,6 +355,7 @@ select.input option {
 .disc-participant-chip {
   display: inline-flex;
   align-items: center;
+  flex-shrink: 0;
   gap: 4px;
   padding: 2px 6px;
   font-size: 0.8em;
@@ -339,13 +370,56 @@ select.input option {
   opacity: 0.6;
 }
 
-/* 0.8.12 PR B — server-derived activity placeholder ("à l'écoute" /
-   "prépare une réponse"). Italic + secondary so it reads as a state,
-   never as a message. */
+.disc-participant-presence-dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--kr-text-ghost);
+}
+
+.disc-participant-presence-dot[data-presence="listening"] {
+  background: var(--kr-success);
+}
+
+.disc-participant-presence-dot[data-presence="dormant"] {
+  background: var(--kr-warning);
+}
+
+.disc-participant-running {
+  flex-shrink: 0;
+  color: var(--kr-success);
+}
+
+/* Server-derived honest presence. Italic + secondary keeps the state compact
+   and visually distinct from an agent message. */
 .disc-participant-activity {
   font-style: italic;
   font-size: 0.9em;
   color: var(--kr-text-secondary);
+}
+
+.disc-participant-activity[data-presence="offline"] {
+  color: var(--kr-text-ghost);
+}
+
+.disc-participant-model {
+  max-width: 14rem;
+  overflow: hidden;
+  color: var(--kr-text-secondary);
+  font-family: var(--kr-font-mono, ui-monospace, monospace);
+  font-size: 0.9em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-participant-write-failed {
+  padding-left: 4px;
+  font-size: 0.85em;
+  font-weight: 600;
+  color: var(--kr-error);
+  border-left: 1px solid rgba(var(--kr-error-rgb), 0.35);
 }
 
 .disc-participants-invite-btn {
@@ -359,6 +433,7 @@ select.input option {
   background: transparent;
   color: var(--kr-accent);
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .disc-participants-invite-btn:hover:not(:disabled) {

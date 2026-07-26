@@ -31,6 +31,7 @@ pub mod mcp_scanner;
 pub mod native_files;
 pub mod net_expose;
 pub mod oauth2_cache;
+pub mod power_guard;
 pub mod pricing;
 pub mod profiles;
 pub mod recovery;

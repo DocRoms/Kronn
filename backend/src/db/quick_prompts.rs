@@ -1,16 +1,11 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection};
 
+use super::parse_dt;
 use crate::models::{
     AgentType, ModelTier, QuickPrompt, QuickPromptVersion, QuickPromptVersionMetrics,
 };
-
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
 
 // 0.8.5 — column layout (read by row_to_quick_prompt + every SELECT below):
 //   0  id
@@ -60,8 +55,8 @@ fn row_to_quick_prompt(row: &rusqlite::Row) -> QuickPrompt {
         tier: serde_json::from_str(&format!("\"{}\"", tier_str)).unwrap_or(ModelTier::Default),
         agent_settings,
         description,
-        created_at: parse_dt(&row.get::<_, String>(9).unwrap_or_default()),
-        updated_at: parse_dt(&row.get::<_, String>(10).unwrap_or_default()),
+        created_at: parse_dt(row.get::<_, String>(9).unwrap_or_default()),
+        updated_at: parse_dt(row.get::<_, String>(10).unwrap_or_default()),
     }
 }
 
@@ -279,7 +274,7 @@ pub fn list_quick_prompt_versions(
             directive_ids: serde_json::from_str(&directive_ids_json).unwrap_or_default(),
             tier: serde_json::from_str(&format!("\"{}\"", tier_str)).unwrap_or(ModelTier::Default),
             description: row.get(13).unwrap_or_default(),
-            created_at: parse_dt(&row.get::<_, String>(14).unwrap_or_default()),
+            created_at: parse_dt(row.get::<_, String>(14).unwrap_or_default()),
         })
     })?;
     Ok(rows.filter_map(|r| r.ok()).collect())

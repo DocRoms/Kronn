@@ -1,19 +1,37 @@
-import { useState } from 'react';
-import { Check, ListPlus, Loader2, Target } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ListPlus, Loader2, Target } from 'lucide-react';
 import { planning } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { userError } from '../lib/userError';
-import type { PlanningProposal } from '../lib/planningProposal';
+import type { PlanningProposal as ParsedPlanningProposal } from '../lib/planningProposal';
+import type { PlanningProposal } from '../types/generated';
+import { PlanningProposalReview } from './PlanningProposalReview';
 
 interface Props {
-  proposal: PlanningProposal;
+  proposal: ParsedPlanningProposal;
   discussionId: string;
+  sourceMessageId?: string;
+  fenceIndex?: number;
 }
 
-export function PlanningActionCard({ proposal, discussionId }: Props) {
+export function PlanningActionCard({
+  proposal,
+  discussionId,
+  sourceMessageId,
+  fenceIndex,
+}: Props) {
   const { t } = useT();
-  const [state, setState] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
-  const [error, setError] = useState('');
+  const proposalId = proposal.action !== 'open' && sourceMessageId && fenceIndex !== undefined
+    ? `proposal:${sourceMessageId}:${fenceIndex}`
+    : null;
+  const [result, setResult] = useState<{
+    proposalId: string | null;
+    durable: PlanningProposal | null;
+    error: string;
+  }>({ proposalId: null, durable: null, error: '' });
+  const durable = result.proposalId === proposalId ? result.durable : null;
+  const error = result.proposalId === proposalId ? result.error : '';
+  const loading = Boolean(proposalId && result.proposalId !== proposalId);
 
   const title = proposal.action === 'create'
     ? proposal.title
@@ -23,66 +41,72 @@ export function PlanningActionCard({ proposal, discussionId }: Props) {
         ? t('planning.proposalOpen')
         : t('planning.proposalUpdate', proposal.task_id);
 
-  const apply = async () => {
-    if (state !== 'idle') return;
-    setState('running');
-    try {
-      if (proposal.action === 'open') {
-        window.dispatchEvent(new CustomEvent('kronn:open-discussion-plan', {
-          detail: { discussionId },
-        }));
-      } else if (proposal.action === 'create' || proposal.action === 'create_many') {
-        const tasks = proposal.action === 'create_many' ? proposal.tasks : [proposal];
-        for (const task of tasks) {
-          const created = await planning.create({
-            title: task.title.trim(),
-            description: task.description ?? '',
-            priority: task.priority ?? 'normal',
-            status: 'todo',
-          });
-          await planning.linkDiscussion(created.id, {
-            discussion_id: discussionId,
-            placement: task.placement ?? 'active',
-            is_primary: proposal.action === 'create' && Boolean(proposal.is_primary),
-          });
-        }
-      } else if (proposal.action === 'complete') {
-        await planning.update(proposal.task_id, { status: 'done' });
-      } else if (proposal.action === 'unblock') {
-        await planning.update(proposal.task_id, {
-          status: 'todo',
-          blocked_reason: null,
+  useEffect(() => {
+    if (!proposalId) return;
+    let cancelled = false;
+    const load = () => {
+      planning.proposal(proposalId)
+        .then(next => {
+          if (!cancelled) {
+            setResult({ proposalId, durable: next, error: '' });
+          }
+        })
+        .catch(cause => {
+          if (!cancelled) {
+            setResult({ proposalId, durable: null, error: userError(cause) });
+          }
         });
-      } else {
-        await planning.update(proposal.task_id, { status: proposal.status });
-      }
-      setState('done');
-      window.dispatchEvent(new CustomEvent('kronn:plan-changed', {
-        detail: { discussionId },
-      }));
-    } catch (cause) {
-      setError(userError(cause));
-      setState('error');
-    }
+    };
+    const refresh = (event: Event) => {
+      const changedDiscussionId = (
+        event as CustomEvent<{ discussionId?: string }>
+      ).detail?.discussionId;
+      if (changedDiscussionId === discussionId) load();
+    };
+    load();
+    window.addEventListener('kronn:plan-proposals-changed', refresh);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('kronn:plan-proposals-changed', refresh);
+    };
+  }, [discussionId, proposalId]);
+
+  const open = () => {
+    window.dispatchEvent(new CustomEvent('kronn:open-discussion-plan', {
+      detail: { discussionId },
+    }));
   };
 
   return (
-    <div className="planning-proposal" data-state={state}>
+    <div
+      className="planning-proposal"
+      data-state={durable?.aggregate_state ?? (error ? 'error' : 'pending')}
+    >
       <div className="planning-proposal-icon">
         {proposal.action === 'open' ? <Target size={16} /> : <ListPlus size={16} />}
       </div>
       <div className="planning-proposal-main">
         <span>{t('planning.agentProposal')}</span>
         <strong>{title}</strong>
-        {error && <small>{error}</small>}
+        {proposal.action === 'open' ? (
+          <button type="button" className="planning-proposal-open" onClick={open}>
+            {t('planning.proposalOpen')}
+          </button>
+        ) : loading ? (
+          <span className="planning-proposal-loading">
+            <Loader2 size={12} className="spin" /> {t('common.loading')}
+          </span>
+        ) : durable ? (
+          <PlanningProposalReview
+            proposal={durable}
+            discussionId={discussionId}
+            compact
+            onChanged={next => setResult({ proposalId: next.id, durable: next, error: '' })}
+          />
+        ) : (
+          <small>{error || t('planning.proposalUnavailable')}</small>
+        )}
       </div>
-      <button type="button" onClick={() => void apply()} disabled={state !== 'idle'}>
-        {state === 'running' && <Loader2 size={13} className="spin" />}
-        {state === 'done' && <Check size={13} />}
-        {state === 'idle' && t('planning.applyProposal')}
-        {state === 'done' && t('planning.applied')}
-        {state === 'error' && t('planning.failed')}
-      </button>
     </div>
   );
 }

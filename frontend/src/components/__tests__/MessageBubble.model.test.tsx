@@ -77,4 +77,29 @@ describe('MessageBubble — per-message model', () => {
     renderBubble({ model: null, model_tier: null });
     expect(screen.queryByText(/qwen3/)).toBeNull();
   });
+
+  it('shows the attempted agent and model on a structured System failure', () => {
+    renderBubble({
+      role: 'System',
+      content: 'Erreur: Ollama is unavailable',
+      agent_type: 'Ollama',
+      model: 'qwen3:32b',
+    });
+
+    const provenance = screen.getByTestId('disc-msg-attempted-model');
+    expect(provenance.textContent).toContain('Ollama');
+    expect(provenance.textContent).toContain('qwen3:32b');
+    expect(provenance.getAttribute('title')).toBe('disc.attemptedModel');
+  });
+
+  it('keeps legacy System failures quiet when no provenance was recorded', () => {
+    renderBubble({
+      role: 'System',
+      content: 'Erreur: legacy failure',
+      agent_type: null,
+      model: null,
+    });
+
+    expect(screen.queryByTestId('disc-msg-attempted-model')).toBeNull();
+  });
 });

@@ -1,9 +1,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import { discussions as discussionsApi } from '../lib/api';
-import { presenceFromActivity, DEFAULT_AWAY_AFTER_MS, AWAY_MARGIN_MS } from '../lib/discPresence';
-import type { Freshness } from '../lib/discPresence';
+import {
+  honestPresenceState,
+  freshnessForPresence,
+  secondsUntil,
+  DEFAULT_AWAY_AFTER_MS,
+  AWAY_MARGIN_MS,
+} from '../lib/discPresence';
+import type { HonestPresenceState } from '../lib/discPresence';
 import type { ToastFn } from '../hooks/useToast';
-import { UserPlus, Copy, X } from 'lucide-react';
+import { UserPlus, Copy, Loader2, X } from 'lucide-react';
 
 /// 0.8.6 phase 2 — discussion participants header.
 ///
@@ -35,6 +41,9 @@ export interface DiscParticipantsHeaderProps {
 interface ParticipantRow {
   id: number;
   agent_type: string;
+  /// Optional self-declared model captured at JOIN time. This is durable
+  /// metadata, not a live probe: the UI labels it explicitly as such.
+  model?: string | null;
   session_id: string | null;
   role: string;
   status: string;
@@ -43,30 +52,16 @@ interface ParticipantRow {
   /// 'reading' (messages delivered, no reply yet). Expiry is applied
   /// server-side at read time — a value here is always current.
   activity?: string | null;
+  presence_state?: HonestPresenceState | null;
+  read_live?: boolean;
+  write_state?: 'ok' | 'failed' | 'unknown';
+  wake_mode?: 'native_dispatch' | 'external_poll';
+  next_poll_at?: string | null;
+  last_write_at?: string | null;
 }
-
-// Activity → i18n key. Unknown values render nothing (forward-compat:
-// a future backend state never shows a raw token to the user).
-const ACTIVITY_LABEL_KEY: Partial<Record<string, string>> = {
-  listening: 'disc.activityListening',
-  reading: 'disc.activityReading',
-  waiting: 'disc.activityWaiting',
-};
 
 // Presence thresholds live in `lib/discPresence.ts` (pure, unit-tested);
 // the away cap follows the server's poll_policy fetched from the disc meta.
-const FRESH_COLOR: Record<Freshness, string> = {
-  fresh: 'var(--kr-success)',
-  idle: 'var(--kr-warning)',
-  away: 'var(--kr-text-tertiary, #888)',
-};
-// User-visible labels go through t(...) — keys per freshness state.
-const FRESH_LABEL_KEY: Record<Freshness, string> = {
-  fresh: 'disc.presenceFresh',
-  idle: 'disc.presenceIdle',
-  away: 'disc.presenceAway',
-};
-
 // Agent-type → emoji icon. Distinct glyphs per CLI but none of them
 // should LOOK like a status indicator (green circle = "online" etc.) —
 // that's what `data-status` is for. All icons are neutral / brand-y.
@@ -83,6 +78,29 @@ const AGENT_ICON: Record<string, string> = {
 };
 
 const iconFor = (agentType: string) => AGENT_ICON[agentType] ?? '👤';
+
+function presenceLabel(
+  participant: ParticipantRow,
+  state: HonestPresenceState,
+  t: DiscParticipantsHeaderProps['t'],
+): string {
+  if (participant.status === 'paused') return t('disc.presencePaused');
+  if (state === 'running') return t('disc.presenceRunning');
+  if (state === 'listening') {
+    return participant.activity === 'reading'
+      ? t('disc.activityReading')
+      : t('disc.presenceListening');
+  }
+  if (state === 'offline') return t('disc.presenceOffline');
+  if (participant.wake_mode === 'native_dispatch') {
+    return t('disc.presenceAwaitingRuntime');
+  }
+
+  const delay = secondsUntil(participant.next_poll_at);
+  if (delay === null || delay === 0) return t('disc.presenceDormant');
+  if (delay < 60) return t('disc.presenceDormantSeconds', delay);
+  return t('disc.presenceDormantMinutes', Math.ceil(delay / 60));
+}
 
 export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHeaderProps) {
   const [participants, setParticipants] = useState<ParticipantRow[]>([]);
@@ -164,37 +182,75 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
 
   return (
     <div className="disc-participants-row" data-testid="disc-participants-row">
-      {participants.length === 0 && (
-        <span className="disc-participants-empty">
-          {t('disc.participantsEmpty')}
-        </span>
-      )}
-      {participants.map(p => {
-        const f = presenceFromActivity(p.activity, p.last_seen, awayAfterMs);
-        const activityKey = p.activity ? ACTIVITY_LABEL_KEY[p.activity] : undefined;
-        return (
-          <span
-            key={p.id}
-            className="disc-participant-chip"
-            data-status={p.status}
-            data-role={p.role}
-            data-freshness={f}
-            title={`${p.agent_type} (${p.role}) — ${t(FRESH_LABEL_KEY[f])}`}
-          >
-            <span
-              aria-hidden
-              style={{ width: 6, height: 6, borderRadius: '50%', background: FRESH_COLOR[f], display: 'inline-block', flexShrink: 0 }}
-            />
-            <span aria-hidden>{iconFor(p.agent_type)}</span>
-            <span>{p.agent_type}</span>
-            {activityKey && (
-              <span className="disc-participant-activity" data-activity={p.activity}>
-                {t(activityKey)}
-              </span>
-            )}
+      <div className="disc-participants-list">
+        {participants.length === 0 && (
+          <span className="disc-participants-empty">
+            {t('disc.participantsEmpty')}
           </span>
-        );
-      })}
+        )}
+        {participants.map(p => {
+          const presence = honestPresenceState(
+            p.presence_state,
+            p.status,
+            p.activity,
+            p.last_seen,
+            awayAfterMs,
+          );
+          const freshness = freshnessForPresence(presence);
+          const label = presenceLabel(p, presence, t);
+          const readLive = p.read_live ?? presence === 'listening';
+          const writeState = p.write_state ?? 'unknown';
+          return (
+            <span
+              key={p.id}
+              className="disc-participant-chip"
+              data-status={p.status}
+              data-role={p.role}
+              data-presence={presence}
+              data-freshness={freshness}
+              data-read-live={readLive}
+              data-write-state={writeState}
+              data-wake-mode={p.wake_mode}
+              title={[
+                `${p.agent_type} (${p.role}) — ${label}`,
+                p.model ? t('disc.modelDeclaredAtJoin', p.model) : null,
+              ].filter(Boolean).join(' · ')}
+            >
+              {presence === 'running' ? (
+                <Loader2
+                  aria-hidden
+                  size={10}
+                  className="disc-participant-running spin"
+                />
+              ) : (
+                <span
+                  aria-hidden
+                  className="disc-participant-presence-dot"
+                  data-presence={presence}
+                />
+              )}
+              <span aria-hidden>{iconFor(p.agent_type)}</span>
+              <span>{p.agent_type}</span>
+              {p.model && (
+                <span
+                  className="disc-participant-model"
+                  title={t('disc.modelDeclaredAtJoin', p.model)}
+                >
+                  · {p.model}
+                </span>
+              )}
+              <span className="disc-participant-activity" data-presence={presence}>
+                {label}
+              </span>
+              {writeState === 'failed' && (
+                <span className="disc-participant-write-failed">
+                  {t('disc.writeFailed')}
+                </span>
+              )}
+            </span>
+          );
+        })}
+      </div>
       <button
         type="button"
         className="disc-participants-invite-btn"

@@ -58,7 +58,7 @@ check_equal "desktop Cargo.lock package kronn-desktop" \
     "$(lock_package_version "$ROOT/desktop/src-tauri/Cargo.lock" "kronn-desktop")"
 
 CHANGELOG_VERSION="$(
-    sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]$/\1/p' "$ROOT/CHANGELOG.md" |
+    sed -nE 's/^## \[([0-9]+\.[0-9]+\.[0-9]+)\]( - [0-9]{4}-[0-9]{2}-[0-9]{2})?$/\1/p' "$ROOT/CHANGELOG.md" |
         head -n 1
 )"
 check_equal "first CHANGELOG release" "$CHANGELOG_VERSION"

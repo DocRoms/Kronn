@@ -287,6 +287,15 @@ async fn execute_run_with_notify_policy(
         return Ok(());
     }
 
+    // E part 2 (TD-20260717-run-power-assertion-sleep) — hold the shared,
+    // refcounted power assertion for the whole active run so a laptop that
+    // sleeps mid-run no longer freezes it or trips a `__guard_timeout__`.
+    // RAII: this named binding lives until the function returns, so it is
+    // released on EVERY terminal/pause exit below (Success/Failed/Cancelled/
+    // StoppedByGuard/WaitingApproval). Acquired only AFTER the run is claimed
+    // Running — a run cancelled before it starts keeps nothing awake.
+    let _power_lease = crate::core::power_guard::acquire();
+
     // Resolve project + companion-repo context. Same pattern as the
     // audit pipeline (api/audit/full.rs:58-74): pre-format the
     // linked_repos + Kronn-projects-universe blocks ONCE here so every

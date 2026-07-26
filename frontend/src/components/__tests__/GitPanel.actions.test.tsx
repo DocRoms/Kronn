@@ -17,6 +17,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, cleanup, act } from '@testing-library/react';
+import { readFileSync } from 'node:fs';
 
 // ─── Mock API (vi.hoisted, DebugSection gold-standard pattern) ────────────────
 
@@ -403,6 +404,29 @@ describe('GitPanel — diff', () => {
     expect(container.querySelector('.git-panel')?.getAttribute('data-expanded')).toBe('true');
     expect(screen.getByLabelText('git.changedFilesList')).toBeDefined();
     expect(screen.getByLabelText('git.collapsePanel')).toBeDefined();
+  });
+
+  it('constrains the expanded grid row so a long file list remains scrollable', async () => {
+    projectsApi.gitStatus.mockResolvedValue({
+      ...baseStatus(),
+      files: Array.from({ length: 124 }, (_, index) => ({
+        path: `src/file-${index}.ts`,
+        status: 'modified',
+        staged: false,
+      })),
+    });
+    renderPanel();
+
+    await waitFor(() => expect(screen.getByText('src/file-0.ts')).toBeDefined());
+    fireEvent.click(screen.getByLabelText('git.expandPanel'));
+    await waitFor(() => expect(screen.getByLabelText('git.changedFilesList')).toBeDefined());
+
+    expect(screen.getByText('src/file-123.ts')).toBeDefined();
+    const gitPanelCss = readFileSync('src/components/GitPanel.css', 'utf8');
+    const expandedLayoutRule = gitPanelCss.match(/\.git-expanded-layout\s*\{([^}]*)\}/)?.[1];
+    const expandedFilesRule = gitPanelCss.match(/\.git-expanded-files\s*\{([^}]*)\}/)?.[1];
+    expect(expandedLayoutRule).toContain('grid-template-rows: minmax(0, 1fr);');
+    expect(expandedFilesRule).toContain('min-height: 0;');
   });
 
   it('opens the diff view on file click and fetches via projects.gitDiff', async () => {

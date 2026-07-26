@@ -374,8 +374,9 @@ pub fn build_agent_prompt(
             N'utilise CES OUTILS QUE si tu remarques un trou de contexte que tu ne peux pas déduire de la fenêtre courante. Pas en spéculation.\n\
             Cette discussion peut avoir un plan partagé composé de tâches priorisées et modifiables dans Kronn. \
             L'utilisateur peut y faire référence naturellement comme « le plan », « les tâches », « ce qu'il reste à faire », « la priorité », etc. \
-            `plan_get()` lit ce plan ; `task_list`/`task_get` lisent les tâches ; `task_create`/`task_update`/`task_link_discussion` permettent de créer, modifier, prioriser ou relier le travail. \
-            Lis d'abord le plan concerné. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine. \
+            `plan_get()` lit ce plan ; `task_list`/`task_get`/`task_changes` lisent les tâches ; `proposal_list`/`proposal_get` lisent les propositions durables ; `task_create`/`task_update`/`task_link_discussion` permettent de créer, modifier, prioriser ou relier le travail. \
+            Lis d'abord le plan concerné. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine (create, create_many, status, complete, unblock, open). \
+            Tu peux lire et proposer, mais seul un humain accepte, refuse ou décide une proposition durable. \
             Ne remplace pas une demande de mise à jour du plan par un simple résumé Markdown.\n\n",
         "es" => "Herramientas de historial vía MCP `kronn-internal`: \
             `disc_meta()` (cuenta de mensajes, agente, tier — gratuito), \
@@ -384,8 +385,9 @@ pub fn build_agent_prompt(
             Úsalos SOLO cuando notes un hueco de contexto que no puedas deducir de la ventana actual.\n\
             Esta conversación puede tener un plan compartido con tareas priorizadas y editables en Kronn. \
             El usuario puede referirse a él naturalmente como « el plan », « las tareas », « lo que queda », « la prioridad », etc. \
-            `plan_get()` lee el plan; `task_list`/`task_get` leen tareas; `task_create`/`task_update`/`task_link_discussion` permiten crear, modificar, priorizar o vincular el trabajo. \
-            Lee primero el plan correspondiente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana. \
+            `plan_get()` lee el plan; `task_list`/`task_get`/`task_changes` leen tareas; `proposal_list`/`proposal_get` leen las propuestas durables; `task_create`/`task_update`/`task_link_discussion` permiten crear, modificar, priorizar o vincular el trabajo. \
+            Lee primero el plan correspondiente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana (create, create_many, status, complete, unblock, open). \
+            Puedes leer y proponer, pero solo un humano acepta, rechaza o decide una propuesta durable. \
             No sustituyas una actualización solicitada por un simple resumen Markdown.\n\n",
         _ => "History tools available via the `kronn-internal` MCP: \
             `disc_meta()` (message count, agent, tier — free), \
@@ -394,8 +396,9 @@ pub fn build_agent_prompt(
             Use these ONLY when you notice a context gap you cannot infer from the current window. Never speculatively.\n\
             This discussion may have a shared Kronn plan made of prioritized, editable tasks. \
             The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. \
-            `plan_get()` reads the plan; `task_list`/`task_get` read tasks; `task_create`/`task_update`/`task_link_discussion` create, edit, prioritize or link work. \
-            Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence. \
+            `plan_get()` reads the plan; `task_list`/`task_get`/`task_changes` read tasks; `proposal_list`/`proposal_get` read durable proposals; `task_create`/`task_update`/`task_link_discussion` create, edit, prioritize or link work. \
+            Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (create, create_many, status, complete, unblock, open). \
+            You may read and propose, but only a human accepts, rejects or decides a durable proposal. \
             Never replace a requested plan update with a prose-only Markdown summary.\n\n",
     };
 
@@ -803,6 +806,113 @@ mod tests {
         assert!(prompt.contains("simple résumé Markdown"));
         assert!(prompt.contains("`plan_get()`"));
         assert!(prompt.contains("`task_link_discussion`"));
+    }
+
+    /// Single source of truth for the Planning contract, shared with the MCP
+    /// bridge (`backend/scripts/planning_contract_invariants.json`). Parsed at
+    /// compile time so a missing/renamed file breaks the build, not silently
+    /// the test.
+    fn planning_contract() -> serde_json::Value {
+        let raw = include_str!("../../scripts/planning_contract_invariants.json");
+        serde_json::from_str(raw).expect("planning_contract_invariants.json must be valid JSON")
+    }
+
+    fn contract_strings(v: &serde_json::Value, key: &str) -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("`{key}` must be a JSON array"))
+            .iter()
+            .map(|s| {
+                s.as_str()
+                    .expect("array entries must be strings")
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// KT-29 (0.9.2-I) parity: the Kronn-launched agent prompt notice must
+    /// carry every Planning-contract invariant, in each supported locale. The
+    /// bridge side (`test_disc_introspection_mcp.py`) checks the SAME JSON
+    /// against the MCP `instructions` block, so neither surface can drift the
+    /// contract without failing its own test — no fragile textual equality.
+    #[test]
+    fn planning_contract_parity_kronn_launched_prompt_notice() {
+        let contract = planning_contract();
+        let fence = contract["fence"].as_str().unwrap();
+        let read_tools = contract_strings(&contract, "read_tools");
+        let actions = contract_strings(&contract, "proposal_actions");
+
+        for lang in ["en", "fr", "es"] {
+            // ≥3 user messages so the introspection notice is injected.
+            let disc = disc_with_messages(
+                vec![user_msg("un"), user_msg("deux"), user_msg("trois")],
+                lang,
+            );
+            let prompt = build_agent_prompt(&disc, &AgentType::ClaudeCode, 0);
+
+            assert!(
+                prompt.contains(fence),
+                "[{lang}] prompt must name the `{fence}` fence"
+            );
+            for tool in &read_tools {
+                assert!(
+                    prompt.contains(tool),
+                    "[{lang}] prompt must mention the read tool `{tool}`"
+                );
+            }
+            for action in &actions {
+                assert!(
+                    prompt.contains(action),
+                    "[{lang}] prompt must list the proposal action `{action}`"
+                );
+            }
+            for alias in contract["aliases"][lang]
+                .as_array()
+                .unwrap_or_else(|| panic!("aliases.{lang} must be a JSON array"))
+            {
+                let alias = alias.as_str().unwrap();
+                assert!(
+                    prompt.contains(alias),
+                    "[{lang}] prompt must recognise the human alias `{alias}`"
+                );
+            }
+            let no_prose = contract["no_prose_only"][lang].as_str().unwrap();
+            assert!(
+                prompt.contains(no_prose),
+                "[{lang}] prompt must forbid a prose-only reply (marker `{no_prose}`)"
+            );
+            let human_decides = contract["human_decides"][lang].as_str().unwrap();
+            assert!(
+                prompt.contains(human_decides),
+                "[{lang}] prompt must state that only a human decides a durable proposal (marker `{human_decides}`)"
+            );
+        }
+    }
+
+    /// KT-29 (0.9.2-I) limit: Vibe & Ollama are launched by Kronn WITHOUT a
+    /// bidirectional MCP client, so they cannot call the plan tools. They get
+    /// the slash-marker fallback, NOT the MCP plan contract — the
+    /// `kronn-plan-action` fence would be dead weight they can't act on. This
+    /// keeps the documented limitation honest as a live invariant.
+    #[test]
+    fn planning_contract_limit_vibe_ollama_get_no_mcp_fence() {
+        let contract = planning_contract();
+        let fence = contract["fence"].as_str().unwrap();
+        for agent in [AgentType::Vibe, AgentType::Ollama] {
+            let disc = disc_with_messages(
+                vec![user_msg("one"), user_msg("two"), user_msg("three")],
+                "en",
+            );
+            let prompt = build_agent_prompt(&disc, &agent, 0);
+            assert!(
+                !prompt.contains(fence),
+                "{agent:?} has no bidirectional MCP — must NOT receive the `{fence}` contract"
+            );
+            assert!(
+                prompt.contains("KRONN:DISC_META"),
+                "{agent:?} must receive the slash-marker fallback instead"
+            );
+        }
     }
 
     #[test]

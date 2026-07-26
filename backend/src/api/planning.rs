@@ -1,5 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
+    http::StatusCode,
     Json,
 };
 
@@ -170,5 +171,106 @@ pub async fn task_changes(
     {
         Ok(changes) => Json(ApiResponse::ok(changes)),
         Err(error) => planning_error(error),
+    }
+}
+
+// ─── 0.9.2-H — Planning proposals (durable inbox, human-gated) ───────────────
+
+use crate::db::planning_proposals::{
+    self, DecisionError, PlanningProposal, ProposalDecisionRequest, ProposalDecisionResponse,
+    ProposalListResponse,
+};
+
+fn default_pending_only() -> bool {
+    true
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct ProposalListQuery {
+    pub discussion_id: String,
+    #[serde(default = "default_pending_only")]
+    pub pending_only: bool,
+}
+
+pub async fn list_proposals(
+    State(state): State<AppState>,
+    Query(query): Query<ProposalListQuery>,
+) -> Json<ApiResponse<ProposalListResponse>> {
+    match state
+        .db
+        .with_read_conn(move |connection| {
+            planning_proposals::list_proposals(connection, &query.discussion_id, query.pending_only)
+        })
+        .await
+    {
+        Ok(list) => Json(ApiResponse::ok(list)),
+        Err(error) => planning_error(error),
+    }
+}
+
+pub async fn get_proposal(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<PlanningProposal>> {
+    match state
+        .db
+        .with_read_conn(move |connection| planning_proposals::get_proposal(connection, &id))
+        .await
+    {
+        Ok(Some(proposal)) => Json(ApiResponse::ok(proposal)),
+        Ok(None) => Json(ApiResponse::err_coded(
+            ApiErrorCode::NotFound,
+            "Planning proposal not found",
+        )),
+        Err(error) => planning_error(error),
+    }
+}
+
+pub async fn decide_proposal_item(
+    State(state): State<AppState>,
+    Path((proposal_id, item_id)): Path<(String, String)>,
+    Json(request): Json<ProposalDecisionRequest>,
+) -> (StatusCode, Json<ApiResponse<ProposalDecisionResponse>>) {
+    let result = state
+        .db
+        .with_conn(move |connection| {
+            Ok(planning_proposals::decide_item(
+                connection,
+                &proposal_id,
+                &item_id,
+                request.decision,
+                request.reason.as_deref(),
+                &request.idempotency_key,
+            ))
+        })
+        .await;
+    match result {
+        Ok(Ok(response)) => (StatusCode::OK, Json(ApiResponse::ok(response))),
+        Ok(Err(DecisionError::NotFound)) => (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::NotFound,
+                "Planning proposal item not found",
+            )),
+        ),
+        Ok(Err(DecisionError::Conflict { current_state })) => (
+            StatusCode::CONFLICT,
+            Json(ApiResponse::err_coded(
+                ApiErrorCode::Conflict,
+                format!("This item was already decided ({current_state:?}) under another request"),
+            )),
+        ),
+        Ok(Err(DecisionError::Invalid(message))) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::err_coded(ApiErrorCode::Validation, message)),
+        ),
+        Ok(Err(DecisionError::Failed(error))) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            planning_error::<ProposalDecisionResponse>(error),
+        ),
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            planning_error::<ProposalDecisionResponse>(error),
+        ),
     }
 }

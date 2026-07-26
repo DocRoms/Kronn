@@ -1084,7 +1084,7 @@ pub enum RunStatus {
     /// can tell a self-protected stop from a real failure.
     StoppedByGuard,
     /// 0.8.11 — terminal state for a run that was in flight when the backend
-    /// process died (crash, container restart, `kill -9`, cargo-watch reload).
+    /// process died (crash, container restart, `kill -9`, dev-watcher reload).
     /// Reconciled at boot from a stuck `Running`/`Pending` row. Distinct from
     /// `Failed` (the workflow didn't error — the host went away) so it doesn't
     /// poison "last run succeeded" cron logic or read as a real failure.

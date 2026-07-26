@@ -1,0 +1,736 @@
+use anyhow::{Context, Result};
+use chrono::{DateTime, Duration, Utc};
+use rusqlite::{params, Connection, OptionalExtension, Row};
+
+use crate::models::AgentType;
+
+use super::parse_dt;
+
+pub const MAX_DISPATCH_ATTEMPTS: u32 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchStatus {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl DispatchStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Running => "Running",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "Pending" => Ok(Self::Pending),
+            "Running" => Ok(Self::Running),
+            "Completed" => Ok(Self::Completed),
+            "Failed" => Ok(Self::Failed),
+            "Cancelled" => Ok(Self::Cancelled),
+            other => anyhow::bail!("unknown dispatch status: {other}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentDispatchJob {
+    pub id: String,
+    pub discussion_id: String,
+    pub trigger_message_id: String,
+    pub trigger_sort_order: i64,
+    pub dedupe_key: String,
+    pub agent_override: Option<AgentType>,
+    pub chain_prompt_ids: Vec<String>,
+    pub next_chain_index: usize,
+    pub batch_item: Option<String>,
+    pub group_id: Option<String>,
+    pub group_concurrency_limit: Option<u32>,
+    pub status: DispatchStatus,
+    pub attempts: u32,
+    pub turn_attempts: u32,
+    pub available_at: DateTime<Utc>,
+    pub claimed_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub last_error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+pub struct NewAgentDispatchJob<'a> {
+    pub id: &'a str,
+    pub discussion_id: &'a str,
+    pub trigger_message_id: &'a str,
+    pub trigger_sort_order: i64,
+    pub dedupe_key: &'a str,
+    pub agent_override: Option<&'a AgentType>,
+    pub chain_prompt_ids: &'a [String],
+    pub batch_item: Option<&'a str>,
+    pub group_id: Option<&'a str>,
+    pub group_concurrency_limit: Option<u32>,
+}
+
+fn map_job(row: &Row<'_>) -> rusqlite::Result<AgentDispatchJob> {
+    let agent_json: Option<String> = row.get(5)?;
+    let chain_json: String = row.get(6)?;
+    let status: String = row.get(11)?;
+    let parse_error = |index: usize, error: anyhow::Error| {
+        rusqlite::Error::FromSqlConversionFailure(index, rusqlite::types::Type::Text, error.into())
+    };
+
+    Ok(AgentDispatchJob {
+        id: row.get(0)?,
+        discussion_id: row.get(1)?,
+        trigger_message_id: row.get(2)?,
+        trigger_sort_order: row.get(3)?,
+        dedupe_key: row.get(4)?,
+        agent_override: agent_json
+            .map(|value| serde_json::from_str(&value).map_err(|error| parse_error(5, error.into())))
+            .transpose()?,
+        chain_prompt_ids: serde_json::from_str(&chain_json)
+            .map_err(|error| parse_error(6, error.into()))?,
+        next_chain_index: row.get::<_, i64>(7)?.max(0) as usize,
+        batch_item: row.get(8)?,
+        group_id: row.get(9)?,
+        group_concurrency_limit: row
+            .get::<_, Option<i64>>(10)?
+            .map(|value| value.max(1) as u32),
+        status: DispatchStatus::parse(&status).map_err(|error| parse_error(11, error))?,
+        attempts: row.get::<_, i64>(12)?.max(0) as u32,
+        turn_attempts: row.get::<_, i64>(13)?.max(0) as u32,
+        available_at: parse_dt(row.get(14)?),
+        claimed_at: row.get::<_, Option<String>>(15)?.map(parse_dt),
+        completed_at: row.get::<_, Option<String>>(16)?.map(parse_dt),
+        last_error: row.get(17)?,
+        created_at: parse_dt(row.get(18)?),
+        updated_at: parse_dt(row.get(19)?),
+    })
+}
+
+const JOB_COLUMNS: &str = "id, discussion_id, trigger_message_id, trigger_sort_order,
+    dedupe_key, agent_override_json, chain_prompt_ids_json, next_chain_index,
+    batch_item, group_id, group_concurrency_limit, status, attempts, turn_attempts,
+    available_at, claimed_at, completed_at, last_error, created_at, updated_at";
+
+pub fn get(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
+    conn.query_row(
+        &format!("SELECT {JOB_COLUMNS} FROM agent_dispatch_jobs WHERE id = ?1"),
+        [id],
+        map_job,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn find_active_for_discussion(
+    conn: &Connection,
+    discussion_id: &str,
+) -> Result<Option<AgentDispatchJob>> {
+    conn.query_row(
+        &format!(
+            "SELECT {JOB_COLUMNS} FROM agent_dispatch_jobs
+             WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
+             ORDER BY CASE status WHEN 'Running' THEN 0 ELSE 1 END,
+                      created_at, id
+             LIMIT 1"
+        ),
+        [discussion_id],
+        map_job,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn enqueue(conn: &Connection, new: NewAgentDispatchJob<'_>) -> Result<AgentDispatchJob> {
+    let now = Utc::now().to_rfc3339();
+    let agent_json = new.agent_override.map(serde_json::to_string).transpose()?;
+    let chain_json = serde_json::to_string(new.chain_prompt_ids)?;
+    conn.execute(
+        "INSERT INTO agent_dispatch_jobs
+         (id, discussion_id, trigger_message_id, trigger_sort_order, dedupe_key,
+          agent_override_json, chain_prompt_ids_json, batch_item, group_id,
+          group_concurrency_limit, status, available_at, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'Pending', ?11, ?11, ?11)
+         ON CONFLICT(dedupe_key) DO NOTHING",
+        params![
+            new.id,
+            new.discussion_id,
+            new.trigger_message_id,
+            new.trigger_sort_order,
+            new.dedupe_key,
+            agent_json,
+            chain_json,
+            new.batch_item,
+            new.group_id,
+            new.group_concurrency_limit.map(i64::from),
+            now,
+        ],
+    )?;
+
+    if let Some(job) = conn
+        .query_row(
+            &format!("SELECT {JOB_COLUMNS} FROM agent_dispatch_jobs WHERE dedupe_key = ?1"),
+            [new.dedupe_key],
+            map_job,
+        )
+        .optional()?
+    {
+        return Ok(job);
+    }
+
+    anyhow::bail!("dispatch enqueue did not persist or match its dedupe key")
+}
+
+pub struct NewLatestUserDispatch<'a> {
+    pub id: &'a str,
+    pub discussion_id: &'a str,
+    pub dedupe_key: &'a str,
+    pub agent_override: Option<&'a AgentType>,
+    pub chain_prompt_ids: &'a [String],
+    pub batch_item: Option<&'a str>,
+    pub group_id: Option<&'a str>,
+    pub group_concurrency_limit: Option<u32>,
+}
+
+pub fn enqueue_for_latest_user(
+    conn: &Connection,
+    new: NewLatestUserDispatch<'_>,
+) -> Result<AgentDispatchJob> {
+    let trigger = conn
+        .query_row(
+            "SELECT id, sort_order FROM messages
+             WHERE discussion_id = ?1 AND role = 'User'
+             ORDER BY sort_order DESC LIMIT 1",
+            [new.discussion_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .context("cannot dispatch a discussion without a user message")?;
+    enqueue(
+        conn,
+        NewAgentDispatchJob {
+            id: new.id,
+            discussion_id: new.discussion_id,
+            trigger_message_id: &trigger.0,
+            trigger_sort_order: trigger.1,
+            dedupe_key: new.dedupe_key,
+            agent_override: new.agent_override,
+            chain_prompt_ids: new.chain_prompt_ids,
+            batch_item: new.batch_item,
+            group_id: new.group_id,
+            group_concurrency_limit: new.group_concurrency_limit,
+        },
+    )
+}
+
+pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM agent_dispatch_jobs
+         WHERE status = 'Pending' AND available_at <= ?1 AND attempts < ?2
+         ORDER BY created_at, id LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        params![
+            Utc::now().to_rfc3339(),
+            i64::from(MAX_DISPATCH_ATTEMPTS),
+            limit.max(1) as i64
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+pub fn list_exhausted_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
+    let mut statement = conn.prepare(
+        "SELECT id FROM agent_dispatch_jobs
+         WHERE status = 'Pending' AND available_at <= ?1 AND attempts >= ?2
+         ORDER BY created_at, id LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        params![
+            Utc::now().to_rfc3339(),
+            i64::from(MAX_DISPATCH_ATTEMPTS),
+            limit.max(1) as i64
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    Ok(rows.filter_map(|row| row.ok()).collect())
+}
+
+pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
+    let now = Utc::now().to_rfc3339();
+    conn.query_row(
+        &format!(
+            "UPDATE agent_dispatch_jobs AS candidate
+             SET status = 'Running',
+                 attempts = attempts + 1,
+                 turn_attempts = turn_attempts + 1,
+                 claimed_at = ?2,
+                 updated_at = ?2,
+                 last_error = NULL
+             WHERE id = ?1
+               AND status = 'Pending'
+               AND available_at <= ?2
+               AND attempts < ?3
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM agent_dispatch_jobs AS same_discussion
+                   WHERE same_discussion.discussion_id = candidate.discussion_id
+                     AND same_discussion.status = 'Running'
+               )
+               AND (
+                    group_id IS NULL
+                    OR group_concurrency_limit IS NULL
+                    OR (
+                        SELECT COUNT(*)
+                        FROM agent_dispatch_jobs AS running
+                        WHERE running.group_id = candidate.group_id
+                          AND running.status = 'Running'
+                    ) < group_concurrency_limit
+               )
+             RETURNING {JOB_COLUMNS}"
+        ),
+        params![id, now, i64::from(MAX_DISPATCH_ATTEMPTS)],
+        map_job,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn reset_running_after_restart(conn: &Connection) -> Result<u64> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Pending', claimed_at = NULL, available_at = ?1, updated_at = ?1,
+             last_error = 'backend_restarted'
+         WHERE status = 'Running'",
+        [now],
+    )?;
+    Ok(changed as u64)
+}
+
+pub fn mark_completed(conn: &Connection, id: &str) -> Result<bool> {
+    set_terminal(conn, id, DispatchStatus::Completed, None)
+}
+
+pub fn mark_failed(conn: &Connection, id: &str, error: &str) -> Result<bool> {
+    set_terminal(conn, id, DispatchStatus::Failed, Some(error))
+}
+
+fn set_terminal(
+    conn: &Connection,
+    id: &str,
+    status: DispatchStatus,
+    error: Option<&str>,
+) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = ?2, completed_at = ?3, updated_at = ?3, last_error = ?4
+         WHERE id = ?1 AND status IN ('Pending', 'Running')",
+        params![id, status.as_str(), now, error],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn retry_after(conn: &Connection, id: &str, delay_seconds: i64, error: &str) -> Result<bool> {
+    let now = Utc::now();
+    let available_at = (now + Duration::seconds(delay_seconds.max(0))).to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Pending', claimed_at = NULL, available_at = ?2,
+             updated_at = ?3, last_error = ?4
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, available_at, now.to_rfc3339(), error],
+    )?;
+    Ok(changed > 0)
+}
+
+/// Return a claimed job to the durable queue when its agent runtime could not
+/// be started. Runtime availability is not an execution attempt: keep both
+/// counters unchanged so the obligation can survive until the runtime comes
+/// back (or the user explicitly cancels it).
+pub fn defer_runtime_unavailable(
+    conn: &Connection,
+    id: &str,
+    delay_seconds: i64,
+    error: &str,
+) -> Result<bool> {
+    let now = Utc::now();
+    let available_at = (now + Duration::seconds(delay_seconds.max(0))).to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Pending',
+             attempts = MAX(attempts - 1, 0),
+             turn_attempts = MAX(turn_attempts - 1, 0),
+             claimed_at = NULL,
+             available_at = ?2,
+             updated_at = ?3,
+             last_error = ?4
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, available_at, now.to_rfc3339(), error],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn release_unstarted_claim(conn: &Connection, id: &str, error: &str) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Pending',
+             attempts = MAX(attempts - 1, 0),
+             turn_attempts = MAX(turn_attempts - 1, 0),
+             claimed_at = NULL,
+             available_at = ?2,
+             updated_at = ?2,
+             last_error = ?3
+         WHERE id = ?1 AND status = 'Running'",
+        params![id, now, error],
+    )?;
+    Ok(changed > 0)
+}
+
+pub fn cancel_for_discussion(conn: &Connection, discussion_id: &str) -> Result<u64> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Cancelled', completed_at = ?2, updated_at = ?2,
+             last_error = 'cancelled'
+         WHERE id = (
+             SELECT id FROM agent_dispatch_jobs
+             WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
+             ORDER BY CASE status WHEN 'Running' THEN 0 ELSE 1 END,
+                      created_at, id
+             LIMIT 1
+         )",
+        params![discussion_id, now],
+    )?;
+    Ok(changed as u64)
+}
+
+pub fn has_active_for_discussion(conn: &Connection, discussion_id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1 FROM agent_dispatch_jobs
+             WHERE discussion_id = ?1 AND status IN ('Pending', 'Running')
+         )",
+        [discussion_id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
+}
+
+pub fn latest_completed_agent_message(
+    conn: &Connection,
+    job: &AgentDispatchJob,
+) -> Result<Option<(String, String, bool)>> {
+    conn.query_row(
+        "SELECT id, content, agent_run_succeeded FROM messages
+         WHERE discussion_id = ?1
+           AND role = 'Agent'
+           AND sort_order > ?2
+           AND recovered_partial = 0
+           AND agent_run_succeeded IS NOT NULL
+           AND agent_dispatch_job_id = ?3
+         ORDER BY sort_order DESC LIMIT 1",
+        params![job.discussion_id, job.trigger_sort_order, job.id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, bool>(2)?)),
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn advance_chain_trigger(
+    conn: &Connection,
+    job_id: &str,
+    message: &crate::models::DiscussionMessage,
+) -> Result<bool> {
+    let transaction = conn.unchecked_transaction()?;
+    let job = get(&transaction, job_id)?.context("dispatch job not found")?;
+    if job.status != DispatchStatus::Running {
+        return Ok(false);
+    }
+    let sort_order =
+        crate::db::discussions::insert_message(&transaction, &job.discussion_id, message)?;
+    let now = Utc::now().to_rfc3339();
+    let changed = transaction.execute(
+        "UPDATE agent_dispatch_jobs
+         SET trigger_message_id = ?2, trigger_sort_order = ?3,
+             next_chain_index = next_chain_index + 1,
+             status = 'Pending', turn_attempts = 0, claimed_at = NULL,
+             available_at = ?4, updated_at = ?4, last_error = NULL
+         WHERE id = ?1 AND status = 'Running'",
+        params![job_id, message.id, sort_order, now],
+    )?;
+    crate::db::discussions::set_awaiting_agent(&transaction, &job.discussion_id, true)?;
+    transaction.commit()?;
+    Ok(changed > 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::migrations;
+
+    fn connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        migrations::run(&connection).unwrap();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d1', 'Dispatch', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u1', 'd1', 'User', 'go', ?1, 1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE discussions SET next_message_seq = 2 WHERE id = 'd1'",
+                [],
+            )
+            .unwrap();
+        connection
+    }
+
+    fn enqueue_default(connection: &Connection, id: &str, dedupe_key: &str) -> AgentDispatchJob {
+        enqueue_for_latest_user(
+            connection,
+            NewLatestUserDispatch {
+                id,
+                discussion_id: "d1",
+                dedupe_key,
+                agent_override: None,
+                chain_prompt_ids: &[],
+                batch_item: None,
+                group_id: None,
+                group_concurrency_limit: None,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn enqueue_is_idempotent_and_claim_is_exclusive() {
+        let connection = connection();
+        let first = enqueue_default(&connection, "j1", "message:u1");
+        let duplicate = enqueue_default(&connection, "j2", "message:u1");
+        assert_eq!(first.id, "j1");
+        assert_eq!(duplicate.id, "j1");
+
+        let claimed = claim(&connection, "j1").unwrap().unwrap();
+        assert_eq!(claimed.status, DispatchStatus::Running);
+        assert_eq!(claimed.attempts, 1);
+        assert!(claim(&connection, "j1").unwrap().is_none());
+    }
+
+    #[test]
+    fn pending_jobs_queue_and_only_one_claims_per_discussion() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        let second = enqueue_default(&connection, "j2", "force:j2");
+        assert_eq!(second.id, "j2");
+
+        assert!(claim(&connection, "j1").unwrap().is_some());
+        assert!(claim(&connection, "j2").unwrap().is_none());
+        assert!(mark_completed(&connection, "j1").unwrap());
+        assert!(claim(&connection, "j2").unwrap().is_some());
+    }
+
+    #[test]
+    fn restart_requeues_running_job_without_losing_attempt_count() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap().unwrap();
+
+        assert_eq!(reset_running_after_restart(&connection).unwrap(), 1);
+        let recovered = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(recovered.status, DispatchStatus::Pending);
+        assert_eq!(recovered.attempts, 1);
+        assert_eq!(recovered.last_error.as_deref(), Some("backend_restarted"));
+        assert!(claim(&connection, "j1").unwrap().is_some());
+    }
+
+    #[test]
+    fn dropped_handoff_releases_claim_without_spending_an_attempt() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap().unwrap();
+
+        assert!(release_unstarted_claim(&connection, "j1", "handoff").unwrap());
+        let released = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(released.status, DispatchStatus::Pending);
+        assert_eq!(released.attempts, 0);
+        assert_eq!(released.turn_attempts, 0);
+        let reclaimed = claim(&connection, "j1").unwrap().unwrap();
+        assert_eq!(reclaimed.attempts, 1);
+        assert_eq!(reclaimed.turn_attempts, 1);
+    }
+
+    #[test]
+    fn unavailable_runtime_defers_without_spending_an_attempt() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        claim(&connection, "j1").unwrap().unwrap();
+
+        assert!(defer_runtime_unavailable(&connection, "j1", 30, "runtime_unavailable").unwrap());
+        let deferred = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(deferred.status, DispatchStatus::Pending);
+        assert_eq!(deferred.attempts, 0);
+        assert_eq!(deferred.turn_attempts, 0);
+        assert!(deferred.claimed_at.is_none());
+        assert_eq!(deferred.last_error.as_deref(), Some("runtime_unavailable"));
+        assert!(
+            deferred.available_at > Utc::now(),
+            "the dispatcher must not hot-loop while the runtime is absent"
+        );
+        assert!(
+            claim(&connection, "j1").unwrap().is_none(),
+            "the job must remain delayed until available_at"
+        );
+    }
+
+    #[test]
+    fn group_limit_prevents_claim_until_a_sibling_finishes() {
+        let connection = connection();
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO discussions (id, title, created_at, updated_at)
+                 VALUES ('d2', 'Dispatch 2', ?1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('u2', 'd2', 'User', 'go', ?1, 1, ?1)",
+                [&now],
+            )
+            .unwrap();
+        let empty = Vec::new();
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "j1",
+                discussion_id: "d1",
+                trigger_message_id: "u1",
+                trigger_sort_order: 1,
+                dedupe_key: "message:u1",
+                agent_override: None,
+                chain_prompt_ids: &empty,
+                batch_item: None,
+                group_id: Some("batch"),
+                group_concurrency_limit: Some(1),
+            },
+        )
+        .unwrap();
+        enqueue(
+            &connection,
+            NewAgentDispatchJob {
+                id: "j2",
+                discussion_id: "d2",
+                trigger_message_id: "u2",
+                trigger_sort_order: 1,
+                dedupe_key: "message:u2",
+                agent_override: None,
+                chain_prompt_ids: &empty,
+                batch_item: None,
+                group_id: Some("batch"),
+                group_concurrency_limit: Some(1),
+            },
+        )
+        .unwrap();
+
+        assert!(claim(&connection, "j1").unwrap().is_some());
+        assert!(claim(&connection, "j2").unwrap().is_none());
+        assert!(mark_completed(&connection, "j1").unwrap());
+        assert!(claim(&connection, "j2").unwrap().is_some());
+    }
+
+    #[test]
+    fn completion_lookup_ignores_recovered_and_unclassified_agent_messages() {
+        let connection = connection();
+        let job = enqueue_default(&connection, "j1", "message:u1");
+        let now = Utc::now().to_rfc3339();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at,
+                  recovered_partial)
+                 VALUES ('a-recovered', 'd1', 'Agent', 'partial', ?1, 2, ?1, 1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at)
+                 VALUES ('a-legacy', 'd1', 'Agent', 'unknown', ?1, 3, ?1)",
+                [&now],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at,
+                  agent_run_succeeded, agent_dispatch_job_id)
+                 VALUES ('a-other-job', 'd1', 'Agent', 'previous turn', ?1, 4, ?1, 1, 'j0')",
+                [&now],
+            )
+            .unwrap();
+        assert!(latest_completed_agent_message(&connection, &job)
+            .unwrap()
+            .is_none());
+
+        connection
+            .execute(
+                "INSERT INTO messages
+                 (id, discussion_id, role, content, timestamp, sort_order, received_at,
+                  agent_run_succeeded, agent_dispatch_job_id)
+                 VALUES ('a-durable', 'd1', 'Agent', 'failed reply', ?1, 5, ?1, 0, 'j1')",
+                [&now],
+            )
+            .unwrap();
+        let completion = latest_completed_agent_message(&connection, &job)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.0, "a-durable");
+        assert_eq!(completion.1, "failed reply");
+        assert!(!completion.2);
+    }
+
+    #[test]
+    fn exhausted_jobs_leave_the_runnable_queue() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET attempts = ?1 WHERE id = 'j1'",
+                [i64::from(MAX_DISPATCH_ATTEMPTS)],
+            )
+            .unwrap();
+
+        assert!(list_runnable_ids(&connection, 10).unwrap().is_empty());
+        assert_eq!(
+            list_exhausted_ids(&connection, 10).unwrap(),
+            vec!["j1".to_string()]
+        );
+    }
+}

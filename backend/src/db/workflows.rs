@@ -37,7 +37,7 @@ fn run_status_str(s: &RunStatus) -> &'static str {
 
 /// 0.8.11 (B5) — reconcile workflow runs left `Running`/`Pending` when the
 /// backend process died mid-run (crash, container restart, `kill -9`,
-/// cargo-watch reload). Without this they stay "Running" forever, poison the
+/// dev-watcher reload). Without this they stay "Running" forever, poison the
 /// active-runs badge, and make a cron's "did the last run succeed?" check read a
 /// zombie as in-progress. Flips rows older than `stale_after_secs` to the
 /// terminal `Interrupted` status (distinct from `Failed`). Mirrors
@@ -390,6 +390,9 @@ pub struct CreateBatchRunInput<'a> {
     /// when the agents write code in parallel, otherwise they clobber each
     /// other in the main tree.
     pub workspace_mode: String,
+    pub chain_prompt_ids: Vec<String>,
+    pub chain_batch_items: Vec<Option<String>>,
+    pub group_concurrency_limit: Option<u32>,
 }
 
 /// Result of [`create_batch_run`] — the ids the caller needs to fan out or
@@ -466,10 +469,11 @@ pub fn create_batch_run(
         input.workspace_mode
     };
 
-    let discussions: Vec<(Discussion, DiscussionMessage)> = input
+    let discussions: Vec<(Discussion, DiscussionMessage, Option<String>)> = input
         .items
         .iter()
-        .map(|item| {
+        .enumerate()
+        .map(|(index, item)| {
             let disc_id = Uuid::new_v4().to_string();
             let initial_message = DiscussionMessage {
                 model: None,
@@ -535,11 +539,15 @@ pub fn create_batch_run(
                 created_at: now,
                 updated_at: now,
             };
-            (discussion, initial_message)
+            (
+                discussion,
+                initial_message,
+                input.chain_batch_items.get(index).cloned().flatten(),
+            )
         })
         .collect();
 
-    let discussion_ids: Vec<String> = discussions.iter().map(|(d, _)| d.id.clone()).collect();
+    let discussion_ids: Vec<String> = discussions.iter().map(|(d, _, _)| d.id.clone()).collect();
 
     // 0.8.5 — resolve the CURRENT QP version once outside the loop. The
     // version_index is stamped on every spawned discussion so the metrics
@@ -555,9 +563,26 @@ pub fn create_batch_run(
     let tx_result: Result<()> = (|| {
         ensure_batch_placeholder_workflow(conn, &qp.id, &qp.name, qp.project_id.as_deref())?;
         insert_run(conn, &run)?;
-        for (disc, msg) in &discussions {
+        for (disc, msg, batch_item) in &discussions {
             crate::db::discussions::insert_discussion(conn, disc)?;
-            crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            let trigger_sort_order = crate::db::discussions::insert_message(conn, &disc.id, msg)?;
+            let job_id = Uuid::new_v4().to_string();
+            let dedupe_key = format!("message:{}", msg.id);
+            crate::db::agent_dispatch::enqueue(
+                conn,
+                crate::db::agent_dispatch::NewAgentDispatchJob {
+                    id: &job_id,
+                    discussion_id: &disc.id,
+                    trigger_message_id: &msg.id,
+                    trigger_sort_order,
+                    dedupe_key: &dedupe_key,
+                    agent_override: None,
+                    chain_prompt_ids: &input.chain_prompt_ids,
+                    batch_item: batch_item.as_deref(),
+                    group_id: Some(&run_id),
+                    group_concurrency_limit: input.group_concurrency_limit,
+                },
+            )?;
             // Every batch child is owed an agent run. Mark it so a
             // restart before the agent starts (queued, or the HTTP path's
             // front-driven /run) is caught by the boot reconcile instead of

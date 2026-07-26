@@ -200,32 +200,32 @@ setup() {
 
 # ─── dev_missing_tools (kronn start-dev preflight) ────────────────────────────
 
-@test "dev_missing_tools: empty when cargo+node+pnpm all present" {
-    run dev_missing_tools 1 1 1
+@test "dev_missing_tools: empty when cargo+node+pnpm+watchexec all present" {
+    run dev_missing_tools 1 1 1 1
     assert_success
     assert_output ""
 }
 
-@test "dev_missing_tools: lists all three when none present" {
+@test "dev_missing_tools: lists all four when none present" {
     run dev_missing_tools 0 0 0
     assert_success
-    assert_output "cargo node pnpm"
+    assert_output "cargo node pnpm watchexec"
 }
 
 @test "dev_missing_tools: reports only the missing one (pnpm)" {
-    run dev_missing_tools 1 1 0
+    run dev_missing_tools 1 1 0 1
     assert_success
     assert_output "pnpm"
 }
 
 @test "dev_missing_tools: reports cargo when only Rust is missing" {
-    run dev_missing_tools 0 1 1
+    run dev_missing_tools 0 1 1 1
     assert_success
     assert_output "cargo"
 }
 
-@test "dev_missing_tools: stable order (cargo before node before pnpm)" {
-    run dev_missing_tools 0 0 1
+@test "dev_missing_tools: stable order (cargo before node before pnpm before watchexec)" {
+    run dev_missing_tools 0 0 1 1
     assert_success
     assert_output "cargo node"
 }
@@ -233,13 +233,66 @@ setup() {
 @test "dev_missing_tools: defaults to all-missing when called with no args" {
     run dev_missing_tools
     assert_success
-    assert_output "cargo node pnpm"
+    assert_output "cargo node pnpm watchexec"
 }
 
 @test "dev_missing_tools: a non-1 token (e.g. 'yes') counts as missing" {
-    run dev_missing_tools yes 1 1
+    run dev_missing_tools yes 1 1 1
     assert_success
     assert_output "cargo"
+}
+
+@test "dev_missing_tools: reports watchexec independently" {
+    run dev_missing_tools 1 1 1 0
+    assert_success
+    assert_output "watchexec"
+}
+
+@test "dev_backend_watcher_pattern: is specific to Kronn cargo run watchers" {
+    run dev_backend_watcher_pattern
+    assert_success
+    assert_output "watchexec.*cargo run"
+    refute_output "watchexec"
+}
+
+@test "wait_for_process_http_ready: succeeds when health answers" {
+    curl() { return 0; }
+    kill() { return 0; }
+    sleep() { :; }
+
+    run wait_for_process_http_ready "http://localhost:3140/api/health" 123 2 0
+    assert_success
+}
+
+@test "wait_for_process_http_ready: retries while watcher lives" {
+    local curl_calls=0
+    curl() {
+        curl_calls=$((curl_calls + 1))
+        [[ "$curl_calls" -ge 2 ]]
+    }
+    kill() { return 0; }
+    sleep() { :; }
+
+    run wait_for_process_http_ready "http://localhost:3140/api/health" 123 3 0
+    assert_success
+}
+
+@test "wait_for_process_http_ready: distinguishes an exited watcher" {
+    curl() { return 1; }
+    kill() { return 1; }
+    sleep() { :; }
+
+    run wait_for_process_http_ready "http://localhost:3140/api/health" 123 2 0
+    assert_failure 2
+}
+
+@test "wait_for_process_http_ready: times out while watcher stays alive" {
+    curl() { return 1; }
+    kill() { return 0; }
+    sleep() { :; }
+
+    run wait_for_process_http_ready "http://localhost:3140/api/health" 123 2 0
+    assert_failure 1
 }
 
 # ─── ask_yn EOF safety (must not loop forever on closed stdin) ─────────────────

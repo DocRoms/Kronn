@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, screen, act, cleanup, fireEvent, waitFor } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { loadDraft } from '../../lib/chat-drafts';
 
 // Mock SpeechSynthesis API
 const mockCancel = vi.fn();
@@ -107,6 +108,12 @@ vi.mock('../../lib/api', () => ({
       later: [],
       completed_active: 0,
       total_active: 0,
+      stats: { ready: 0, blocked: 0, in_progress: 0, ideas: 0, done: 0, later: 0 },
+    }),
+    proposals: vi.fn().mockResolvedValue({
+      proposals: [],
+      pending_proposal_count: 0,
+      pending_item_count: 0,
     }),
     changes: vi.fn().mockResolvedValue([]),
     list: vi.fn().mockResolvedValue({ items: [], next_cursor: null }),
@@ -129,7 +136,11 @@ vi.mock('../../hooks/useWebSocket', () => ({
   useWebSocket: vi.fn(() => ({ connected: false })),
 }));
 
-import { discussions as discussionsApi, projects as projectsApi } from '../../lib/api';
+import {
+  discussions as discussionsApi,
+  planning as planningApi,
+  projects as projectsApi,
+} from '../../lib/api';
 import { DiscussionsPage } from '../DiscussionsPage';
 import type { AgentDetection, AiAuditStatus, Discussion, Project } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
@@ -139,6 +150,12 @@ const toastFn: ToastFn = vi.fn();
 
 beforeEach(() => {
   vi.mocked(discussionsApi.get).mockReset();
+  vi.mocked(planningApi.proposals).mockReset();
+  vi.mocked(planningApi.proposals).mockResolvedValue({
+    proposals: [],
+    pending_proposal_count: 0,
+    pending_item_count: 0,
+  });
 });
 
 afterEach(cleanup);
@@ -346,6 +363,75 @@ describe('DiscussionsPage', () => {
 
     // After remount, discussions.get should be called again to reload d1
     expect(vi.mocked(discussionsApi.get)).toHaveBeenCalledWith('d1');
+  });
+
+  it('re-syncs the active discussion on WS reconnect (0.9.2-F gate DoD #4)', async () => {
+    // A dropped WS that re-connects must RE-SYNC and APPLY the result, not
+    // leave a stale view or duplicate. useWebSocket calls onConnect on every
+    // (re)connect (proven in useWebSocket.test.ts); here we assert that
+    // DiscussionsPage's onConnect refetches the list AND reloads the active
+    // discussion, and that a NEW message from the reload actually renders once.
+    const before: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'before reconnect', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(before);
+    const refetch = vi.fn();
+    const lifted = liftedProps();
+
+    const { useWebSocket } = await import('../../hooks/useWebSocket');
+    let capturedOnConnect: (() => void) | undefined;
+    vi.mocked(useWebSocket).mockImplementation((_onMessage, onConnect) => {
+      capturedOnConnect = onConnect as (() => void) | undefined;
+      return { connected: true };
+    });
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: before.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={refetch}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />
+    );
+
+    // The reload after reconnect carries a NEW, distinctive message.
+    const marker = 'applied-after-reconnect-42';
+    const after: Discussion = {
+      ...makeListDiscussion('d1', 2),
+      messages: [
+        { id: 'm1', role: 'User', content: 'before reconnect', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+        { id: 'm2', role: 'Agent', content: marker, agent_type: 'ClaudeCode', timestamp: '2026-01-01T00:00:02Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(after);
+    refetch.mockClear();
+
+    // Simulate the socket dropping and re-connecting.
+    await act(async () => {
+      capturedOnConnect?.();
+    });
+
+    // The reloaded disc's new message is APPLIED and rendered exactly once
+    // (proves messages re-sync + no duplicate). No arbitrary sleep — waitFor.
+    await waitFor(() => {
+      expect(screen.getAllByText(marker)).toHaveLength(1);
+    });
+    // The list snapshot (carries awaiting_agent) is re-fetched, and the active
+    // disc was reloaded by id.
+    expect(refetch).toHaveBeenCalled();
+    expect(vi.mocked(discussionsApi.get)).toHaveBeenCalledWith('d1');
+
+    vi.mocked(useWebSocket).mockImplementation(() => ({ connected: false }));
   });
 
   it('does NOT abort SSE controllers on unmount', async () => {
@@ -569,6 +655,69 @@ describe('DiscussionsPage', () => {
 
     // discussions.get should have been called again to reload the discussion with new messages
     expect(vi.mocked(discussionsApi.get).mock.calls.length).toBeGreaterThan(callCountBefore);
+  });
+
+  it('refreshes the pending-proposal header count when a new Agent message lands', async () => {
+    const first = makeListDiscussion('d1', 1);
+    const withProposal = makeListDiscussion('d1', 2);
+    vi.mocked(discussionsApi.get)
+      .mockResolvedValueOnce(first)
+      .mockResolvedValue(withProposal);
+    vi.mocked(planningApi.proposals)
+      .mockResolvedValueOnce({
+        proposals: [],
+        pending_proposal_count: 0,
+        pending_item_count: 0,
+      })
+      .mockResolvedValue({
+        proposals: [],
+        pending_proposal_count: 1,
+        pending_item_count: 1,
+      });
+
+    const lifted = liftedProps();
+    lifted.sendingMap = { d1: true };
+    const { rerender, container } = await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[first]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...lifted}
+      />,
+    );
+    await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(1));
+    expect(container.querySelector('.disc-plan-pending')).toBeNull();
+
+    await act(async () => {
+      rerender(
+        <I18nProvider>
+          <DiscussionsPage
+            projects={[]}
+            agents={[]}
+            allDiscussions={[first]}
+            configLanguage="fr"
+            agentAccess={null}
+            refetchDiscussions={noop}
+            refetchProjects={noop}
+            onNavigate={noop}
+            toast={toastFn}
+            initialActiveDiscussionId="d1"
+            {...lifted}
+            sendingMap={{ d1: false }}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    await waitFor(() => expect(planningApi.proposals).toHaveBeenCalledTimes(2));
+    expect(container.querySelector('.disc-plan-pending')?.textContent).toBe('1');
   });
 
   it('refetches and reloads on kronn:discussion-updated (auto-skill activation)', async () => {
@@ -1173,6 +1322,105 @@ describe('DiscussionsPage', () => {
 
     // speechSynthesis.cancel should have been called when sending the message
     expect(mockCancel).toHaveBeenCalled();
+  });
+
+  it('uses the client message UUID for the optimistic row and request', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    let sentPayload: { content: string; client_message_id?: string } | undefined;
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, payload: any) => {
+        sentPayload = payload;
+      },
+    );
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(chatInput, { target: { value: 'Stable optimistic id' } });
+    });
+    const sendBtn = document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(sendBtn); });
+
+    expect(sentPayload?.client_message_id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const optimisticIdPill = document.querySelector(
+      `button[title*="${sentPayload?.client_message_id}"]`,
+    );
+    expect(optimisticIdPill).toBeTruthy();
+  });
+
+  it('reverts the optimistic row when the send errors before acceptance', async () => {
+    const fullDisc: Discussion = {
+      ...makeListDiscussion('d1', 1),
+      messages: [
+        { id: 'm1', role: 'User', content: 'Hello', agent_type: null, timestamp: '2026-01-01T00:00:00Z', tokens_used: 0, auth_mode: null },
+      ],
+    };
+    vi.mocked(discussionsApi.get).mockResolvedValue(fullDisc);
+    // No `accepted` receipt: the backend refused the send (e.g. partial_pending),
+    // so the optimistic User row must NOT linger as a phantom "sent" message.
+    // jsdom has no `confirm`; user cancels the dismiss prompt (returns false).
+    const prevConfirm = window.confirm;
+    window.confirm = vi.fn(() => false);
+    vi.mocked(discussionsApi.sendMessageStream).mockImplementation(
+      async (_discId: any, _payload: any, _onChunk: any, _onDone: any, onError: any) => {
+        onError('partial_pending: previous run in recovery');
+      },
+    );
+
+    await wrap(
+      <DiscussionsPage
+        projects={[]}
+        agents={[]}
+        allDiscussions={[{ ...makeListDiscussion('d1', 1), messages: fullDisc.messages }]}
+        configLanguage="fr"
+        agentAccess={null}
+        refetchDiscussions={noop}
+        refetchProjects={noop}
+        onNavigate={noop}
+        toast={toastFn}
+        initialActiveDiscussionId="d1"
+        {...liftedProps()}
+      />
+    );
+
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+    const chatInput = document.querySelector('textarea') as HTMLTextAreaElement;
+    await act(async () => {
+      fireEvent.change(chatInput, { target: { value: 'Phantom message' } });
+    });
+    const sendBtn = document.querySelector('button[aria-label="Send message"]') as HTMLButtonElement;
+    await act(async () => { fireEvent.click(sendBtn); });
+    await act(async () => { await new Promise(r => setTimeout(r, 0)); });
+
+    // The refused message must not remain in the thread.
+    expect(document.body.textContent).not.toContain('Phantom message');
+    expect(chatInput.value).toBe('Phantom message');
+    expect(loadDraft('d1')?.text).toBe('Phantom message');
+    window.confirm = prevConfirm;
   });
 
   it('creates a new discussion via the form', async () => {

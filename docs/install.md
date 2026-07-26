@@ -58,11 +58,10 @@ hot-reload, and no Docker:
 
 ```bash
 # One-time toolchain (Kronn needs Rust + Node on the host for native mode):
-brew install node                       # Node ≥ 24 (or use fnm/nvm)
+brew install node watchexec             # Node ≥ 24 + backend hot-reload
 npm install -g pnpm                      # or: corepack enable
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y   # Rust
 source "$HOME/.cargo/env"
-cargo install cargo-watch               # used for backend hot-reload
 
 git clone https://github.com/DocRoms/kronn.git && cd kronn
 ./kronn start-dev                        # ONE command — backend + Vite, hot-reload
@@ -70,9 +69,10 @@ git clone https://github.com/DocRoms/kronn.git && cd kronn
 ```
 
 `./kronn start-dev` runs the native stack in a single command: it checks the
-toolchain (cargo / node / pnpm), starts the Rust backend (API on **:3140**) and
-the Vite UI (on **:5173**, which proxies `/api` → :3140), and **prints the UI
-URL** so you don't open the API port by mistake. `Ctrl+C` stops both.
+toolchain (cargo / node / pnpm / watchexec), starts the Rust backend (API on
+**:3140**), waits until `/api/health` answers, then starts the Vite UI (on
+**:5173**, which proxies `/api` → :3140). It **prints the UI URL** so you don't
+open the API port by mistake. `Ctrl+C` stops both.
 
 > **The UI is on `:5173`, not `:3140`.** In native dev the backend serves the
 > **API only** on :3140 — opening it shows a blank page. The interface is served

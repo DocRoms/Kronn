@@ -180,9 +180,16 @@ pub async fn set_scan_paths(
 
 /// POST /api/setup/install-agent
 /// Install an agent
-pub async fn install_agent(Json(agent_type): Json<AgentType>) -> Json<ApiResponse<String>> {
+pub async fn install_agent(
+    State(state): State<AppState>,
+    Json(agent_type): Json<AgentType>,
+) -> Json<ApiResponse<String>> {
     match agents::install_agent(&agent_type).await {
-        Ok(output) => Json(ApiResponse::ok(output)),
+        Ok(output) => {
+            agents::invalidate_detect_cache();
+            super::agents::resync_mcp_configs_after_install(&state).await;
+            Json(ApiResponse::ok(output))
+        }
         Err(e) => Json(ApiResponse::err(format!("Install failed: {}", e))),
     }
 }

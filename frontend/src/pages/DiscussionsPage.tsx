@@ -21,7 +21,7 @@ import { parseAgentQuestions } from '../lib/agent-question-parse';
 import { userError } from '../lib/userError';
 import { getDeployedVersion, setDeployedVersion } from '../lib/qp-improver-banner';
 import { sanitizeQpImproverPayload } from '../lib/qp-improver-sanitize';
-import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan } from '../types/generated';
+import type { Project, AgentDetection, Discussion, AgentType, AgentsConfig, Skill, AgentProfile, Directive, McpConfigDisplay, McpIncompatibility, Contact, WsMessage, ContextFile, BatchRunSummary, DiscussionPlan, ProposalListResponse } from '../types/generated';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { useQpChain } from '../hooks/useQpChain';
 import { useMessageQueue } from '../hooks/useMessageQueue';
@@ -29,9 +29,10 @@ import { useRafBatchedStream } from '../hooks/useRafBatchedStream';
 import { buildStreamingFlush } from '../lib/stream-flush';
 import { findLastAgentMessage } from '../lib/discussionHelpers';
 import { saveDraft } from '../lib/chat-drafts';
+import { publishMessageSendSettled } from '../lib/messageSendLifecycle';
 import { buildBatchTriageRows, buildContinuationDraft, type BatchTriageRow } from '../lib/batchTriage';
 import { useT } from '../lib/I18nContext';
-import { AGENT_LABELS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, agentColor, isAgentRestricted as isAgentRestrictedUtil, hasAgentFullAccess, getProjectGroup, isUsable, isBriefingDisc, isBootstrapDisc, isValidationDisc } from '../lib/constants';
 import type { ToastFn } from '../hooks/useToast';
 import {
   ChevronRight, Cpu, Loader2,
@@ -40,6 +41,34 @@ import {
   Menu, X, Clock, ExternalLink,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
+
+function newClientMessageId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function mentionedAgent(text: string): AgentType | undefined {
+  for (const mention of AGENT_MENTIONS) {
+    const escaped = mention.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    if (new RegExp(`(^|[\\s([{])${escaped}(?=$|[\\s\\])},.!?;:])`, 'i').test(text)) {
+      return mention.type;
+    }
+  }
+  return undefined;
+}
 
 export interface DiscussionsPageProps {
   projects: Project[];
@@ -180,6 +209,8 @@ export function DiscussionsPage({
   const [showPlanPanel, setShowPlanPanel] = useState(false);
   const [showSettingsPanel, setShowSettingsPanel] = useState(false);
   const [discussionPlan, setDiscussionPlan] = useState<DiscussionPlan | null>(null);
+  const [proposalInbox, setProposalInbox] = useState<ProposalListResponse | null>(null);
+  const [proposalInboxDiscussionId, setProposalInboxDiscussionId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!showGitPanel && !showPlanPanel && !showSettingsPanel) return;
@@ -215,6 +246,9 @@ export function DiscussionsPage({
   // `deleteLastAgentMessages` + `editLastUserMessage` + `runAgent` in
   // parallel, producing duplicate user edits and parallel agent runs.
   const editingMsgInFlightRef = useRef(false);
+  // One key per edit intent, reused after transport retries. The backend
+  // dedupes the whole edit+tombstone+dispatch transaction on this key.
+  const editingRevisionKeyRef = useRef<string | null>(null);
   // 0.8.4 follow-up — QP improver deploy CTA needs (a) a busy state to
   // disable the button + show "Déploiement en cours…" while the PUT
   // round-trips, and (b) a useRef guard against a fast double-click
@@ -385,22 +419,40 @@ export function DiscussionsPage({
   useEffect(() => {
     if (!activeDiscussionId) return;
     let cancelled = false;
-    planningApi.discussionPlan(activeDiscussionId)
-      .then(plan => {
-        if (!cancelled) setDiscussionPlan(plan);
+    Promise.all([
+      planningApi.discussionPlan(activeDiscussionId),
+      planningApi.proposals(activeDiscussionId),
+    ])
+      .then(([plan, proposals]) => {
+        if (!cancelled) {
+          setDiscussionPlan(plan);
+          setProposalInbox(proposals);
+          setProposalInboxDiscussionId(activeDiscussionId);
+        }
       })
       .catch(() => {
-        if (!cancelled) setDiscussionPlan(null);
+        if (!cancelled) {
+          setDiscussionPlan(null);
+          setProposalInbox(null);
+          setProposalInboxDiscussionId(activeDiscussionId);
+        }
       });
     return () => { cancelled = true; };
-  }, [activeDiscussionId]);
+  }, [activeDiscussionId, activeDiscussion?.message_count]);
 
   useEffect(() => {
     const refreshPlan = (event: Event) => {
       const discussionId = (event as CustomEvent<{ discussionId?: string }>).detail?.discussionId;
       if (!discussionId || discussionId !== activeDiscussionId) return;
-      planningApi.discussionPlan(discussionId)
-        .then(setDiscussionPlan)
+      Promise.all([
+        planningApi.discussionPlan(discussionId),
+        planningApi.proposals(discussionId),
+      ])
+        .then(([plan, proposals]) => {
+          setDiscussionPlan(plan);
+          setProposalInbox(proposals);
+          setProposalInboxDiscussionId(discussionId);
+        })
         .catch(() => { /* panel will surface a fetch error when opened */ });
     };
     const openPlan = (event: Event) => {
@@ -411,9 +463,11 @@ export function DiscussionsPage({
       setShowPlanPanel(true);
     };
     window.addEventListener('kronn:plan-changed', refreshPlan);
+    window.addEventListener('kronn:plan-proposals-changed', refreshPlan);
     window.addEventListener('kronn:open-discussion-plan', openPlan);
     return () => {
       window.removeEventListener('kronn:plan-changed', refreshPlan);
+      window.removeEventListener('kronn:plan-proposals-changed', refreshPlan);
       window.removeEventListener('kronn:open-discussion-plan', openPlan);
     };
   }, [activeDiscussionId]);
@@ -515,7 +569,7 @@ export function DiscussionsPage({
       }
     }
     // Remote peer sent a message in a shared discussion → reload it
-    if (msg.type === 'chat_message') {
+    if (msg.type === 'chat_message' || msg.type === 'message_revised') {
       // If we're viewing this discussion, reload to show the new message
       refetchDiscussions();
       if (activeDiscussionId) {
@@ -1203,9 +1257,13 @@ export function DiscussionsPage({
     // rather than launching a parallel run.
     if (sendingMap[discId] || abortControllers.current[discId]) {
       enqueueMessage(msg, targetAgent);
+      // The in-memory queue now owns this submission. It is not a backend
+      // receipt, but the composer may safely advance to the next draft.
+      publishMessageSendSettled(discId, msg, 'accepted');
       return;
     }
     stopTts();
+    const clientMessageId = newClientMessageId();
 
     // Optimistically add user message to loadedDiscussions so it appears immediately
     setLoadedDiscussions(prev => {
@@ -1216,7 +1274,7 @@ export function DiscussionsPage({
         [discId]: {
           ...disc,
           messages: [...disc.messages, {
-            id: `optimistic-${Date.now()}`,
+            id: clientMessageId,
             role: 'User' as const,
             content: msg,
             agent_type: null,
@@ -1248,54 +1306,102 @@ export function DiscussionsPage({
     }
 
     resetAgentLogs();
-    await discussionsApi.sendMessageStream(
-      discId,
-      { content: msg, target_agent: targetAgent },
-      (text) => appendStreamChunk(discId, text),
-      () => cleanupStream(discId),
-      (error) => {
-        console.error('Agent error:', error);
-        const errStr = userError(error);
-        if (errStr.includes('checked out') || errStr.includes('worktree')) {
-          setWorktreeError(errStr);
-        } else if (errStr.includes('partial_pending')) {
-          // Backend refused: previous run still in recovery. Offer one-click
-          // dismiss so the user can retype without waiting for the WS event.
-          if (confirm(t('disc.partialPendingPrompt'))) {
-            discussionsApi.dismissPartial(discId)
-              .then(() => {
-                refetchDiscussions();
-                reloadDiscussion(discId);
-                toast(t('disc.partialDismissed'), 'success');
-              })
-              .catch(e => toast(userError(e), 'error'));
-          }
-        } else {
-          toast(errStr, 'error');
+    // The optimistic User row above carries the durable id (clientMessageId).
+    // It is confirmed only by the `accepted` receipt; an error BEFORE that
+    // receipt (partial_pending, invalid id) means the backend never persisted
+    // it, so the row must be rolled back or the UI shows a phantom "sent"
+    // message. `accepted` always precedes any post-persistence error, so
+    // `!acceptedReceipt` reliably means "not persisted".
+    let acceptedReceipt = false;
+    let sendSettlementPublished = false;
+    let sendErrorHandled = false;
+    const publishSettlement = (settlement: 'accepted' | 'refused') => {
+      if (sendSettlementPublished) return;
+      sendSettlementPublished = true;
+      publishMessageSendSettled(discId, msg, settlement);
+    };
+    const revertOptimisticUserRow = () => {
+      setLoadedDiscussions(prev => {
+        const disc = prev[discId];
+        if (!disc) return prev;
+        return {
+          ...prev,
+          [discId]: {
+            ...disc,
+            messages: disc.messages.filter(m => m.id !== clientMessageId),
+            message_count: Math.max(0, disc.message_count - 1),
+            non_system_message_count: Math.max(0, disc.non_system_message_count - 1),
+          },
+        };
+      });
+    };
+    const handleSendError = (error: string) => {
+      if (sendErrorHandled) return;
+      sendErrorHandled = true;
+      console.error('Agent error:', error);
+      if (!acceptedReceipt) {
+        revertOptimisticUserRow();
+        publishSettlement('refused');
+      }
+      const errStr = userError(error);
+      if (errStr.includes('checked out') || errStr.includes('worktree')) {
+        setWorktreeError(errStr);
+      } else if (errStr.includes('partial_pending')) {
+        // Backend refused: previous run still in recovery. Offer one-click
+        // dismiss so the user can retype without waiting for the WS event.
+        if (confirm(t('disc.partialPendingPrompt'))) {
+          discussionsApi.dismissPartial(discId)
+            .then(() => {
+              refetchDiscussions();
+              reloadDiscussion(discId);
+              toast(t('disc.partialDismissed'), 'success');
+            })
+            .catch(e => toast(userError(e), 'error'));
         }
-        cleanupStream(discId);
-      },
-      controller.signal,
-      () => {
-        refetchDiscussions();
-        setSendingMap(prev => ({ ...prev, [discId]: true }));
-        // The backend just persisted the user message (real id) and pinned any
-        // composer-staged files to it (0.8.8). Reload BOTH so the attachment
-        // binds immediately: reloadDiscussion swaps the optimistic message
-        // (id `optimistic-…`) for the real one, and loadContextFiles refreshes
-        // each file's message_id. Without the disc reload the files stay keyed
-        // to a message id the UI doesn't have yet, so the thumbnail wouldn't
-        // appear until the agent finished (cleanupStream's reload) — defeating
-        // the whole point of showing your attachment the instant you send.
-        reloadDiscussion(discId);
-        loadContextFiles(discId);
-        // The optimistic update above bumped both counts by 1 (the freshly
-        // queued User message); seed lastSeen with the matching non-System
-        // basis so the badge resolves to 0 without waiting on the next tick.
-        markDiscussionSeen(discId, activeDiscussion ? unseenBasis(activeDiscussion) + 1 : 1);
-      },
-      onAgentLog,
-    );
+      } else {
+        toast(errStr, 'error');
+      }
+      cleanupStream(discId);
+    };
+    try {
+      await discussionsApi.sendMessageStream(
+        discId,
+        { content: msg, target_agent: targetAgent, client_message_id: clientMessageId },
+        (text) => appendStreamChunk(discId, text),
+        () => {
+          // A cleanly closed stream without an acceptance receipt must not
+          // consume the draft. This is a protocol failure, equivalent to a
+          // pre-persistence refusal from the composer's perspective.
+          if (!acceptedReceipt) {
+            handleSendError('Message stream closed before persistence receipt');
+            return;
+          }
+          cleanupStream(discId);
+        },
+        handleSendError,
+        controller.signal,
+        () => {
+          setSendingMap(prev => ({ ...prev, [discId]: true }));
+        },
+        onAgentLog,
+        () => {
+          acceptedReceipt = true;
+          publishSettlement('accepted');
+          refetchDiscussions();
+          // The durable receipt is emitted only after the message commit and
+          // pending-file link. Reconcile on that event rather than on HTTP
+          // headers, which can also precede an SSE error.
+          reloadDiscussion(discId);
+          loadContextFiles(discId);
+          // The optimistic update above bumped both counts by 1 (the freshly
+          // queued User message); seed lastSeen with the matching non-System
+          // basis so the badge resolves to 0 without waiting on the next tick.
+          markDiscussionSeen(discId, activeDiscussion ? unseenBasis(activeDiscussion) + 1 : 1);
+        },
+      );
+    } catch (error) {
+      handleSendError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   // QP chain — load QPs, queue one mid-stream, auto-fire on the sending
@@ -1467,9 +1573,14 @@ export function DiscussionsPage({
     }
   }, [ttsPlayingMsgId, ttsState]);
   const handleMsgEditStart = useCallback((msgId: string, content: string) => {
+    editingRevisionKeyRef.current = newClientMessageId();
     setEditingMsgId(msgId); setEditingText(content);
   }, []);
-  const handleMsgEditCancel = useCallback(() => { setEditingMsgId(null); setEditingText(''); }, []);
+  const handleMsgEditCancel = useCallback(() => {
+    editingRevisionKeyRef.current = null;
+    setEditingMsgId(null);
+    setEditingText('');
+  }, []);
   const handleMsgExpandSummary = useCallback((msgId: string) => {
     setExpandedSummaryMsgId(prev => prev === msgId ? null : msgId);
   }, []);
@@ -1679,27 +1790,58 @@ export function DiscussionsPage({
     if (!activeDiscussionId || !editingMsgId || !editingText.trim()) return;
     if (editingMsgInFlightRef.current) return;
     if (sending || abortControllers.current[activeDiscussionId]) return;
+    const targetMessage = activeDiscussion?.messages.find(message => message.id === editingMsgId);
+    if (!targetMessage || targetMessage.role !== 'User') {
+      toast(t('common.error'), 'error');
+      return;
+    }
     editingMsgInFlightRef.current = true;
     const discId = activeDiscussionId;
+    const idempotencyKey = editingRevisionKeyRef.current ?? newClientMessageId();
+    editingRevisionKeyRef.current = idempotencyKey;
+    const controller = new AbortController();
+    abortControllers.current[discId] = controller;
+    const targetAgent = mentionedAgent(editingText);
+    setStreamingTargetMap(prev => {
+      if (targetAgent) return { ...prev, [discId]: targetAgent };
+      const { [discId]: _drop, ...rest } = prev;
+      return rest;
+    });
+    setSendingMap(prev => ({ ...prev, [discId]: true }));
+    setStreamingMap(prev => ({ ...prev, [discId]: '' }));
+    resetAgentLogs();
     try {
-      await discussionsApi.deleteLastAgentMessages(discId);
-      await discussionsApi.editLastUserMessage(discId, editingText.trim());
-      setEditingMsgId(null);
-      setEditingText('');
-      await refetchDiscussions();
-      reloadDiscussion(discId);
-      const controller = new AbortController();
-      abortControllers.current[discId] = controller;
-      setSendingMap(prev => ({ ...prev, [discId]: true }));
-      setStreamingMap(prev => ({ ...prev, [discId]: '' }));
-      resetAgentLogs();
-      await discussionsApi.runAgent(
+      await discussionsApi.reviseMessageStream(
         discId,
+        {
+          message_id: editingMsgId,
+          content: editingText.trim(),
+          expected_revision: targetMessage.timestamp,
+          idempotency_key: idempotencyKey,
+          target_agent: targetAgent,
+        },
         (text) => appendStreamChunk(discId, text),
         () => cleanupStream(discId),
-        (error) => { console.error('Agent error:', error); const e = userError(error); if (e.includes('checked out') || e.includes('worktree')) { setWorktreeError(e); } else { toast(e, 'error'); } cleanupStream(discId); },
+        (error) => {
+          console.error('Agent error:', error);
+          const e = userError(error);
+          if (e.includes('checked out') || e.includes('worktree')) {
+            setWorktreeError(e);
+          } else {
+            toast(e, 'error');
+          }
+          cleanupStream(discId);
+        },
         controller.signal,
-          onAgentLog,
+        undefined,
+        onAgentLog,
+        () => {
+          editingRevisionKeyRef.current = null;
+          setEditingMsgId(null);
+          setEditingText('');
+          refetchDiscussions();
+          reloadDiscussion(discId);
+        },
       );
     } finally {
       editingMsgInFlightRef.current = false;
@@ -2048,6 +2190,12 @@ export function DiscussionsPage({
               planCompleted={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.completed_active : 0}
               planTotal={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.total_active : 0}
               planLater={discussionPlan?.discussion_id === activeDiscussion.id ? discussionPlan.later.length : 0}
+              pendingProposalCount={proposalInboxDiscussionId === activeDiscussion.id
+                ? proposalInbox?.pending_proposal_count ?? 0
+                : 0}
+              pendingProposalItemCount={proposalInboxDiscussionId === activeDiscussion.id
+                ? proposalInbox?.pending_item_count ?? 0
+                : 0}
               isMobile={isMobile}
               sending={sending}
               pendingFilesCount={pendingFilesCount}
@@ -3112,6 +3260,16 @@ export function DiscussionsPage({
                 discussionId={activeDiscussion.id}
                 onClose={() => setShowPlanPanel(false)}
                 onChanged={setDiscussionPlan}
+                onNavigateDiscussion={(targetDiscussionId) => {
+                  setActiveDiscussionId(targetDiscussionId);
+                  ensureDiscussionVisible(targetDiscussionId);
+                  reloadDiscussion(targetDiscussionId);
+                  setShowPlanPanel(false);
+                }}
+                onNavigateProject={(projectId) => {
+                  setShowPlanPanel(false);
+                  onNavigate('projects', { projectId });
+                }}
                 toast={toast}
               />
             )}

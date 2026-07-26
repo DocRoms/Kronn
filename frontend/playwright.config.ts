@@ -22,7 +22,7 @@ const devUrl = `http://localhost:${devPort}`;
  *
  * The **Rust backend** must be running separately. Two ways:
  *   - Docker:  `./kronn start` or `make start`
- *   - Native:  `make dev-backend` (cargo watch with auto-reload)
+ *   - Native:  `make dev-backend` (watchexec with auto-reload)
  *
  * If the backend is down, tests fail at the first /api call with a 502 from
  * Vite. We don't auto-spawn cargo because cold-start is ~30s and breaks the

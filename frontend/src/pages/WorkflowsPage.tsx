@@ -482,9 +482,14 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
   // doesn't re-fire on every render.
   useEffect(() => {
     if (!initialSelectedWorkflowId) return;
-    setTab('workflows');
-    openDetail(initialSelectedWorkflowId);
-    onInitialSelectionConsumed?.();
+    const timeoutId = window.setTimeout(() => {
+      setTab('workflows');
+      void openDetail(initialSelectedWorkflowId);
+      onInitialSelectionConsumed?.();
+    }, 0);
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialSelectedWorkflowId]);
 

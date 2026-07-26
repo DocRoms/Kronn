@@ -27,6 +27,20 @@ export const AGENT_LABELS: Record<string, string> = {
 
 export const ALL_AGENT_TYPES: AgentType[] = ['ClaudeCode', 'Codex', 'Vibe', 'GeminiCli', 'Kiro', 'CopilotCli', 'Ollama'];
 
+export const AGENT_MENTIONS: ReadonlyArray<{
+  trigger: string;
+  type: AgentType;
+  label: string;
+}> = [
+  { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
+  { trigger: '@codex', type: 'Codex', label: 'Codex' },
+  { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
+  { trigger: '@gemini', type: 'GeminiCli', label: 'Gemini CLI' },
+  { trigger: '@kiro', type: 'Kiro', label: 'Kiro' },
+  { trigger: '@copilot', type: 'CopilotCli', label: 'GitHub Copilot' },
+  { trigger: '@ollama', type: 'Ollama', label: 'Ollama' },
+];
+
 /** Agents RTK can hook to compress shell output (token savings). Kiro/Copilot/
  *  Vibe/Ollama are out of scope (not in RTK's list / no shell to hook / local).
  *  Single source of truth — shared by the RTK Settings card and the

@@ -3,6 +3,24 @@ use crate::models::*;
 use crate::AppState;
 use axum::{extract::State, Json};
 
+pub(crate) async fn resync_mcp_configs_after_install(state: &AppState) {
+    let secret = state.config.read().await.encryption_secret.clone();
+    let Some(secret) = secret else {
+        tracing::debug!("Skipping post-install MCP sync: no encryption secret configured");
+        return;
+    };
+    if let Err(error) = state
+        .db
+        .with_conn(move |conn| {
+            crate::core::mcp_scanner::sync_all_projects(conn, &secret);
+            Ok(())
+        })
+        .await
+    {
+        tracing::warn!("Post-install MCP config sync failed: {error}");
+    }
+}
+
 /// GET /api/agents
 /// Detect all agents on the system, with enabled/disabled status from config.
 /// Non-installed agents that are only runtime_available require a configured
@@ -48,13 +66,20 @@ pub async fn install(
     match agents::install_agent(&agent_type).await {
         Ok(output) => {
             // Auto-enable after install: remove from disabled_agents if present
-            let mut config = state.config.write().await;
-            config.disabled_agents.retain(|a| a != &agent_type);
-            if let Err(e) = crate::core::config::save(&config).await {
-                tracing::error!("Failed to save config after agent install: {e}");
+            {
+                let mut config = state.config.write().await;
+                config.disabled_agents.retain(|a| a != &agent_type);
+                if let Err(e) = crate::core::config::save(&config).await {
+                    tracing::error!("Failed to save config after agent install: {e}");
+                }
             }
             // The detection cache is now stale — the agent just appeared.
             agents::invalidate_detect_cache();
+            // Agent-specific config files may not exist yet when the agent was
+            // installed after Kronn's startup sync (notably Vibe's
+            // project-local .vibe/config.toml). Make the new CLI immediately
+            // usable instead of waiting for a backend restart or MCP edit.
+            resync_mcp_configs_after_install(&state).await;
             Json(ApiResponse::ok(output))
         }
         Err(e) => Json(ApiResponse::err(format!("{}", e))),

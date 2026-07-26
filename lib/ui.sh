@@ -329,19 +329,53 @@ is_macos_host() {
 
 # Pure: given whether each native-dev tool is present (1 = present, anything
 # else = missing), echo the space-separated list of MISSING tool names in a
-# stable order (cargo node pnpm), or nothing when all are present. Native dev
-# mode (`kronn start-dev`) runs the Rust backend (cargo) + the Vite frontend
-# (node + pnpm) on the host with no Docker — these three are the hard
-# prerequisites. Kept pure (args, no `command -v`) so it is unit-testable; the
-# caller resolves real presence. Cross-platform: native dev is valid on
-# Linux/WSL/macOS alike, so there is no OS gating here.
+# stable order (cargo node pnpm watchexec), or nothing when all are present.
+# Native dev mode (`kronn start-dev`) runs the Rust backend through watchexec +
+# the Vite frontend (node + pnpm) on the host with no Docker — these four are
+# the hard prerequisites. Kept pure (args, no `command -v`) so it is
+# unit-testable; the caller resolves real presence. Cross-platform: native dev
+# is valid on Linux/WSL/macOS alike, so there is no OS gating here.
 dev_missing_tools() {
-    local have_cargo="${1:-0}" have_node="${2:-0}" have_pnpm="${3:-0}"
+    local have_cargo="${1:-0}" have_node="${2:-0}" have_pnpm="${3:-0}" have_watchexec="${4:-0}"
     local missing=""
     [[ "$have_cargo" == "1" ]] || missing="${missing} cargo"
     [[ "$have_node"  == "1" ]] || missing="${missing} node"
     [[ "$have_pnpm"  == "1" ]] || missing="${missing} pnpm"
+    [[ "$have_watchexec" == "1" ]] || missing="${missing} watchexec"
     echo "${missing# }"
+}
+
+# Pure process pattern shared by native-dev preflight/reaping. Keep it narrow:
+# a bare `watchexec` pattern would kill unrelated watchers owned by the user.
+dev_backend_watcher_pattern() {
+    echo "watchexec.*cargo run"
+}
+
+# Wait until a child-owned HTTP endpoint is ready. Returns:
+#   0 — endpoint answered successfully
+#   1 — timeout while the child stayed alive
+#   2 — child exited before readiness
+# `attempts` and `interval` are injectable so shell tests finish instantly.
+wait_for_process_http_ready() {
+    local url="${1:-}" child_pid="${2:-}" attempts="${3:-300}" interval="${4:-1}"
+    local attempt=0
+
+    [[ -n "$url" && -n "$child_pid" ]] || return 2
+    [[ "$attempts" =~ ^[1-9][0-9]*$ ]] || attempts=300
+    [[ "$interval" =~ ^[0-9]+$ ]] || interval=1
+
+    while (( attempt < attempts )); do
+        if curl -fsS --connect-timeout 1 --max-time 1 -o /dev/null "$url" 2>/dev/null; then
+            return 0
+        fi
+        if ! kill -0 "$child_pid" 2>/dev/null; then
+            return 2
+        fi
+        attempt=$((attempt + 1))
+        sleep "$interval"
+    done
+
+    return 1
 }
 
 # Print `url` as an OSC 8 terminal hyperlink (clickable in Terminal.app, iTerm2,

@@ -33,6 +33,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -225,6 +226,36 @@ TOOLS = [
             "type": "object",
             "properties": {"task_id": {"type": "string"}},
             "required": ["task_id"],
+        },
+    },
+    {
+        "name": "proposal_list",
+        "description": (
+            "List durable Planning PROPOSALS (kronn-plan-action fences) awaiting "
+            "human validation in a discussion, with per-item states and pending "
+            "counters. READ-ONLY: agents propose, only a human accepts/rejects — "
+            "no acceptance tool is exposed to agents. Defaults to the current "
+            "discussion; pending_only defaults to true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "discussion_id": {"type": "string"},
+                "pending_only": {"type": "boolean", "default": True},
+            },
+        },
+    },
+    {
+        "name": "proposal_get",
+        "description": (
+            "Return one FULL Planning proposal with every item: action, state "
+            "(pending/accepted/rejected), rejection reason and the task created "
+            "or updated on acceptance. Read-only."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"proposal_id": {"type": "string"}},
+            "required": ["proposal_id"],
         },
     },
     {
@@ -435,7 +466,9 @@ TOOLS = [
             "Ready to play.\"})`. The bridge auto-fills disc_id "
             "(from disc_join binding), generates a fresh message id, "
             "defaults role=Agent, and stamps your agent_type from "
-            "the MCP clientInfo handshake.\n"
+            "the MCP clientInfo handshake. One unambiguous structured "
+            "`@agent` mention outside code is carried as `target_agent`, "
+            "so one-shot agents such as Ollama can be durably re-run.\n"
             "  • BULK (for cross-agent-memory transcript import, "
             "0.8.4) — pass `messages: [{source_msg_id, role, "
             "content, agent_type}, …]` to push a whole conversation "
@@ -455,6 +488,7 @@ TOOLS = [
                 "content": {"type": "string", "description": "Simple mode : the text to post. Bridge wraps it into a messages[]."},
                 "role": {"type": "string", "description": "Simple mode : role override (default Agent). Use User if you're echoing the user's words."},
                 "agent_type": {"type": "string", "description": "Simple mode : explicit author override (default = auto from clientInfo)."},
+                "target_agent": {"type": "string", "description": "Simple mode : explicit one-shot responder override. Normally inferred from one unambiguous structured @agent mention outside code. AgentType value such as ClaudeCode, Codex or Ollama."},
                 "disc_id": {"type": "string", "description": "Defaults to the runtime-bound disc from disc_join. Override only when you need to post to a DIFFERENT disc."},
                 "messages": {
                     "type": "array",
@@ -466,6 +500,7 @@ TOOLS = [
                             "role": {"type": "string", "description": "User | Agent | System"},
                             "content": {"type": "string"},
                             "agent_type": {"type": "string"},
+                            "target_agent": {"type": "string", "description": "Optional explicit responder for this live message. Ignored as a dispatch signal by bulk historical imports."},
                         },
                         "required": ["source_msg_id", "role", "content"],
                     },
@@ -592,7 +627,16 @@ TOOLS = [
                 "token": {
                     "type": "string",
                     "description": "Invite token (kr-join-… form).",
-                }
+                },
+                "model": {
+                    "type": "string",
+                    "description": (
+                        "Optional: the model you run on (e.g. "
+                        "\"claude-opus-4\"). Self-DECLARED, shown in the "
+                        "participant header as declared-at-join. Omit if "
+                        "unknown — Kronn never guesses a model."
+                    ),
+                },
             },
             "required": ["token"],
         },
@@ -2514,20 +2558,14 @@ def _session_id_for_caller():
 
 
 def _parent_process_cmdline():
-    """Read the parent process's cmdline on Linux/WSL — best-effort
-    fallback for CLIs that don't send a useful `clientInfo.name` in
-    the MCP initialize handshake (e.g. Vibe, some Codex builds).
-    Returns `None` on non-Linux systems or if /proc is unavailable.
+    """Read the direct parent's cmdline on every supported platform.
+
+    `_cmdline_of` already handles Linux/WSL through `/proc` and macOS through
+    `ps`. Keeping a second Linux-only implementation here made host-launched
+    Vibe sessions appear as `Unknown` on macOS whenever its MCP `clientInfo`
+    name was generic.
     """
-    try:
-        ppid = os.getppid()
-        with open(f"/proc/{ppid}/cmdline", "rb") as fh:
-            raw = fh.read()
-        # `cmdline` is NUL-separated argv ; we only care about the
-        # combined string for a substring match.
-        return raw.replace(b"\x00", b" ").decode("utf-8", errors="replace").lower()
-    except Exception:
-        return None
+    return _cmdline_of(os.getppid())
 
 
 def _agent_type_for_session():
@@ -2837,7 +2875,17 @@ def _attempt_resume():
         disc_id_before = b["disc_id"]
         old_token = b["resume_token"]
         stored_agent_type = b.get("agent_type")
-        agent_type = stored_agent_type or _agent_type_for_session()
+        inferred_agent_type = _agent_type_for_session()
+        # A pre-fix binding may have persisted the fallback `Unknown` even
+        # though a later bridge can identify its host CLI correctly. Preserve
+        # every known identity across reloads, but let this one placeholder
+        # self-heal. The backend accepts the same narrow Unknown → known
+        # promotion when authenticated by this binding's resume credential.
+        agent_type = (
+            inferred_agent_type
+            if stored_agent_type in (None, "Unknown") and inferred_agent_type != "Unknown"
+            else stored_agent_type or inferred_agent_type
+        )
         next_token = b.get("pending_resume_token")
         if not next_token:
             next_token = f"kr-resume-{secrets.token_hex(16)}"
@@ -2979,7 +3027,7 @@ def _http(method, path, body=None):
 def _http_transport_retry(method, path, attempts=6, delays=(2, 4, 8, 12, 16)):
     """`_http` with a BOUNDED retry on TRANSPORT failures only (connection
     refused/reset, remote disconnect, socket timeout) — the signature of a
-    backend restart, e.g. `cargo watch` rebuilding for 30-60s. HTTP errors
+    backend restart, e.g. the dev watcher rebuilding for 30-60s. HTTP errors
     (4xx/5xx) are application-level and never retried. Safe only for
     idempotent calls: the caller re-sends the same request verbatim.
     Total worst-case wait ≈ sum(delays) ≈ 42s + in-flight time."""
@@ -3100,6 +3148,24 @@ def call_task_get(args):
         raise RuntimeError("task_get: task_id is required")
     encoded = urllib.parse.quote(task_id, safe="")
     return _unwrap(_http("GET", f"/api/planning/tasks/{encoded}"))
+
+
+def call_proposal_list(args):
+    # 0.9.2-H — read-only inbox of durable Planning proposals. Agents may READ
+    # proposals; only a human accepts/rejects (no mutation tool is exposed).
+    query = {"discussion_id": _planning_discussion_id(args)}
+    if args.get("pending_only") is not None:
+        query["pending_only"] = str(args["pending_only"]).lower()
+    suffix = f"?{urllib.parse.urlencode(query)}"
+    return _unwrap(_http("GET", f"/api/planning/proposals{suffix}"))
+
+
+def call_proposal_get(args):
+    proposal_id = (args.get("proposal_id") or "").strip()
+    if not proposal_id:
+        raise RuntimeError("proposal_get: proposal_id is required")
+    encoded = urllib.parse.quote(proposal_id, safe="")
+    return _unwrap(_http("GET", f"/api/planning/proposals/{encoded}"))
 
 
 def call_task_changes(args):
@@ -3247,6 +3313,37 @@ def call_disc_create(args):
     return _unwrap(_http("POST", "/api/disc/create", body))
 
 
+_MENTION_TARGETS = {
+    "claude": "ClaudeCode",
+    "codex": "Codex",
+    "vibe": "Vibe",
+    "gemini": "GeminiCli",
+    "kiro": "Kiro",
+    "copilot": "CopilotCli",
+    "ollama": "Ollama",
+}
+
+
+def _structured_target_agent(content):
+    """Return one unambiguous @agent target from conversational prose.
+
+    Fenced and inline code are removed first so documentation/examples do not
+    launch agents. Multiple distinct mentions intentionally return None: the
+    append contract carries one durable responder, never an arbitrary first
+    choice from a fan-out request.
+    """
+    if not isinstance(content, str) or not content:
+        return None
+    prose = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+    prose = re.sub(r"`[^`\n]*`", "", prose)
+    pattern = r"(?<![\w@])@(" + "|".join(_MENTION_TARGETS) + r")(?![\w-])"
+    targets = {
+        _MENTION_TARGETS[match.group(1).lower()]
+        for match in re.finditer(pattern, prose, flags=re.IGNORECASE)
+    }
+    return next(iter(targets)) if len(targets) == 1 else None
+
+
 def call_disc_append(args):
     """0.8.6 fix 2026-05-21 — ergonomic shorthand for multi-agent chat.
 
@@ -3270,7 +3367,7 @@ def call_disc_append(args):
 
     # Light shorthand : an agent passed `content` directly.
     if not messages and args.get("content"):
-        messages = [{
+        message = {
             "source_msg_id": f"live-{uuid.uuid4()}",
             "role": args.get("role") or "Agent",
             "content": args["content"],
@@ -3279,7 +3376,13 @@ def call_disc_append(args):
                 or _agent_type_for_session()
                 or None
             ),
-        }]
+        }
+        target_agent = args.get("target_agent")
+        if target_agent is None and message["role"] == "Agent":
+            target_agent = _structured_target_agent(message["content"])
+        if target_agent:
+            message["target_agent"] = target_agent
+        messages = [message]
 
     if not isinstance(messages, list) or not messages:
         raise RuntimeError(
@@ -3401,6 +3504,14 @@ def call_disc_join(args):
         "agent_type": agent_type,
         "session_id": session_id,
     }
+    # KT-37 — optional self-DECLARED model. Explicit arg wins; else an
+    # env-declared default (KRONN_AGENT_MODEL). Never inferred: if neither is
+    # set we omit it and the backend leaves any prior declaration untouched.
+    model = args.get("model")
+    if model is None:
+        model = os.environ.get("KRONN_AGENT_MODEL")
+    if isinstance(model, str) and model.strip():
+        body["model"] = model.strip()
     result = _unwrap(_http("POST", "/api/discussions/peer-join", body))
 
     # Bind THIS process to the joined disc so subsequent tool calls
@@ -5735,6 +5846,8 @@ DISPATCH = {
     "plan_get": call_plan_get,
     "task_list": call_task_list,
     "task_get": call_task_get,
+    "proposal_list": call_proposal_list,
+    "proposal_get": call_proposal_get,
     "task_changes": call_task_changes,
     "task_create": call_task_create,
     "task_update": call_task_update,
@@ -5911,7 +6024,7 @@ def _handle(req):
                     "owns ALL credentials server-side (never paste secrets). "
                     "Your tools, by area:\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. Users may call it “the plan”, “the tasks”, “what remains”, “priority”, or similar. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. You may create, edit, prioritize or link tasks directly when intent is unambiguous; otherwise propose a clickable human gate with a `kronn-plan-action` JSON fence (`create`, `create_many`, `status`, `complete`, `unblock`, or `open`). Never answer a requested plan update with only a prose summary.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"

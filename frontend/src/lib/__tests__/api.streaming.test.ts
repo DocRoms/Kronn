@@ -434,9 +434,9 @@ describe('discussions.orchestrate', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-// discussions.sendMessageStream / runAgent — delegate to _streamSSE
+// discussions.sendMessageStream / reviseMessageStream / runAgent — delegate to _streamSSE
 // ════════════════════════════════════════════════════════════════════════════
-describe('discussions.sendMessageStream / runAgent', () => {
+describe('discussions.sendMessageStream / reviseMessageStream / runAgent', () => {
   it('sendMessageStream streams chunks then done, POSTing to /messages', async () => {
     mockStreamingFetch([sse('chunk', { text: 'hi' }), sse('done', {})]);
     const { discussions } = await import('../api');
@@ -461,12 +461,113 @@ describe('discussions.sendMessageStream / runAgent', () => {
     expect(onDone).toHaveBeenCalledTimes(1);
   });
 
+  it('runAgent reuses the supplied idempotency key', async () => {
+    mockStreamingFetch([sse('done', {})]);
+    const { discussions } = await import('../api');
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    await discussions.runAgent(
+      'd-1',
+      vi.fn(),
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      'f26d0055-8f73-443f-b05e-92c77e3eefc8',
+    );
+    const opts = fetchSpy.mock.calls[0][1] as { body?: string };
+    expect(JSON.parse(opts.body ?? '{}')).toEqual({
+      idempotency_key: 'f26d0055-8f73-443f-b05e-92c77e3eefc8',
+    });
+  });
+
+  it('reviseMessageStream forwards the atomic revision receipt', async () => {
+    const receipt = {
+      event_id: 'revision-event',
+      message_id: 'user-message',
+      sort_order: 43,
+      revision: '2026-07-26T10:00:00Z',
+      dispatch_job_id: 'dispatch-job',
+      duplicate: false,
+    };
+    mockStreamingFetch([
+      sse('message_revised', receipt),
+      sse('chunk', { text: 'new reply' }),
+      sse('done', {}),
+    ]);
+    const { discussions } = await import('../api');
+    const fetchSpy = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    const onChunk = vi.fn();
+    const onRevised = vi.fn();
+    await discussions.reviseMessageStream(
+      'd-1',
+      {
+        message_id: 'user-message',
+        content: 'edited',
+        expected_revision: '2026-07-26T09:00:00Z',
+        idempotency_key: 'revision-key',
+      } as never,
+      onChunk,
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      onRevised,
+    );
+
+    expect(fetchSpy.mock.calls[0][0]).toMatch(/\/api\/discussions\/d-1\/messages\/revise$/);
+    expect(JSON.parse((fetchSpy.mock.calls[0][1] as { body: string }).body)).toMatchObject({
+      message_id: 'user-message',
+      idempotency_key: 'revision-key',
+    });
+    expect(onRevised).toHaveBeenCalledWith(receipt);
+    expect(onChunk).toHaveBeenCalledWith('new reply');
+  });
+
   it('forwards log events to onLog', async () => {
     mockStreamingFetch([sse('log', { text: '🔧 ran a tool' }), sse('done', {})]);
     const { discussions } = await import('../api');
     const onLog = vi.fn();
     await discussions.sendMessageStream('d-1', { content: 'x' } as never, vi.fn(), vi.fn(), vi.fn(), undefined, undefined, onLog);
     expect(onLog).toHaveBeenCalledWith('🔧 ran a tool');
+  });
+
+  it('forwards the durable accepted receipt before stream chunks', async () => {
+    mockStreamingFetch([
+      sse('accepted', {
+        message_id: 'bb995ddb-a19f-4536-810e-3cb1ec08f012',
+        sort_order: 42,
+        duplicate: false,
+      }),
+      sse('chunk', { text: 'reply' }),
+      sse('done', {}),
+    ]);
+    const { discussions } = await import('../api');
+    const calls: string[] = [];
+    const onAccepted = vi.fn(() => calls.push('accepted'));
+    const onChunk = vi.fn(() => calls.push('chunk'));
+
+    await discussions.sendMessageStream(
+      'd-1',
+      {
+        content: 'hello',
+        client_message_id: 'bb995ddb-a19f-4536-810e-3cb1ec08f012',
+      } as never,
+      onChunk,
+      vi.fn(),
+      vi.fn(),
+      undefined,
+      undefined,
+      undefined,
+      onAccepted,
+    );
+
+    expect(onAccepted).toHaveBeenCalledWith({
+      message_id: 'bb995ddb-a19f-4536-810e-3cb1ec08f012',
+      sort_order: 42,
+      duplicate: false,
+    });
+    expect(calls).toEqual(['accepted', 'chunk']);
   });
 });
 

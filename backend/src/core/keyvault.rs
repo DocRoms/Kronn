@@ -164,7 +164,7 @@ pub struct KeyStore {
 /// keychain-item authorization to the binary's code signature, and an ad-hoc /
 /// unsigned cargo build changes identity at EVERY rebuild — so each boot
 /// re-prompts ("kronn wants to use your confidential information…") and
-/// "Always Allow" can never stick under cargo-watch. The `0600` sidecar keeps
+/// "Always Allow" can never stick across dev-watcher restarts. The `0600` sidecar keeps
 /// the key durable in dev; signed release builds get the keychain tier, where
 /// the authorization DOES persist. `KRONN_USE_KEYCHAIN=1|0` overrides both ways
 /// (e.g. testing the keychain path from a dev build).

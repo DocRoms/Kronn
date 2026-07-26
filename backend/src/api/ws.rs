@@ -708,6 +708,59 @@ pub(crate) async fn ingest_relayable_frame(state: &AppState, msg: &WsMessage) ->
                 .await
                 .unwrap_or(false)
         }
+        WsMessage::MessageRevised {
+            shared_discussion_id,
+            event_id,
+            target_message_id,
+            previous_content_hash,
+            expected_revision,
+            revision,
+            content,
+            target_agent,
+            idempotency_key,
+            ..
+        } => {
+            let sid = shared_discussion_id.clone();
+            let eid = event_id.clone();
+            let mid = target_message_id.clone();
+            let previous_hash = previous_content_hash.clone();
+            let expected = expected_revision.clone();
+            let revision_value = revision.clone();
+            let revised_content = content.clone();
+            let agent = target_agent.clone();
+            let key = idempotency_key.clone();
+            state
+                .db
+                .with_conn(move |conn| {
+                    let Some(discussion_id) =
+                        crate::db::discussions::find_discussion_by_shared_id(conn, &sid)?
+                    else {
+                        return Ok(false);
+                    };
+                    let created_at = chrono::DateTime::parse_from_rfc3339(&revision_value)
+                        .map(|value| value.with_timezone(&Utc))
+                        .unwrap_or_else(|_| Utc::now());
+                    crate::db::discussions::apply_remote_message_revision(
+                        conn,
+                        &crate::models::MessageRevisionEvent {
+                            id: eid,
+                            discussion_id,
+                            target_message_id: mid,
+                            previous_content_hash: previous_hash,
+                            expected_revision: expected,
+                            revision: revision_value,
+                            content: revised_content,
+                            target_agent: agent,
+                            idempotency_key: key,
+                            sort_order: 0,
+                            dispatch_job_id: None,
+                            created_at,
+                        },
+                    )
+                })
+                .await
+                .unwrap_or(false)
+        }
         WsMessage::DiscussionInvite {
             shared_discussion_id,
             title,

@@ -7,9 +7,10 @@
 //! That's intentional — the runner ingests the manifest on every
 //! triage-step completion, including after a Goto-driven retriage.
 
+use super::parse_dt;
 use crate::models::AgentDecision;
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection};
 
 /// Insert or replace a single decision row. Idempotent on
@@ -180,15 +181,9 @@ fn row_to_decision(row: &rusqlite::Row) -> rusqlite::Result<AgentDecision> {
         gate_status: row.get(17)?,
         override_value: row.get(18)?,
         code_locations: row.get(19)?,
-        created_at: parse_dt(&created_str),
-        resolved_at: resolved_str.as_deref().map(parse_dt),
+        created_at: parse_dt(created_str),
+        resolved_at: resolved_str.map(parse_dt),
     })
-}
-
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
 }
 
 #[cfg(test)]

@@ -1,13 +1,21 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
 import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFile, QuickPrompt } from '../types/generated';
-import { isUsable } from '../lib/constants';
+import {
+  AGENT_MENTIONS as ALL_AGENT_MENTIONS,
+  agentColor,
+  isUsable,
+} from '../lib/constants';
 import { audioBufferToFloat32, transcribeAudio } from '../lib/stt-engine';
 import { loadDraft, saveDraft, clearDraft } from '../lib/chat-drafts';
 import { quoteMultilinePaste } from '../lib/quoteMultilinePaste';
 import { formatRelativeTime } from '../lib/relativeTime';
 import { discussions as discussionsApi, autoTriggersApi } from '../lib/api';
 import { detectTriggeredSkills } from '../lib/autoTriggers';
+import {
+  MESSAGE_SEND_SETTLED_EVENT,
+  type MessageSendSettledDetail,
+} from '../lib/messageSendLifecycle';
 import {
   findEmojiQuery, searchEmojis, applyEmojiReplacement,
   type EmojiQuery, type EmojiSuggestion,
@@ -21,14 +29,26 @@ import {
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
 
-const ALL_AGENT_MENTIONS: { trigger: string; type: AgentType; label: string }[] = [
-  { trigger: '@claude', type: 'ClaudeCode', label: 'Claude Code' },
-  { trigger: '@codex', type: 'Codex', label: 'Codex' },
-  { trigger: '@vibe', type: 'Vibe', label: 'Vibe' },
-  { trigger: '@gemini', type: 'GeminiCli', label: 'Gemini CLI' },
-  { trigger: '@kiro', type: 'Kiro', label: 'Kiro' },
-  { trigger: '@copilot', type: 'CopilotCli', label: 'GitHub Copilot' },
-];
+interface AgentMentionQuery {
+  query: string;
+  start: number;
+  end: number;
+}
+
+function findAgentMentionQuery(
+  text: string,
+  cursorPos: number,
+): AgentMentionQuery | null {
+  const prefix = text.slice(0, Math.max(0, Math.min(cursorPos, text.length)));
+  const match = prefix.match(/(?:^|[\s([{])@([\w-]*)$/);
+  if (!match) return null;
+  const query = match[1].toLowerCase();
+  return {
+    query,
+    start: prefix.length - query.length - 1,
+    end: prefix.length,
+  };
+}
 
 let sttWorker: Worker | null = null;
 function getSttWorker(): Worker {
@@ -214,8 +234,86 @@ export function ChatInput({
     };
   }, []);
 
+  // A send is only durable once the backend emits its `accepted` receipt.
+  // Keep the submitted text in localStorage while the optimistic request is
+  // in flight, then either clear that snapshot on acceptance or restore it on
+  // a pre-receipt failure (502, backend restart, network loss). If the user
+  // already started typing the next message, preserve BOTH texts instead of
+  // overwriting the newer draft.
+  useEffect(() => {
+    const onSendSettled = (rawEvent: Event) => {
+      const { detail } = rawEvent as CustomEvent<MessageSendSettledDetail>;
+      if (!detail) return;
+      if (detail.discussionId !== currentDiscIdRef.current) {
+        // The user switched rooms while the request was in flight. The
+        // submitted snapshot belongs to the previous room: remove it only
+        // after durable acceptance; on refusal leave it stored so returning
+        // to that room restores the unsent message.
+        if (detail.settlement === 'accepted') clearDraft(detail.discussionId);
+        return;
+      }
+
+      const current = chatInputValueRef.current;
+      if (detail.settlement === 'accepted') {
+        if (current.trim()) {
+          flushDraftNow(detail.discussionId, current);
+        } else {
+          clearDraft(detail.discussionId);
+        }
+        return;
+      }
+
+      const restored = !current.trim()
+        ? detail.message
+        : current === detail.message
+          ? current
+          : `${detail.message}\n\n${current}`;
+      updateChatInput(restored);
+      flushDraftNow(detail.discussionId, restored);
+      setRestoredDraftAt(new Date().toISOString());
+      requestAnimationFrame(() => {
+        chatInputRef.current?.focus();
+        if (chatInputRef.current) {
+          const end = chatInputRef.current.value.length;
+          chatInputRef.current.setSelectionRange(end, end);
+        }
+      });
+    };
+
+    window.addEventListener(MESSAGE_SEND_SETTLED_EVENT, onSendSettled);
+    return () => window.removeEventListener(MESSAGE_SEND_SETTLED_EVENT, onSendSettled);
+  }, [flushDraftNow, updateChatInput]);
+
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
   const [mentionIndex, setMentionIndex] = useState(0);
+  const mentionRangeRef = useRef<Pick<AgentMentionQuery, 'start' | 'end'> | null>(null);
+
+  const refreshMentionQuery = useCallback((text: string, cursorPos: number) => {
+    const found = findAgentMentionQuery(text, cursorPos);
+    mentionRangeRef.current = found
+      ? { start: found.start, end: found.end }
+      : null;
+    setMentionQuery(found?.query ?? null);
+    if (found) setMentionIndex(0);
+  }, []);
+
+  const applyMentionSuggestion = useCallback((trigger: string) => {
+    const range = mentionRangeRef.current;
+    if (!range) return;
+    const current = chatInputValueRef.current;
+    const trailing = current.slice(range.end);
+    const spacer = trailing.length === 0 || !/^\s/.test(trailing) ? ' ' : '';
+    const next = `${current.slice(0, range.start)}${trigger}${spacer}${trailing}`;
+    const cursor = range.start + trigger.length + spacer.length;
+    updateChatInput(next);
+    scheduleDraftSave(next);
+    setMentionQuery(null);
+    mentionRangeRef.current = null;
+    requestAnimationFrame(() => {
+      chatInputRef.current?.focus();
+      chatInputRef.current?.setSelectionRange(cursor, cursor);
+    });
+  }, [scheduleDraftSave, updateChatInput]);
 
   // ─── Emoji shortcode autocomplete (:tada: → 🎉) ──────────────────────────
   // Clones the @mention plumbing below but matches `:word` anywhere in the
@@ -323,8 +421,14 @@ export function ChatInput({
   }, [installedAgentsList]);
 
   const parseMention = (text: string): { targetAgent?: AgentType } => {
+    const lower = text.toLowerCase();
     for (const m of AGENT_MENTIONS) {
-      if (text.toLowerCase().startsWith(m.trigger + ' ') || text.toLowerCase() === m.trigger) {
+      const escaped = m.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const pattern = new RegExp(
+        `(^|[\\s([{])${escaped}(?=$|[\\s\\])},.!?;:])`,
+        'i',
+      );
+      if (pattern.test(lower)) {
         return { targetAgent: m.type };
       }
     }
@@ -388,14 +492,11 @@ export function ChatInput({
       }
     }
 
-    // Drop the persisted draft BEFORE we clear the textarea: if the onSend
-    // callback throws synchronously we still don't want to leave a stale
-    // draft around (the user sees the message in the chat anyway).
-    if (draftSaveTimerRef.current) {
-      clearTimeout(draftSaveTimerRef.current);
-      draftSaveTimerRef.current = null;
-    }
-    clearDraft(discussion.id);
+    // Visually clear the composer immediately, but retain the submitted text
+    // as a durable draft until DiscussionsPage receives the backend's
+    // `accepted` receipt. A failure before that receipt restores this exact
+    // snapshot instead of losing the user's message.
+    flushDraftNow(discussion.id, msg);
     setRestoredDraftAt(null);
     updateChatInput('');
     setMentionQuery(null);
@@ -771,14 +872,14 @@ export function ChatInput({
                   data-highlighted={i === mentionIndex}
                   onMouseDown={e => {
                     e.preventDefault();
-                    updateChatInput(m.trigger + ' ');
-                    setMentionQuery(null);
-                    chatInputRef.current?.focus();
+                    // Event-time read only; no ref value influences render.
+                    // eslint-disable-next-line react-hooks/refs
+                    applyMentionSuggestion(m.trigger);
                   }}
                   onMouseEnter={() => setMentionIndex(i)}
                 >
-                  <Cpu size={12} className="text-accent" />
-                  <span className="font-semibold text-accent">{m.trigger}</span>
+                  <Cpu size={12} style={{ color: agentColor(m.type) }} />
+                  <span className="font-semibold" style={{ color: agentColor(m.type) }}>{m.trigger}</span>
                   <span className="text-muted">{m.label}</span>
                 </button>
               ))}
@@ -899,13 +1000,7 @@ export function ChatInput({
             scheduleDraftSave(val);
             // Hide the "restored draft" hint as soon as the user edits.
             if (restoredDraftAt) setRestoredDraftAt(null);
-            const atMatch = val.match(/^@(\w*)$/);
-            if (atMatch) {
-              setMentionQuery(atMatch[1].toLowerCase());
-              setMentionIndex(0);
-            } else {
-              setMentionQuery(null);
-            }
+            refreshMentionQuery(val, ta.selectionStart ?? val.length);
             // Emoji shortcode autocomplete — uses the caret position, not
             // just the full value, so `:ta` buried mid-sentence also opens.
             refreshEmojiQuery(val, ta.selectionStart ?? val.length);
@@ -927,14 +1022,19 @@ export function ChatInput({
             // sélectionnables". Skip refresh on Up/Down while the
             // popover is open; Left/Right/Home/End still refresh
             // because they DO move the caret and may exit the query.
-            if (emojiMatch && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) return;
+            if (
+              (emojiMatch || mentionQuery !== null)
+              && (e.key === 'ArrowUp' || e.key === 'ArrowDown')
+            ) return;
             if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(e.key)) {
               const ta = e.currentTarget;
+              refreshMentionQuery(ta.value, ta.selectionStart ?? ta.value.length);
               refreshEmojiQuery(ta.value, ta.selectionStart ?? ta.value.length);
             }
           }}
           onClick={e => {
             const ta = e.currentTarget;
+            refreshMentionQuery(ta.value, ta.selectionStart ?? ta.value.length);
             refreshEmojiQuery(ta.value, ta.selectionStart ?? ta.value.length);
           }}
           onKeyDown={e => {
@@ -963,8 +1063,7 @@ export function ChatInput({
               if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
               if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
                 e.preventDefault();
-                updateChatInput(filtered[mentionIndex].trigger + ' ');
-                setMentionQuery(null);
+                applyMentionSuggestion(filtered[mentionIndex].trigger);
                 return;
               }
               if (e.key === 'Escape') { setMentionQuery(null); return; }

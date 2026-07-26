@@ -83,6 +83,23 @@ pub enum WsMessage {
         #[serde(default)]
         agent_type: Option<crate::models::AgentType>,
     },
+    /// Atomic edit/resend event for a shared discussion. This is distinct from
+    /// `ChatMessage`: it updates an existing User projection and tombstones
+    /// trailing replies while consuming a fresh local cursor on every mirror.
+    MessageRevised {
+        shared_discussion_id: String,
+        event_id: String,
+        target_message_id: String,
+        previous_content_hash: String,
+        expected_revision: String,
+        revision: String,
+        content: String,
+        #[serde(default)]
+        target_agent: Option<crate::models::AgentType>,
+        idempotency_key: String,
+        from_pseudo: String,
+        from_invite_code: String,
+    },
     /// Invitation to join a shared discussion.
     DiscussionInvite {
         shared_discussion_id: String,
@@ -247,6 +264,7 @@ impl WsMessage {
         matches!(
             self,
             WsMessage::ChatMessage { .. }
+                | WsMessage::MessageRevised { .. }
                 | WsMessage::DiscussionInvite { .. }
                 | WsMessage::DiscSyncRequest { .. }
                 | WsMessage::FileAttached { .. }
@@ -258,6 +276,7 @@ impl WsMessage {
     pub fn relay_dedup_key(&self) -> Option<String> {
         match self {
             WsMessage::ChatMessage { message_id, .. } => Some(format!("c:{message_id}")),
+            WsMessage::MessageRevised { event_id, .. } => Some(format!("r:{event_id}")),
             WsMessage::DiscussionInvite {
                 shared_discussion_id,
                 ..

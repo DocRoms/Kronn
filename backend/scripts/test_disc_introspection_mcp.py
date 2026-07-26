@@ -30,6 +30,7 @@ matches the script's own "no third-party packages" discipline.
 
 import io
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -1053,6 +1054,7 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
       - agent_type derives from clientInfo
       - heavy mode (messages array) still works for back-compat
       - role override + agent_type override propagate
+      - one unambiguous @agent mention becomes a durable target override
       - missing both content AND messages → clear error
     """
 
@@ -1097,6 +1099,40 @@ class DiscAppendSimpleModeTests(unittest.TestCase):
         msg = mock_http.call_args[0][2]["messages"][0]
         self.assertEqual(msg["role"], "User")
         self.assertEqual(msg["agent_type"], "ManualOverride")
+
+    def test_simple_mode_infers_one_structured_agent_target(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "content": "Peux-tu continuer, @ollama ?",
+            })
+        msg = mock_http.call_args[0][2]["messages"][0]
+        self.assertEqual(msg["target_agent"], "Ollama")
+
+    def test_code_examples_and_ambiguous_fanout_do_not_infer_a_target(self):
+        cases = [
+            "Documente `@ollama` sans le lancer.",
+            "```\ndisc_append({content: '@ollama réponds'})\n```",
+            "@claude et @codex, comparez vos conclusions.",
+            "contact@ollama.example n'est pas une mention",
+        ]
+        for content in cases:
+            with self.subTest(content=content), \
+                 mock.patch.object(self.mod, "_http") as mock_http:
+                mock_http.return_value = {"success": True, "data": {}}
+                self.mod.call_disc_append({"content": content})
+                msg = mock_http.call_args[0][2]["messages"][0]
+                self.assertNotIn("target_agent", msg)
+
+    def test_explicit_target_agent_wins_over_inference(self):
+        with mock.patch.object(self.mod, "_http") as mock_http:
+            mock_http.return_value = {"success": True, "data": {}}
+            self.mod.call_disc_append({
+                "content": "@ollama is discussed, but Claude owns this turn.",
+                "target_agent": "ClaudeCode",
+            })
+        msg = mock_http.call_args[0][2]["messages"][0]
+        self.assertEqual(msg["target_agent"], "ClaudeCode")
 
     def test_heavy_mode_messages_array_still_works(self):
         # Back-compat : the 0.8.4 cross-agent-memory transcript import
@@ -1279,15 +1315,29 @@ class ClientInfoAutoDetectTests(unittest.TestCase):
             self.assertEqual(self.mod._agent_type_for_session(), "Unknown")
 
     def test_parent_cmdline_fallback_kicks_in_when_clientinfo_useless(self):
-        # 2026-05-21 fix : Vibe's MCP client doesn't always send a
-        # name we can match → fall back to /proc/<PPID>/cmdline. Mock
-        # `_parent_process_cmdline` to simulate a Vibe parent process.
+        # Vibe's MCP client doesn't always send a name we can match → fall
+        # back to its parent process command line.
         self.mod._CLIENT_INFO["name"] = None  # clientInfo gave us nothing
         with mock.patch.object(
             self.mod, "_parent_process_cmdline",
             return_value="/usr/local/bin/vibe --some-flag",
         ):
             self.assertEqual(self.mod._agent_type_for_session(), "Vibe")
+
+    def test_parent_cmdline_fallback_uses_cross_platform_reader(self):
+        # Regression: the old helper read /proc directly, so it always
+        # returned None on macOS and Vibe joined rooms as `Unknown`.
+        with mock.patch.object(self.mod.os, "getppid", return_value=4242), \
+             mock.patch.object(
+                 self.mod,
+                 "_cmdline_of",
+                 return_value="/opt/homebrew/bin/vibe --model mistral",
+             ) as cmdline:
+            self.assertEqual(
+                self.mod._parent_process_cmdline(),
+                "/opt/homebrew/bin/vibe --model mistral",
+            )
+            cmdline.assert_called_once_with(4242)
 
     def test_unknown_fallback_when_neither_clientinfo_nor_cmdline_helps(self):
         # Final guard : nothing we can do, return Unknown rather than
@@ -1458,7 +1508,7 @@ class DiscWaitForPeerTests(unittest.TestCase):
         self.mod = _load_module()
 
     def test_transport_cut_is_retried_with_the_same_request(self):
-        # Passe stab-1 — a backend restart (cargo watch) mid-poll used to
+        # Passe stab-1 — a backend dev-watcher restart mid-poll used to
         # surface as a tool error and drop the agent out of the room. The
         # bridge now retries transport failures, SAME query string (the
         # since_sort_order makes the resume idempotent).
@@ -4606,6 +4656,37 @@ class ResumeBindingTests(unittest.TestCase):
         self.assertNotIn("resume_token", returned,
                          "the resume credential must never reach the model context")
 
+    def test_disc_join_forwards_declared_model_and_omits_when_absent(self):
+        # KT-37 — an explicit `model` arg is forwarded to peer-join as a
+        # self-declaration (trimmed); absent, and with no KRONN_AGENT_MODEL, it
+        # is omitted so the backend never receives — nor infers — a model.
+        env = self._envelope(
+            {"disc_id": "d-m", "session_pk": 1, "resume_token": "kr-r",
+             "peer_count": 1, "disc_title": "T", "recent_messages": [], "next_steps": ""})
+
+        # (a) explicit arg forwarded, trimmed.
+        http = mock.MagicMock(return_value=env)
+        with mock.patch.object(self.mod, "_http", http), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRONN_AGENT_MODEL", None)
+            self.mod.call_disc_join({"token": "kr-join-x", "model": "  claude-opus-4  "})
+        self.assertEqual(http.call_args.args[2].get("model"), "claude-opus-4")
+
+        # (b) omitted (and no env) → no `model` key at all.
+        http2 = mock.MagicMock(return_value=env)
+        with mock.patch.object(self.mod, "_http", http2), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("KRONN_AGENT_MODEL", None)
+            self.mod.call_disc_join({"token": "kr-join-y"})
+        self.assertNotIn("model", http2.call_args.args[2])
+
+        # (c) env-declared default used when no arg.
+        http3 = mock.MagicMock(return_value=env)
+        with mock.patch.object(self.mod, "_http", http3), \
+                mock.patch.dict(os.environ, {"KRONN_AGENT_MODEL": "qwen3:32b"}, clear=False):
+            self.mod.call_disc_join({"token": "kr-join-z"})
+        self.assertEqual(http3.call_args.args[2].get("model"), "qwen3:32b")
+
     def test_response_loss_retries_the_exact_durable_successor(self):
         import urllib.error
         self.mod._write_binding("d-loss", "kr-resume-old", agent_type="Codex")
@@ -4668,6 +4749,15 @@ class ResumeBindingTests(unittest.TestCase):
              mock.patch.object(self.mod, "_http", http):
             self.assertEqual(self.mod._attempt_resume(), "d-agent")
         self.assertEqual(http.call_args.args[2]["agent_type"], "Codex")
+
+    def test_persisted_unknown_agent_type_self_heals_on_resume(self):
+        self.mod._write_binding("d-vibe", "kr-resume-old", agent_type="Unknown")
+        http = mock.MagicMock(side_effect=self._resume_responder("d-vibe"))
+        with mock.patch.object(self.mod, "_agent_type_for_session", return_value="Vibe"), \
+             mock.patch.object(self.mod, "_http", http):
+            self.assertEqual(self.mod._attempt_resume(), "d-vibe")
+        self.assertEqual(http.call_args.args[2]["agent_type"], "Vibe")
+        self.assertEqual(self.mod._read_binding()["agent_type"], "Vibe")
 
     def test_legacy_binding_does_not_fossilize_failed_agent_inference(self):
         self.mod._write_binding("d-legacy-agent", "kr-resume-old")
@@ -4743,14 +4833,57 @@ class PlanningToolTests(unittest.TestCase):
     def test_catalogue_and_dispatch_expose_the_compact_contract(self):
         expected = {
             "plan_get", "task_list", "task_get", "task_changes",
+            "proposal_list", "proposal_get",
             "task_create", "task_update", "task_update_dod", "task_link_discussion",
             "task_add_blocker",
         }
         names = {tool["name"] for tool in self.mod.TOOLS}
         self.assertTrue(expected.issubset(names))
         self.assertTrue(expected.issubset(self.mod.DISPATCH))
+        self.assertFalse(
+            {"proposal_accept", "proposal_reject", "proposal_decide"} & names,
+            "proposal decisions must remain human-only",
+        )
         task_list = next(tool for tool in self.mod.TOOLS if tool["name"] == "task_list")
         self.assertEqual(task_list["inputSchema"]["properties"]["limit"]["maximum"], 100)
+
+    def test_planning_contract_parity_with_kronn_launched_prompt(self):
+        # KT-29 (0.9.2-I) parity: the MCP `instructions` block and the
+        # Kronn-launched agent prompt notice share ONE contract, pinned in
+        # planning_contract_invariants.json. The Rust side checks the SAME file
+        # against build_agent_prompt; here we check the MCP instructions carry
+        # every invariant (English surface) + no human-decision tool exists.
+        contract_path = os.path.join(
+            os.path.dirname(__file__), "planning_contract_invariants.json"
+        )
+        with open(contract_path, encoding="utf-8") as fh:
+            contract = json.load(fh)
+
+        resp = self.mod._handle(
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+        )
+        instr = resp["result"]["instructions"]
+
+        needles = (
+            [contract["fence"]]
+            + contract["read_tools"]
+            + contract["proposal_actions"]
+            + contract["aliases"]["en"]
+            + [contract["no_prose_only"]["en"], contract["human_decides"]["en"]]
+        )
+        for needle in needles:
+            self.assertIn(
+                needle, instr,
+                f"MCP Planning instructions must carry the invariant `{needle}`",
+            )
+
+        # No human-decision tool may ever be exposed to an agent (decisions on
+        # a proposal are human-only, through the UI).
+        names = {tool["name"] for tool in self.mod.TOOLS}
+        self.assertFalse(
+            set(contract["forbidden_decision_tools"]) & names,
+            "proposal decisions must remain human-only — no decision tool in the MCP surface",
+        )
 
     def test_plan_get_defaults_to_current_discussion(self):
         with mock.patch.object(self.mod, "_http", self.fake_http):
@@ -4773,6 +4906,33 @@ class PlanningToolTests(unittest.TestCase):
         self.assertIn("tag=platform", path)
         self.assertIn("with_discussion=false", path)
         self.assertIn("limit=25", path)
+
+    def test_proposal_list_defaults_to_current_discussion_and_pending(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_proposal_list({})
+        self.fake_http.assert_called_once_with(
+            "GET", "/api/planning/proposals?discussion_id=disc-plan"
+        )
+
+        self.fake_http.reset_mock()
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_proposal_list({
+                "discussion_id": "disc-other",
+                "pending_only": False,
+            })
+        method, path = self.fake_http.call_args.args
+        self.assertEqual(method, "GET")
+        self.assertIn("discussion_id=disc-other", path)
+        self.assertIn("pending_only=false", path)
+
+    def test_proposal_get_encodes_the_opaque_id(self):
+        with mock.patch.object(self.mod, "_http", self.fake_http):
+            self.mod.call_proposal_get({
+                "proposal_id": "proposal:message/one:0",
+            })
+        self.fake_http.assert_called_once_with(
+            "GET", "/api/planning/proposals/proposal%3Amessage%2Fone%3A0"
+        )
 
     def test_task_create_attributes_the_acting_agent(self):
         with mock.patch.object(self.mod, "_http", self.fake_http), \

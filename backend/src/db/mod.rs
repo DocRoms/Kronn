@@ -1,4 +1,5 @@
 pub mod agent_decisions;
+pub mod agent_dispatch;
 pub mod api_call_logs;
 pub mod audit_runs;
 pub mod contacts;
@@ -9,6 +10,7 @@ pub mod learnings;
 pub mod mcps;
 pub mod migrations;
 pub mod planning;
+pub mod planning_proposals;
 pub mod projects;
 pub mod quick_apis;
 pub mod quick_prompts;
@@ -17,6 +19,9 @@ pub mod workflows;
 #[cfg(test)]
 #[path = "tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod release_gate_tests;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, NaiveDateTime, Utc};

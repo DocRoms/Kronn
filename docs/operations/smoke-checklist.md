@@ -9,7 +9,7 @@ the release discussion.
 **Hard rule:** every step that spawns or kills a process goes through
 `scripts/smoke-bench.sh` (PID captured at spawn, bench marker, kill refusal
 outside the bench). Never `pgrep <pattern> | head`: on this repo production
-runs the same `target/debug/kronn` binary under `cargo watch`, and a pattern
+runs the same `target/debug/kronn` binary under the native dev watcher, and a pattern
 match once killed production for ~2 minutes (0.8.11 smoke, P1).
 
 ## 1. Consistent DB copy

@@ -160,6 +160,34 @@
   color: var(--kr-accent);
 }
 
+.set-nav-version {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-2);
+  flex-wrap: wrap;
+  margin-top: var(--kr-sp-3);
+  padding: var(--kr-sp-4);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-faint);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.45;
+  text-align: center;
+}
+
+.set-nav-version a {
+  color: var(--kr-accent-text);
+  font-weight: 650;
+  text-decoration: none;
+}
+
+.set-nav-version a:hover,
+.set-nav-version a:focus-visible {
+  text-decoration: underline;
+}
+
 /* ── Card ──────────────────────────────────────────────── */
 .set-card {
   --set-card-tone: var(--kr-accent-rgb);
@@ -2678,6 +2706,10 @@
   }
 
   .set-nav-title {
+    display: none;
+  }
+
+  .set-nav-version {
     display: none;
   }
 

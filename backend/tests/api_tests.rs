@@ -7374,18 +7374,50 @@ async fn disc_load_other_surfaces_message_attachments_cross_disc() {
     let state = test_state();
     let disc_id = create_test_discussion(&state).await;
     let did = disc_id.clone();
-    state.db.with_conn(move |conn| {
-        for (mid, role, content) in [("m-a", "User", "question"), ("m-b", "Agent", "reponse avec image")] {
+    state
+        .db
+        .with_conn(move |conn| {
+            for (index, (mid, role, content)) in [
+                ("m-a", "User", "question"),
+                ("m-b", "Agent", "reponse avec image"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                conn.execute(
+                    "INSERT INTO messages
+                 (id, discussion_id, role, content, agent_type, timestamp,
+                  tokens_used, sort_order, received_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0, ?6, ?5)",
+                    rusqlite::params![
+                        mid,
+                        did,
+                        role,
+                        content,
+                        chrono::Utc::now().to_rfc3339(),
+                        index as i64 + 1
+                    ],
+                )?;
+            }
             conn.execute(
-                "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                 VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0)",
-                rusqlite::params![mid, did, role, content, chrono::Utc::now().to_rfc3339()],
+                "UPDATE discussions SET next_message_seq = 3 WHERE id = ?1",
+                [&did],
             )?;
-        }
-        kronn::db::discussions::insert_context_file(conn, "cf-lo", &did, "chart.png", "image/png", 99, "[Image]", Some("/data/.kronn/context-files/x_chart.png"))?;
-        kronn::db::discussions::link_pending_context_files_to_message(conn, &did, "m-b")?;
-        Ok(())
-    }).await.unwrap();
+            kronn::db::discussions::insert_context_file(
+                conn,
+                "cf-lo",
+                &did,
+                "chart.png",
+                "image/png",
+                99,
+                "[Image]",
+                Some("/data/.kronn/context-files/x_chart.png"),
+            )?;
+            kronn::db::discussions::link_pending_context_files_to_message(conn, &did, "m-b")?;
+            Ok(())
+        })
+        .await
+        .unwrap();
 
     let app = kronn::build_router(state);
     let (status, loaded) =
@@ -9365,19 +9397,36 @@ mod cold_api_handlers_tests {
 
         // Append `messages_count` messages.
         let did = disc_id.clone();
-        state.db.with_conn(move |conn| {
-            for i in 0..messages_count {
-                let mid = format!("msg-{}-{}", i, uuid::Uuid::new_v4());
-                let now = chrono::Utc::now();
-                let role = if i % 2 == 0 { "User" } else { "Agent" };
+        state
+            .db
+            .with_conn(move |conn| {
+                for i in 0..messages_count {
+                    let mid = format!("msg-{}-{}", i, uuid::Uuid::new_v4());
+                    let now = chrono::Utc::now();
+                    let role = if i % 2 == 0 { "User" } else { "Agent" };
+                    conn.execute(
+                        "INSERT INTO messages
+                     (id, discussion_id, role, content, agent_type, timestamp,
+                      tokens_used, sort_order, received_at)
+                     VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0, ?6, ?5)",
+                        rusqlite::params![
+                            mid,
+                            did,
+                            role,
+                            format!("Message body {i}"),
+                            now.to_rfc3339(),
+                            i as i64 + 1
+                        ],
+                    )?;
+                }
                 conn.execute(
-                    "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, tokens_used)
-                     VALUES (?1, ?2, ?3, ?4, NULL, ?5, 0)",
-                    rusqlite::params![mid, did, role, format!("Message body {i}"), now.to_rfc3339()],
+                    "UPDATE discussions SET next_message_seq = ?2 WHERE id = ?1",
+                    rusqlite::params![did, messages_count as i64 + 1],
                 )?;
-            }
-            Ok(())
-        }).await.unwrap();
+                Ok(())
+            })
+            .await
+            .unwrap();
         disc_id
     }
 

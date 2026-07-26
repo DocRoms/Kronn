@@ -297,6 +297,12 @@ export function Dashboard({ onReset }: DashboardProps) {
     // agent is already running) — without this the sidebar doesn't know
     // the disc exists and opening it from the card shows an empty thread.
     refetchDiscussions();
+  }, () => {
+    // The agent list is otherwise fetched only on dashboard mount or manual
+    // refresh. A backend restart can detect a CLI installed while Kronn was
+    // running (for example a freshly reinstalled Vibe), but the open Settings
+    // page would keep rendering its stale "not installed" snapshot.
+    refetchAgents();
   });
   const [activeAuditsPopoverOpen, setActiveAuditsPopoverOpen] = useState(false);
 

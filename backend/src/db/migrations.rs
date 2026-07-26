@@ -9,6 +9,332 @@ pub fn run(conn: &Connection) -> Result<()> {
     run_with_backup(conn, None)
 }
 
+/// All schema migrations in order (name → SQL). Extracted as a module const so
+/// test helpers (`run_through`) can build an older schema, seed pre-migration
+/// data, then run the remaining migrations through the real path.
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("001_initial", include_str!("sql/001_initial.sql")),
+    ("002_mcp_redesign", include_str!("sql/002_mcp_redesign.sql")),
+    ("003_workflows", include_str!("sql/003_workflows.sql")),
+    (
+        "004_token_tracking",
+        include_str!("sql/004_token_tracking.sql"),
+    ),
+    (
+        "005_discussion_archive",
+        include_str!("sql/005_discussion_archive.sql"),
+    ),
+    (
+        "006_discussion_skills",
+        include_str!("sql/006_discussion_skills.sql"),
+    ),
+    (
+        "007_project_skills",
+        include_str!("sql/007_project_skills.sql"),
+    ),
+    (
+        "008_discussions_index",
+        include_str!("sql/008_discussions_index.sql"),
+    ),
+    ("009_profiles", include_str!("sql/009_profiles.sql")),
+    ("010_directives", include_str!("sql/010_directives.sql")),
+    (
+        "011_multi_profiles",
+        include_str!("sql/011_multi_profiles.sql"),
+    ),
+    ("012_mcp_general", include_str!("sql/012_mcp_general.sql")),
+    (
+        "013_discussion_worktrees",
+        include_str!("sql/013_discussion_worktrees.sql"),
+    ),
+    (
+        "014_summary_cache",
+        include_str!("sql/014_summary_cache.sql"),
+    ),
+    ("015_model_tier", include_str!("sql/015_model_tier.sql")),
+    (
+        "016_message_model_tier",
+        include_str!("sql/016_message_model_tier.sql"),
+    ),
+    (
+        "017_message_count",
+        include_str!("sql/017_message_count.sql"),
+    ),
+    (
+        "018_briefing_notes",
+        include_str!("sql/018_briefing_notes.sql"),
+    ),
+    (
+        "019_pin_first_message",
+        include_str!("sql/019_pin_first_message.sql"),
+    ),
+    (
+        "020_fix_worktree_paths",
+        include_str!("sql/020_fix_worktree_paths.sql"),
+    ),
+    (
+        "021_message_identity",
+        include_str!("sql/021_message_identity.sql"),
+    ),
+    ("022_contacts", include_str!("sql/022_contacts.sql")),
+    (
+        "023_shared_discussions",
+        include_str!("sql/023_shared_discussions.sql"),
+    ),
+    ("024_message_cost", include_str!("sql/024_message_cost.sql")),
+    (
+        "025_context_files",
+        include_str!("sql/025_context_files.sql"),
+    ),
+    // 026: idempotent column addition (handled below, not via SQL file)
+    (
+        "027_quick_prompts",
+        include_str!("sql/026_quick_prompts.sql"),
+    ),
+    (
+        "028_quick_prompt_descriptions",
+        include_str!("sql/027_quick_prompt_descriptions.sql"),
+    ),
+    (
+        "029_batch_workflow_runs",
+        include_str!("sql/028_batch_workflow_runs.sql"),
+    ),
+    (
+        "030_workflow_run_parent",
+        include_str!("sql/030_workflow_run_parent.sql"),
+    ),
+    (
+        "031_partial_response",
+        include_str!("sql/031_partial_response.sql"),
+    ),
+    (
+        "032_partial_response_started_at",
+        include_str!("sql/032_partial_response_started_at.sql"),
+    ),
+    (
+        "033_discussion_pinned",
+        include_str!("sql/033_discussion_pinned.sql"),
+    ),
+    (
+        "034_test_mode_fields",
+        include_str!("sql/034_test_mode_fields.sql"),
+    ),
+    (
+        "035_mcp_server_api_spec",
+        include_str!("sql/035_mcp_server_api_spec.sql"),
+    ),
+    (
+        "036_mcp_host_sync",
+        include_str!("sql/036_mcp_host_sync.sql"),
+    ),
+    (
+        "037_mcp_host_sync_backfill",
+        include_str!("sql/037_mcp_host_sync_backfill.sql"),
+    ),
+    (
+        "038_mcp_host_sync_collapse",
+        include_str!("sql/038_mcp_host_sync_collapse.sql"),
+    ),
+    (
+        "039_workflow_guards",
+        include_str!("sql/039_workflow_guards.sql"),
+    ),
+    (
+        "040_workflow_artifacts",
+        include_str!("sql/040_workflow_artifacts.sql"),
+    ),
+    (
+        "041_workflow_on_failure",
+        include_str!("sql/041_workflow_on_failure.sql"),
+    ),
+    (
+        "042_workflow_run_state",
+        include_str!("sql/042_workflow_run_state.sql"),
+    ),
+    (
+        "043_workflow_exec_allowlist",
+        include_str!("sql/043_workflow_exec_allowlist.sql"),
+    ),
+    (
+        "044_workflow_variables",
+        include_str!("sql/044_workflow_variables.sql"),
+    ),
+    ("045_quick_apis", include_str!("sql/045_quick_apis.sql")),
+    (
+        "046_workflow_run_produced_branches",
+        include_str!("sql/046_workflow_run_produced_branches.sql"),
+    ),
+    (
+        "047_discussion_summary_strategy",
+        include_str!("sql/047_discussion_summary_strategy.sql"),
+    ),
+    (
+        "048_disc_summary_ranges",
+        include_str!("sql/048_disc_summary_ranges.sql"),
+    ),
+    (
+        "049_introspection_call_count",
+        include_str!("sql/049_introspection_call_count.sql"),
+    ),
+    ("050_audit_runs", include_str!("sql/050_audit_runs.sql")),
+    (
+        "051_agent_decisions",
+        include_str!("sql/051_agent_decisions.sql"),
+    ),
+    (
+        "052_project_linked_repos",
+        include_str!("sql/052_project_linked_repos.sql"),
+    ),
+    (
+        "053_audit_runs_last_completed_step",
+        include_str!("sql/053_audit_runs_last_completed_step.sql"),
+    ),
+    (
+        "054_cross_agent_memory",
+        include_str!("sql/054_cross_agent_memory.sql"),
+    ),
+    (
+        "055_audit_run_steps",
+        include_str!("sql/055_audit_run_steps.sql"),
+    ),
+    (
+        "056_qp_qa_profile_directive_binding",
+        include_str!("sql/056_qp_qa_profile_directive_binding.sql"),
+    ),
+    (
+        "057_message_duration",
+        include_str!("sql/057_message_duration.sql"),
+    ),
+    (
+        "058_qp_versions_and_lineage",
+        include_str!("sql/058_qp_versions_and_lineage.sql"),
+    ),
+    (
+        "059_qp_versions_backfill",
+        include_str!("sql/059_qp_versions_backfill.sql"),
+    ),
+    (
+        "060_discussion_sessions",
+        include_str!("sql/060_discussion_sessions.sql"),
+    ),
+    (
+        "061_api_call_logs",
+        include_str!("sql/061_api_call_logs.sql"),
+    ),
+    (
+        "062_message_lint_report",
+        include_str!("sql/062_message_lint_report.sql"),
+    ),
+    (
+        "063_continual_learning",
+        include_str!("sql/063_continual_learning.sql"),
+    ),
+    (
+        "064_discussion_session_last_seen",
+        include_str!("sql/064_discussion_session_last_seen.sql"),
+    ),
+    (
+        "065_reap_abandoned_sessions",
+        include_str!("sql/065_reap_abandoned_sessions.sql"),
+    ),
+    (
+        "066_context_files_message_id",
+        include_str!("sql/066_context_files_message_id.sql"),
+    ),
+    (
+        "067_context_files_backfill_legacy",
+        include_str!("sql/067_context_files_backfill_legacy.sql"),
+    ),
+    (
+        "068_shared_id_unique",
+        include_str!("sql/068_shared_id_unique.sql"),
+    ),
+    (
+        "069_disc_no_agent",
+        include_str!("sql/069_disc_no_agent.sql"),
+    ),
+    (
+        "070_agent_model_override",
+        include_str!("sql/070_agent_model_override.sql"),
+    ),
+    (
+        "071_message_model",
+        include_str!("sql/071_message_model.sql"),
+    ),
+    (
+        "072_message_received_at",
+        include_str!("sql/072_message_received_at.sql"),
+    ),
+    (
+        "073_session_activity",
+        include_str!("sql/073_session_activity.sql"),
+    ),
+    (
+        "074_disc_awaiting_agent",
+        include_str!("sql/074_disc_awaiting_agent.sql"),
+    ),
+    (
+        "075_workflows_pinned",
+        include_str!("sql/075_workflows_pinned.sql"),
+    ),
+    (
+        "076_audit_runs_validation_link",
+        include_str!("sql/076_audit_runs_validation_link.sql"),
+    ),
+    (
+        "077_discussion_session_resume",
+        include_str!("sql/077_discussion_session_resume.sql"),
+    ),
+    (
+        "078_normalize_sqlite_datetimes",
+        include_str!("sql/078_normalize_sqlite_datetimes.sql"),
+    ),
+    (
+        "079_discussion_agent_handoff",
+        include_str!("sql/079_discussion_agent_handoff.sql"),
+    ),
+    (
+        "080_project_source_exclusions",
+        include_str!("sql/080_project_source_exclusions.sql"),
+    ),
+    (
+        "081_planning_tasks",
+        include_str!("sql/081_planning_tasks.sql"),
+    ),
+    (
+        "082_message_sequence",
+        include_str!("sql/082_message_sequence.sql"),
+    ),
+    (
+        "083_agent_dispatch_jobs",
+        include_str!("sql/083_agent_dispatch_jobs.sql"),
+    ),
+    (
+        "084_agent_dispatch_pending_queue",
+        include_str!("sql/084_agent_dispatch_pending_queue.sql"),
+    ),
+    (
+        "085_message_revisions",
+        include_str!("sql/085_message_revisions.sql"),
+    ),
+    (
+        "086_session_presence_honesty",
+        include_str!("sql/086_session_presence_honesty.sql"),
+    ),
+    (
+        "087_planning_proposals",
+        include_str!("sql/087_planning_proposals.sql"),
+    ),
+    (
+        "088_proposal_decision_idempotency",
+        include_str!("sql/088_proposal_decision_idempotency.sql"),
+    ),
+    (
+        "089_agent_model_provenance",
+        include_str!("sql/089_agent_model_provenance.sql"),
+    ),
+];
+
 /// Run all migrations, optionally backing up the database file first.
 pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> {
     conn.execute_batch(
@@ -19,296 +345,7 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
         );",
     )?;
 
-    let migrations: &[(&str, &str)] = &[
-        ("001_initial", include_str!("sql/001_initial.sql")),
-        ("002_mcp_redesign", include_str!("sql/002_mcp_redesign.sql")),
-        ("003_workflows", include_str!("sql/003_workflows.sql")),
-        (
-            "004_token_tracking",
-            include_str!("sql/004_token_tracking.sql"),
-        ),
-        (
-            "005_discussion_archive",
-            include_str!("sql/005_discussion_archive.sql"),
-        ),
-        (
-            "006_discussion_skills",
-            include_str!("sql/006_discussion_skills.sql"),
-        ),
-        (
-            "007_project_skills",
-            include_str!("sql/007_project_skills.sql"),
-        ),
-        (
-            "008_discussions_index",
-            include_str!("sql/008_discussions_index.sql"),
-        ),
-        ("009_profiles", include_str!("sql/009_profiles.sql")),
-        ("010_directives", include_str!("sql/010_directives.sql")),
-        (
-            "011_multi_profiles",
-            include_str!("sql/011_multi_profiles.sql"),
-        ),
-        ("012_mcp_general", include_str!("sql/012_mcp_general.sql")),
-        (
-            "013_discussion_worktrees",
-            include_str!("sql/013_discussion_worktrees.sql"),
-        ),
-        (
-            "014_summary_cache",
-            include_str!("sql/014_summary_cache.sql"),
-        ),
-        ("015_model_tier", include_str!("sql/015_model_tier.sql")),
-        (
-            "016_message_model_tier",
-            include_str!("sql/016_message_model_tier.sql"),
-        ),
-        (
-            "017_message_count",
-            include_str!("sql/017_message_count.sql"),
-        ),
-        (
-            "018_briefing_notes",
-            include_str!("sql/018_briefing_notes.sql"),
-        ),
-        (
-            "019_pin_first_message",
-            include_str!("sql/019_pin_first_message.sql"),
-        ),
-        (
-            "020_fix_worktree_paths",
-            include_str!("sql/020_fix_worktree_paths.sql"),
-        ),
-        (
-            "021_message_identity",
-            include_str!("sql/021_message_identity.sql"),
-        ),
-        ("022_contacts", include_str!("sql/022_contacts.sql")),
-        (
-            "023_shared_discussions",
-            include_str!("sql/023_shared_discussions.sql"),
-        ),
-        ("024_message_cost", include_str!("sql/024_message_cost.sql")),
-        (
-            "025_context_files",
-            include_str!("sql/025_context_files.sql"),
-        ),
-        // 026: idempotent column addition (handled below, not via SQL file)
-        (
-            "027_quick_prompts",
-            include_str!("sql/026_quick_prompts.sql"),
-        ),
-        (
-            "028_quick_prompt_descriptions",
-            include_str!("sql/027_quick_prompt_descriptions.sql"),
-        ),
-        (
-            "029_batch_workflow_runs",
-            include_str!("sql/028_batch_workflow_runs.sql"),
-        ),
-        (
-            "030_workflow_run_parent",
-            include_str!("sql/030_workflow_run_parent.sql"),
-        ),
-        (
-            "031_partial_response",
-            include_str!("sql/031_partial_response.sql"),
-        ),
-        (
-            "032_partial_response_started_at",
-            include_str!("sql/032_partial_response_started_at.sql"),
-        ),
-        (
-            "033_discussion_pinned",
-            include_str!("sql/033_discussion_pinned.sql"),
-        ),
-        (
-            "034_test_mode_fields",
-            include_str!("sql/034_test_mode_fields.sql"),
-        ),
-        (
-            "035_mcp_server_api_spec",
-            include_str!("sql/035_mcp_server_api_spec.sql"),
-        ),
-        (
-            "036_mcp_host_sync",
-            include_str!("sql/036_mcp_host_sync.sql"),
-        ),
-        (
-            "037_mcp_host_sync_backfill",
-            include_str!("sql/037_mcp_host_sync_backfill.sql"),
-        ),
-        (
-            "038_mcp_host_sync_collapse",
-            include_str!("sql/038_mcp_host_sync_collapse.sql"),
-        ),
-        (
-            "039_workflow_guards",
-            include_str!("sql/039_workflow_guards.sql"),
-        ),
-        (
-            "040_workflow_artifacts",
-            include_str!("sql/040_workflow_artifacts.sql"),
-        ),
-        (
-            "041_workflow_on_failure",
-            include_str!("sql/041_workflow_on_failure.sql"),
-        ),
-        (
-            "042_workflow_run_state",
-            include_str!("sql/042_workflow_run_state.sql"),
-        ),
-        (
-            "043_workflow_exec_allowlist",
-            include_str!("sql/043_workflow_exec_allowlist.sql"),
-        ),
-        (
-            "044_workflow_variables",
-            include_str!("sql/044_workflow_variables.sql"),
-        ),
-        ("045_quick_apis", include_str!("sql/045_quick_apis.sql")),
-        (
-            "046_workflow_run_produced_branches",
-            include_str!("sql/046_workflow_run_produced_branches.sql"),
-        ),
-        (
-            "047_discussion_summary_strategy",
-            include_str!("sql/047_discussion_summary_strategy.sql"),
-        ),
-        (
-            "048_disc_summary_ranges",
-            include_str!("sql/048_disc_summary_ranges.sql"),
-        ),
-        (
-            "049_introspection_call_count",
-            include_str!("sql/049_introspection_call_count.sql"),
-        ),
-        ("050_audit_runs", include_str!("sql/050_audit_runs.sql")),
-        (
-            "051_agent_decisions",
-            include_str!("sql/051_agent_decisions.sql"),
-        ),
-        (
-            "052_project_linked_repos",
-            include_str!("sql/052_project_linked_repos.sql"),
-        ),
-        (
-            "053_audit_runs_last_completed_step",
-            include_str!("sql/053_audit_runs_last_completed_step.sql"),
-        ),
-        (
-            "054_cross_agent_memory",
-            include_str!("sql/054_cross_agent_memory.sql"),
-        ),
-        (
-            "055_audit_run_steps",
-            include_str!("sql/055_audit_run_steps.sql"),
-        ),
-        (
-            "056_qp_qa_profile_directive_binding",
-            include_str!("sql/056_qp_qa_profile_directive_binding.sql"),
-        ),
-        (
-            "057_message_duration",
-            include_str!("sql/057_message_duration.sql"),
-        ),
-        (
-            "058_qp_versions_and_lineage",
-            include_str!("sql/058_qp_versions_and_lineage.sql"),
-        ),
-        (
-            "059_qp_versions_backfill",
-            include_str!("sql/059_qp_versions_backfill.sql"),
-        ),
-        (
-            "060_discussion_sessions",
-            include_str!("sql/060_discussion_sessions.sql"),
-        ),
-        (
-            "061_api_call_logs",
-            include_str!("sql/061_api_call_logs.sql"),
-        ),
-        (
-            "062_message_lint_report",
-            include_str!("sql/062_message_lint_report.sql"),
-        ),
-        (
-            "063_continual_learning",
-            include_str!("sql/063_continual_learning.sql"),
-        ),
-        (
-            "064_discussion_session_last_seen",
-            include_str!("sql/064_discussion_session_last_seen.sql"),
-        ),
-        (
-            "065_reap_abandoned_sessions",
-            include_str!("sql/065_reap_abandoned_sessions.sql"),
-        ),
-        (
-            "066_context_files_message_id",
-            include_str!("sql/066_context_files_message_id.sql"),
-        ),
-        (
-            "067_context_files_backfill_legacy",
-            include_str!("sql/067_context_files_backfill_legacy.sql"),
-        ),
-        (
-            "068_shared_id_unique",
-            include_str!("sql/068_shared_id_unique.sql"),
-        ),
-        (
-            "069_disc_no_agent",
-            include_str!("sql/069_disc_no_agent.sql"),
-        ),
-        (
-            "070_agent_model_override",
-            include_str!("sql/070_agent_model_override.sql"),
-        ),
-        (
-            "071_message_model",
-            include_str!("sql/071_message_model.sql"),
-        ),
-        (
-            "072_message_received_at",
-            include_str!("sql/072_message_received_at.sql"),
-        ),
-        (
-            "073_session_activity",
-            include_str!("sql/073_session_activity.sql"),
-        ),
-        (
-            "074_disc_awaiting_agent",
-            include_str!("sql/074_disc_awaiting_agent.sql"),
-        ),
-        (
-            "075_workflows_pinned",
-            include_str!("sql/075_workflows_pinned.sql"),
-        ),
-        (
-            "076_audit_runs_validation_link",
-            include_str!("sql/076_audit_runs_validation_link.sql"),
-        ),
-        (
-            "077_discussion_session_resume",
-            include_str!("sql/077_discussion_session_resume.sql"),
-        ),
-        (
-            "078_normalize_sqlite_datetimes",
-            include_str!("sql/078_normalize_sqlite_datetimes.sql"),
-        ),
-        (
-            "079_discussion_agent_handoff",
-            include_str!("sql/079_discussion_agent_handoff.sql"),
-        ),
-        (
-            "080_project_source_exclusions",
-            include_str!("sql/080_project_source_exclusions.sql"),
-        ),
-        (
-            "081_planning_tasks",
-            include_str!("sql/081_planning_tasks.sql"),
-        ),
-    ];
+    let migrations: &[(&str, &str)] = MIGRATIONS;
 
     // Check if there are pending migrations before backing up
     if let Some(path) = db_path {
@@ -387,6 +424,38 @@ pub fn run_with_backup(conn: &Connection, db_path: Option<&Path>) -> Result<()> 
     // older 025 that didn't include disk_path)
     let _ = conn.execute_batch("ALTER TABLE context_files ADD COLUMN disk_path TEXT;");
 
+    Ok(())
+}
+
+/// Test-only: apply migrations up to AND INCLUDING `stop_after` (by name), so a
+/// test can build an older schema, seed pre-migration data, then run the
+/// remaining migrations through [`run`]. Panics on an unknown migration name.
+#[cfg(test)]
+pub(crate) fn run_through(conn: &Connection, stop_after: &str) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS _migrations (
+            id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );",
+    )?;
+    let stop_idx = MIGRATIONS
+        .iter()
+        .position(|(name, _)| *name == stop_after)
+        .unwrap_or_else(|| panic!("run_through: unknown migration name `{stop_after}`"));
+    for (name, sql) in &MIGRATIONS[..=stop_idx] {
+        let already_applied: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM _migrations WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )?;
+        if !already_applied {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute_batch(sql)?;
+            tx.execute("INSERT INTO _migrations (name) VALUES (?1)", [name])?;
+            tx.commit()?;
+        }
+    }
     Ok(())
 }
 
@@ -545,6 +614,109 @@ mod tests {
             !table_exists,
             "the CREATE must have been rolled back, not left half-applied"
         );
+    }
+
+    #[test]
+    fn message_sequence_migration_backfills_and_enforces_uniqueness() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE discussions (id TEXT PRIMARY KEY);
+             CREATE TABLE messages (
+                 id TEXT PRIMARY KEY,
+                 discussion_id TEXT NOT NULL,
+                 sort_order INTEGER NOT NULL
+             );
+             INSERT INTO discussions (id) VALUES ('d-old'), ('d-empty');
+             INSERT INTO messages (id, discussion_id, sort_order)
+             VALUES ('m1', 'd-old', 2), ('m2', 'd-old', 5);",
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!("sql/082_message_sequence.sql"))
+            .unwrap();
+
+        let old_next: i64 = conn
+            .query_row(
+                "SELECT next_message_seq FROM discussions WHERE id = 'd-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let empty_next: i64 = conn
+            .query_row(
+                "SELECT next_message_seq FROM discussions WHERE id = 'd-empty'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_next, 6);
+        assert_eq!(empty_next, 1);
+
+        let duplicate = conn.execute(
+            "INSERT INTO messages (id, discussion_id, sort_order)
+             VALUES ('m3', 'd-old', 5)",
+            [],
+        );
+        assert!(
+            duplicate.is_err(),
+            "sort_order must be unique per discussion"
+        );
+    }
+
+    #[test]
+    fn agent_dispatch_pending_queue_migration_repairs_the_legacy_active_index() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE agent_dispatch_jobs (
+                 id TEXT PRIMARY KEY,
+                 discussion_id TEXT NOT NULL,
+                 status TEXT NOT NULL
+             );
+             CREATE UNIQUE INDEX idx_agent_dispatch_one_active_discussion
+             ON agent_dispatch_jobs(discussion_id)
+             WHERE status IN ('Pending', 'Running');
+             INSERT INTO agent_dispatch_jobs (id, discussion_id, status)
+             VALUES ('pending-1', 'disc-1', 'Pending');",
+        )
+        .unwrap();
+
+        conn.execute_batch(include_str!("sql/084_agent_dispatch_pending_queue.sql"))
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, status)
+             VALUES ('pending-2', 'disc-1', 'Pending')",
+            [],
+        )
+        .expect("multiple pending turns must queue for the same discussion");
+        conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, status)
+             VALUES ('running-1', 'disc-1', 'Running')",
+            [],
+        )
+        .unwrap();
+        let second_running = conn.execute(
+            "INSERT INTO agent_dispatch_jobs (id, discussion_id, status)
+             VALUES ('running-2', 'disc-1', 'Running')",
+            [],
+        );
+        assert!(
+            second_running.is_err(),
+            "only one worker may hold a Running claim per discussion"
+        );
+
+        let legacy_index_exists: bool = conn
+            .query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM sqlite_master
+                     WHERE type = 'index'
+                       AND name = 'idx_agent_dispatch_one_active_discussion'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!legacy_index_exists);
     }
 
     #[test]

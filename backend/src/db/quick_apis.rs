@@ -4,17 +4,11 @@
 //! names follow `WorkflowStep` ApiCall fields verbatim so the editor
 //! (frontend) can reuse `ApiCallStepCard` without remapping.
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
 use std::collections::HashMap;
 
+use super::parse_dt;
 use crate::models::{ExtractSpec, PaginationSpec, QuickApi};
-
-fn parse_dt(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
 
 /// Decode an optional JSON string column into a typed value. Empty strings
 /// and SQL NULLs both resolve to `None` so the model surfaces a clean
@@ -52,8 +46,8 @@ fn row_to_quick_api(row: &rusqlite::Row) -> QuickApi {
             .map(|n| n as u64),
         api_max_retries: row.get::<_, Option<u8>>(16).unwrap_or(None),
         variables: parse_json_opt(row.get(17).unwrap_or(None)).unwrap_or_default(),
-        created_at: parse_dt(&row.get::<_, String>(18).unwrap_or_default()),
-        updated_at: parse_dt(&row.get::<_, String>(19).unwrap_or_default()),
+        created_at: parse_dt(row.get::<_, String>(18).unwrap_or_default()),
+        updated_at: parse_dt(row.get::<_, String>(19).unwrap_or_default()),
         // 0.8.5 — columns 20/21 added by migration 056. Pre-056 rows get
         // backfilled to '[]' by the ALTER; the unwrap_or here is defensive.
         profile_ids: parse_json_opt::<Vec<String>>(row.get::<_, String>(20).ok())
@@ -225,6 +219,7 @@ pub fn delete_quick_api(conn: &Connection, id: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::models::PromptVariable;
+    use chrono::Utc;
 
     fn open_test_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();

@@ -459,6 +459,9 @@ pub async fn batch_run(
                     author_avatar_email,
                     language: "fr".into(),
                     workspace_mode,
+                    chain_prompt_ids: Vec::new(),
+                    chain_batch_items: Vec::new(),
+                    group_concurrency_limit: None,
                 },
             )
         })
@@ -617,6 +620,9 @@ pub async fn compare_agents(
                     author_avatar_email,
                     language: "fr".into(),
                     workspace_mode: "Direct".into(),
+                    chain_prompt_ids: Vec::new(),
+                    chain_batch_items: Vec::new(),
+                    group_concurrency_limit: None,
                 },
             )
         })

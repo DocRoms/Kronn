@@ -1,0 +1,82 @@
+/* KT-30C (C1) — searchable, virtualised "all tasks" list. Sized for the narrow
+   discussion-plan panel (320–400px): the body never scrolls sideways, only the
+   bounded list scrolls vertically so TanStack Virtual has a viewport. */
+
+.plan-all {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  overflow-x: hidden;
+}
+
+.plan-all-search {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 10px;
+  border: 1px solid var(--kr-border);
+  border-radius: 6px;
+  background: var(--kr-bg-input);
+  color: inherit;
+  font: inherit;
+}
+
+.plan-all-search:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 1px;
+}
+
+.plan-all-empty {
+  margin: 12px 4px;
+  opacity: 0.7;
+  font-size: 0.9em;
+}
+
+/* The bounded scroll viewport — a fixed max-height is what lets the virtualizer
+   render only the visible window instead of every row. */
+.plan-all-scroll {
+  position: relative;
+  max-height: 60vh;
+  overflow-y: auto;
+  overflow-x: hidden;
+  border-radius: 6px;
+}
+
+.plan-all-scroll:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: -2px;
+}
+
+/* Total-size spacer; absolutely-positioned rows are placed against it. */
+.plan-all-sizer {
+  position: relative;
+  width: 100%;
+}
+
+.plan-all-group {
+  box-sizing: border-box;
+  padding: 8px 10px 4px;
+  font-size: 0.72em;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  opacity: 0.6;
+}
+
+.plan-all-row {
+  box-sizing: border-box;
+  padding: 6px 10px;
+  min-width: 0;
+  cursor: pointer;
+  border-radius: 6px;
+  /* Row content is presentational; keep long titles from widening the panel. */
+  overflow: hidden;
+}
+
+.plan-all-row:hover {
+  background: var(--kr-bg-hover);
+}
+
+.plan-all-row.is-selected {
+  background: var(--kr-bg-selected);
+}
