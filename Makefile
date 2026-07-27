@@ -231,11 +231,11 @@ build:
 ## Backend dev with hot reload
 dev-backend:
 	@echo "$(GREEN)▸ Starting backend (watch mode)...$(RESET)"
-	cd backend && watchexec --restart --exts rs,toml,lock --stop-timeout 10s -- cargo run
+	./scripts/dev-backend-supervisor.sh
 
-# Exploitation mode: NO watcher. A dev watcher SIGTERMs the backend on any
-# repo file change — it killed live audits mid-run. Use this whenever
-# agents/audits must survive edits to the repo.
+# Exploitation mode: NO watcher. Dev mode now keeps the old backend serving
+# while it compiles, but a successful build still swaps the process and would
+# interrupt live agents/audits. Use this whenever runs must survive repo edits.
 # NB: .cargo/config.toml shares target-dir at the repo root — the binary
 # lands HERE, not in backend/target/.
 run-backend:
@@ -270,7 +270,7 @@ check:
 ## Generate TypeScript types from Rust models
 typegen:
 	@echo "$(GREEN)▸ Generating ts-rs bindings from Rust models...$(RESET)"
-	cd backend && cargo test export_bindings -- --nocapture
+	cd backend && cargo test --lib export_bindings -- --nocapture
 	@echo "$(GREEN)▸ Assembling frontend/src/types/generated.ts from the bindings...$(RESET)"
 	@node frontend/scripts/assemble-generated-types.mjs
 	@echo "$(GREEN)▸ generated.ts regenerated — commit it with your Rust model change.$(RESET)"

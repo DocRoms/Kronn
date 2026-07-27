@@ -264,6 +264,8 @@ fn sample_message(id: &str, role: MessageRole) -> DiscussionMessage {
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     }
 }
 
@@ -1367,6 +1369,7 @@ fn mcp_config_update_env_persists() {
         None,
         None,
         None,
+        None,
     )
     .unwrap();
     assert!(updated, "update_config should return true");
@@ -1388,6 +1391,7 @@ fn mcp_config_update_nonexistent_returns_false() {
         &conn,
         "nonexistent",
         Some("label"),
+        None,
         None,
         None,
         None,
@@ -1468,6 +1472,7 @@ fn mcp_config_global_visible_to_all_projects() {
         "cfg-global",
         None,
         Some(&new_encrypted),
+        None,
         None,
         None,
         None,
@@ -1641,6 +1646,7 @@ fn mcp_config_update_global_flag_changes_visibility() {
         None,
         None,
         Some(true),
+        None,
         None,
         None,
         None,
@@ -4561,6 +4567,8 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         };
         let agent_msg = DiscussionMessage {
             model: None,
@@ -4578,6 +4586,8 @@ fn quick_prompt_metrics_aggregates_first_agent_reply_per_version() {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: Some(agent_dur),
+            target_agent: None,
+            reply_to_message_id: None,
         };
         crate::db::discussions::insert_message(&conn, disc_id, &user_msg).unwrap();
         crate::db::discussions::insert_message(&conn, disc_id, &agent_msg).unwrap();
@@ -4843,6 +4853,8 @@ fn quick_prompt_metrics_ignores_non_first_agent_replies() {
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: Some(dur),
+        target_agent: None,
+        reply_to_message_id: None,
     };
     crate::db::discussions::insert_message(
         &conn,

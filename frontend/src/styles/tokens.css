@@ -647,6 +647,11 @@
   --kr-text-faint: #7789a0;
   --kr-text-dim: #7789a0;
   --kr-text-ghost: #98a8bc;
+  /* RGB companions used by rgba(var(--…-rgb), alpha) overlays. Without
+     light-theme overrides these inherit the dark palette's white triples. */
+  --kr-text-rgb: 10, 20, 32;
+  --kr-text-faint-rgb: 119, 137, 160;
+  --kr-text-ghost-rgb: 152, 168, 188;
 
   --kr-success: #0a8f4a;
   --kr-success-rgb: 10, 143, 74;

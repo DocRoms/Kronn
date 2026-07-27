@@ -68,6 +68,19 @@ git clone https://github.com/DocRoms/kronn.git && cd kronn
 # → open http://localhost:5173
 ```
 
+On Linux or WSL, install the same watcher from the official `.deb` release or
+through Cargo:
+
+```bash
+cargo install --locked watchexec-cli
+```
+
+Watchexec is required only by `start-dev` / `make dev-backend` to rebuild and
+restart the Rust backend when source files change. It is not required by the
+desktop app, Docker, or `make run-backend`. If it is missing, `start-dev` stops
+before launching either process and prints the missing executable plus the
+platform-appropriate install command.
+
 `./kronn start-dev` runs the native stack in a single command: it checks the
 toolchain (cargo / node / pnpm / watchexec), starts the Rust backend (API on
 **:3140**), waits until `/api/health` answers, then starts the Vite UI (on

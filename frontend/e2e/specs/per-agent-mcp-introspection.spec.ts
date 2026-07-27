@@ -118,11 +118,30 @@ async function probeAgentBailout(agent: string): Promise<string | null> {
       if (out.includes('rate limit') || out.includes('rate_limit')) return resolve('Rate limit reached upstream');
       if (out.includes('insufficient_quota') || out.includes('billing')) return resolve('Quota / billing issue upstream');
       if (out.includes('not authenticated') || out.includes('expired session')) return resolve('Session expired — re-run /login');
+      // Exact phrases seen on unauthenticated runners (Gemini / Copilot).
+      if (out.includes('set an auth method')) return resolve('No auth method configured for this CLI');
+      if (out.includes('no authentication information found')) return resolve('CLI has no stored authentication');
       if (out.includes('command not found')) return resolve('Agent CLI not installed in container');
       resolve(null);
     });
   });
 }
+
+/**
+ * Real-agent runs are OPT-IN on CI. These scenarios launch actual CLIs, which
+ * need credentials a shared runner deliberately does not have — so on CI they
+ * failed with auth errors every time, teaching nothing. Locally nothing
+ * changes: the tests still run whenever the agent is installed.
+ *
+ * The skip is loud on purpose. "Green by silent skip" is a known trap in this
+ * repo: every skipped agent prints its reason, and the Playwright summary
+ * carries the skipped count, so nobody can read the run as covered.
+ */
+const REAL_AGENT_RUNS_ENABLED =
+  !process.env.CI || process.env.KRONN_REAL_AGENT_E2E === '1';
+const CI_OPT_IN_REASON =
+  'real-agent run: opt-in on CI — the runner has no agent credentials. '
+  + 'Set KRONN_REAL_AGENT_E2E=1 (and provide credentials) to enable.';
 
 for (const AGENT of INTROSPECTION_AGENTS) {
   test.describe(`Introspection — real ${AGENT} run`, () => {
@@ -135,6 +154,12 @@ for (const AGENT of INTROSPECTION_AGENTS) {
     let skipReason: string | null = null;
 
     test.beforeAll(async ({ request }) => {
+      if (!REAL_AGENT_RUNS_ENABLED) {
+        // eslint-disable-next-line no-console
+        console.log(`[per-agent-mcp] skipping ${AGENT}: ${CI_OPT_IN_REASON}`);
+        skipReason = CI_OPT_IN_REASON;
+        return;
+      }
       const agents = await discoverInstalledAgents(request);
       installed = agents.includes(AGENT);
       if (!installed) return;
@@ -186,8 +211,10 @@ for (const AGENT of INTROSPECTION_AGENTS) {
     });
 
     test(`${AGENT} calls disc_get_message(0) and quotes the primer`, async ({ page, request }) => {
+      // skipReason first: with the CI opt-in gate `installed` is never probed,
+      // and "not installed" would be a misleading story for that skip.
+      test.skip(!!skipReason, `${AGENT}: ${skipReason}`);
       test.skip(!installed, `${AGENT} is not installed on this runner`);
-      test.skip(!!skipReason, `${AGENT} probe bailed: ${skipReason} — skipping per-agent assertions (account-side, not a Kronn bug)`);
       test.skip(!discId, `${AGENT} disc setup failed in beforeAll`);
 
       const before = (await readDisc(request, discId!))?.introspection_call_count ?? 0;

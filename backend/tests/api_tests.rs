@@ -2199,6 +2199,50 @@ async fn discussion_agent_switch_waits_for_next_user_message() {
 }
 
 #[tokio::test]
+async fn discussion_native_agent_mode_round_trips_through_http() {
+    let state = test_state();
+    state
+        .db
+        .with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO discussions
+                 (id, title, agent, language, participants_json, created_at,
+                  updated_at, message_count, workspace_mode, no_agent)
+                 VALUES ('d-peer-only', 'Peers only', 'Codex', 'fr', '[]',
+                         datetime('now'), datetime('now'), 0, 'Direct', 0)",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let app = build_router_with_auth(state, false);
+
+    let (_, initial) = get_json(app.clone(), "/api/discussions/d-peer-only/native-agent").await;
+    assert_eq!(initial["success"], true);
+    assert_eq!(initial["data"]["disabled"], false);
+
+    for disabled in [true, false] {
+        let (_, updated) = patch_json(
+            app.clone(),
+            "/api/discussions/d-peer-only",
+            serde_json::json!({ "no_agent": disabled }),
+        )
+        .await;
+        assert_eq!(updated["success"], true);
+
+        let (_, persisted) =
+            get_json(app.clone(), "/api/discussions/d-peer-only/native-agent").await;
+        assert_eq!(persisted["success"], true);
+        assert_eq!(persisted["data"]["disabled"], disabled);
+    }
+
+    let (_, missing) = get_json(app, "/api/discussions/d-missing/native-agent").await;
+    assert_eq!(missing["success"], false);
+    assert_eq!(missing["error"], "Discussion not found");
+}
+
+#[tokio::test]
 async fn discussions_create_uses_default_language() {
     let state = test_state();
 
@@ -4721,6 +4765,9 @@ async fn ws_drops_pre_presence_garbage_silently() {
         timestamp: 0,
         role: kronn::models::MessageRole::User,
         agent_type: None,
+        targets: vec![],
+        target_agents: vec![],
+        reply_to_message_id: None,
     };
     sender
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -4879,6 +4926,9 @@ async fn ws_rejects_non_presence_first_message() {
         timestamp: 0,
         role: kronn::models::MessageRole::User,
         agent_type: None,
+        targets: vec![],
+        target_agents: vec![],
+        reply_to_message_id: None,
     };
     sender
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -5152,6 +5202,15 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         timestamp: now.timestamp_millis(),
         role: kronn::models::MessageRole::Agent,
         agent_type: Some(kronn::models::AgentType::ClaudeCode),
+        targets: vec![
+            kronn::models::MessageTarget::agent(kronn::models::AgentType::Codex),
+            kronn::models::MessageTarget::agent(kronn::models::AgentType::ClaudeCode),
+        ],
+        target_agents: vec![
+            kronn::models::AgentType::Codex,
+            kronn::models::AgentType::ClaudeCode,
+        ],
+        reply_to_message_id: None,
     };
     sender
         .send(tokio_tungstenite::tungstenite::Message::Text(
@@ -5196,6 +5255,19 @@ async fn ws_chat_message_inserts_into_shared_discussion() {
         updated_disc.messages[0].agent_type,
         Some(kronn::models::AgentType::ClaudeCode),
         "federated reply must keep the originating agent identity"
+    );
+    let targets = state
+        .db
+        .with_conn(|conn| kronn::db::discussions::list_message_targets(conn, "remote-msg-001"))
+        .await
+        .unwrap();
+    assert_eq!(
+        targets,
+        vec![
+            kronn::models::MessageTarget::agent(kronn::models::AgentType::Codex),
+            kronn::models::MessageTarget::agent(kronn::models::AgentType::ClaudeCode),
+        ],
+        "federation must preserve the ordered plural routing contract",
     );
 }
 
@@ -5243,6 +5315,8 @@ async fn disc_sync_request_resends_missing_messages() {
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     };
     let did = disc_id.clone();
     state
@@ -5454,6 +5528,8 @@ async fn wait_for_peer_surfaces_same_agent_type_peer_but_not_own_local() {
         author_avatar_email: None,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     };
     // Our own local append (no author_pseudo) + a federated peer ClaudeCode msg.
     let own = mk("m-own", "my own local append", None);
@@ -5535,22 +5611,65 @@ async fn send_message_to_no_agent_disc_skips_the_runner() {
         "no_agent disc must skip the runner, got: {body_str}"
     );
 
+    // Plural explicit targets still persist in text order (deduplicated), even
+    // though no-agent mode intentionally creates no native jobs.
+    let app = build_router_with_auth(state.clone(), false);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/discussions/d-human/messages")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "content": "@codex confronte @claude",
+                "target_agents": ["Codex", "ClaudeCode", "Codex"],
+                "target_agent": "Codex",
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let mut req = req;
+    req.extensions_mut()
+        .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+            [127, 0, 0, 1],
+            45678,
+        ))));
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
     // The human message itself IS persisted (chat still works).
-    let count: i64 = state
+    let (count, targets, jobs): (i64, String, i64) = state
         .db
         .with_conn(|conn| {
-            Ok(conn.query_row(
+            let count = conn.query_row(
                 "SELECT COUNT(*) FROM messages WHERE discussion_id = 'd-human'",
                 [],
-                |r| r.get::<_, i64>(0),
-            )?)
+                |row| row.get(0),
+            )?;
+            let targets = conn.query_row(
+                "SELECT GROUP_CONCAT(agent_type, ',')
+                 FROM (
+                     SELECT mt.agent_type
+                     FROM message_targets mt
+                     JOIN messages m ON m.id = mt.message_id
+                     WHERE m.discussion_id = 'd-human'
+                     ORDER BY mt.position
+                 )",
+                [],
+                |row| row.get(0),
+            )?;
+            let jobs = conn.query_row(
+                "SELECT COUNT(*) FROM agent_dispatch_jobs
+                 WHERE discussion_id = 'd-human'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((count, targets, jobs))
         })
         .await
         .unwrap();
-    assert_eq!(
-        count, 1,
-        "the human message is stored even though no agent replies"
-    );
+    assert_eq!(count, 2, "both human messages persist without a reply");
+    assert_eq!(targets, "Codex,ClaudeCode");
+    assert_eq!(jobs, 0, "no-agent mode never creates native jobs");
 }
 
 /// DiscussionInvite creates a new local discussion with the shared_id.
@@ -5676,6 +5795,9 @@ async fn ws_chat_message_idempotent() {
         timestamp: now.timestamp_millis(),
         role: kronn::models::MessageRole::User,
         agent_type: None,
+        targets: vec![],
+        target_agents: vec![],
+        reply_to_message_id: None,
     };
 
     // Send twice
@@ -5782,6 +5904,69 @@ async fn mcp_create_config_and_reveal() {
 }
 
 #[tokio::test]
+async fn mcp_probe_config_returns_readiness_through_http() {
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "api-chartbeat",
+            "label": "Chartbeat readiness",
+            "env": {
+                "CHARTBEAT_API_KEY": "test-key"
+            },
+            "args_override": null,
+            "is_global": false,
+            "project_ids": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["success"], true);
+    let config_id = created["data"]["id"]
+        .as_str()
+        .expect("config id should exist");
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, probed) = post_json(
+        app,
+        &format!("/api/mcps/configs/{config_id}/probe"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(probed["success"], true, "probe failed: {probed:?}");
+    assert_eq!(probed["data"]["server_id"], "api-chartbeat");
+    assert_eq!(
+        probed["data"]["ready"], false,
+        "an incomplete authenticated probe must not claim readiness"
+    );
+    assert_eq!(probed["data"]["checks"][0]["id"], "api");
+    assert_eq!(probed["data"]["checks"][0]["ok"], false);
+    assert_eq!(probed["data"]["checks"][0]["required"], true);
+    assert!(
+        probed["data"]["checks"][0]["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("CHARTBEAT_HOST")),
+        "the diagnostic should name the missing non-secret parameter: {probed:?}"
+    );
+
+    let app = kronn::build_router_with_auth(state, false);
+    let (status, missing) = post_json(
+        app,
+        "/api/mcps/configs/unknown-config/probe",
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(missing["success"], false);
+    assert!(missing["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("Config not found")));
+}
+
+#[tokio::test]
 async fn mcp_delete_config_removes_from_overview() {
     let state = test_state();
 
@@ -5881,6 +6066,79 @@ async fn mcp_update_config_changes_env() {
         entries[0]["masked_value"], "new-token-beta",
         "Revealed value should reflect the updated env"
     );
+}
+
+#[tokio::test]
+async fn mcp_update_config_persists_only_available_plugin_interfaces() {
+    let state = test_state();
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, created) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "mcp-fastly",
+            "label": "Fastly preference",
+            "env": {},
+            "args_override": null,
+            "is_global": false,
+            "project_ids": []
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "create failed: {created:?}");
+    assert_eq!(created["data"]["preferred_interface"], "api");
+    let fastly_config_id = created["data"]["id"].as_str().unwrap();
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, updated) = patch_json(
+        app,
+        &format!("/api/mcps/configs/{fastly_config_id}"),
+        serde_json::json!({ "preferred_interface": "cli" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["success"], true, "{updated:?}");
+    assert_eq!(updated["data"]["preferred_interface"], "cli");
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (status, renamed) = patch_json(
+        app,
+        &format!("/api/mcps/configs/{fastly_config_id}"),
+        serde_json::json!({ "label": "Fastly renamed" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        renamed["data"]["preferred_interface"], "cli",
+        "an unrelated edit must preserve the explicit interface preference"
+    );
+
+    let app = kronn::build_router_with_auth(state.clone(), false);
+    let (_, chartbeat) = post_json(
+        app,
+        "/api/mcps/configs",
+        serde_json::json!({
+            "server_id": "api-chartbeat",
+            "label": "Chartbeat preference",
+            "env": { "CHARTBEAT_API_KEY": "test" },
+            "args_override": null,
+            "is_global": false,
+            "project_ids": []
+        }),
+    )
+    .await;
+    let chartbeat_config_id = chartbeat["data"]["id"].as_str().unwrap();
+    let app = kronn::build_router_with_auth(state, false);
+    let (_, rejected) = patch_json(
+        app,
+        &format!("/api/mcps/configs/{chartbeat_config_id}"),
+        serde_json::json!({ "preferred_interface": "mcp" }),
+    )
+    .await;
+    assert_eq!(rejected["success"], false);
+    assert!(rejected["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("unavailable")));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -7116,9 +7374,8 @@ async fn disc_create_round_trip_with_source_binding() {
 }
 
 #[tokio::test]
-async fn disc_link_rebinds_to_new_session() {
-    // Last-link-wins: re-linking to a different session must override
-    // the previous binding and close the old history row.
+async fn disc_link_adds_new_session_without_stealing_existing() {
+    // A shared discussion keeps one open binding per joined session.
     let app = test_app();
     let (_, created) = post_json(
         app.clone(),
@@ -7133,7 +7390,7 @@ async fn disc_link_rebinds_to_new_session() {
     .await;
     let disc_id = created["data"]["disc_id"].as_str().unwrap().to_string();
 
-    // Re-bind to a different (agent, session).
+    // Bind a second (agent, session) pair to the same discussion.
     let (_, linked) = post_json(
         app.clone(),
         "/api/disc/link",
@@ -7146,13 +7403,13 @@ async fn disc_link_rebinds_to_new_session() {
     .await;
     assert_eq!(linked["success"], true);
 
-    // Old binding no longer resolves.
+    // The original binding still resolves.
     let (_, old) = get_json(
         app.clone(),
         "/api/disc/find_by_session?source_agent=ClaudeCode&source_session_id=sess-A",
     )
     .await;
-    assert!(old["data"]["disc_id"].is_null());
+    assert_eq!(old["data"]["disc_id"].as_str().unwrap(), disc_id);
 
     // New binding resolves.
     let (_, new) = get_json(
@@ -9166,9 +9423,24 @@ mod cold_api_handlers_tests {
             "https://github.com/team/demo/pulls"
         );
         assert_eq!(json["data"]["last_tag"], "v0.9.0");
-        assert_eq!(json["data"]["languages"][0]["language"], "TypeScript");
+        assert!(
+            json["data"]["languages"]
+                .as_array()
+                .is_none_or(|languages| languages.is_empty()),
+            "the cold default response must not wait for language analysis"
+        );
         assert_eq!(json["data"]["languages_cached"], false);
-        assert!(json["data"]["languages_checked_at"].is_string());
+        assert!(json["data"]["languages_checked_at"].is_null());
+
+        let (_, refreshed) = get_json(
+            build_router_with_auth(state.clone(), false),
+            &format!("/api/projects/{}/git-status?refresh=true", project_id),
+        )
+        .await;
+        assert_eq!(refreshed["success"], true);
+        assert_eq!(refreshed["data"]["languages"][0]["language"], "TypeScript");
+        assert_eq!(refreshed["data"]["languages_cached"], false);
+        assert!(refreshed["data"]["languages_checked_at"].is_string());
 
         let (_, cached) = get_json(
             build_router_with_auth(state, false),
@@ -9179,7 +9451,7 @@ mod cold_api_handlers_tests {
         assert_eq!(cached["data"]["languages_cached"], true);
         assert_eq!(
             cached["data"]["languages_checked_at"],
-            json["data"]["languages_checked_at"]
+            refreshed["data"]["languages_checked_at"]
         );
     }
 

@@ -248,10 +248,10 @@ setup() {
     assert_output "watchexec"
 }
 
-@test "dev_backend_watcher_pattern: is specific to Kronn cargo run watchers" {
+@test "dev_backend_watcher_pattern: is specific to Kronn backend watchers" {
     run dev_backend_watcher_pattern
     assert_success
-    assert_output "watchexec.*cargo run"
+    assert_output "watchexec.*dev-backend-watch-command"
     refute_output "watchexec"
 }
 
@@ -293,6 +293,167 @@ setup() {
 
     run wait_for_process_http_ready "http://localhost:3140/api/health" 123 2 0
     assert_failure 1
+}
+
+@test "dev_stack_process_state: reports running while both children live" {
+    kill() { return 0; }
+
+    run dev_stack_process_state 101 202
+    assert_success
+    assert_output "running"
+}
+
+@test "dev_stack_process_state: reports a dead backend before the frontend" {
+    kill() {
+        [[ "$2" == "101" ]] && return 1
+        return 0
+    }
+
+    run dev_stack_process_state 101 202
+    assert_failure 2
+    assert_output "backend-exited"
+}
+
+@test "dev_stack_process_state: reports a dead frontend" {
+    kill() {
+        [[ "$2" == "202" ]] && return 1
+        return 0
+    }
+
+    run dev_stack_process_state 101 202
+    assert_failure 3
+    assert_output "frontend-exited"
+}
+
+@test "dev_stack_process_state: rejects missing child identifiers" {
+    run dev_stack_process_state "" 202
+    assert_failure 2
+    assert_output "invalid"
+}
+
+@test "dev_backend_exit_is_failure: compile and boot failures are unexpected" {
+    run dev_backend_exit_is_failure 1
+    assert_success
+
+    run dev_backend_exit_is_failure 101
+    assert_success
+}
+
+@test "dev_backend_exit_is_failure: clean and watcher signal exits are expected" {
+    run dev_backend_exit_is_failure 0
+    assert_failure
+
+    run dev_backend_exit_is_failure 130
+    assert_failure
+
+    run dev_backend_exit_is_failure 143
+    assert_failure
+}
+
+@test "dev_backend_exit_is_failure: malformed status fails closed" {
+    run dev_backend_exit_is_failure nope
+    assert_success
+}
+
+@test "dev backend watch command records a cargo failure for the supervisor" {
+    local fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+    local marker="$BATS_TEST_TMPDIR/backend-failed"
+    mkdir -p "$fake_bin"
+    printf '#!/usr/bin/env bash\nexit 101\n' >"$fake_bin/cargo"
+    chmod +x "$fake_bin/cargo"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_FAILURE_FILE="$marker" \
+        "$PROJECT_ROOT/scripts/dev-backend-watch-command.sh"
+
+    assert_failure 101
+    run test -f "$marker"
+    assert_success
+    run sed -n '1p' "$marker"
+    assert_output "101"
+}
+
+@test "dev backend watch command keeps a healthy supervised backend on compile failure" {
+    local fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+    local marker="$BATS_TEST_TMPDIR/backend-failed"
+    mkdir -p "$fake_bin"
+    printf '#!/usr/bin/env bash\nexit 101\n' >"$fake_bin/cargo"
+    chmod +x "$fake_bin/cargo"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_FAILURE_FILE="$marker" \
+        KRONN_DEV_BACKEND_SUPERVISOR_PID="99999999" \
+        "$PROJECT_ROOT/scripts/dev-backend-watch-command.sh"
+
+    assert_failure 101
+    assert_output --partial "keeping the current backend online"
+    run test -f "$marker"
+    assert_failure
+}
+
+@test "dev backend watch command ignores a normal watcher restart signal" {
+    local fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+    local marker="$BATS_TEST_TMPDIR/backend-failed"
+    mkdir -p "$fake_bin"
+    printf '#!/usr/bin/env bash\nexit 143\n' >"$fake_bin/cargo"
+    chmod +x "$fake_bin/cargo"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_FAILURE_FILE="$marker" \
+        "$PROJECT_ROOT/scripts/dev-backend-watch-command.sh"
+
+    assert_failure 143
+    run test -f "$marker"
+    assert_failure
+}
+
+@test "dev backend supervisor keeps the old process until a successful-build signal" {
+    local fake_bin="$BATS_TEST_TMPDIR/supervisor-bin"
+    local fake_backend_dir="$BATS_TEST_TMPDIR/backend"
+    local fake_backend="$BATS_TEST_TMPDIR/kronn"
+    local starts="$BATS_TEST_TMPDIR/backend-starts"
+    mkdir -p "$fake_bin" "$fake_backend_dir"
+
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_bin/cargo"
+    printf '#!/usr/bin/env bash\nexit 0\n' >"$fake_bin/curl"
+    cat >"$fake_backend" <<'EOF'
+#!/usr/bin/env bash
+printf 'start\n' >>"$KRONN_TEST_BACKEND_STARTS"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+EOF
+    cat >"$fake_bin/watchexec" <<'EOF'
+#!/usr/bin/env bash
+sleep 0.2
+kill -USR1 "$KRONN_DEV_BACKEND_SUPERVISOR_PID"
+trap 'exit 0' TERM INT
+while true; do sleep 1; done
+EOF
+    chmod +x "$fake_bin/cargo" "$fake_bin/curl" "$fake_bin/watchexec" "$fake_backend"
+
+    run env \
+        PATH="$fake_bin:$PATH" \
+        KRONN_DEV_BACKEND_DIR="$fake_backend_dir" \
+        KRONN_DEV_BACKEND_BINARY="$fake_backend" \
+        KRONN_DEV_BACKEND_HEALTH_URL="http://test.invalid/health" \
+        KRONN_TEST_BACKEND_STARTS="$starts" \
+        bash -c '
+            "$1" >/dev/null 2>&1 &
+            supervisor=$!
+            for _ in $(seq 1 100); do
+                [[ "$(wc -l <"$2" 2>/dev/null || echo 0)" -ge 2 ]] && break
+                sleep 0.05
+            done
+            count="$(wc -l <"$2" 2>/dev/null || echo 0)"
+            kill -TERM "$supervisor" 2>/dev/null || true
+            wait "$supervisor" 2>/dev/null || true
+            [[ "$count" -eq 2 ]]
+        ' _ "$PROJECT_ROOT/scripts/dev-backend-supervisor.sh" "$starts"
+
+    assert_success
 }
 
 # ─── ask_yn EOF safety (must not loop forever on closed stdin) ─────────────────

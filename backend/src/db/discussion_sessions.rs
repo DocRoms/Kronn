@@ -54,6 +54,10 @@ pub struct DiscussionSession {
     /// join, durable, never inferred. `None` = not declared (the UI shows it as
     /// such, never a guessed default).
     pub model: Option<String>,
+    /// Native conversation id reported by the CLI (for example the UUID used
+    /// by `codex resume`). This is distinct from `session_id`, which identifies
+    /// the Kronn bridge binding.
+    pub conversation_id: Option<String>,
 }
 
 /// 0.9.2-G — honest presence state, server-derived (never a bare "connected"
@@ -139,6 +143,9 @@ pub struct ParticipantView {
     /// inferred). `None` = not declared; the UI shows it as declared-at-join,
     /// never as a live/guessed value.
     pub model: Option<String>,
+    /// Native CLI conversation id, when the joining bridge can prove one.
+    /// `None` deliberately produces no resume affordance in the UI.
+    pub conversation_id: Option<String>,
 }
 
 /// Parse an RFC3339 (or SQLite `%Y-%m-%d %H:%M:%S`) timestamp, returning `None`
@@ -297,6 +304,20 @@ pub fn set_session_model(conn: &Connection, session_pk: i64, model: &str) -> Res
     Ok(())
 }
 
+/// Record a native CLI conversation id without changing the bridge binding.
+/// The caller validates and bounds the opaque value before writing it.
+pub fn set_session_conversation_id(
+    conn: &Connection,
+    session_pk: i64,
+    conversation_id: &str,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE discussion_sessions SET conversation_id = ?2 WHERE id = ?1",
+        params![session_pk, conversation_id],
+    )?;
+    Ok(())
+}
+
 /// List participants for a disc, ordered by `joined_at`. Default
 /// `include_left=false` matches the header rendering (we only want
 /// active+paused). Audit views pass `true`.
@@ -306,12 +327,12 @@ pub fn list_sessions(
     include_left: bool,
 ) -> Result<Vec<DiscussionSession>> {
     let sql = if include_left {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model, conversation_id
            FROM discussion_sessions
           WHERE disc_id = ?1
           ORDER BY joined_at ASC"
     } else {
-        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model
+        "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model, conversation_id
            FROM discussion_sessions
           WHERE disc_id = ?1 AND status != 'left'
           ORDER BY joined_at ASC"
@@ -331,6 +352,7 @@ pub fn list_sessions(
                 last_seen: r.get(8)?,
                 activity: activity_of_row(r.get(9)?, r.get(10)?),
                 model: r.get(11)?,
+                conversation_id: r.get(12)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -346,7 +368,8 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
     let now = Utc::now();
     let mut stmt = conn.prepare(
         "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at,
-                last_seen, activity, activity_expires_at, next_poll_at, last_write_at, write_state, model
+                last_seen, activity, activity_expires_at, next_poll_at, last_write_at, write_state, model,
+                conversation_id
            FROM discussion_sessions
           WHERE disc_id = ?1 AND status != 'left'
           ORDER BY joined_at ASC",
@@ -403,6 +426,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
                 next_poll_at,
                 last_write_at,
                 model: r.get(14)?,
+                conversation_id: r.get(15)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -504,6 +528,7 @@ pub fn list_participant_views(conn: &Connection, disc_id: &str) -> Result<Vec<Pa
             last_write_at: None,
             // A synthesised obligation is not a joined session — nothing declared.
             model: None,
+            conversation_id: None,
         });
         synth_id -= 1;
     }
@@ -522,7 +547,7 @@ pub fn find_active_session(
 ) -> Result<Option<DiscussionSession>> {
     let row = conn
         .query_row(
-            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model
+            "SELECT id, disc_id, agent_type, session_id, role, status, joined_at, left_at, last_seen, activity, activity_expires_at, model, conversation_id
                FROM discussion_sessions
               WHERE agent_type = ?1 AND session_id = ?2 AND status != 'left'
               LIMIT 1",
@@ -540,6 +565,7 @@ pub fn find_active_session(
                     last_seen: r.get(8)?,
                     activity: activity_of_row(r.get(9)?, r.get(10)?),
                     model: r.get(11)?,
+                    conversation_id: r.get(12)?,
                 })
             },
         )
@@ -719,26 +745,19 @@ fn activity_of_row(activity: Option<String>, expires_at: Option<String>) -> Opti
     (exp_dt > Utc::now()).then_some(act)
 }
 
-/// Count LIVE responders = MCP-joined agents currently `status='active'`
-/// (NOT `paused`, NOT `left`) on this disc. Used by `send_message` to
-/// suppress the double-responder bug: when ≥1 agent is connected, Kronn
-/// must NOT auto-spawn its own runner on a human message — the connected
-/// agent answers (the user message is persisted + broadcast, so the peer
-/// picks it up via its own loop or when the human relays it).
+/// Count sticky room members = MCP-joined agents currently `status='active'`
+/// (NOT `paused`, NOT `left`) on this disc. Presence projections use this
+/// durable membership so an idle peer remains visible between turns.
 ///
 /// PRESENCE-STICKY (2026-06-08, user decision): a session counts as long as
 /// it is `active`, with NO time-since-heartbeat window. The earlier 300s
-/// staleness window broke turn-based collaboration — a CLI peer that idles
-/// more than 5 minutes between human turns read as dead and Kronn
-/// double-replied (reproduced on disc ca495847: user msg at 14:05 → Kronn
-/// native reply 14:05:50 AND the CLI peer's MCP reply 14:06:38, because the
-/// peer's last_seen was 48min old). Crashed-peer safety is handled OUT of
-/// band, not by shrinking this window:
+/// staleness window broke turn-based collaboration by removing idle peers
+/// from the room header. Crashed-peer cleanup is handled OUT of band, not by
+/// shrinking this membership window:
 ///   (a) [`reap_abandoned_sessions`] retires sessions idle > 24h, and
 ///   (b) the user can always force a reply via `POST /run` (`run_agent`),
 ///       which is intentionally NOT gated.
-/// `paused` is excluded on purpose: a paused agent won't reply → Kronn
-/// SHOULD still auto-respond if every connected agent is paused.
+/// `paused` is excluded on purpose: it is a deliberate temporary departure.
 pub fn count_live_participants(conn: &Connection, disc_id: &str) -> Result<i64> {
     let n: i64 = conn.query_row(
         "SELECT COUNT(*) FROM discussion_sessions
@@ -749,10 +768,9 @@ pub fn count_live_participants(conn: &Connection, disc_id: &str) -> Result<i64> 
     Ok(n)
 }
 
-/// Count active responders of one concrete agent type. Targeted `@agent`
-/// messages use this narrower gate: an active Claude session must not suppress
-/// a requested local Codex run, while an already-active Codex session still
-/// prevents a duplicate responder.
+/// Count sticky room members of one concrete agent type. Routing uses the
+/// fresh-activity counterpart below; this query is reserved for durable
+/// presence and audit projections.
 pub fn count_live_participants_for_agent(
     conn: &Connection,
     disc_id: &str,
@@ -772,24 +790,38 @@ pub fn count_live_participants_for_agent(
 /// peer stays a member and its test stays green). A session is an *eligible
 /// responder* only while the server has FRESH proof it is actively watching:
 /// an UNEXPIRED `listening` (open long-poll) or `reading` (message delivered,
-/// reply in progress) activity. A sticky-but-idle member — attached with no
-/// live activity — is NOT counted here, so it can never force the room into
-/// silence: the durable dispatch obligation falls back to the local worker
-/// instead of waiting forever on a peer that may be gone. (`waiting` +
-/// `next_poll_at`-grace eligibility lands in a later G slice, once
-/// `next_poll_at` is persisted per session.) `unixepoch` parses both RFC3339
-/// and SQLite datetime, so mixed timestamp formats compare safely.
+/// reply in progress) activity, OR a paced `waiting` session whose promised
+/// `next_poll_at` has not passed its presence grace. That scheduled pause must
+/// remain eligible: otherwise a human turn landing between two disciplined
+/// polls starts a native duplicate just before the peer returns. A
+/// sticky-but-idle member — attached with no live activity or overdue beyond
+/// its own poll deadline — is NOT counted here, so it can never force the room
+/// into silence. `unixepoch` parses both RFC3339 and SQLite datetime, so mixed
+/// timestamp formats compare safely.
 const RESPONDER_ELIGIBLE_PREDICATE: &str = "status = 'active'
-        AND activity IN ('listening', 'reading')
-        AND activity_expires_at IS NOT NULL
-        AND unixepoch(activity_expires_at) > unixepoch(?1)";
+        AND (
+            (
+                activity IN ('listening', 'reading')
+                AND activity_expires_at IS NOT NULL
+                AND unixepoch(activity_expires_at) > unixepoch(?1)
+            )
+            OR (
+                activity = 'waiting'
+                AND next_poll_at IS NOT NULL
+                AND unixepoch(next_poll_at) + ?2 >= unixepoch(?1)
+            )
+        )";
 
 pub fn count_eligible_responders(conn: &Connection, disc_id: &str) -> Result<i64> {
     let now = Utc::now().to_rfc3339();
     let sql = format!(
-        "SELECT COUNT(*) FROM discussion_sessions WHERE disc_id = ?2 AND {RESPONDER_ELIGIBLE_PREDICATE}"
+        "SELECT COUNT(*) FROM discussion_sessions WHERE disc_id = ?3 AND {RESPONDER_ELIGIBLE_PREDICATE}"
     );
-    let n: i64 = conn.query_row(&sql, params![now, disc_id], |r| r.get(0))?;
+    let n: i64 = conn.query_row(
+        &sql,
+        params![now, NEXT_POLL_GRACE.num_seconds(), disc_id],
+        |r| r.get(0),
+    )?;
     Ok(n)
 }
 
@@ -801,9 +833,13 @@ pub fn count_eligible_responders_for_agent(
     let now = Utc::now().to_rfc3339();
     let sql = format!(
         "SELECT COUNT(*) FROM discussion_sessions
-          WHERE disc_id = ?2 AND agent_type = ?3 AND {RESPONDER_ELIGIBLE_PREDICATE}"
+          WHERE disc_id = ?3 AND agent_type = ?4 AND {RESPONDER_ELIGIBLE_PREDICATE}"
     );
-    let n: i64 = conn.query_row(&sql, params![now, disc_id, agent_type], |r| r.get(0))?;
+    let n: i64 = conn.query_row(
+        &sql,
+        params![now, NEXT_POLL_GRACE.num_seconds(), disc_id, agent_type],
+        |r| r.get(0),
+    )?;
     Ok(n)
 }
 
@@ -1491,6 +1527,8 @@ mod tests {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         };
         crate::db::discussions::insert_message(&conn, "d1", &msg).unwrap();
         let available_at = (Utc::now() + Duration::seconds(30)).to_rfc3339();
@@ -2229,6 +2267,49 @@ mod tests {
             count_eligible_responders_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
             0,
             "paused is neither a member nor an eligible responder"
+        );
+    }
+
+    #[test]
+    fn waiting_responder_is_eligible_until_its_next_poll_grace_expires() {
+        let conn = setup_db();
+        create_session(&conn, "d1", "ClaudeCode", Some("paced"), "peer").unwrap();
+
+        // A timed-out long poll leaves a raw `waiting` marker. Its activity TTL
+        // may expire before the wider presence grace, but next_poll_at remains
+        // the server's durable promise that this peer will poll again.
+        set_session_activity(&conn, "d1", "ClaudeCode", Some("paced"), "waiting", -1).unwrap();
+        set_next_poll_at(
+            &conn,
+            "d1",
+            "ClaudeCode",
+            Some("paced"),
+            Utc::now() + Duration::seconds(60),
+        )
+        .unwrap();
+        assert_eq!(
+            count_eligible_responders_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
+            1,
+            "a peer inside its server-paced wait still owns the next turn"
+        );
+
+        set_next_poll_at(
+            &conn,
+            "d1",
+            "ClaudeCode",
+            Some("paced"),
+            Utc::now() - NEXT_POLL_GRACE - Duration::seconds(1),
+        )
+        .unwrap();
+        assert_eq!(
+            count_eligible_responders_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
+            0,
+            "an overdue waiting peer must stop suppressing the native fallback"
+        );
+        assert_eq!(
+            count_live_participants_for_agent(&conn, "d1", "ClaudeCode").unwrap(),
+            1,
+            "responder expiry must not erase sticky room membership"
         );
     }
 

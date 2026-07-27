@@ -320,6 +320,8 @@ pub async fn orchestrate(
                 author_avatar_email: None,
                 source_msg_id: None,
                 duration_ms: None,
+                target_agent: None,
+                reply_to_message_id: None,
             };
             let did = disc_id.clone();
             if let Err(e) = state
@@ -538,6 +540,8 @@ pub async fn orchestrate(
                                 author_avatar_email: None,
                                 source_msg_id: None,
                                 duration_ms: None,
+                                target_agent: None,
+                                reply_to_message_id: None,
                             };
                             let did = disc_id.clone();
                             if let Err(e) = state
@@ -656,6 +660,8 @@ pub async fn orchestrate(
                             author_avatar_email: None,
                             source_msg_id: None,
                             duration_ms: None,
+                            target_agent: None,
+                            reply_to_message_id: None,
                         };
                         let did = disc_id.clone();
                         if let Err(e) = state
@@ -983,6 +989,8 @@ pub(super) async fn maybe_generate_summary(
                                 author_avatar_email: None,
                                 source_msg_id: None,
                                 duration_ms: None,
+                                target_agent: None,
+                                reply_to_message_id: None,
                             };
                             crate::db::discussions::insert_message(conn, &did2, &sys_msg)?;
                             Ok(())

@@ -127,7 +127,12 @@ http_status: number | null,
  */
 error: string | null, };
 
-export type AgentConfig = { path: string | null, installed: boolean, version: string | null, full_access: boolean, };
+export type AgentConfig = { path: string | null, installed: boolean, version: string | null, full_access: boolean,
+/**
+ * Optional UI color used for this agent's canonical `@mention`.
+ * `None` keeps the built-in frontend color.
+ */
+mention_color?: string | null, };
 
 /**
  * One decision row. Mirrors the `agent_decisions` table 1:1 — see
@@ -158,6 +163,16 @@ export type AgentDetection = { name: string, agent_type: AgentType, installed: b
  * Agent is runnable via npx/uvx fallback even when no local binary is found
  */
 runtime_available: boolean,
+/**
+ * Whether Kronn has the authentication material required by this runner.
+ * `None` is the backward-compatible wire value for older detection paths;
+ * API responses produced by the current backend always set it.
+ */
+auth_ready?: boolean,
+/**
+ * Local command that prepares authentication when `auth_ready == false`.
+ */
+auth_setup_command?: string,
 /**
  * `rtk` binary found on the host (PATH). Same value for every agent
  * detection in a given sweep, but kept per-agent so the frontend can
@@ -222,7 +237,7 @@ export type AiFileNode = { path: string, name: string, is_dir: boolean, children
 
 export type AiSearchResult = { path: string, match_count: number, };
 
-export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "OAuth2ClientCredentials": { token_url: string, client_id_env: string, client_secret_env: string, scope: string, extra_headers?: Array<OAuth2ExtraHeader>, } } | { "TokenExchange": {
+export type ApiAuthKind = { "ApiKeyQuery": { param_name: string, env_key: string, } } | { "ApiKeyHeader": { header_name: string, env_key: string, } } | { "Bearer": { env_key: string, } } | { "Basic": { user_env: string, password_env: string, } } | { "BasicApiKey": { env_key: string, } } | { "CliToken": { command: string, args: Array<string>, inject: TokenInjection, } } | { "OAuth2ClientCredentials": { token_url: string, client_id_env: string, client_secret_env: string, scope: string, extra_headers?: Array<OAuth2ExtraHeader>, } } | { "TokenExchange": {
 /**
  * Endpoint relative to the plugin's `base_url`. Examples:
  * `/sessions`, `/oauth/token`, `/v1/auth/exchange`.
@@ -1014,11 +1029,22 @@ export type DirectiveCategory = "Output" | "Language";
  */
 export type DiscAppendMessage = { source_msg_id: string, role: MessageRole, content: string, agent_type?: AgentType | null,
 /**
- * Explicit one-shot responder requested by a structured `@agent`
- * mention. The append transaction consumes this as a durable dispatch
- * override; ordinary prose must leave it unset.
+ * Authoritative responder identities for this live peer turn. This is the
+ * same typed model as human messages, so `@codex` (native) and one exact
+ * joined Codex CLI session are never conflated.
  */
-target_agent?: AgentType | null, };
+targets?: Array<MessageTarget>,
+/**
+ * Explicit one-shot responder requested by a structured `@agent`
+ * mention. Compatibility projection for older bridges; new callers use
+ * `targets`.
+ */
+target_agent?: AgentType | null,
+/**
+ * Durable id of an existing message in this same discussion. Message ids
+ * are opaque (federated peers may use non-UUID ids).
+ */
+reply_to_message_id?: string | null, };
 
 export type DiscAppendRequest = { disc_id: string, messages: Array<DiscAppendMessage>,
 /**
@@ -1039,10 +1065,9 @@ diverged: boolean,
  */
 lint?: AppendLintSummary,
 /**
- * `sort_order` of the LAST appended message (stab-1). Long-polling
- * callers must pass it as `since_sort_order` instead of estimating
- * their position — estimates drift under concurrent posters and made
- * agents silently skip messages. `None` when nothing was appended.
+ * `sort_order` of the LAST appended message (stab-1). This is a write
+ * receipt, not a read cursor: another message may have landed between
+ * the caller's last read and this append. `None` when nothing was appended.
  */
 last_sort_order?: number, };
 
@@ -1077,7 +1102,12 @@ export type DiscFindBySessionQuery = { source_agent: string, source_session_id: 
 
 export type DiscFindBySessionResponse = { disc_id: string | null, };
 
-export type DiscLinkRequest = { disc_id: string, source_agent: string, source_session_id: string, };
+export type DiscLinkRequest = { disc_id: string, source_agent: string, source_session_id: string,
+/**
+ * Reassign a session that is already owned by another discussion.
+ * Defaults to false so the UI/MCP cannot steal a live thread silently.
+ */
+force_reassign?: boolean, };
 
 export type DiscLoadOtherMessage = { idx: number, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string,
 /**
@@ -1132,6 +1162,18 @@ export type DiscSearchHit = { disc_id: string, title: string, snippet: string, s
 
 export type DiscSearchQuery = { q: string, limit?: number | null, };
 
+export type DiscSessionStatusQuery = { source_agent: string, source_session_id: string, };
+
+export type DiscSessionStatusResponse = { binding_version: number, bound_disc_id: string | null,
+/**
+ * Discussion currently carrying a non-left live peer with this identity.
+ */
+connected_disc_id: string | null,
+/**
+ * Native session state when connected (`active` / `paused`), otherwise null.
+ */
+connection_status: string | null, };
+
 /**
  * Snapshot of every disc currently bound to a source. Used by the
  * frontend sidebar to decorate items with a "from X" badge without
@@ -1139,7 +1181,7 @@ export type DiscSearchQuery = { q: string, limit?: number | null, };
  * source_session_id, imported_at, diverged_at)` tuples for every
  * disc where `source_agent IS NOT NULL`.
  */
-export type DiscSourceBinding = { disc_id: string, source_agent: string, source_session_id: string, imported_at: string | null, diverged_at: string | null, };
+export type DiscSourceBinding = { binding_version: number, disc_id: string, source_agent: string, source_session_id: string, imported_at: string | null, diverged_at: string | null, };
 
 export type DiscSourceDetail = { current: DiscSourceBinding | null, history: Array<DiscSourceHistoryEntry>, };
 
@@ -1149,9 +1191,15 @@ export type DiscSourceDetail = { current: DiscSourceBinding | null, history: Arr
  * user can see the full "this disc was first owned by ClaudeCode
  * session X, then Cursor session Y" chain.
  */
-export type DiscSourceHistoryEntry = { source_agent: string, source_session_id: string, linked_at: string, unlinked_at: string | null, };
+export type DiscSourceHistoryEntry = { binding_version: number, source_agent: string, source_session_id: string, linked_at: string, unlinked_at: string | null, };
 
-export type DiscUnlinkRequest = { disc_id: string, };
+export type DiscUnlinkRequest = { disc_id: string,
+/**
+ * KT-85 — release only THIS session's binding. Omitting both fields
+ * releases every binding of the discussion, which a shared room must never
+ * do implicitly: it is reserved for an explicit human "detach this thread".
+ */
+source_agent?: string | null, source_session_id?: string | null, };
 
 export type Discussion = { id: string, project_id: string | null, title: string, agent: AgentType, language: string, participants: Array<AgentType>, messages: Array<DiscussionMessage>, message_count: number,
 /**
@@ -1240,6 +1288,27 @@ test_mode_restore_branch?: string | null,
  */
 test_mode_stash_ref?: string | null, created_at: string, updated_at: string, };
 
+export type DiscussionExportEnvelope = { kind: string, version: number, exported_at: string, secret_policy: string, source_discussion_id: string, discussion: Discussion, messages: Array<DiscussionMessage>, attachments: Array<PortableDiscussionAttachment>, revision_events: Array<PortableDiscussionRevisionEvent>, plan: Array<PortableDiscussionPlanItem>,
+/**
+ * Absent from every bundle exported before KT-74, hence `default` on the
+ * way in: a v1 file must keep importing untouched. `skip_serializing_if`
+ * on the way out, so an instance with no identity omits the key instead of
+ * writing `"exported_by": null`.
+ */
+exported_by?: PortableExporterIdentity | null, };
+
+/**
+ * KT-74 — provenance of an imported discussion, as the sidebar needs it.
+ * `imported_by_*` stay `None` for bundles exported before the envelope carried
+ * an identity: the row is still a real import, just an anonymous one.
+ */
+export type DiscussionImportProvenance = { disc_id: string,
+/**
+ * `portable_bundle` today; `agent_transcript` is reserved for the import
+ * route that does not exist yet.
+ */
+provenance_kind: string, imported_by_pseudo: string | null, imported_by_avatar_email: string | null, imported_at: string, };
+
 export type DiscussionMessage = { id: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number, auth_mode: string | null,
 /**
  * Which model tier was used for this message (economy/default/reasoning).
@@ -1283,12 +1352,25 @@ duration_ms?: number | null,
  * computed by `core::anti_halluc::analyze` at finalize. `None` on
  * User/System messages, when the feature is off, or when nothing flagged.
  */
-lint_report?: LintReport | null, };
+lint_report?: LintReport | null,
+/**
+ * 0.9.2 (KT-58) — the agent this message was explicitly dispatched to via a
+ * structured `@agent` mention. Written by the same transaction that
+ * enqueues the dispatch job, so the read model can distinguish "names an
+ * agent" from "awaits that agent's reply". `None` = ordinary prose.
+ */
+target_agent?: AgentType | null,
+/**
+ * 0.9.2 (KT-73) — durable message this one answers. The referenced
+ * message must belong to the same discussion. Portable imports remap the
+ * identifier alongside message ids.
+ */
+reply_to_message_id?: string | null, };
 
 /**
  * Lean surrounding-message shape for a `disc_get_message` window.
  */
-export type DiscussionMessageContextItem = { idx: number, id: string, message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, };
+export type DiscussionMessageContextItem = { idx: number, id: string, message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, reply_to_message_id?: string | null, timestamp: string, };
 
 /**
  * Single-message read shape — same fields as the underlying
@@ -1298,7 +1380,7 @@ export type DiscussionMessageRead = { idx: number, id: string,
 /**
  * Stable compact reference accepted by `disc_get_message`.
  */
-message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, timestamp: string, tokens_used: number,
+message_ref: string, role: MessageRole, content: string, agent_type: AgentType | null, reply_to_message_id?: string | null, timestamp: string, tokens_used: number,
 /**
  * Files attached to this message (0.8.8). Lets an agent that navigates to
  * an old message see what was uploaded with it instead of being blind to
@@ -1338,6 +1420,8 @@ poll_policy: PollBackoffPolicy,
  */
 pacing?: PacingState, project_id: string | null, };
 
+export type DiscussionNativeAgentMode = { disabled: boolean, };
+
 export type DiscussionPlan = { discussion_id: string, primary_objective: PlanningTaskSummary | null, active: Array<PlanningDiscussionRelation>, later: Array<PlanningDiscussionRelation>,
 /**
  * Retained aliases (== `stats.done` / sum of the five Active buckets) so
@@ -1373,7 +1457,13 @@ activity: string | null,
  * join, durable, never inferred. `None` = not declared (the UI shows it as
  * such, never a guessed default).
  */
-model: string | null, };
+model: string | null,
+/**
+ * Native conversation id reported by the CLI (for example the UUID used
+ * by `codex resume`). This is distinct from `session_id`, which identifies
+ * the Kronn bridge binding.
+ */
+conversation_id: string | null, };
 
 export type DriftCheckResponse = { audit_date: string | null, stale_sections: Array<DriftSection>, fresh_sections: Array<string>, total_sections: number, };
 
@@ -1393,6 +1483,8 @@ export type Evidence = { kind: string, ref: string, quote?: string | null, };
 export type EvidenceCheck = { reference: string, status: string, fabricated: boolean, };
 
 export type ExecResponse = { stdout: string, stderr: string, exit_code: number, };
+
+export type ExportPluginBundleRequest = { config_ids: Array<string>, include_values?: boolean, passphrase?: string | null, confirmation?: string | null, };
 
 /**
  * Extraction specification for an `ApiCall` step's JSON response.
@@ -1462,9 +1554,83 @@ export type GitBlameQuery = { path: string, };
 
 export type GitBlameResponse = { path: string, lines: Array<GitBlameLine>, };
 
+export type GitBranchesResponse = { current_branch: string, default_branch: string, branches: Array<GitBranchSummary>, commits: Array<GitGraphCommit>,
+/**
+ * True when more commits exist than the bounded graph returned here.
+ */
+truncated: boolean, };
+
 export type GitBranchRequest = { name: string, };
 
 export type GitBranchResponse = { branch: string, };
+
+export type GitBranchSummary = {
+/**
+ * Short ref name (`main`, `feature/foo` or `origin/main`).
+ */
+name: string,
+/**
+ * Full ref name, retained so the backend never has to reconstruct it.
+ */
+ref_name: string, commit: string, subject: string, author: string, committed_at: number, is_current: boolean, is_remote: boolean, upstream: string | null, ahead: number, behind: number, };
+
+/**
+ * KT-67 — what an annotated line is actually about. `git blame` gives a hash
+ * and an author; this is the story behind it.
+ */
+export type GitCommitDetail = { sha: string, short_sha: string, author_name: string, author_email: string,
+/**
+ * Unix seconds — the frontend already formats blame dates this way.
+ */
+author_time: number, committer_name: string, commit_time: number, subject: string,
+/**
+ * Body without the subject. Empty when the commit has a one-line message.
+ */
+body: string,
+/**
+ * Branches containing this commit, bounded — a commit near the root of a
+ * busy repo is contained by hundreds, and nobody reads that list.
+ */
+branches: Array<string>,
+/**
+ * True when `branches` was cut, so the UI can say "and N more" honestly
+ * instead of implying the list is complete.
+ */
+branches_truncated: boolean,
+/**
+ * Files touched, for scale. The diff itself stays out: this is a tooltip,
+ * not a review surface, and a merge commit would dwarf the response.
+ */
+files_changed: number, };
+
+/**
+ * KT-75 — the commit's own patch, parent → commit. Not a comparison against
+ * the current branch: the point is to read the change as it was made, whatever
+ * happened to the file since.
+ */
+export type GitCommitPatch = { sha: string, short_sha: string, subject: string,
+/**
+ * Unified diff for every file in the commit. Empty for a commit that
+ * touched nothing (an empty commit is legal).
+ */
+patch: string,
+/**
+ * True when the patch hit the byte cap. A merge or a vendored-tree import
+ * runs to megabytes, and a viewer that silently stops mid-hunk reads as a
+ * complete diff.
+ */
+truncated: boolean, files_changed: number,
+/**
+ * A root commit has no parent, so its patch is the whole file set added.
+ * Worth saying out loud rather than letting the reader wonder.
+ */
+is_root: boolean, };
+
+export type GitCommitQuery = {
+/**
+ * Commit-ish as reported by blame. Validated before reaching git.
+ */
+sha: string, };
 
 export type GitCommitRequest = { files: Array<string>, message: string, amend?: boolean, sign?: boolean, };
 
@@ -1482,6 +1648,8 @@ committed?: boolean | null, };
 export type GitDiffResponse = { path: string, diff: string, };
 
 export type GitFileStatus = { path: string, status: string, staged: boolean, };
+
+export type GitGraphCommit = { hash: string, short_hash: string, parents: Array<string>, refs: Array<string>, subject: string, author: string, committed_at: number, };
 
 export type GitPushResponse = { success: boolean, message: string, };
 
@@ -1524,6 +1692,8 @@ languages_checked_at: string | null,
  */
 languages_cached: boolean, };
 
+export type GitSwitchBranchRequest = { branch: string, };
+
 /**
  * Which guard tripped — surfaced verbatim in the SSE `GuardTriggered`
  * event so the frontend can render the right badge / toast / explainer.
@@ -1542,6 +1712,14 @@ export type HostScope = { "kind": "ClaudeUser" } | { "kind": "ClaudeLocal", "val
  * whether Kronn writes the entry into `~/.claude.json` & friends.
  */
 export type HostSyncMode = "None" | "GlobalOnly" | "MirrorAll";
+
+export type ImportDiscussionReport = { discussion_id: string, source_discussion_id: string, already_imported: boolean, imported_messages: number, imported_attachments: number, imported_revision_events: number, imported_tasks: number, imported_task_events: number, warnings: Array<string>, conflicts: Array<string>, };
+
+export type ImportDiscussionRequest = { content: string, project_id?: string | null, };
+
+export type ImportPluginBundleReport = { bundle_id: string, already_imported: boolean, imported_config_ids: Array<string>, skipped_plugins: number, includes_values: boolean, warnings: Array<string>, conflicts: Array<string>, };
+
+export type ImportPluginBundleRequest = { content: string, passphrase?: string | null, };
 
 /**
  * 0.6.0 — payload for `POST /api/quick-apis/import`. Mirrors the QP shape.
@@ -1571,7 +1749,17 @@ export type ImportWorkflowRequest = { content: string, project_id?: string | nul
  * lives server-side so we can tweak it (i18n, channel, etc.) without
  * shipping a frontend release.
  */
-export type InviteResponse = { token: string, disc_id: string, expires_at: string, ttl_seconds: number, instruction_text: string, };
+export type InviteResponse = { token: string, disc_id: string, expires_at: string, ttl_seconds: number,
+/**
+ * Handoff to paste into the invited agent's terminal. This is the FIRST
+ * thing that agent reads — before `disc_join` even answers — so it carries
+ * the working contract, not just the token.
+ */
+instruction_text: string,
+/**
+ * Token-only form, for a human who just wants the bare call (KT-52).
+ */
+instruction_text_minimal: string, };
 
 /**
  * Metadata returned by `create_invite_token`. The plain `token` field
@@ -1741,7 +1929,7 @@ secrets_broken: boolean,
 /**
  * See `McpConfig::host_sync`.
  */
-host_sync: HostSyncMode, };
+host_sync: HostSyncMode, preferred_interface: PluginInterface, };
 
 export type McpContextEntry = { slug: string, label: string, content: string, };
 
@@ -1838,6 +2026,20 @@ incompatibilities: Array<McpIncompatibility>,
  */
 incomplete_configs: Array<McpIncompleteConfig>, };
 
+export type McpProbeCheck = { id: string, label: string, ok: boolean,
+/**
+ * Whether this capability is required for the plugin's primary supported
+ * path. Optional capabilities remain visible without making the whole
+ * plugin appear broken.
+ */
+required: boolean, detail: string, };
+
+/**
+ * Result of a real plugin readiness probe. Checks are deliberately
+ * display-safe: command stdout/stderr and credentials never cross the API.
+ */
+export type McpProbeResponse = { server_id: string, ready: boolean, checks: Array<McpProbeCheck>, };
+
 /**
  * An MCP server type (e.g. "GitHub", "Atlassian", "Context7").
  *
@@ -1867,6 +2069,38 @@ export type MessageAttachment = { id: string, filename: string, mime_type: strin
 export type MessageRevisionReceipt = { event_id: string, message_id: string, revision: string, sort_order: number, duplicate: boolean, dispatch_job_id: string | null, };
 
 export type MessageRole = "User" | "Agent" | "System";
+
+/**
+ * KT-65 — one matching MESSAGE, not one matching discussion.
+ *
+ * `search_discussions` above answers "which rooms mention X" with a single
+ * snippet; it cannot take the reader to the message that matched. This shape
+ * carries the message identity so the UI can open the exact turn.
+ */
+export type MessageSearchHit = { disc_id: string, disc_title: string, message_id: string, sort_order: number, role: string, timestamp: string,
+/**
+ * Excerpt centred on the match, not the head of the message — a hit 3 000
+ * characters in is otherwise invisible in the result list.
+ */
+snippet: string, agent_type: string | null, author_pseudo: string | null, project_id: string | null, };
+
+/**
+ * KT-65 — filters for the message-level search. Every field is optional and
+ * they combine with AND, so the caller narrows instead of paging blindly.
+ */
+export type MessageSearchQuery = { q: string, discussion_id?: string | null, project_id?: string | null,
+/**
+ * Agent type ("Codex") or federated human pseudo ("Romu - mac").
+ */
+author?: string | null,
+/**
+ * Inclusive RFC3339 bounds.
+ */
+since?: string | null, until?: string | null, limit?: number | null, offset?: number | null, };
+
+export type MessageTarget = { kind: MessageTargetKind, agent_type: AgentType, cli_session_id?: number | null, };
+
+export type MessageTargetKind = "discussion_agent" | "agent" | "cli";
 
 /**
  * Abstract model capability tier. Kronn maps each tier to a concrete --model flag per agent.
@@ -2074,7 +2308,24 @@ export type ParticipantView = { id: number, disc_id: string, agent_type: string,
  * inferred). `None` = not declared; the UI shows it as declared-at-join,
  * never as a live/guessed value.
  */
-model: string | null, };
+model: string | null,
+/**
+ * Native CLI conversation id, when the joining bridge can prove one.
+ * `None` deliberately produces no resume affordance in the UI.
+ */
+conversation_id: string | null, };
+
+export type PeerJoinPlanSnapshot = { primary_objective: PeerJoinPlanTaskPreview | null,
+/**
+ * First eight non-completed Active tasks, in plan order.
+ */
+current: Array<PeerJoinPlanTaskPreview>,
+/**
+ * Three most recently updated completed Active tasks.
+ */
+recently_completed: Array<PeerJoinPlanTaskPreview>, current_total: number, completed_total: number, later_total: number, };
+
+export type PeerJoinPlanTaskPreview = { reference: string, title: string, status: PlanningTaskStatus, };
 
 /**
  * Body of `POST /api/discussions/peer-join`. The token is the
@@ -2099,7 +2350,12 @@ session_id: string,
  * bounded, stored as declared-at-join. Omitted or blank preserves any
  * value declared on a previous join/rebind (legacy bridges omit it).
  */
-model?: string | null, };
+model?: string | null,
+/**
+ * Native conversation id used by the CLI's own resume command. Optional
+ * and distinct from the Kronn bridge `session_id`.
+ */
+conversation_id?: string | null, };
 
 /**
  * Wire shape returned by `peer-join`. Carries the disc id (so the
@@ -2123,6 +2379,11 @@ disc_title: string,
  * freshly-created topic.
  */
 recent_messages: Array<RecentMessagePreview>,
+/**
+ * Compact, bounded plan state available even when the MCP client cached
+ * an older tool catalogue and cannot call `plan_get` yet.
+ */
+plan_snapshot: PeerJoinPlanSnapshot,
 /**
  * 0.8.6 fix 2026-05-21 — explicit directive returned to the
  * agent so it understands the multi-agent protocol. Without
@@ -2161,6 +2422,10 @@ export type PeerLeaveResponse = {
 left: boolean, };
 
 export type PeerResumeRequest = { agent_type: string, session_id: string, resume_token: string,
+/**
+ * Native CLI conversation id observed after reconnect or `/clear`.
+ */
+conversation_id?: string | null,
 /**
  * Client-prepared successor credential. The bridge persists it as a
  * pending value *before* this request, making the rotation retryable if
@@ -2249,6 +2514,26 @@ export type PlanningTaskStatus = "idea" | "todo" | "in_progress" | "blocked" | "
 
 export type PlanningTaskSummary = { id: string, reference: string, parent_id: string | null, parent_reference: string | null, parent_title: string | null, title: string, status: PlanningTaskStatus, priority: PlanningTaskPriority, rank: number, completed_subtasks: number, total_subtasks: number, project_ids: Array<string>, discussion_ids: Array<string>, tags: Array<string>, blocker_count: number, created_at: string, updated_at: string, };
 
+export type PluginBundleEnvelope = { kind: string, version: number, bundle_id: string, exported_at: string, includes_values: boolean, encrypted: boolean, plugin_labels: Array<string>, value_manifest: Array<PluginBundlePreviewItem>, payload?: PluginBundlePayload | null, encrypted_payload?: string | null, wrapped_key?: string | null, };
+
+export type PluginBundlePayload = { plugins: Array<PortablePluginConfig>, };
+
+export type PluginBundlePreview = { plugins: Array<PluginBundlePreviewItem>, value_count: number, sensitive_value_count: number, confirmation_phrase: string, minimum_passphrase_length: number, };
+
+export type PluginBundlePreviewItem = { config_id: string, server_id: string, label: string, server_name: string, cli_credential: boolean, values: Array<PluginBundleValueDescriptor>, };
+
+export type PluginBundleSelectionRequest = { config_ids: Array<string>, };
+
+export type PluginBundleValueDescriptor = { key: string, sensitive: boolean, exportable: boolean, };
+
+/**
+ * Preferred way for agents to invoke a configured plugin.
+ *
+ * Availability is derived from the server definition; this value only stores
+ * the operator's choice among those capabilities.
+ */
+export type PluginInterface = "api" | "mcp" | "cli";
+
 /**
  * stab-1 (Romu) — EXPLICIT long-poll pacing contract, returned by
  * `disc_meta` and `peer-join` instead of living as an implicit convention
@@ -2267,6 +2552,27 @@ hot_poll_seconds: number,
  * How long a User message keeps the room in the hot regime.
  */
 user_attention_lease_seconds: number, };
+
+export type PortableDiscussionAttachment = { source_id: string, message_id: string | null, filename: string, mime_type: string, original_size: number, extracted_text: string,
+/**
+ * Raw bytes are available for disk-backed attachments. Office documents
+ * historically stored only extracted text, so this is null for them.
+ */
+data_base64: string | null, created_at: string, };
+
+export type PortableDiscussionPlanItem = { placement: PlanningPlacement, is_primary: boolean, position: number, task: PlanningTaskDetail, };
+
+export type PortableDiscussionRevisionEvent = { target_message_id: string, previous_content_hash: string, expected_revision: string, revision: string, content: string, target_agent_json: string | null, idempotency_key: string, created_at: string, };
+
+/**
+ * KT-74 — the human who exported the bundle, so the receiving Kronn can say
+ * "imported from Romu" instead of attributing the discussion to a CLI it was
+ * merely bound to. Both fields are optional: an instance that never set a
+ * pseudo has nothing to declare, and no field may be forged to fill the gap.
+ */
+export type PortableExporterIdentity = { pseudo: string | null, avatar_email: string | null, };
+
+export type PortablePluginConfig = { source_config_id: string, server: McpServer, label: string, env_keys: Array<string>, values: Record<string, string> | null, args_override: Array<string> | null, was_global: boolean, include_general: boolean, preferred_interface: PluginInterface, };
 
 /**
  * 0.9.2-G — honest presence state, server-derived (never a bare "connected"
@@ -2535,7 +2841,11 @@ export type RetryConfig = { max_retries: number, backoff: string, };
  * exposed on the target message. `idempotency_key` is generated once by the
  * UI and reused when the same HTTP request is retried.
  */
-export type ReviseMessageRequest = { message_id: string, content: string, expected_revision: string, idempotency_key: string, target_agent?: AgentType | null, };
+export type ReviseMessageRequest = { message_id: string, content: string, expected_revision: string, idempotency_key: string, targets?: Array<MessageTarget>, target_all?: boolean, target_agent?: AgentType | null,
+/**
+ * Plural replacement for `target_agent`; empty preserves legacy clients.
+ */
+target_agents?: Array<AgentType>, };
 
 export type RtkActivateRequest = {
 /**
@@ -2661,7 +2971,24 @@ export type ScanConfig = { paths: Array<string>, ignore: Array<string>,
  */
 scan_depth: number, };
 
-export type SendMessageRequest = { content: string, target_agent?: AgentType | null, client_message_id?: string | null, };
+export type SendMessageRequest = { content: string,
+/**
+ * Durable target identities selected by current clients. Unlike the
+ * compatibility `target_agents` projection, this distinguishes the
+ * configured discussion agent, a one-shot agent, and a joined CLI.
+ */
+targets?: Array<MessageTarget>,
+/**
+ * Expand to every responder already visible in the discussion: the
+ * configured agent, previously-addressed one-shot agents, and non-left
+ * joined CLI sessions. It never means every installed agent.
+ */
+target_all?: boolean,
+/**
+ * Every explicit `@agent` addressee, deduplicated in textual order.
+ * `target_agent` below remains accepted for older clients.
+ */
+target_agents?: Array<AgentType>, target_agent?: AgentType | null, client_message_id?: string | null, reply_to_message_id?: string | null, };
 
 export type ServerConfig = { host: string, port: number,
 /**
@@ -2797,6 +3124,12 @@ default_model_tier: ModelTier,
 default_summary_strategy: SummaryStrategy, };
 
 export type SetAgentAccessRequest = { agent: AgentType, full_access: boolean, };
+
+export type SetAgentMentionColorRequest = { agent: AgentType,
+/**
+ * `None` or an empty string restores the built-in color.
+ */
+color?: string | null, };
 
 export type SetBriefingRequest = { notes?: string | null, };
 
@@ -3152,6 +3485,13 @@ keys: Array<ApiKey>, disabled_overrides: Array<string>, };
 
 export type TokenUsageSummary = { total_tokens: number, total_cost_usd: number, discussion_tokens: number, workflow_tokens: number, by_provider: Array<ProviderUsage>, by_project: Array<ProjectUsage>, top_discussions: Array<UsageEntry>, top_workflows: Array<UsageEntry>, daily_history: Array<DailyUsage>, };
 
+export type TourDemoDiscussionResponse = { discussion_id: string, created: boolean,
+/**
+ * Exact first message stored in the demo. The tour types this value into
+ * the launcher so the simulated request can never drift from the result.
+ */
+prompt: string, };
+
 export type TrackerSourceConfig = { "type": "GitHub", owner: string, repo: string, };
 
 /**
@@ -3222,9 +3562,14 @@ agent?: AgentType | null,
 /**
  * Change the auto-summary policy. Persists in `discussions.summary_strategy`.
  */
-summary_strategy?: SummaryStrategy | null, };
+summary_strategy?: SummaryStrategy | null,
+/**
+ * Disable or restore Kronn's native fallback for this discussion. Joined
+ * peers remain participants and continue receiving turns.
+ */
+no_agent?: boolean | null, };
 
-export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, };
+export type UpdateMcpConfigRequest = { label?: string | null, env?: Record<string, string> | null, args_override?: Array<string> | null, is_global?: boolean | null, include_general?: boolean | null, host_sync?: HostSyncMode | null, preferred_interface?: PluginInterface | null, };
 
 export type UpdateMcpContextRequest = { content: string, };
 
@@ -3316,7 +3661,13 @@ export type UsageTotals = { input_tokens: number, output_tokens: number, cache_c
 
 export type VersionCheck = { current: string, latest: string | null, release_url: string | null, up_to_date: boolean, };
 
-export type WaitForPeerMessage = { sort_order: number, role: string, agent_type: string | null, content: string, timestamp: string,
+export type WaitForPeerMessage = {
+/**
+ * Durable identifier of the delivered transcript message or revision
+ * event. Callers can cite it in an acknowledgement and use it as
+ * `reply_to_message_id` when the item is a transcript message.
+ */
+message_id: string, sort_order: number, role: string, agent_type: string | null, content: string, timestamp: string,
 /**
  * Author pseudo for messages that arrived from a PEER instance (federated)
  * or a human; `None` for our own local appends. Lets the wait correctly
@@ -3328,7 +3679,29 @@ author_pseudo: string | null,
  * Present for projection-change events that are cursor-visible but not
  * rendered as transcript messages.
  */
-event_type?: string | null, target_message_id?: string | null, };
+event_type?: string | null, target_message_id?: string | null,
+/**
+ * Structured addressee for this turn. A waiting peer whose own agent type
+ * differs must not answer it.
+ */
+target_agent?: string | null,
+/**
+ * Every structured addressee, in the order written by the human. Peers
+ * answer when their own agent type is present and otherwise only observe.
+ */
+target_agents?: Array<string>,
+/**
+ * Authoritative target identities. Unlike `target_agents`, this tells a
+ * native punctual agent from the configured discussion agent and from one
+ * exact joined CLI session of the same provider.
+ */
+targets?: Array<MessageTarget>,
+/**
+ * Server-computed for the calling durable CLI session. A CLI answers only
+ * when this is true; matching the provider name is intentionally
+ * insufficient because `@codex` and `@codex · CLI` are distinct targets.
+ */
+addressed_to_caller: boolean, };
 
 export type WaitForPeerResponse = {
 /**
@@ -3362,7 +3735,17 @@ pacing: PacingState,
  * activity (generic label, no countdown). `None` on a delivery (the
  * caller replies now, not later).
  */
-next_poll_at: string | null, };
+next_poll_at: string | null,
+/**
+ * How many turns in this window were addressed to someone else and so held
+ * back from `messages`. `latest_sort_order` still counts them, otherwise the
+ * caller would loop on a cursor gap — which makes "withheld by routing" and
+ * "not read yet" indistinguishable from the cursor alone. Reporting the count
+ * lets an agent say "3 turns were not for me" instead of looking deaf when a
+ * human asks whether it saw their message. Excludes the caller's own appends:
+ * it wrote those, they were never news.
+ */
+withheld_by_routing: number, };
 
 /**
  * How a participant can be woken. In 0.9.2 every session row is a joined
@@ -3916,7 +4299,22 @@ export type WsMessage = { "type": "presence", from_pseudo: string, from_invite_c
  * (no field on the wire) decoding to the historical behaviour
  * (role=User, agent_type=None).
  */
-role: MessageRole, agent_type: AgentType | null, } | { "type": "message_revised", shared_discussion_id: string, event_id: string, target_message_id: string, previous_content_hash: string, expected_revision: string, revision: string, content: string, target_agent: AgentType | null, idempotency_key: string, from_pseudo: string, from_invite_code: string, } | { "type": "discussion_invite", shared_discussion_id: string, title: string, from_pseudo: string, from_invite_code: string, } | { "type": "disc_sync_request", shared_discussion_id: string,
+role: MessageRole, agent_type: AgentType | null,
+/**
+ * Every explicitly addressed agent, in author text order. Empty on
+ * older peers; receivers then fall back to the legacy single target.
+ */
+target_agents: Array<AgentType>,
+/**
+ * Durable target identities. Empty on older peers; receivers derive
+ * one-shot targets from `target_agents` in that case.
+ */
+targets: Array<MessageTarget>,
+/**
+ * Durable link to the message this one replies to. Optional for wire
+ * compatibility with peers older than migration 095.
+ */
+reply_to_message_id: string | null, } | { "type": "message_revised", shared_discussion_id: string, event_id: string, target_message_id: string, previous_content_hash: string, expected_revision: string, revision: string, content: string, target_agent: AgentType | null, target_agents: Array<AgentType>, targets: Array<MessageTarget>, idempotency_key: string, from_pseudo: string, from_invite_code: string, } | { "type": "discussion_invite", shared_discussion_id: string, title: string, from_pseudo: string, from_invite_code: string, } | { "type": "disc_sync_request", shared_discussion_id: string,
 /**
  * Unix-millis of the newest message the requester already has for this
  * shared disc (0 if none). The responder sends everything strictly

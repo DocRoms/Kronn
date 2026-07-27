@@ -421,6 +421,23 @@ pub async fn execute_api_call_step_with_db(
     .await
 }
 
+/// Execute a plugin-readiness probe against the exact configured server/env,
+/// without requiring a project link and without persisting a response excerpt.
+/// Dynamic OAuth/token-exchange/CLI credentials follow the production path.
+pub async fn execute_api_call_probe(
+    step: &WorkflowStep,
+    plugin: &McpServer,
+    config_id: &str,
+    env: &HashMap<String, String>,
+    state: &crate::AppState,
+    ctx: &TemplateContext,
+    policy: SecurityPolicy,
+) -> StepOutcome {
+    let mut resolved_env = env.clone();
+    resolve_dynamic_auth(plugin, config_id, state, &mut resolved_env).await;
+    execute_api_call_step_core(step, plugin, &resolved_env, ctx, policy).await
+}
+
 /// Same as [`execute_api_call_step_with_db`] but lets the caller stamp a
 /// source on the audit-log row + propagate optional run_id / disc_id /
 /// agent context. The outcome is identical; only the log row metadata
@@ -564,17 +581,28 @@ async fn execute_api_call_step_with_db_inner(
         );
     };
 
-    // Resolve OAuth2/token-exchange credentials only at broker request time.
-    // Discussion startup deliberately does not mint or render tokens: doing
-    // so would expose them to model context, process argv and durable logs.
-    // The virtual env keys below stay inside this backend call path.
+    resolve_dynamic_auth(&plugin, config_id, state, &mut env).await;
+
+    execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
+}
+
+/// Resolve OAuth2/token-exchange/CLI credentials only at request time.
+/// Discussion startup deliberately does not mint or render tokens: doing so
+/// would expose them to model context, process argv and durable logs. The
+/// virtual env keys below stay inside this backend call path.
+async fn resolve_dynamic_auth(
+    plugin: &McpServer,
+    config_id: &str,
+    state: &crate::AppState,
+    env: &mut HashMap<String, String>,
+) {
     if let Some(spec) = plugin.api_spec.as_ref() {
         if matches!(spec.auth, ApiAuthKind::OAuth2ClientCredentials { .. }) {
             match crate::core::oauth2_cache::resolve_token(
                 &state.oauth2_cache,
                 config_id,
                 &spec.auth,
-                &env,
+                env,
             )
             .await
             {
@@ -597,7 +625,7 @@ async fn execute_api_call_step_with_db_inner(
                 config_id,
                 &spec.auth,
                 &spec.base_url,
-                &env,
+                env,
             )
             .await
             {
@@ -608,10 +636,17 @@ async fn execute_api_call_step_with_db_inner(
                     env.insert("__token_error__".into(), e.to_string());
                 }
             }
+        } else if let ApiAuthKind::CliToken { command, args, .. } = &spec.auth {
+            match resolve_cli_token(command, args).await {
+                Ok(token) => {
+                    env.insert("__cli_token__".into(), token);
+                }
+                Err(e) => {
+                    env.insert("__cli_token_error__".into(), e);
+                }
+            }
         }
     }
-
-    execute_api_call_step_core(step, &plugin, &env, ctx, policy).await
 }
 
 // `matches_config` (the TODO P0.5b `true` stub) is gone (2026-06-10):
@@ -619,6 +654,37 @@ async fn execute_api_call_step_with_db_inner(
 // plugin lookup above matches the exact instance directly.
 
 // ─── Auth resolution ────────────────────────────────────────────────────
+
+/// Resolve a credential from a registry-declared local CLI without ever
+/// logging or persisting its stdout. The command is executed directly (no
+/// shell), bounded to five seconds, and its output remains in-memory only.
+async fn resolve_cli_token(command: &str, args: &[String]) -> Result<String, String> {
+    let mut cmd = crate::core::cmd::async_cmd(command);
+    cmd.args(args);
+    cmd.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output())
+        .await
+        .map_err(|_| format!("Credential CLI `{command}` timed out after 5 seconds"))?
+        .map_err(|e| format!("Credential CLI `{command}` is unavailable: {e}"))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "Credential CLI `{command}` failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+
+    let token = String::from_utf8(output.stdout)
+        .map_err(|_| format!("Credential CLI `{command}` returned non-UTF-8 output"))?
+        .trim()
+        .to_string();
+    if token.is_empty() {
+        return Err(format!(
+            "Credential CLI `{command}` returned an empty token; authenticate it first"
+        ));
+    }
+    Ok(token)
+}
 
 /// Builds a `ResolvedAuth` from the plugin's declared `ApiAuthKind` plus
 /// the decrypted env. Mirrors what `build_api_context_block` does to hand
@@ -696,6 +762,24 @@ pub fn resolve_auth(
             out.headers
                 .insert("Authorization".into(), format!("Basic {encoded}"));
         }
+        ApiAuthKind::CliToken { inject, .. } => match env.get("__cli_token__") {
+            Some(token) => match inject {
+                TokenInjection::BearerHeader => out.bearer = Some(token.clone()),
+                TokenInjection::CustomHeader { name } => {
+                    out.headers.insert(name.clone(), token.clone());
+                }
+                TokenInjection::QueryParam { name } => {
+                    out.query.insert(name.clone(), token.clone());
+                }
+            },
+            None => {
+                let err = env
+                    .get("__cli_token_error__")
+                    .cloned()
+                    .unwrap_or_else(|| "credential CLI was not resolved".into());
+                return Err(format!("CLI token unavailable: {err}"));
+            }
+        },
         ApiAuthKind::OAuth2ClientCredentials { extra_headers, .. } => {
             // Same contract as `build_api_context_block`: the caller has
             // already resolved the token via `core::oauth2_cache` and
@@ -1876,6 +1960,43 @@ mod tests {
         };
         let out = resolve_auth(&auth, &env).unwrap();
         assert_eq!(out.bearer.as_deref(), Some("tok-123"));
+    }
+
+    #[test]
+    fn resolve_auth_cli_token_uses_declared_fastly_header() {
+        let mut env = HashMap::new();
+        env.insert("__cli_token__".into(), "fastly-secret".into());
+        let auth = ApiAuthKind::CliToken {
+            command: "fastly".into(),
+            args: vec!["auth".into(), "token".into()],
+            inject: TokenInjection::CustomHeader {
+                name: "Fastly-Key".into(),
+            },
+        };
+        let out = resolve_auth(&auth, &env).unwrap();
+        assert_eq!(
+            out.headers.get("Fastly-Key"),
+            Some(&"fastly-secret".to_string())
+        );
+        assert!(out.bearer.is_none());
+    }
+
+    #[test]
+    fn resolve_auth_cli_token_surfaces_resolution_error() {
+        let mut env = HashMap::new();
+        env.insert(
+            "__cli_token_error__".into(),
+            "credential CLI unavailable".into(),
+        );
+        let auth = ApiAuthKind::CliToken {
+            command: "fastly".into(),
+            args: vec!["auth".into(), "token".into()],
+            inject: TokenInjection::CustomHeader {
+                name: "Fastly-Key".into(),
+            },
+        };
+        let error = resolve_auth(&auth, &env).unwrap_err();
+        assert!(error.contains("credential CLI unavailable"));
     }
 
     #[test]

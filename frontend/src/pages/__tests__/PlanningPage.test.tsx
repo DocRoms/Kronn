@@ -131,7 +131,7 @@ describe('PlanningPage', () => {
   });
 
   it('opens the full detail only after a task is selected', async () => {
-    render(
+    const { container } = render(
       <PlanningPage
         projects={[]}
         discussions={[]}
@@ -142,6 +142,10 @@ describe('PlanningPage', () => {
     fireEvent.click(await screen.findByText('Upgrade PHP'));
     await waitFor(() => expect(mocks.get).toHaveBeenCalledWith('task-1'));
     expect(await screen.findByDisplayValue('Move the runtime forward.')).toBeInTheDocument();
+    const panel = screen.getByRole('complementary', { name: 'planning.taskActions' });
+    expect(panel.querySelector(':scope > header')).not.toBeNull();
+    expect(panel.querySelector('.planning-detail-form')).not.toBeNull();
+    expect(container.querySelector('.planning-workspace > .planning-detail')).toBe(panel);
   });
 
   it('opens a directly linked task detail on mount', async () => {
@@ -191,6 +195,37 @@ describe('PlanningPage', () => {
       priority: 'high',
       parent_id: 'task-1',
       project_ids: ['project-1'],
+    }));
+  });
+
+  it('offers to unblock a task when every blocker is done or archived', async () => {
+    const blocked = detail(summary({ status: 'blocked', blocker_count: 0 }));
+    blocked.blocked_reason = 'Waiting for the old migration.';
+    blocked.blockers = [
+      summary({
+        id: 'blocker-archived',
+        reference: 'KT-9',
+        title: 'Legacy migration',
+        status: 'archived',
+      }),
+    ];
+    mocks.get.mockResolvedValue(blocked);
+
+    render(
+      <PlanningPage
+        projects={[]}
+        discussions={[]}
+        toast={vi.fn()}
+        onNavigateDiscussion={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(await screen.findByText('Upgrade PHP'));
+    fireEvent.click(await screen.findByText('planning.unblock'));
+
+    await waitFor(() => expect(mocks.update).toHaveBeenCalledWith('task-1', {
+      status: 'todo',
+      blocked_reason: null,
     }));
   });
 });

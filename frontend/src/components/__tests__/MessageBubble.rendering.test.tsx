@@ -20,16 +20,26 @@
  * props bag spread onto every render. No real person names.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, within, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, within, waitFor, act } from '@testing-library/react';
 import { I18nProvider } from '../../lib/I18nContext';
+import { LocalIdentityProvider } from '../../lib/LocalIdentityContext';
 
 // Mock the boot config call so I18nProvider doesn't try to fetch.
 vi.mock('../../lib/api', async () => {
   const real = await vi.importActual<object>('../../lib/api');
-  return { ...real, config: { getUiLanguage: vi.fn().mockResolvedValue('fr') } };
+  return {
+    ...real,
+    config: {
+      getUiLanguage: vi.fn().mockResolvedValue('fr'),
+      // KT-47 — the @user chip resolves the local identity through this call.
+      getServerConfig: vi.fn().mockResolvedValue({ pseudo: null, avatar_email: null }),
+      getAgentAccess: vi.fn().mockResolvedValue(null),
+    },
+  };
 });
 
 import { MessageBubble, MarkdownContent, type MessageBubbleProps } from '../MessageBubble';
+import { config as configApi } from '../../lib/api';
 import type { DiscussionMessage, MessageRole } from '../../types/generated';
 
 function makeMessage(overrides: Partial<DiscussionMessage> = {}): DiscussionMessage {
@@ -103,6 +113,80 @@ describe('MessageBubble — role-based bubble variant', () => {
     expect(container.querySelector('.disc-msg-bubble')?.getAttribute('data-role')).toBe('agent');
   });
 
+  it('exposes an accessible reply action on human and agent messages', () => {
+    const onReply = vi.fn();
+    const message = makeMessage({ role: 'Agent' });
+    renderBubble(message, { onReply });
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.reply' }));
+
+    expect(onReply).toHaveBeenCalledWith(message);
+  });
+
+  it('renders a durable reply header and navigates to the source message', () => {
+    const onReplyNavigate = vi.fn();
+    const source = makeMessage({
+      id: '12345678-source',
+      role: 'Agent',
+      agent_type: 'Codex',
+      content: 'Original answer',
+    });
+    renderBubble(
+      makeMessage({ id: 'reply', reply_to_message_id: source.id }),
+      { replyTarget: source, onReplyNavigate },
+    );
+
+    const header = screen.getByTitle('disc.openReplyTarget');
+    expect(header).toHaveTextContent('#12345678');
+    fireEvent.click(header);
+    expect(onReplyNavigate).toHaveBeenCalledWith(source.id);
+  });
+
+  it('keeps a missing reply target visible without broken navigation', () => {
+    renderBubble(
+      makeMessage({
+        id: 'reply',
+        reply_to_message_id: '87654321-missing',
+      }),
+      { replyTarget: null, onReplyNavigate: vi.fn() },
+    );
+
+    const header = screen.getByTitle('disc.replyTargetMissing');
+    expect(header).toBeDisabled();
+    expect(header).toHaveTextContent('#87654321');
+  });
+
+  it('shows every reply as a compact backlink on the original message', () => {
+    const onReplyNavigate = vi.fn();
+    const original = makeMessage({ id: 'original', role: 'User' });
+    const agentReply = makeMessage({
+      id: 'reply-agent',
+      agent_type: 'Codex',
+      content: 'Agent follow-up',
+      reply_to_message_id: original.id,
+    });
+    const humanReply = makeMessage({
+      id: 'reply-human',
+      role: 'User',
+      agent_type: null,
+      author_pseudo: 'Peer',
+      content: 'Human follow-up',
+      reply_to_message_id: original.id,
+    });
+    renderBubble(original, {
+      replies: [agentReply, humanReply],
+      onReplyNavigate,
+      t: (key: string, ...args: (string | number)[]) => `${key} ${args.join(' ')}`,
+    });
+
+    const backlinks = screen.getAllByRole('button', { name: /disc\.repliedBy/ });
+    expect(backlinks).toHaveLength(2);
+    expect(backlinks[0]).toHaveTextContent('@codex');
+    expect(backlinks[1]).toHaveTextContent('@Peer');
+    fireEvent.click(backlinks[1]);
+    expect(onReplyNavigate).toHaveBeenCalledWith(humanReply.id);
+  });
+
   it('tags an error System message with data-variant="error"', () => {
     const { container } = renderBubble(makeMessage({ role: 'System', content: 'API exploded' }));
     const bubble = container.querySelector('.disc-msg-bubble');
@@ -141,9 +225,18 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
     const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
     expect(chip).not.toBeNull();
     expect(chip?.dataset.agent).toBe('Codex');
-    expect(chip?.textContent).toBe('@codex');
+    expect(chip?.textContent).toBe('@codex · agent ponctuel');
     expect(chip?.style.color).toBe('#10a37f');
     expect(screen.getByText('vérifie ce patch')).toBeInTheDocument();
+  });
+
+  it('renders a joined CLI alias as the same agent chip with an explicit CLI identity', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User', content: '@codex-cli vérifie ce patch' }),
+    );
+    const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
+    expect(chip?.dataset.agent).toBe('Codex');
+    expect(chip?.textContent).toBe('@codex · CLI');
   });
 
   it('renders an agent mention inline wherever it appears in the message', () => {
@@ -151,8 +244,8 @@ describe('MessageBubble — author pseudo / avatar (User)', () => {
       makeMessage({ role: 'User', content: 'demande à @codex plus tard' }),
     );
     const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
-    expect(chip?.textContent).toBe('@codex');
-    expect(container).toHaveTextContent('demande à @codex plus tard');
+    expect(chip?.textContent).toBe('@codex · agent ponctuel');
+    expect(container).toHaveTextContent('demande à @codex · agent ponctuel plus tard');
   });
 
   it('does not turn an unknown word or code literal into an agent chip', () => {
@@ -203,8 +296,8 @@ describe('MessageBubble — agent mentions', () => {
     const chip = container.querySelector<HTMLElement>('.disc-agent-mention-chip');
     expect(chip).not.toBeNull();
     expect(chip?.dataset.agent).toBe('Vibe');
-    expect(chip?.textContent).toBe('@vibe');
-    expect(container).toHaveTextContent('Je demande à @vibe de vérifier.');
+    expect(chip?.textContent).toBe('@vibe · agent ponctuel');
+    expect(container).toHaveTextContent('Je demande à @vibe · agent ponctuel de vérifier.');
   });
 
   it('keeps mentions in Agent code literals unstyled', () => {
@@ -218,10 +311,119 @@ describe('MessageBubble — agent mentions', () => {
   });
 });
 
+describe('MessageBubble — human mention (@user)', () => {
+  it('renders @user as its own chip, not an agent chip', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', content: '@user peux-tu valider ?' }),
+    );
+    const chip = container.querySelector<HTMLElement>('.disc-user-mention-chip');
+    expect(chip).not.toBeNull();
+    expect(chip?.textContent).toBe('@user');
+    expect(chip?.dataset.mention).toBe('user');
+    expect(container.querySelector('.disc-agent-mention-chip')).toBeNull();
+    expect(container).toHaveTextContent('@user peux-tu valider ?');
+  });
+
+  it('keeps @user in a code literal unstyled', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', content: 'écris `@user` littéralement' }),
+    );
+    expect(container.querySelector('.disc-user-mention-chip')).toBeNull();
+    expect(container.querySelector('code')).toHaveTextContent('@user');
+  });
+
+  it('exposes the dispatch target so the awaited mention can be singled out', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User', content: '@codex et @vibe, avis ?', target_agent: 'Codex' }),
+    );
+    expect(container.querySelector('.disc-msg-row')?.getAttribute('data-target-agent')).toBe('Codex');
+    // Both mentions still render — only their weight differs.
+    expect(container.querySelectorAll('.disc-agent-mention-chip')).toHaveLength(2);
+  });
+
+  it('carries no dispatch target when the message addresses nobody in particular', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'User', content: 'note pour plus tard' }),
+    );
+    expect(container.querySelector('.disc-msg-row')?.hasAttribute('data-target-agent')).toBe(false);
+  });
+});
+
+describe('MessageBubble — @user carries the real human identity', () => {
+  const renderWithIdentity = async (
+    identity: { pseudo: string | null; avatar_email: string | null },
+    content = '@user peux-tu valider ?',
+  ) => {
+    (configApi.getServerConfig as ReturnType<typeof vi.fn>).mockResolvedValue(identity);
+    const rendered = render(
+      <I18nProvider>
+        <LocalIdentityProvider>
+          <MessageBubble {...baseProps} msg={makeMessage({ role: 'Agent', content })} />
+        </LocalIdentityProvider>
+      </I18nProvider>,
+    );
+    // Let the identity fetch settle so the chip re-renders with it.
+    await act(async () => { await Promise.resolve(); });
+    return rendered;
+  };
+
+  it('shows the configured Kronn pseudo instead of a generic label', async () => {
+    const { container } = await renderWithIdentity({ pseudo: 'Romu - mac', avatar_email: null });
+    const chip = container.querySelector<HTMLElement>('.disc-user-mention-chip');
+    expect(chip?.textContent).toBe('@Romu - mac');
+    expect(chip?.getAttribute('title')).toBe('Romu - mac');
+  });
+
+  it('shows the Gravatar when an avatar e-mail is configured', async () => {
+    const { container } = await renderWithIdentity({
+      pseudo: 'Romu - mac',
+      avatar_email: 'romu@example.com',
+    });
+    const img = container.querySelector<HTMLImageElement>('img.disc-user-mention-avatar');
+    expect(img).not.toBeNull();
+    expect(img?.getAttribute('src')).toContain('gravatar.com');
+  });
+
+  it('falls back to the canonical @user when no identity is configured', async () => {
+    const { container } = await renderWithIdentity({ pseudo: null, avatar_email: null });
+    const chip = container.querySelector<HTMLElement>('.disc-user-mention-chip');
+    expect(chip?.textContent).toBe('@user');
+    expect(container.querySelector('img.disc-user-mention-avatar')).toBeNull();
+  });
+
+  it('applies the configured color to agent mentions and the agent label', async () => {
+    (configApi.getAgentAccess as ReturnType<typeof vi.fn>).mockResolvedValue({
+      codex: { mention_color: '#123abc' },
+    });
+    const rendered = render(
+      <I18nProvider>
+        <LocalIdentityProvider>
+          <MessageBubble
+            {...baseProps}
+            msg={makeMessage({ role: 'Agent', agent_type: 'Codex', content: '@codex prêt.' })}
+          />
+        </LocalIdentityProvider>
+      </I18nProvider>,
+    );
+    const chip = await waitFor(() => {
+      const element = rendered.container.querySelector<HTMLElement>('.disc-agent-mention-chip');
+      expect(element?.style.color).toBe('#123abc');
+      return element;
+    });
+    expect(chip).not.toBeNull();
+    expect(rendered.container.querySelector<HTMLElement>('.disc-msg-agent-label')?.style.color)
+      .toBe('#123abc');
+  });
+});
+
 describe('MessageBubble — agent label + copy buttons', () => {
-  it('renders the agent label with the agent type', () => {
+  it('renders a non-default native responder as a punctual agent', () => {
     const { container } = renderBubble(makeMessage({ role: 'Agent', agent_type: 'Codex' }));
-    expect(container.querySelector('.disc-msg-agent-label')?.textContent).toContain('Codex');
+    expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
+      '@codex · disc.targetPunctualAgent',
+    );
+    expect(container.querySelector<HTMLElement>('.disc-msg-bubble')?.style.borderLeftColor)
+      .toBeTruthy();
   });
 
   it('falls back to defaultAgent when agent_type is null', () => {
@@ -229,7 +431,32 @@ describe('MessageBubble — agent label + copy buttons', () => {
       makeMessage({ role: 'Agent', agent_type: null }),
       { defaultAgent: 'Vibe' },
     );
-    expect(container.querySelector('.disc-msg-agent-label')?.textContent).toContain('Vibe');
+    expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
+      '@vibe · disc.targetDiscussionAgent',
+    );
+  });
+
+  it('labels an imported or appended CLI response explicitly', () => {
+    const { container } = renderBubble(
+      makeMessage({ role: 'Agent', agent_type: 'Codex', source_msg_id: 'live-cli-1' }),
+    );
+    expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
+      '@codex · disc.targetCli',
+    );
+  });
+
+  it('labels the agentless guided-tour document as preloaded Kronn content', () => {
+    const { container } = renderBubble(
+      makeMessage({
+        role: 'Agent',
+        agent_type: 'ClaudeCode',
+        source_msg_id: 'kronn-guided-tour-demo-preview',
+      }),
+    );
+    expect(container.querySelector('.disc-msg-agent-label')).toHaveTextContent(
+      'disc.tourDemoAuthor · disc.tourDemoKind',
+    );
+    expect(container.querySelector('.disc-msg-agent-label')).not.toHaveTextContent('@claude');
   });
 
   it('invokes onCopy(msgId, content) from the footer copy button', () => {

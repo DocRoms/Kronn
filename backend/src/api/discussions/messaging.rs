@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::models::*;
 use crate::AppState;
 
+use super::routing::{route_human_turn, DispatchRoute};
 use super::streaming::make_agent_stream;
 use super::{SseStream, MAX_CONTENT_LEN};
 
@@ -43,45 +44,123 @@ fn accepted_event(message_id: &str, sort_order: i64, duplicate: bool) -> Event {
     )
 }
 
-async fn local_agent_policy(
+pub(crate) fn normalized_targets(
+    targets: Vec<MessageTarget>,
+    target_agents: Vec<AgentType>,
+    legacy_target: Option<AgentType>,
+) -> Vec<MessageTarget> {
+    let mut targets = if !targets.is_empty() {
+        targets
+    } else if target_agents.is_empty() {
+        legacy_target
+            .into_iter()
+            .map(MessageTarget::agent)
+            .collect()
+    } else {
+        target_agents
+            .into_iter()
+            .map(MessageTarget::agent)
+            .collect()
+    };
+    let mut deduped = Vec::with_capacity(targets.len());
+    for target in targets.drain(..) {
+        if !deduped.contains(&target) {
+            deduped.push(target);
+        }
+    }
+    deduped
+}
+
+pub(crate) async fn canonical_targets(
     state: &AppState,
     discussion_id: &str,
-    target_agent: Option<&AgentType>,
-) -> (bool, i64) {
+    requested: Vec<MessageTarget>,
+    target_all: bool,
+) -> Result<Vec<MessageTarget>, String> {
+    let did = discussion_id.to_string();
+    let context = state
+        .db
+        .with_conn(move |conn| {
+            let discussion = crate::db::discussions::get_discussion(conn, &did)?
+                .ok_or_else(|| anyhow::anyhow!("discussion not found"))?;
+            let sessions = crate::db::discussion_sessions::list_sessions(conn, &did, false)?;
+            let no_agent = crate::db::discussions::disc_is_no_agent(conn, &did)?;
+            Ok((discussion, sessions, no_agent))
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    let (discussion, sessions, no_agent) = context;
+
+    let mut candidates = if target_all {
+        let mut all = if no_agent {
+            Vec::new()
+        } else {
+            vec![MessageTarget::discussion_agent(discussion.agent.clone())]
+        };
+        all.extend(
+            discussion
+                .participants
+                .iter()
+                .filter(|agent| **agent != discussion.agent)
+                .cloned()
+                .map(MessageTarget::agent),
+        );
+        all.extend(sessions.iter().map(|session| {
+            MessageTarget::cli(
+                crate::db::discussions::parse_agent_type(&session.agent_type),
+                session.id,
+            )
+        }));
+        all
+    } else {
+        Vec::new()
+    };
+    candidates.extend(requested);
+
+    let mut targets = Vec::with_capacity(candidates.len());
+    for target in candidates {
+        let canonical = match target.kind {
+            MessageTargetKind::DiscussionAgent => {
+                MessageTarget::discussion_agent(discussion.agent.clone())
+            }
+            MessageTargetKind::Agent => MessageTarget::agent(target.agent_type),
+            MessageTargetKind::Cli => {
+                let Some(session_id) = target.cli_session_id else {
+                    return Err("CLI target requires cli_session_id".to_string());
+                };
+                let Some(session) = sessions.iter().find(|session| session.id == session_id) else {
+                    return Err(format!(
+                        "CLI target {session_id} is not part of this discussion"
+                    ));
+                };
+                let session_agent = crate::db::discussions::parse_agent_type(&session.agent_type);
+                if session_agent != target.agent_type {
+                    return Err(format!(
+                        "CLI target {session_id} does not match the requested agent"
+                    ));
+                }
+                MessageTarget::cli(session_agent, session_id)
+            }
+        };
+        if !targets.contains(&canonical) {
+            targets.push(canonical);
+        }
+    }
+    Ok(targets)
+}
+
+async fn human_dispatch_route(
+    state: &AppState,
+    discussion_id: &str,
+    target: Option<&MessageTarget>,
+) -> DispatchRoute {
     let no_agent_id = discussion_id.to_string();
     let no_agent = state
         .db
         .with_conn(move |conn| crate::db::discussions::disc_is_no_agent(conn, &no_agent_id))
         .await
         .unwrap_or(false);
-    if no_agent {
-        return (true, 0);
-    }
-
-    let live_check_id = discussion_id.to_string();
-    let live_target = target_agent.map(|agent| format!("{agent:?}"));
-    let live_agents = match state
-        .db
-        .with_conn(move |conn| match live_target {
-            Some(agent) => crate::db::discussion_sessions::count_live_participants_for_agent(
-                conn,
-                &live_check_id,
-                &agent,
-            ),
-            None => crate::db::discussion_sessions::count_live_participants(conn, &live_check_id),
-        })
-        .await
-    {
-        Ok(count) => count,
-        Err(error) => {
-            tracing::warn!(
-                "send_message: count_live_participants failed for disc {discussion_id}, \
-                 falling back to local runner: {error}"
-            );
-            0
-        }
-    };
-    (false, live_agents)
+    route_human_turn(no_agent, target)
 }
 
 /// GET /api/discussions/running — disc ids with an in-flight agent run RIGHT
@@ -129,12 +208,79 @@ pub async fn send_message(
         },
         None => Uuid::new_v4().to_string(),
     };
+    // Message ids are durable opaque identifiers, not guaranteed UUIDs:
+    // federated/legacy peers legitimately use ids such as `wsl-…`. The
+    // same-discussion existence check below is the actual integrity boundary.
+    let reply_to_message_id = req.reply_to_message_id.clone();
+    if let Some(reply_id) = reply_to_message_id.as_deref() {
+        let did = id.clone();
+        let reply_id = reply_id.to_string();
+        let belongs_to_discussion = state
+            .db
+            .with_conn(move |conn| {
+                conn.query_row(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM messages
+                         WHERE id = ?1 AND discussion_id = ?2
+                     )",
+                    rusqlite::params![reply_id, did],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .await
+            .unwrap_or(false);
+        if !belongs_to_discussion {
+            return sse_events(vec![Event::default().event("error").data(
+                serde_json::json!({
+                    "error": "Reply target not found in this discussion"
+                })
+                .to_string(),
+            )]);
+        }
+    }
 
-    let target = req.target_agent.clone();
+    let requested_targets = normalized_targets(
+        req.targets.clone(),
+        req.target_agents.clone(),
+        req.target_agent.clone(),
+    );
+    let targets = match canonical_targets(&state, &id, requested_targets, req.target_all).await {
+        Ok(targets) => targets,
+        Err(error) => {
+            return sse_events(vec![Event::default()
+                .event("error")
+                .data(serde_json::json!({ "error": error }).to_string())]);
+        }
+    };
+    let target = targets.first().map(|target| target.agent_type.clone());
     // Resolve responder ownership before the acceptance transaction so human-
-    // only/shared rooms never expose a briefly-runnable local dispatch job.
-    let (no_agent, live_agents) = local_agent_policy(&state, &id, target.as_ref()).await;
-    let needs_local_dispatch = !no_agent && live_agents == 0;
+    // only/shared rooms never expose briefly-runnable local dispatch jobs.
+    // Explicit plural targets are evaluated independently: a joined Claude can
+    // own its reply while an absent Codex gets a durable native obligation.
+    let mut routes = Vec::new();
+    if targets.is_empty() {
+        routes.push(human_dispatch_route(&state, &id, None).await);
+    } else {
+        for target in &targets {
+            routes.push(human_dispatch_route(&state, &id, Some(target)).await);
+        }
+    }
+    let local_dispatch_agents = routes
+        .iter()
+        .filter_map(|route| match route {
+            DispatchRoute::NativePrincipal => Some(None),
+            DispatchRoute::TargetedNative(agent) => Some(Some(agent.clone())),
+            DispatchRoute::NoNativeResponder | DispatchRoute::JoinedPeers => None,
+        })
+        .collect::<Vec<_>>();
+    let no_native_responder = routes
+        .iter()
+        .all(|route| matches!(route, DispatchRoute::NoNativeResponder));
+    let joined_peers_only = !routes.is_empty()
+        && routes
+            .iter()
+            .all(|route| matches!(route, DispatchRoute::JoinedPeers));
 
     // Read user identity from config for message attribution
     let (author_pseudo, author_avatar_email) = {
@@ -162,28 +308,34 @@ pub async fn send_message(
         author_avatar_email,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: target.clone(),
+        reply_to_message_id,
     };
     let disc_id = id.clone();
     let msg = user_msg;
-    let target_clone = target.clone();
-    let insert_job_id = Uuid::new_v4().to_string();
+    let targets_clone = targets.clone();
+    let local_dispatches = local_dispatch_agents
+        .into_iter()
+        .map(|agent| (Uuid::new_v4().to_string(), agent))
+        .collect::<Vec<_>>();
 
     let insert_outcome = match state
         .db
         .with_conn(move |conn| {
-            let outcome = if needs_local_dispatch {
-                crate::db::discussions::insert_user_message_with_dispatch(
-                    conn,
-                    &disc_id,
-                    &msg,
-                    &insert_job_id,
-                    target_clone.as_ref(),
-                )?
-            } else {
-                crate::db::discussions::insert_user_message_with_agent_handoff(
-                    conn, &disc_id, &msg,
-                )?
-            };
+            let dispatch_specs = local_dispatches
+                .iter()
+                .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
+                    job_id,
+                    agent_override: agent.as_ref(),
+                })
+                .collect::<Vec<_>>();
+            let outcome = crate::db::discussions::insert_user_message_with_dispatches(
+                conn,
+                &disc_id,
+                &msg,
+                &targets_clone,
+                &dispatch_specs,
+            )?;
             if matches!(
                 &outcome,
                 crate::db::discussions::InsertUserMessageOutcome::Inserted { .. }
@@ -200,7 +352,11 @@ pub async fn send_message(
                     );
                 }
                 // Track new participant
-                if let Some(ref t) = target_clone {
+                for target in &targets_clone {
+                    if target.kind != MessageTargetKind::Agent {
+                        continue;
+                    }
+                    let t = &target.agent_type;
                     let disc = crate::db::discussions::get_discussion(conn, &disc_id)?;
                     if let Some(d) = disc {
                         if !d.participants.contains(t) {
@@ -256,9 +412,20 @@ pub async fn send_message(
     // F9 — human-only disc: never spawn an agent. Persist + federate the human
     // message (done above) and stop. Guarantees true human↔human chat even on
     // an instance that has an agent installed.
-    if no_agent {
+    if no_native_responder {
         crate::api::federation::federate_message(&state, &id, &stored_user_msg).await;
-        let payload = serde_json::json!({ "skipped": true, "reason": "no_agent" }).to_string();
+        let reason = if target.is_some() {
+            "target_not_joined"
+        } else {
+            "no_agent"
+        };
+        let payload = serde_json::json!({
+            "skipped": true,
+            "reason": reason,
+            "target_agent": target,
+            "target_agents": targets,
+        })
+        .to_string();
         return sse_events(vec![
             accepted,
             Event::default().event("skipped_no_agent").data(payload),
@@ -279,22 +446,20 @@ pub async fn send_message(
     // "sending" state clears with no empty agent bubble (the peer's reply
     // arrives separately via the disc message list / WS).
     //
-    // PRESENCE-STICKY: `count_live_participants` counts any 'active' session
-    // regardless of how long ago it last heartbeated — a turn-based CLI peer
-    // idles minutes between human turns and must NOT be judged dead (the old
-    // 300s window was the double-responder bug). Crashed-peer escape hatch:
-    // `run_agent` (/run) is unguarded, so the user forces a Kronn reply with
-    // one click; and abandoned sessions (idle > 24h) are reaped at boot.
-    // `paused` agents are NOT counted (they won't reply → Kronn answers).
-    if live_agents > 0 {
+    // Membership remains sticky for the participant header, but dispatch
+    // ownership requires fresh listening/reading activity. Otherwise a peer
+    // that left without calling disc_leave suppresses the durable local
+    // fallback until the 24h reaper runs and the room appears silent.
+    if joined_peers_only {
         crate::api::federation::federate_message(&state, &id, &stored_user_msg).await;
         tracing::info!(
-            "send_message: {live_agents} live MCP agent(s) on disc {id} — skipping local runner (connected agents respond)"
+            "send_message: {} joined CLI target(s) on disc {id} — skipping local runner",
+            targets.len()
         );
         let payload = serde_json::json!({
             "skipped": true,
             "reason": "live_mcp_agents",
-            "live_agents": live_agents,
+            "live_agents": targets.len(),
         })
         .to_string();
         return sse_events(vec![
@@ -342,15 +507,52 @@ pub async fn revise_message(
             .into_response();
     }
 
-    let (no_agent, live_agents) =
-        local_agent_policy(&state, &id, request.target_agent.as_ref()).await;
-    let needs_local_dispatch = !no_agent && live_agents == 0;
-    let dispatch_job_id = Uuid::new_v4().to_string();
+    let requested_targets = normalized_targets(
+        request.targets.clone(),
+        request.target_agents.clone(),
+        request.target_agent.clone(),
+    );
+    let targets = match canonical_targets(&state, &id, requested_targets, request.target_all).await
+    {
+        Ok(targets) => targets,
+        Err(error) => {
+            return (StatusCode::BAD_REQUEST, Json(ApiResponse::<()>::err(error))).into_response();
+        }
+    };
+    let mut local_dispatch_agents = Vec::new();
+    if targets.is_empty() {
+        let route = human_dispatch_route(&state, &id, None).await;
+        if matches!(route, DispatchRoute::NativePrincipal) {
+            local_dispatch_agents.push(None);
+        }
+    } else {
+        for target in &targets {
+            match human_dispatch_route(&state, &id, Some(target)).await {
+                DispatchRoute::NativePrincipal => local_dispatch_agents.push(None),
+                DispatchRoute::TargetedNative(agent) => {
+                    local_dispatch_agents.push(Some(agent));
+                }
+                DispatchRoute::NoNativeResponder | DispatchRoute::JoinedPeers => {}
+            }
+        }
+    }
+    let has_local_dispatch = !local_dispatch_agents.is_empty();
+    let dispatches = local_dispatch_agents
+        .into_iter()
+        .map(|agent| (Uuid::new_v4().to_string(), agent))
+        .collect::<Vec<_>>();
     let db_request = request.clone();
     let db_discussion_id = id.clone();
     let outcome = state
         .db
         .with_conn(move |connection| {
+            let dispatch_specs = dispatches
+                .iter()
+                .map(|(job_id, agent)| crate::db::discussions::UserDispatchSpec {
+                    job_id,
+                    agent_override: agent.as_ref(),
+                })
+                .collect::<Vec<_>>();
             Ok(crate::db::discussions::revise_message_with_dispatch(
                 connection,
                 crate::db::discussions::ReviseMessageParams {
@@ -359,9 +561,8 @@ pub async fn revise_message(
                     content: db_request.content.trim(),
                     expected_revision: &db_request.expected_revision,
                     idempotency_key: &db_request.idempotency_key,
-                    target_agent: db_request.target_agent.as_ref(),
-                    needs_local_dispatch,
-                    dispatch_job_id: &dispatch_job_id,
+                    targets: &targets,
+                    dispatches: &dispatch_specs,
                 },
             ))
         })
@@ -438,7 +639,7 @@ pub async fn revise_message(
         crate::api::federation::federate_message_revision(&state, &outcome.event).await;
     }
 
-    if no_agent || live_agents > 0 || outcome.receipt.duplicate {
+    if !has_local_dispatch || outcome.receipt.duplicate {
         return sse_events(vec![revision_event]).into_response();
     }
 
@@ -689,6 +890,34 @@ mod tests {
         String::from_utf8_lossy(&bytes).to_string()
     }
 
+    #[tokio::test]
+    async fn target_all_excludes_the_disabled_discussion_agent() {
+        let disc = "d-all-no-agent";
+        let state = make_state_with_disc(disc).await;
+        let cli_session_id = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussions::set_disc_no_agent(conn, disc, true)?;
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "Codex",
+                    Some("sess-all"),
+                    "peer",
+                )
+            })
+            .await
+            .unwrap();
+
+        let targets = canonical_targets(&state, disc, Vec::new(), true)
+            .await
+            .unwrap();
+        assert_eq!(
+            targets,
+            vec![MessageTarget::cli(AgentType::Codex, cli_session_id)]
+        );
+    }
+
     async fn response_body_to_string(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -708,16 +937,25 @@ mod tests {
         let state = make_state_with_disc(disc).await;
         // A live MCP agent is connected (status='active', fresh last_seen
         // from create_session).
-        state
+        let cli_session_id = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::create_session(
+                let session_id = crate::db::discussion_sessions::create_session(
                     conn,
                     disc,
                     "Codex",
                     Some("sess-x"),
                     "peer",
-                )
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "Codex",
+                    Some("sess-x"),
+                    "listening",
+                    300,
+                )?;
+                Ok(session_id)
             })
             .await
             .unwrap();
@@ -727,8 +965,12 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "hello peers".into(),
+                targets: vec![MessageTarget::cli(AgentType::Codex, cli_session_id)],
+                target_all: false,
+                target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("5fa2fc3c-4b92-4472-9729-faba80bf0525".into()),
+                reply_to_message_id: None,
             }),
         )
         .await;
@@ -763,16 +1005,25 @@ mod tests {
     async fn retrying_client_message_id_returns_duplicate_receipt_without_rerun() {
         let disc = "d-idempotent";
         let state = make_state_with_disc(disc).await;
-        state
+        let cli_session_id = state
             .db
             .with_conn(move |conn| {
-                crate::db::discussion_sessions::create_session(
+                let session_id = crate::db::discussion_sessions::create_session(
                     conn,
                     disc,
                     "Codex",
                     Some("sess-idempotent"),
                     "peer",
-                )
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "Codex",
+                    Some("sess-idempotent"),
+                    "listening",
+                    300,
+                )?;
+                Ok(session_id)
             })
             .await
             .unwrap();
@@ -783,8 +1034,12 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "only once".into(),
+                targets: vec![MessageTarget::cli(AgentType::Codex, cli_session_id)],
+                target_all: false,
+                target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some(client_message_id.into()),
+                reply_to_message_id: None,
             }),
         )
         .await;
@@ -797,8 +1052,12 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "only once".into(),
+                targets: vec![MessageTarget::cli(AgentType::Codex, cli_session_id)],
+                target_all: false,
+                target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some(client_message_id.into()),
+                reply_to_message_id: None,
             }),
         )
         .await;
@@ -834,6 +1093,14 @@ mod tests {
                     Some("live-reviser"),
                     "peer",
                 )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("live-reviser"),
+                    "listening",
+                    300,
+                )?;
                 crate::db::discussions::insert_message(
                     conn,
                     disc,
@@ -853,6 +1120,8 @@ mod tests {
                         author_avatar_email: None,
                         source_msg_id: None,
                         duration_ms: None,
+                        target_agent: None,
+                        reply_to_message_id: None,
                     },
                 )?;
                 Ok(())
@@ -863,17 +1132,24 @@ mod tests {
             .db
             .with_conn(move |conn| {
                 let messages = crate::db::discussions::list_messages(conn, disc)?;
-                Ok(messages[0].timestamp.to_rfc3339())
+                Ok(serde_json::to_value(&messages[0])?["timestamp"]
+                    .as_str()
+                    .expect("serialized message timestamp")
+                    .to_string())
             })
             .await
             .unwrap();
+        assert!(expected_revision.ends_with('Z'));
         let idempotency_key = "de60829d-250d-41b1-bb45-632c22c59f7c";
         let request = ReviseMessageRequest {
             message_id: message_id.into(),
             content: "after".into(),
             expected_revision,
             idempotency_key: idempotency_key.into(),
+            targets: vec![],
+            target_all: false,
             target_agent: None,
+            target_agents: vec![],
         };
 
         let first = revise_message(
@@ -927,8 +1203,12 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "human only".into(),
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("6661b620-162d-4a8a-9552-33f0896c6835".into()),
+                reply_to_message_id: None,
             }),
         )
         .await;
@@ -941,6 +1221,51 @@ mod tests {
             accepted_pos < skipped_pos,
             "accepted receipt must precede no-agent skip: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn send_message_persists_explicit_target_agent() {
+        let disc = "d-target-stamp";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                // Keep the test deterministic: persistence is under test, not
+                // launching a real Codex process.
+                conn.execute("UPDATE discussions SET no_agent = 1 WHERE id = ?1", [disc])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: "@codex peux-tu vérifier ?".into(),
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: Some(AgentType::Codex),
+                client_message_id: Some("c4a768c8-48b5-4d64-9fe4-121ebf9c36ac".into()),
+                reply_to_message_id: None,
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("event: accepted"));
+        assert!(
+            body.contains("target_not_joined"),
+            "an absent target in a no-agent room needs an actionable reason: {body}"
+        );
+
+        let messages = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, disc))
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].target_agent, Some(AgentType::Codex));
     }
 
     #[tokio::test]
@@ -973,13 +1298,101 @@ mod tests {
             Path(disc.to_string()),
             Json(SendMessageRequest {
                 content: "must not persist".into(),
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
                 target_agent: None,
                 client_message_id: Some("not-a-uuid".into()),
+                reply_to_message_id: None,
             }),
         )
         .await;
         let body = sse_body_to_string(response).await;
         assert!(body.contains("Invalid client_message_id"));
+        assert!(!body.contains("event: accepted"));
+
+        let messages = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, disc))
+            .await
+            .unwrap();
+        assert!(messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn send_message_persists_a_reply_target_from_the_same_discussion() {
+        let disc = "d-reply-target";
+        // Federated and legacy messages can carry opaque, non-UUID ids.
+        let source_id = "wsl-1726cd13dff6";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                let now = Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, timestamp, sort_order
+                     ) VALUES (?1, ?2, 'Agent', 'Original answer', ?3, 1)",
+                    rusqlite::params![source_id, disc, now],
+                )?;
+                conn.execute(
+                    "UPDATE discussions
+                     SET no_agent = 1, next_message_seq = 2, message_count = 1
+                     WHERE id = ?1",
+                    [disc],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: "Follow-up".into(),
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some("22222222-2222-4222-8222-222222222222".into()),
+                reply_to_message_id: Some(source_id.into()),
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("event: accepted"));
+
+        let messages = state
+            .db
+            .with_conn(move |conn| crate::db::discussions::list_messages(conn, disc))
+            .await
+            .unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].reply_to_message_id.as_deref(), Some(source_id));
+    }
+
+    #[tokio::test]
+    async fn send_message_rejects_a_reply_target_outside_the_discussion() {
+        let disc = "d-missing-reply-target";
+        let state = make_state_with_disc(disc).await;
+
+        let response = send_message(
+            State(state.clone()),
+            Path(disc.to_string()),
+            Json(SendMessageRequest {
+                content: "Follow-up".into(),
+                targets: vec![],
+                target_all: false,
+                target_agents: vec![],
+                target_agent: None,
+                client_message_id: Some("33333333-3333-4333-8333-333333333333".into()),
+                reply_to_message_id: Some("44444444-4444-4444-8444-444444444444".into()),
+            }),
+        )
+        .await;
+        let body = sse_body_to_string(response).await;
+        assert!(body.contains("Reply target not found in this discussion"));
         assert!(!body.contains("event: accepted"));
 
         let messages = state
@@ -1013,6 +1426,8 @@ mod tests {
                     author_avatar_email: None,
                     source_msg_id: None,
                     duration_ms: None,
+                    target_agent: None,
+                    reply_to_message_id: None,
                 };
                 let second = DiscussionMessage {
                     id: "812ee54a-62d6-4426-bf19-b970416958d7".into(),
@@ -1192,7 +1607,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn targeted_policy_ignores_other_live_agent_types() {
+    async fn typed_target_identity_selects_exact_responder_class() {
         let disc = "d-targeted-policy";
         let state = make_state_with_disc(disc).await;
         state
@@ -1205,23 +1620,154 @@ mod tests {
                     Some("claude-live"),
                     "owner",
                 )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-live"),
+                    "listening",
+                    300,
+                )?;
                 Ok(())
             })
             .await
             .unwrap();
 
-        let (_, untargeted_live) = local_agent_policy(&state, disc, None).await;
-        let (_, codex_live) = local_agent_policy(&state, disc, Some(&AgentType::Codex)).await;
-        let (_, claude_live) = local_agent_policy(&state, disc, Some(&AgentType::ClaudeCode)).await;
+        let untargeted = human_dispatch_route(&state, disc, None).await;
+        let codex =
+            human_dispatch_route(&state, disc, Some(&MessageTarget::agent(AgentType::Codex))).await;
+        let claude_cli = human_dispatch_route(
+            &state,
+            disc,
+            Some(&MessageTarget::cli(AgentType::ClaudeCode, 1)),
+        )
+        .await;
 
-        assert_eq!(untargeted_live, 1);
+        assert_eq!(untargeted, DispatchRoute::NativePrincipal);
         assert_eq!(
-            codex_live, 0,
-            "a live Claude session must not swallow a targeted Codex run"
+            codex,
+            DispatchRoute::TargetedNative(AgentType::Codex),
+            "a punctual Codex target must not be swallowed by a joined Claude CLI"
         );
         assert_eq!(
-            claude_live, 1,
-            "an already-live target must still prevent a duplicate runner"
+            claude_cli,
+            DispatchRoute::JoinedPeers,
+            "an exact CLI identity owns only its explicitly addressed turn"
+        );
+    }
+
+    #[tokio::test]
+    async fn paced_waiting_peer_owns_turn_until_its_poll_deadline_expires() {
+        let disc = "d-paced-responder";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-paced"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-paced"),
+                    "waiting",
+                    -1,
+                )?;
+                crate::db::discussion_sessions::set_next_poll_at(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-paced"),
+                    chrono::Utc::now() + chrono::Duration::seconds(60),
+                )
+            })
+            .await
+            .unwrap();
+
+        let target = MessageTarget::cli(AgentType::ClaudeCode, 1);
+        let waiting_route = human_dispatch_route(&state, disc, Some(&target)).await;
+        assert_eq!(
+            waiting_route,
+            DispatchRoute::JoinedPeers,
+            "a human turn inside the server-paced gap must not spawn a duplicate native agent"
+        );
+
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::set_next_poll_at(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-paced"),
+                    chrono::Utc::now() - chrono::Duration::seconds(121),
+                )
+            })
+            .await
+            .unwrap();
+        let expired_route = human_dispatch_route(&state, disc, Some(&target)).await;
+        assert_eq!(
+            expired_route,
+            DispatchRoute::JoinedPeers,
+            "a durable CLI addressee remains the owner across pacing windows"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_peer_activity_falls_back_without_removing_sticky_membership() {
+        let disc = "d-expired-responder";
+        let state = make_state_with_disc(disc).await;
+        state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::create_session(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-expired"),
+                    "peer",
+                )?;
+                crate::db::discussion_sessions::set_session_activity(
+                    conn,
+                    disc,
+                    "ClaudeCode",
+                    Some("claude-expired"),
+                    "listening",
+                    -100,
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let targeted_route = human_dispatch_route(
+            &state,
+            disc,
+            Some(&MessageTarget::agent(AgentType::ClaudeCode)),
+        )
+        .await;
+        let untargeted_route = human_dispatch_route(&state, disc, None).await;
+        let sticky_members = state
+            .db
+            .with_conn(move |conn| {
+                crate::db::discussion_sessions::count_live_participants(conn, disc)
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            targeted_route,
+            DispatchRoute::TargetedNative(AgentType::ClaudeCode)
+        );
+        assert_eq!(untargeted_route, DispatchRoute::NativePrincipal);
+        assert_eq!(
+            sticky_members, 1,
+            "dispatch freshness must not detach the participant from the room"
         );
     }
 
@@ -1322,6 +1868,8 @@ mod tests {
                         author_avatar_email: None,
                         source_msg_id: None,
                         duration_ms: None,
+                        target_agent: None,
+        reply_to_message_id: None,
                     },
                 )?;
                 crate::db::agent_dispatch::enqueue_for_latest_user(

@@ -1,0 +1,12 @@
+-- 0.9.2 (KT-58) — record WHO a message was dispatched to.
+--
+-- A structured `@agent` mention already produced a durable dispatch job with an
+-- `agent_override`, but the target was never stored on the message itself: it
+-- existed only on the ingestion payload (`DiscAppendMessage.target_agent`) and
+-- on `message_revision_events`. The read model therefore could not tell "this
+-- message names @codex" from "this message awaits a reply from @codex", so no
+-- UI could surface a pending interaction.
+--
+-- NULL = no explicit target (ordinary prose, or a legacy row written before
+-- this migration). Stored as the same serialized form as `messages.agent_type`.
+ALTER TABLE messages ADD COLUMN target_agent TEXT;

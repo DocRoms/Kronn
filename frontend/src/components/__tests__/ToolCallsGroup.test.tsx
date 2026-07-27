@@ -41,6 +41,17 @@ describe('ToolCallsGroup — Kronn-MCP sub-banner', () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it('exposes the folded group as the exact target of a global search hit', () => {
+    const messages = [
+      mkMsg('[kronn-internal: qa_list()]', '2026-05-22T15:00:00Z', '1'),
+      mkMsg('[kronn-internal: api_call({})]', '2026-05-22T15:00:01Z', '2'),
+    ];
+    render(<ToolCallsGroup messages={messages} targetMessageId="msg-2" t={t} />);
+    const group = screen.getByTestId('tool-calls-group');
+    expect(group.getAttribute('data-message-id')).toBe('msg-2');
+    expect(group.getAttribute('data-search-current')).toBe('true');
+  });
+
   it('renders the kronn sub-banner with count + per-tool breakdown when collapsed', () => {
     const msgs = [
       mkMsg('[kronn-internal: qa_run({"qa_id": "a"})]', '2026-05-22T15:00:00Z', '1'),

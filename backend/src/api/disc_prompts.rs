@@ -15,7 +15,7 @@
 //!
 //! See `disc_helpers.rs` for the small text/agent utilities reused here.
 
-use crate::models::{AgentType, Discussion, MessageRole};
+use crate::models::{AgentType, Discussion, DiscussionMessage, MessageRole};
 
 use super::disc_helpers::{
     agent_display_name, agent_prompt_budget, language_instruction, smart_truncate,
@@ -319,6 +319,36 @@ fn isolated_worktree_notice(disc: &Discussion) -> String {
     }
 }
 
+fn reply_context(message: &DiscussionMessage, messages: &[DiscussionMessage]) -> String {
+    let Some(reply_id) = message.reply_to_message_id.as_deref() else {
+        return String::new();
+    };
+    let message_ref = format!("MSG-{}", reply_id.chars().take(8).collect::<String>());
+    let Some(target) = messages.iter().find(|candidate| candidate.id == reply_id) else {
+        return format!("[Reply to missing message {message_ref}]\n");
+    };
+    let author = target
+        .agent_type
+        .as_ref()
+        .map(agent_display_name)
+        .or_else(|| target.author_pseudo.clone())
+        .unwrap_or_else(|| match target.role {
+            MessageRole::User => "User".into(),
+            MessageRole::Agent => "Agent".into(),
+            MessageRole::System => "System".into(),
+        });
+    let normalized = target
+        .content
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut excerpt = normalized.chars().take(120).collect::<String>();
+    if normalized.chars().count() > 120 {
+        excerpt.push('…');
+    }
+    format!("[Reply to {message_ref} by {author}: {excerpt}]\n")
+}
+
 pub fn build_agent_prompt(
     disc: &Discussion,
     agent_type: &AgentType,
@@ -377,7 +407,9 @@ pub fn build_agent_prompt(
             `plan_get()` lit ce plan ; `task_list`/`task_get`/`task_changes` lisent les tâches ; `proposal_list`/`proposal_get` lisent les propositions durables ; `task_create`/`task_update`/`task_link_discussion` permettent de créer, modifier, prioriser ou relier le travail. \
             Lis d'abord le plan concerné. Applique directement une intention non ambiguë ; sinon propose l'action avec un bloc `kronn-plan-action` soumis à validation humaine (create, create_many, status, complete, unblock, open). \
             Tu peux lire et proposer, mais seul un humain accepte, refuse ou décide une proposition durable. \
-            Ne remplace pas une demande de mise à jour du plan par un simple résumé Markdown.\n\n",
+            Ne remplace pas une demande de mise à jour du plan par un simple résumé Markdown. \
+            Quand un travail suivi démarre ou change réellement, maintiens son statut, sa DoD et sa priorité dans le plan. N'écris que lors d'un changement réel : ne recharge ou réécris jamais une tâche inchangée pour simplement signaler l'avancement. \
+            Si les outils Planning annoncés sont absents de ta surface MCP, utilise l'instantané `plan_snapshot` de `disc_join` en lecture seule, demande à @user de reconnecter le MCP Kronn et n'invente aucune mise à jour.\n\n",
         "es" => "Herramientas de historial vía MCP `kronn-internal`: \
             `disc_meta()` (cuenta de mensajes, agente, tier — gratuito), \
             `disc_get_message(idx | message_id, before?, after?)` (un mensaje por índice o referencia `MSG-…`, con contexto pequeño opcional — gratuito), \
@@ -388,7 +420,9 @@ pub fn build_agent_prompt(
             `plan_get()` lee el plan; `task_list`/`task_get`/`task_changes` leen tareas; `proposal_list`/`proposal_get` leen las propuestas durables; `task_create`/`task_update`/`task_link_discussion` permiten crear, modificar, priorizar o vincular el trabajo. \
             Lee primero el plan correspondiente. Aplica directamente una intención inequívoca; si es ambigua, propone un bloque `kronn-plan-action` con validación humana (create, create_many, status, complete, unblock, open). \
             Puedes leer y proponer, pero solo un humano acepta, rechaza o decide una propuesta durable. \
-            No sustituyas una actualización solicitada por un simple resumen Markdown.\n\n",
+            No sustituyas una actualización solicitada por un simple resumen Markdown. \
+            Cuando un trabajo seguido empieza o cambia realmente, mantén su estado, DoD y prioridad en el plan. Escribe solo ante un cambio real: nunca recargues o reescribas una tarea sin cambios solo para informar del progreso. \
+            Si las herramientas de Planning anunciadas faltan en tu superficie MCP, usa el `plan_snapshot` de `disc_join` en modo de solo lectura, pide a @user que reconecte el MCP de Kronn y no inventes ninguna actualización.\n\n",
         _ => "History tools available via the `kronn-internal` MCP: \
             `disc_meta()` (message count, agent, tier — free), \
             `disc_get_message(idx | message_id, before?, after?)` (one message by index or `MSG-…` reference, with an optional small context window — free), \
@@ -399,7 +433,9 @@ pub fn build_agent_prompt(
             `plan_get()` reads the plan; `task_list`/`task_get`/`task_changes` read tasks; `proposal_list`/`proposal_get` read durable proposals; `task_create`/`task_update`/`task_link_discussion` create, edit, prioritize or link work. \
             Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (create, create_many, status, complete, unblock, open). \
             You may read and propose, but only a human accepts, rejects or decides a durable proposal. \
-            Never replace a requested plan update with a prose-only Markdown summary.\n\n",
+            Never replace a requested plan update with a prose-only Markdown summary. \
+            Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. \
+            If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n\n",
     };
 
     // Slash-marker fallback for agents that don't speak MCP (Vibe,
@@ -446,7 +482,7 @@ pub fn build_agent_prompt(
     if user_msgs.len() <= 1 && !latest_is_peer_agent {
         let content = user_msgs
             .last()
-            .map(|m| m.content.clone())
+            .map(|m| format!("{}{}", reply_context(m, &disc.messages), m.content))
             .unwrap_or_default();
         // Language instruction at end only — LLMs weight recent text more heavily,
         // and MCP context is injected via --append-system-prompt (separate from prompt).
@@ -574,14 +610,23 @@ pub fn build_agent_prompt(
         .enumerate()
         .filter(|(i, _)| *i >= skip_from)
         .map(|(_, msg)| match msg.role {
-            MessageRole::User => format!("User: {}\n\n", msg.content),
+            MessageRole::User => format!(
+                "User: {}{}\n\n",
+                reply_context(msg, &disc.messages),
+                msg.content
+            ),
             MessageRole::Agent => {
                 let agent_label = msg
                     .agent_type
                     .as_ref()
                     .map(agent_display_name)
                     .unwrap_or_else(|| "Agent".into());
-                format!("{}: {}\n\n", agent_label, msg.content)
+                format!(
+                    "{}: {}{}\n\n",
+                    agent_label,
+                    reply_context(msg, &disc.messages),
+                    msg.content
+                )
             }
             MessageRole::System => unreachable!(),
         })
@@ -729,6 +774,8 @@ mod tests {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         }
     }
 
@@ -749,6 +796,8 @@ mod tests {
             author_avatar_email: None,
             source_msg_id: Some("peer-turn".into()),
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         }
     }
 
@@ -771,6 +820,36 @@ mod tests {
         assert!(prompt.contains("first question"));
         assert!(prompt.contains("follow-up question"));
         assert!(prompt.contains("Please respond to the latest user message"));
+    }
+
+    #[test]
+    fn agent_prompt_exposes_durable_reply_context() {
+        let original = agent_msg(
+            "The migration needs a compatibility test.",
+            AgentType::ClaudeCode,
+        );
+        let mut reply = user_msg("I will add it.");
+        reply.reply_to_message_id = Some(original.id.clone());
+        let expected_ref = format!("MSG-{}", original.id.chars().take(8).collect::<String>());
+        let disc = disc_with_messages(vec![original, reply], "en");
+
+        let prompt = build_agent_prompt(&disc, &AgentType::Codex, 0);
+
+        assert!(prompt.contains(&format!(
+            "[Reply to {expected_ref} by Claude Code: The migration needs a compatibility test.]"
+        )));
+        assert!(prompt.contains("I will add it."));
+    }
+
+    #[test]
+    fn agent_prompt_keeps_missing_reply_reference_visible() {
+        let mut reply = user_msg("The source message was not imported.");
+        reply.reply_to_message_id = Some("11111111-2222-3333-4444-555555555555".into());
+        let disc = disc_with_messages(vec![reply], "en");
+
+        let prompt = build_agent_prompt(&disc, &AgentType::Codex, 0);
+
+        assert!(prompt.contains("[Reply to missing message MSG-11111111]"));
     }
 
     #[test]
@@ -886,6 +965,19 @@ mod tests {
                 prompt.contains(human_decides),
                 "[{lang}] prompt must state that only a human decides a durable proposal (marker `{human_decides}`)"
             );
+            for invariant in [
+                "maintain_on_change",
+                "no_noop_writes",
+                "stale_surface_fallback",
+            ] {
+                let marker = contract[invariant][lang]
+                    .as_str()
+                    .unwrap_or_else(|| panic!("{invariant}.{lang} must be a string"));
+                assert!(
+                    prompt.contains(marker),
+                    "[{lang}] prompt must carry `{invariant}` (marker `{marker}`)"
+                );
+            }
         }
     }
 

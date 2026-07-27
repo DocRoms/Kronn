@@ -13,10 +13,11 @@
  *  - After microtask flush, the user can send again
  *  - If onSend throws synchronously, the ref still releases (user can retry)
  */
-import { describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent, act } from '@testing-library/react';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { ChatInput } from '../ChatInput';
-import type { Discussion } from '../../types/generated';
+import type { AgentDetection, Discussion } from '../../types/generated';
+import { discussions as discussionsApi } from '../../lib/api';
 
 vi.mock('../../lib/stt-engine', () => ({
   audioBufferToFloat32: vi.fn(),
@@ -37,11 +38,15 @@ const disc: Discussion = {
   created_at: '2026-05-28T00:00:00Z', updated_at: '2026-05-28T00:00:00Z',
 } as unknown as Discussion;
 
-function mount(onSend: ReturnType<typeof vi.fn>, sending = false) {
+function mount(
+  onSend: ReturnType<typeof vi.fn>,
+  sending = false,
+  agents: AgentDetection[] = [],
+) {
   const t = (k: string, ...a: unknown[]) => (a.length ? `${k}(${a.join('|')})` : k);
   return render(
     <ChatInput
-      discussion={disc} agents={[]} sending={sending} disabled={false}
+      discussion={disc} agents={agents} sending={sending} disabled={false}
       ttsEnabled={false} ttsState="idle" worktreeError={null}
       availableSkills={[]} availableDirectives={[]}
       onSend={onSend as never} onStop={vi.fn()} onOrchestrate={vi.fn()}
@@ -67,6 +72,132 @@ function sendButton(): HTMLButtonElement {
 }
 
 describe('ChatInput — send-race guard (P0-10)', () => {
+  beforeEach(() => {
+    vi.spyOn(discussionsApi, 'participants').mockResolvedValue([]);
+    vi.spyOn(discussionsApi, 'nativeAgentMode').mockResolvedValue({ disabled: false });
+  });
+
+  it('routes a joined CLI autocomplete alias to the exact durable session', async () => {
+    vi.spyOn(discussionsApi, 'participants').mockResolvedValue([{
+      id: 42,
+      disc_id: disc.id,
+      agent_type: 'Codex',
+      session_id: 'codex-cli-session',
+      role: 'peer',
+      status: 'active',
+      joined_at: '2026-07-29T00:00:00Z',
+      left_at: null,
+    }] as never);
+    const onSend = vi.fn();
+    mount(onSend, false, [{
+      agent_type: 'Codex',
+      installed: true,
+      runtime_available: false,
+      enabled: true,
+    } as AgentDetection]);
+
+    await waitFor(() => {
+      fireEvent.change(screen.getByRole('textbox'), { target: { value: '@codex-c' } });
+      expect(screen.getByText('@codex')).toBeInTheDocument();
+    });
+    fireEvent.mouseDown(screen.getByText('@codex'));
+    expect(screen.getByRole<HTMLInputElement>('textbox').value).toBe('@codex-cli ');
+    fireEvent.click(sendButton());
+
+    expect(onSend).toHaveBeenCalledWith(
+      '@codex-cli',
+      [{ kind: 'cli', agent_type: 'Codex', cli_session_id: 42 }],
+      false,
+      undefined,
+    );
+  });
+
+  it('explains the effective discussion routing with dynamic identities', async () => {
+    const participantsSpy = vi.spyOn(discussionsApi, 'participants').mockResolvedValue([{
+      id: 42,
+      disc_id: disc.id,
+      agent_type: 'Codex',
+      session_id: 'codex-cli-session',
+      role: 'peer',
+      status: 'active',
+      joined_at: '2026-07-29T00:00:00Z',
+      left_at: null,
+    }] as never);
+    vi.spyOn(discussionsApi, 'nativeAgentMode').mockResolvedValue({ disabled: true });
+    mount(vi.fn(), false, [
+      {
+        agent_type: 'ClaudeCode',
+        installed: true,
+        runtime_available: false,
+        enabled: false,
+      },
+      {
+        agent_type: 'Codex',
+        installed: true,
+        runtime_available: false,
+        enabled: true,
+      },
+    ] as AgentDetection[]);
+
+    await waitFor(() => expect(participantsSpy).toHaveBeenCalledWith(disc.id));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '@' } });
+    expect(screen.getByText('disc.routingActiveAgents')).toBeInTheDocument();
+    expect(screen.getByText('disc.routingAvailableAgents')).toBeInTheDocument();
+    const mentionItems = Array.from(document.querySelectorAll('.disc-mention-item'));
+    const cliIndex = mentionItems.findIndex(item => item.textContent?.includes('disc.targetCli'));
+    const punctualIndex = mentionItems.findIndex(
+      item => item.textContent?.includes('disc.targetPunctualAgent'),
+    );
+    expect(cliIndex).toBeGreaterThanOrEqual(0);
+    expect(punctualIndex).toBeGreaterThan(cliIndex);
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Escape' });
+    fireEvent.click(screen.getByLabelText('disc.routingHelpTitle'));
+
+    const help = screen.getByRole('dialog', { name: 'disc.routingHelpTitle' });
+    expect(help).toHaveTextContent('disc.routingActiveAgents');
+    expect(help).toHaveTextContent('disc.routingAvailableAgents');
+    expect(help).toHaveTextContent('disc.routingDisabledAgent');
+    expect(help).toHaveTextContent('@claude · disc.targetDiscussionAgent');
+    expect(help).toHaveTextContent('disc.routingHelpDiscussionAgentDisabled');
+    expect(help).toHaveTextContent('@codex · disc.targetPunctualAgent');
+    expect(help).toHaveTextContent('@codex-cli · disc.targetCli');
+    expect(help).toHaveTextContent(
+      'disc.routingHelpAll(@codex-cli · disc.targetCli)',
+    );
+  });
+
+  it('routes every installed mention once in the order written by the human', () => {
+    const onSend = vi.fn();
+    const agents = [
+      {
+        agent_type: 'ClaudeCode',
+        installed: true,
+        runtime_available: false,
+        enabled: true,
+      },
+      {
+        agent_type: 'Codex',
+        installed: true,
+        runtime_available: false,
+        enabled: true,
+      },
+    ] as AgentDetection[];
+    mount(onSend, false, agents);
+    typeText('@codex tu peux confronter @claude si tu veux');
+
+    act(() => { fireEvent.click(sendButton()); });
+
+    expect(onSend).toHaveBeenCalledWith(
+      '@codex tu peux confronter @claude si tu veux',
+      [
+        { kind: 'agent', agent_type: 'Codex', cli_session_id: null },
+        { kind: 'discussion_agent', agent_type: 'ClaudeCode', cli_session_id: null },
+      ],
+      false,
+      undefined,
+    );
+  });
+
   it('two synchronous clicks fire onSend only ONCE', () => {
     const onSend = vi.fn();
     mount(onSend);
@@ -82,7 +213,7 @@ describe('ChatInput — send-race guard (P0-10)', () => {
     });
 
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith('hello race', undefined);
+    expect(onSend).toHaveBeenCalledWith('hello race', undefined, false, undefined);
   });
 
   it('Enter then Enter in quick succession only fires onSend once', () => {

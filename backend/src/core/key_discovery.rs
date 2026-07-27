@@ -107,7 +107,7 @@ fn read_gemini_key() -> Option<String> {
 }
 
 /// Read the Mistral API key from ~/.vibe/.env
-fn read_vibe_key() -> Option<String> {
+pub(crate) fn read_vibe_key() -> Option<String> {
     let path = home_dir()?.join(".vibe").join(".env");
     let content = std::fs::read_to_string(&path).ok()?;
     for line in content.lines() {

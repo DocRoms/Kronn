@@ -75,7 +75,7 @@ export function SecretField({
           style={{ cursor: 'pointer' }}
           title={t('mcp.custom.replaceValue')}
           type={revealed ? 'text' : 'password'}
-          value={revealed ? peeked! : '••••••••'}
+          value={revealed ? (peeked ?? '') : '••••••••'}
           onChange={() => {}}
           onFocus={() => { setPeeked(null); onReplace?.(); }}
         />

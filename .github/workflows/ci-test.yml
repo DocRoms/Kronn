@@ -86,6 +86,17 @@ jobs:
         # No sccache for clippy — cached artifacts can replay stale lint warnings
         # even when the source has changed (sccache hashes deps/flags, not source content)
 
+      # Run the actual backend suite before unrelated desktop/frontend setup.
+      # Previously it sat after apt, pnpm, the production UI build, desktop
+      # check and type generation: any one of those gates could abort the job
+      # before Rust tests ran, leaving a red "test-backend" with no backend-test
+      # verdict at all.
+      - name: cargo test — backend (early verdict)
+        run: cargo test
+        env:
+          SCCACHE_GHA_ENABLED: "true"
+          RUSTC_WRAPPER: "sccache"
+
       # ── Desktop crate compile-check ────────────────────────────────────
       # backend/ and desktop/src-tauri/ are separate crates (no root
       # workspace). cargo clippy above only covers backend → desktop
@@ -139,17 +150,6 @@ jobs:
       - name: Build frontend (produces frontend/dist/)
         working-directory: frontend
         run: pnpm build
-
-      # 0.8.11 — lint gates. eslint fails on ERRORS (0 today) and ratchets the
-      # WARNING budget so the react-19-strict backlog can only shrink (see
-      # docs/tech-debt/TD-20260509-react19-effect-rules.md). lint:i18n fails on
-      # a missing/undefined translation key (caught `common.saving` at wire-up).
-      - name: Lint — eslint (0 errors, warning budget)
-        working-directory: frontend
-        run: pnpm lint --max-warnings 162
-      - name: Lint — i18n key parity (fr/en/es)
-        working-directory: frontend
-        run: pnpm lint:i18n
 
       - name: cargo check — desktop crate
         working-directory: desktop/src-tauri
@@ -222,12 +222,6 @@ jobs:
           # Baseline is ZERO in prod code: keep it that way.
           python3 scripts/ci/test_lint_with_conn_unwrap.py
           python3 scripts/ci/lint_with_conn_unwrap.py
-
-      - name: cargo test
-        run: cargo test
-        env:
-          SCCACHE_GHA_ENABLED: "true"
-          RUSTC_WRAPPER: "sccache"
 
       # ── Coverage threshold floor ────────────────────────────────
       # Pinned just below the 2026-05-29 measured baseline
@@ -345,6 +339,17 @@ jobs:
 
       - name: TypeScript check
         run: npx tsc --noEmit
+
+      # Keep frontend gates in the frontend job. They previously lived in
+      # test-backend solely because that job also builds the Tauri assets, so an
+      # ESLint regression appeared in GitHub as a red "backend" check and Rust
+      # tests never ran. The exact warning baseline is a ratchet: new warnings
+      # fail CI, while cleanup can only lower this number.
+      - name: Lint — eslint (0 errors, warning budget)
+        run: pnpm lint --max-warnings 161
+
+      - name: Lint — i18n key parity (fr/en/es)
+        run: pnpm lint:i18n
 
       - name: Run tests with coverage threshold floor
         # Uses `vitest run --coverage` so the `coverage.thresholds` block

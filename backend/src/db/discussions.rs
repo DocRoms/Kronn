@@ -164,6 +164,8 @@ pub fn reconcile_awaiting_agents(conn: &Connection) -> Result<Vec<String>> {
                 author_avatar_email: None,
                 source_msg_id: None,
                 duration_ms: None,
+                target_agent: None,
+                reply_to_message_id: None,
             };
             // If the notice can't be persisted, KEEP awaiting_agent=1 so the
             // next boot retries: no notice landed, so retrying can't duplicate
@@ -257,6 +259,8 @@ pub fn recover_partial_responses(conn: &Connection) -> Result<Vec<String>> {
             author_avatar_email: None,
             source_msg_id: None,
             duration_ms: None,
+            target_agent: None,
+            reply_to_message_id: None,
         };
         let recovery_result = (|| -> Result<()> {
             let transaction = conn.unchecked_transaction()?;
@@ -633,22 +637,40 @@ pub fn ensure_mirror_by_shared_id(
 /// Read directly off the column (like `diverged_at`) so we don't have to thread
 /// the flag through the big `Discussion` struct + all its query sites.
 pub fn disc_is_no_agent(conn: &Connection, disc_id: &str) -> Result<bool> {
-    let v: Option<i64> = conn
+    Ok(get_disc_no_agent(conn, disc_id)?.unwrap_or(false))
+}
+
+/// Read the persisted native-agent mode while preserving "not found" for API
+/// callers. Routing uses [`disc_is_no_agent`] because it already has a loaded
+/// discussion and only needs the boolean.
+pub fn get_disc_no_agent(conn: &Connection, disc_id: &str) -> Result<Option<bool>> {
+    let value = conn
         .query_row(
             "SELECT no_agent FROM discussions WHERE id = ?1",
             params![disc_id],
-            |row| row.get(0),
+            |row| row.get::<_, i64>(0),
         )
-        .ok();
-    Ok(v.unwrap_or(0) != 0)
+        .optional()?;
+    Ok(value.map(|disabled| disabled != 0))
 }
 
-/// Set/clear the F9 human-only flag on a disc. Returns true if the row existed.
+/// Set/clear the F9 human-only flag on a disc. Disabling is one transaction
+/// with retiring every queued native response, so a dispatcher cannot claim a
+/// stale obligation after the UI has confirmed the mode. Returns true if the
+/// discussion existed.
 pub fn set_disc_no_agent(conn: &Connection, disc_id: &str, no_agent: bool) -> Result<bool> {
-    let affected = conn.execute(
+    let transaction = conn.unchecked_transaction()?;
+    let affected = transaction.execute(
         "UPDATE discussions SET no_agent = ?2, updated_at = ?3 WHERE id = ?1",
         params![disc_id, no_agent as i32, Utc::now().to_rfc3339()],
     )?;
+    if affected > 0 && no_agent {
+        super::agent_dispatch::cancel_pending_for_discussion(&transaction, disc_id)?;
+        if !super::agent_dispatch::has_active_for_discussion(&transaction, disc_id)? {
+            set_awaiting_agent(&transaction, disc_id, false)?;
+        }
+    }
+    transaction.commit()?;
     Ok(affected > 0)
 }
 
@@ -774,7 +796,19 @@ pub fn insert_user_message_with_agent_handoff(
     discussion_id: &str,
     msg: &DiscussionMessage,
 ) -> Result<InsertUserMessageOutcome> {
-    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, None)
+    let targets = msg
+        .target_agent
+        .iter()
+        .cloned()
+        .map(MessageTarget::agent)
+        .collect::<Vec<_>>();
+    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, &targets, &[])
+}
+
+#[derive(Debug)]
+pub struct UserDispatchSpec<'a> {
+    pub job_id: &'a str,
+    pub agent_override: Option<&'a AgentType>,
 }
 
 /// Same acceptance transaction as [`insert_user_message_with_agent_handoff`],
@@ -788,12 +822,30 @@ pub fn insert_user_message_with_dispatch(
     dispatch_job_id: &str,
     agent_override: Option<&AgentType>,
 ) -> Result<InsertUserMessageOutcome> {
-    insert_user_message_with_agent_handoff_inner(
-        conn,
-        discussion_id,
-        msg,
-        Some((dispatch_job_id, agent_override)),
-    )
+    let targets = msg
+        .target_agent
+        .iter()
+        .cloned()
+        .map(MessageTarget::agent)
+        .collect::<Vec<_>>();
+    let dispatches = [UserDispatchSpec {
+        job_id: dispatch_job_id,
+        agent_override,
+    }];
+    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, &targets, &dispatches)
+}
+
+/// Accept one human turn with every explicit target and every native dispatch
+/// obligation in one transaction. The first job is claimed for the caller's
+/// SSE stream; later jobs remain Pending and are drained sequentially.
+pub fn insert_user_message_with_dispatches(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
+) -> Result<InsertUserMessageOutcome> {
+    insert_user_message_with_agent_handoff_inner(conn, discussion_id, msg, targets, dispatches)
 }
 
 /// Persist any live turn (including a joined MCP peer's Agent reply) together
@@ -842,7 +894,15 @@ pub fn insert_message_with_targeted_dispatch(
     target_agent: &AgentType,
 ) -> Result<i64> {
     let transaction = conn.unchecked_transaction()?;
-    let sort_order = insert_message(&transaction, discussion_id, msg)?;
+    // KT-58 — stamp the target on the row here rather than trusting callers to
+    // pass it twice: the stored value then cannot disagree with the dispatch
+    // job enqueued in this same transaction.
+    let stored = DiscussionMessage {
+        target_agent: Some(target_agent.clone()),
+        reply_to_message_id: None,
+        ..msg.clone()
+    };
+    let sort_order = insert_message(&transaction, discussion_id, &stored)?;
     let empty_chain = Vec::new();
     super::agent_dispatch::enqueue(
         &transaction,
@@ -864,11 +924,55 @@ pub fn insert_message_with_targeted_dispatch(
     Ok(sort_order)
 }
 
+/// Persist one live peer turn with its typed responder identities and every
+/// native response obligation in the same transaction. CLI targets create no
+/// local job but remain durable in `message_targets`, so only the exact joined
+/// session receives the User/Agent turn on its next wait.
+pub fn insert_message_with_targets_and_dispatches(
+    conn: &Connection,
+    discussion_id: &str,
+    msg: &DiscussionMessage,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
+) -> Result<i64> {
+    let tx = conn.unchecked_transaction()?;
+    let sort_order = insert_message(&tx, discussion_id, msg)?;
+    replace_message_targets(&tx, &msg.id, targets)?;
+    if !dispatches.is_empty() {
+        let empty_chain = Vec::new();
+        for dispatch in dispatches {
+            let dedupe_key = dispatch
+                .agent_override
+                .map(|agent| format!("peer:{}:{}", msg.id, format_agent_type(agent)))
+                .unwrap_or_else(|| format!("peer:{}", msg.id));
+            super::agent_dispatch::enqueue(
+                &tx,
+                super::agent_dispatch::NewAgentDispatchJob {
+                    id: dispatch.job_id,
+                    discussion_id,
+                    trigger_message_id: &msg.id,
+                    trigger_sort_order: sort_order,
+                    dedupe_key: &dedupe_key,
+                    agent_override: dispatch.agent_override,
+                    chain_prompt_ids: &empty_chain,
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+        }
+        set_awaiting_agent(&tx, discussion_id, true)?;
+    }
+    tx.commit()?;
+    Ok(sort_order)
+}
+
 fn insert_user_message_with_agent_handoff_inner(
     conn: &Connection,
     discussion_id: &str,
     msg: &DiscussionMessage,
-    dispatch: Option<(&str, Option<&AgentType>)>,
+    targets: &[MessageTarget],
+    dispatches: &[UserDispatchSpec<'_>],
 ) -> Result<InsertUserMessageOutcome> {
     let tx = conn.unchecked_transaction()?;
 
@@ -918,29 +1022,36 @@ fn insert_user_message_with_agent_handoff_inner(
         stored.content = content_with_agent_handoff(&stored.content, &from, &current_agent);
     }
     let sort_order = insert_message(&tx, discussion_id, &stored)?;
+    replace_message_targets(&tx, &stored.id, targets)?;
     tx.execute(
         "UPDATE discussions SET pending_agent_handoff_from = NULL WHERE id = ?1",
         [discussion_id],
     )?;
-    let dispatch_job = if let Some((job_id, agent_override)) = dispatch {
+    let dispatch_job = if !dispatches.is_empty() {
         let empty_chain = Vec::new();
-        super::agent_dispatch::enqueue(
-            &tx,
-            super::agent_dispatch::NewAgentDispatchJob {
-                id: job_id,
-                discussion_id,
-                trigger_message_id: &stored.id,
-                trigger_sort_order: sort_order,
-                dedupe_key: &format!("message:{}", stored.id),
-                agent_override,
-                chain_prompt_ids: &empty_chain,
-                batch_item: None,
-                group_id: None,
-                group_concurrency_limit: None,
-            },
-        )?;
+        for dispatch in dispatches {
+            let dedupe_key = dispatch
+                .agent_override
+                .map(|agent| format!("message:{}:{}", stored.id, format_agent_type(agent)))
+                .unwrap_or_else(|| format!("message:{}", stored.id));
+            super::agent_dispatch::enqueue(
+                &tx,
+                super::agent_dispatch::NewAgentDispatchJob {
+                    id: dispatch.job_id,
+                    discussion_id,
+                    trigger_message_id: &stored.id,
+                    trigger_sort_order: sort_order,
+                    dedupe_key: &dedupe_key,
+                    agent_override: dispatch.agent_override,
+                    chain_prompt_ids: &empty_chain,
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+        }
         set_awaiting_agent(&tx, discussion_id, true)?;
-        super::agent_dispatch::claim(&tx, job_id)?.map(Box::new)
+        super::agent_dispatch::claim(&tx, dispatches[0].job_id)?.map(Box::new)
     } else {
         None
     };
@@ -1116,7 +1227,7 @@ fn list_all_messages(
     conn: &Connection,
 ) -> Result<std::collections::HashMap<String, Vec<DiscussionMessage>>> {
     let mut stmt = conn.prepare(
-        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model
+        "SELECT discussion_id, id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, duration_ms, lint_report, model, reply_to_message_id
          FROM messages ORDER BY sort_order, timestamp"
     )?;
 
@@ -1151,6 +1262,8 @@ fn list_all_messages(
                     .unwrap_or(None)
                     .and_then(|s| serde_json::from_str(&s).ok()),
                 model: row.get::<_, Option<String>>(12).unwrap_or(None),
+                target_agent: None,
+                reply_to_message_id: row.get::<_, Option<String>>(13).unwrap_or(None),
             },
         ))
     })?;
@@ -1164,7 +1277,7 @@ fn list_all_messages(
 
 pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<DiscussionMessage>> {
     let mut stmt = conn.prepare(
-        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model
+        "SELECT id, role, content, agent_type, timestamp, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, reply_to_message_id
          FROM messages WHERE discussion_id = ?1
          ORDER BY sort_order, timestamp"
     )?;
@@ -1196,6 +1309,11 @@ pub fn list_messages(conn: &Connection, discussion_id: &str) -> Result<Vec<Discu
                     .unwrap_or(None)
                     .and_then(|s| serde_json::from_str(&s).ok()),
                 model: row.get::<_, Option<String>>(14).unwrap_or(None),
+                target_agent: row
+                    .get::<_, Option<String>>(15)
+                    .unwrap_or(None)
+                    .map(|s| parse_agent_type(&s)),
+                reply_to_message_id: row.get::<_, Option<String>>(16).unwrap_or(None),
             })
         })?
         .filter_map(|r| r.ok())
@@ -1337,8 +1455,8 @@ fn insert_message_inner(
         .and_then(|r| serde_json::to_string(r).ok());
 
     conn.execute(
-        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, received_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        "INSERT INTO messages (id, discussion_id, role, content, agent_type, timestamp, sort_order, tokens_used, auth_mode, model_tier, cost_usd, author_pseudo, author_avatar_email, source_msg_id, duration_ms, lint_report, model, target_agent, received_at, reply_to_message_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
         params![
             msg.id,
             discussion_id,
@@ -1357,11 +1475,16 @@ fn insert_message_inner(
             msg.duration_ms.map(|d| d as i64),
             lint_report_json,
             msg.model,
+            msg.target_agent.as_ref().map(format_agent_type),
             // Reception clock (072): THIS instance's now, never the author's
             // timestamp — the pacing anchors depend on it.
             chrono::Utc::now().to_rfc3339(),
+            msg.reply_to_message_id,
         ],
     )?;
+    if let Some(target) = msg.target_agent.as_ref() {
+        replace_message_targets(conn, &msg.id, &[MessageTarget::agent(target.clone())])?;
+    }
 
     conn.execute(
         "UPDATE discussions SET message_count = message_count + 1 WHERE id = ?1",
@@ -1383,6 +1506,75 @@ fn insert_message_inner(
     }
 
     Ok(next_order)
+}
+
+/// Replace the ordered set of explicit addressees for one message.
+///
+/// `messages.target_agent` remains the compatibility projection of the first
+/// target; this table is the plural source of truth for routing and JOIN waits.
+pub fn replace_message_targets(
+    conn: &Connection,
+    message_id: &str,
+    targets: &[MessageTarget],
+) -> Result<()> {
+    conn.execute(
+        "DELETE FROM message_targets WHERE message_id = ?1",
+        [message_id],
+    )?;
+    for (position, target) in targets.iter().enumerate() {
+        let target_kind = match target.kind {
+            MessageTargetKind::DiscussionAgent => "discussion_agent",
+            MessageTargetKind::Agent => "agent",
+            MessageTargetKind::Cli => "cli",
+        };
+        conn.execute(
+            "INSERT INTO message_targets (
+                 message_id, target_kind, agent_type, cli_session_id, position
+             ) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                message_id,
+                target_kind,
+                format_agent_type(&target.agent_type),
+                target.cli_session_id,
+                position as i64
+            ],
+        )?;
+    }
+    conn.execute(
+        "UPDATE messages SET target_agent = ?2 WHERE id = ?1",
+        params![
+            message_id,
+            targets
+                .first()
+                .map(|target| format_agent_type(&target.agent_type)),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_message_targets(conn: &Connection, message_id: &str) -> Result<Vec<MessageTarget>> {
+    let mut statement = conn.prepare(
+        "SELECT target_kind, agent_type, cli_session_id
+         FROM message_targets
+         WHERE message_id = ?1
+         ORDER BY position ASC",
+    )?;
+    let targets = statement
+        .query_map([message_id], |row| {
+            let kind = match row.get::<_, String>(0)?.as_str() {
+                "discussion_agent" => MessageTargetKind::DiscussionAgent,
+                "cli" => MessageTargetKind::Cli,
+                _ => MessageTargetKind::Agent,
+            };
+            Ok(MessageTarget {
+                kind,
+                agent_type: parse_agent_type(&row.get::<_, String>(1)?),
+                cli_session_id: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(anyhow::Error::from)?;
+    Ok(targets)
 }
 
 /// 0.8.5 — Stamp the QP lineage on a discussion that was spawned by a
@@ -1520,9 +1712,8 @@ pub struct ReviseMessageParams<'a> {
     pub content: &'a str,
     pub expected_revision: &'a str,
     pub idempotency_key: &'a str,
-    pub target_agent: Option<&'a AgentType>,
-    pub needs_local_dispatch: bool,
-    pub dispatch_job_id: &'a str,
+    pub targets: &'a [MessageTarget],
+    pub dispatches: &'a [UserDispatchSpec<'a>],
 }
 
 pub(crate) fn content_hash(content: &str) -> String {
@@ -1530,6 +1721,14 @@ pub(crate) fn content_hash(content: &str) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn revisions_match(stored: &str, expected: &str) -> bool {
+    stored == expected
+        || chrono::DateTime::parse_from_rfc3339(stored)
+            .ok()
+            .zip(chrono::DateTime::parse_from_rfc3339(expected).ok())
+            .is_some_and(|(stored, expected)| stored == expected)
 }
 
 fn map_revision_event(row: &rusqlite::Row<'_>) -> rusqlite::Result<MessageRevisionEvent> {
@@ -1595,9 +1794,11 @@ pub fn revise_message_with_dispatch(
     {
         if existing.discussion_id != request.discussion_id
             || existing.target_message_id != request.message_id
-            || existing.expected_revision != request.expected_revision
+            || !revisions_match(&existing.expected_revision, request.expected_revision)
             || existing.content != request.content
-            || existing.target_agent.as_ref() != request.target_agent
+            || existing.target_agent.as_ref()
+                != request.targets.first().map(|target| &target.agent_type)
+            || list_message_targets(&transaction, request.message_id)? != request.targets
         {
             return Err(ReviseMessageError::IdempotencyConflict);
         }
@@ -1650,7 +1851,7 @@ pub fn revise_message_with_dispatch(
     if target.3 != "User" || has_later_user {
         return Err(ReviseMessageError::NotFound);
     }
-    if target.1 != request.expected_revision {
+    if !revisions_match(&target.1, request.expected_revision) {
         return Err(ReviseMessageError::Conflict {
             current_revision: target.1,
         });
@@ -1702,7 +1903,7 @@ pub fn revise_message_with_dispatch(
             revision,
             request.message_id,
             request.discussion_id,
-            request.expected_revision,
+            target.1,
         ],
     )?;
     if updated != 1 {
@@ -1715,33 +1916,55 @@ pub fn revise_message_with_dispatch(
             .unwrap_or_default();
         return Err(ReviseMessageError::Conflict { current_revision });
     }
+    replace_message_targets(&transaction, request.message_id, request.targets)?;
 
     let target_agent_json = request
-        .target_agent
-        .map(serde_json::to_string)
+        .targets
+        .first()
+        .map(|target| serde_json::to_string(&target.agent_type))
         .transpose()
         .map_err(anyhow::Error::from)?;
     let mut claimed_dispatch = None;
-    let dispatch_job_id = if request.needs_local_dispatch {
-        let dedupe_key = format!("revision:{}", request.idempotency_key);
-        let job = crate::db::agent_dispatch::enqueue(
+    let dispatch_job_id = if !request.dispatches.is_empty() {
+        for dispatch in request.dispatches {
+            let dedupe_key = dispatch
+                .agent_override
+                .map(|agent| {
+                    format!(
+                        "revision:{}:{}",
+                        request.idempotency_key,
+                        format_agent_type(agent)
+                    )
+                })
+                .unwrap_or_else(|| format!("revision:{}", request.idempotency_key));
+            crate::db::agent_dispatch::enqueue(
+                &transaction,
+                crate::db::agent_dispatch::NewAgentDispatchJob {
+                    id: dispatch.job_id,
+                    discussion_id: request.discussion_id,
+                    trigger_message_id: request.message_id,
+                    trigger_sort_order: target.2,
+                    dedupe_key: &dedupe_key,
+                    agent_override: dispatch.agent_override,
+                    chain_prompt_ids: &[],
+                    batch_item: None,
+                    group_id: None,
+                    group_concurrency_limit: None,
+                },
+            )?;
+        }
+        claimed_dispatch =
+            crate::db::agent_dispatch::claim(&transaction, request.dispatches[0].job_id)?;
+        let still_awaiting = crate::db::agent_dispatch::has_active_for_discussion(
             &transaction,
-            crate::db::agent_dispatch::NewAgentDispatchJob {
-                id: request.dispatch_job_id,
-                discussion_id: request.discussion_id,
-                trigger_message_id: request.message_id,
-                trigger_sort_order: target.2,
-                dedupe_key: &dedupe_key,
-                agent_override: request.target_agent,
-                chain_prompt_ids: &[],
-                batch_item: None,
-                group_id: None,
-                group_concurrency_limit: None,
-            },
+            request.discussion_id,
         )?;
-        claimed_dispatch = crate::db::agent_dispatch::claim(&transaction, &job.id)?;
-        crate::db::discussions::set_awaiting_agent(&transaction, request.discussion_id, true)?;
-        Some(job.id)
+        crate::db::discussions::set_awaiting_agent(
+            &transaction,
+            request.discussion_id,
+            still_awaiting,
+        )?;
+        Some(request.dispatches[0].job_id.to_string())
     } else {
         crate::db::discussions::set_awaiting_agent(&transaction, request.discussion_id, false)?;
         None
@@ -1786,7 +2009,10 @@ pub fn revise_message_with_dispatch(
         expected_revision: request.expected_revision.to_string(),
         revision: revision.clone(),
         content: request.content.to_string(),
-        target_agent: request.target_agent.cloned(),
+        target_agent: request
+            .targets
+            .first()
+            .map(|target| target.agent_type.clone()),
         idempotency_key: request.idempotency_key.to_string(),
         sort_order: event_sort_order,
         dispatch_job_id: dispatch_job_id.clone(),
@@ -1814,6 +2040,20 @@ pub fn revise_message_with_dispatch(
 pub fn apply_remote_message_revision(
     conn: &Connection,
     event: &MessageRevisionEvent,
+) -> Result<bool> {
+    let legacy_targets = event
+        .target_agent
+        .iter()
+        .cloned()
+        .map(MessageTarget::agent)
+        .collect::<Vec<_>>();
+    apply_remote_message_revision_with_targets(conn, event, &legacy_targets)
+}
+
+pub fn apply_remote_message_revision_with_targets(
+    conn: &Connection,
+    event: &MessageRevisionEvent,
+    targets: &[MessageTarget],
 ) -> Result<bool> {
     let transaction = conn.unchecked_transaction()?;
     if get_revision_event_by_idempotency_key(&transaction, &event.idempotency_key)?.is_some() {
@@ -1882,6 +2122,7 @@ pub fn apply_remote_message_revision(
             event.discussion_id,
         ],
     )?;
+    replace_message_targets(&transaction, &event.target_message_id, targets)?;
     let target_agent_json = event
         .target_agent
         .as_ref()
@@ -2039,7 +2280,7 @@ pub fn update_message_tokens(
     Ok(())
 }
 
-fn parse_agent_type(s: &str) -> AgentType {
+pub(crate) fn parse_agent_type(s: &str) -> AgentType {
     match s {
         "ClaudeCode" => AgentType::ClaudeCode,
         "Codex" => AgentType::Codex,

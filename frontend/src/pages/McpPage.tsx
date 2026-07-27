@@ -2,9 +2,10 @@ import { useState, useRef, useEffect } from 'react';
 import { mcps as mcpsApi } from '../lib/api';
 import { useT } from '../lib/I18nContext';
 import { useToast } from '../hooks/useToast';
+import { useAsyncGuard } from '../hooks/useAsyncGuard';
 import { userError } from '../lib/userError';
 import { isHiddenPath } from '../lib/constants';
-import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, HostSyncMode, CustomApiPayload, McpServer } from '../types/generated';
+import type { AgentType, ApiAuthKind, ApiEndpoint, Project, McpConfigDisplay, McpDefinition, McpOverview, McpProbeResponse, HostSyncMode, CustomApiPayload, McpServer, PluginInterface } from '../types/generated';
 import { pluginKind, type PluginKind } from '../lib/pluginKind';
 import { linkify } from '../lib/linkify';
 import { CustomApiAiHelper } from '../components/CustomApiAiHelper';
@@ -12,13 +13,15 @@ import { RecoveryRestorePanel } from '../components/RecoveryRestorePanel';
 import { Dropdown } from '../components/Dropdown';
 import { SecretField } from '../components/SecretField';
 import {
-  Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare,
+  Puzzle, Plus, Trash2, Eye, Check, RefreshCw, Square, CheckSquare, Minus,
   X, Key, Pencil, FileText, ExternalLink, Save, Search,
   Plug, Globe, Info, Sparkles, Upload, Download, ChevronRight,
 } from 'lucide-react';
 import { HostSyncChip } from '../components/HostSyncChip';
 import { HostSyncPreview } from '../components/HostSyncPreview';
 import { ListControls } from '../components/ListControls';
+import { PluginPortabilityModal } from '../components/PluginPortabilityModal';
+import { ContextHelp } from '../components/ContextHelp';
 
 /**
  * Compact "what kind of plugin is this" badge — shown on each installed
@@ -230,6 +233,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const [exportPayload, setExportPayload] = useState<{ name: string; json: string } | null>(null);
   const [exportCopyState, setExportCopyState] = useState<'idle' | 'copied' | 'failed'>('idle');
   const exportTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [portabilityMode, setPortabilityMode] = useState<'export' | 'import' | null>(null);
   // Edit secrets
   const [editingEnvId, setEditingEnvId] = useState<string | null>(null);
   const [editingEnv, setEditingEnv] = useState<Record<string, string>>({});
@@ -256,6 +260,35 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     } catch { /* localStorage disabled (incognito / quota) — sort defaults to A→Z on next load */ }
   }, [mcpSortReversed]);
   const [selectedConfigId, setSelectedConfigId] = useState<string | null>(initialSelectedConfigId ?? null);
+  const [probeByConfig, setProbeByConfig] = useState<Record<string, McpProbeResponse>>({});
+  const [probingConfigId, setProbingConfigId] = useState<string | null>(null);
+  // The detail panel is viewport-fixed, so it must start below whatever chrome
+  // sits above it: the sticky top nav and the list boundary below the search /
+  // filter / sort controls. This mirrors Planning: page chrome stays full-width,
+  // then one horizontal rule starts both the list and its detail drawer.
+  // Measured, not hardcoded: the nav can wrap and the toolbar is responsive.
+  // Recomputed on scroll because the list boundary scrolls while the nav doesn't.
+  const [panelTop, setPanelTop] = useState(0);
+  useEffect(() => {
+    const nav = document.querySelector('.dash-nav');
+    const boundary = document.querySelector('.mcp-list-boundary');
+    const sync = () => {
+      const navBottom = nav?.getBoundingClientRect().bottom ?? 0;
+      const boundaryBottom = boundary?.getBoundingClientRect().bottom ?? 0;
+      setPanelTop(Math.max(navBottom, Math.min(boundaryBottom, window.innerHeight)));
+    };
+    sync();
+    const observer = new ResizeObserver(sync);
+    if (nav) observer.observe(nav);
+    if (boundary) observer.observe(boundary);
+    window.addEventListener('scroll', sync, { passive: true, capture: true });
+    window.addEventListener('resize', sync);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener('scroll', sync, { capture: true });
+      window.removeEventListener('resize', sync);
+    };
+  }, []);
 
   // Open a specific config when navigated from another page (e.g. ProjectCard)
   useEffect(() => {
@@ -264,11 +297,10 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   }, [initialSelectedConfigId]);
 
-  // The plugin detail/edit is a centered MODAL overlay (refonte Phase 2,
-  // 2026-06-10) — no more inline-in-grid detail, so no scroll-jump at all.
-  // Esc is staged: while EDITING, first Esc cancels the edit (back to the
-  // view body); a second Esc (or backdrop/X) closes the modal. resetAddMcp
-  // only invokes stable setters, so the captured closure is safe.
+  // The plugin detail/edit is a non-blocking side panel. Esc is staged:
+  // while editing, first Esc cancels the edit (back to the view body);
+  // a second Esc (or X) closes the panel.
+  // resetAddMcp only invokes stable setters, so the captured closure is safe.
   useEffect(() => {
     if (!selectedConfigId) return;
     const onKey = (e: KeyboardEvent) => {
@@ -298,6 +330,19 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
       console.warn('Failed to save label:', e);
     }
   };
+
+  const handleProbeConfig = useAsyncGuard(async (configId: string) => {
+    setProbingConfigId(configId);
+    try {
+      const result = await mcpsApi.probeConfig(configId);
+      setProbeByConfig(previous => ({ ...previous, [configId]: result }));
+    } catch (error) {
+      console.warn('Failed to probe plugin:', error);
+      toast(t('mcp.probeFailed', userError(error)), 'error');
+    } finally {
+      setProbingConfigId(null);
+    }
+  });
 
   const resetAddMcp = () => {
     setShowAddMcp(false);
@@ -848,6 +893,18 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
     }
   };
 
+  const handleSetPreferredInterface = useAsyncGuard(
+    async (configId: string, preferredInterface: PluginInterface) => {
+      try {
+        await mcpsApi.updateConfig(configId, { preferred_interface: preferredInterface });
+        await refetchMcps();
+      } catch (e) {
+        console.warn('Failed to set preferred plugin interface:', e);
+        toast(t('common.actionFailed', userError(e)), 'error');
+      }
+    },
+  );
+
   const handleToggleConfigProject = async (configId: string, projectId: string, currentlyLinked: boolean) => {
     const config = mcpOverview.configs.find(c => c.id === configId);
     if (!config) return;
@@ -954,6 +1011,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   const { servers, configs } = mcpOverview;
   const totalConfigs = configs.length;
   const globalConfigs = configs.filter(c => c.is_global);
+  const isBuiltinConfig = (config: McpConfigDisplay) => (
+    config.server_name.toLowerCase() === 'kronn-internal'
+    || config.server_id === 'kronn-internal'
+    || config.server_id.endsWith(':kronn-internal')
+  );
+  const builtinConfig = configs.find(isBuiltinConfig);
+  const builtinMatchesList = (mcpKindFilter === 'all' || mcpKindFilter === 'mcp')
+    && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()));
+  const showBuiltinFallback = !builtinConfig && !showAddMcp && builtinMatchesList;
   const serverById = new Map(servers.map(server => [server.id, server]));
   const registryById = new Map(mcpRegistry.map(definition => [definition.id, definition]));
   const kindForServer = (serverId: string): PluginKind => {
@@ -1470,7 +1536,9 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
   );
 
   return (
-    <div>
+    // While the detail panel is open the page reserves its width so cards
+    // reflow beside it instead of sitting hidden underneath.
+    <div className={selectedConfigId ? 'mcp-page-with-panel' : undefined}>
       {/* 0.8.6 (#33 fix 2026-05-21) — Custom plugin export modal.
           Renders unconditionally at the top so it survives navigation
           inside McpPage (detail panel state can flip while the modal
@@ -1550,14 +1618,52 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
         </div>
       )}
 
+      {portabilityMode && (
+        <PluginPortabilityModal
+          mode={portabilityMode}
+          configs={configs}
+          onClose={() => setPortabilityMode(null)}
+          onImported={() => {
+            refetchMcps();
+          }}
+        />
+      )}
+
       <div className="mcp-page-header">
         <div>
-          <h1 className="mcp-h1"><MatrixText text={t('mcp.title')} /> <span className="mcp-subtitle"><MatrixText text={t('mcp.subtitle')} /></span></h1>
+          <div className="kr-context-help-title-row">
+            <h1 className="mcp-h1"><MatrixText text={t('mcp.title')} /> <span className="mcp-subtitle"><MatrixText text={t('mcp.subtitle')} /></span></h1>
+            <ContextHelp title={t('contextHelp.plugins.title')}>
+              <p>{t('contextHelp.plugins.intro')}</p>
+              <ul>
+                <li>{t('contextHelp.plugins.mcp')}</li>
+                <li>{t('contextHelp.plugins.api')}</li>
+                <li>{t('contextHelp.plugins.cli')}</li>
+              </ul>
+              <p className="kr-context-help-agent-note">{t('contextHelp.plugins.agents')}</p>
+            </ContextHelp>
+          </div>
           <p className="mcp-meta">
             {totalConfigs} {totalConfigs > 1 ? t('mcp.configPlural') : t('mcp.config')} · {servers.length} {servers.length > 1 ? t('mcp.serverPlural') : t('mcp.server')} · {globalConfigs.length} {globalConfigs.length > 1 ? t('mcp.globalPlural') : t('mcp.global')}
           </p>
         </div>
         <div className="flex-row gap-4 mcp-header-actions">
+          {totalConfigs > 0 && (
+            <button
+              className="mcp-btn-action"
+              onClick={() => setPortabilityMode('export')}
+              title={t('mcp.portability.exportTitle')}
+            >
+              <Download size={14} /> {t('mcp.portability.export')}
+            </button>
+          )}
+          <button
+            className="mcp-btn-action"
+            onClick={() => setPortabilityMode('import')}
+            title={t('mcp.portability.importTitle')}
+          >
+            <Upload size={14} /> {t('mcp.portability.import')}
+          </button>
           <button className="mcp-btn-action mcp-btn-action-primary" data-tour-id="add-plugin-btn" onClick={() => { setShowAddMcp(true); setAddMcpSelected(null); setAddMcpSearch(''); }} title={t('mcp.addTitle')}>
             <Plus size={14} /> {t('mcp.add')}
           </button>
@@ -1573,14 +1679,14 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           The scanner already SKIPS them in project-level config files;
           this banner tells the operator which plugins to fix. Click on
           a row to jump to the config detail. */}
-      {(mcpOverview.incomplete_configs?.length ?? 0) > 0 && (
+      {(mcpOverview.incomplete_configs ?? []).length > 0 && (
         <div className="mcp-warning-banner" data-testid="mcp-incomplete-banner">
           <div className="mcp-warning-banner-title">
-            ⚠ {t('mcp.incomplete.title', mcpOverview.incomplete_configs!.length)}
+            ⚠ {t('mcp.incomplete.title', (mcpOverview.incomplete_configs ?? []).length)}
           </div>
           <p className="mcp-warning-banner-hint">{t('mcp.incomplete.hint')}</p>
           <ul className="mcp-warning-banner-list">
-            {mcpOverview.incomplete_configs!.map(ic => (
+            {(mcpOverview.incomplete_configs ?? []).map(ic => (
               <li key={ic.config_id}>
                 <button
                   type="button"
@@ -2086,44 +2192,25 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
           />
         </div>
       )}
+      <div
+        className="mcp-list-boundary"
+        data-testid="mcp-list-boundary"
+        aria-hidden="true"
+      />
 
       {/* ── Empty-state banner: no MCP exposed in CLI hors Kronn (UX#7) ── */}
       <CliExposureHint configs={configs} onJumpToConfig={(id) => setSelectedConfigId(id)} />
 
-      {/* ── Built-in system MCP: kronn-internal (discussion introspection) is
-             auto-injected into every project, not user-installable. Shown as a
-             read-only card in the main view (no add/config/link flow). ── */}
-      {!showAddMcp
-        && (mcpKindFilter === 'all' || mcpKindFilter === 'mcp')
-        && (!mcpSearch || t('mcp.builtin.tileTitle').toLowerCase().includes(mcpSearch.toLowerCase()))
-        && (
-        <div
-          className="mcp-card mcp-builtin-card"
-          data-kind="mcp"
-          data-testid="mcp-kronn-internal-card"
-          title={t('mcp.builtin.tooltip')}
-        >
-          <div className="mcp-plugin-card-header">
-            <span className="mcp-plugin-card-icon"><Plug size={17} /></span>
-            <div className="mcp-plugin-card-identity">
-              <span className="mcp-installed-name">{t('mcp.builtin.tileTitle')}</span>
-              <span className="mcp-plugin-card-server">{t('mcp.builtin.tileCat')}</span>
-            </div>
-            <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>
-          </div>
-          <p className="mcp-builtin-desc">{t('mcp.builtin.tileDesc')}</p>
-        </div>
-      )}
-
       {/* ── Installed plugins grid (detail expands inline) ── */}
-      {totalConfigs > 0 ? (
+      {totalConfigs > 0 || showBuiltinFallback ? (
         <div className="mcp-installed-grid">
           {visibleConfigs.length === 0 && (
-            <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>
+            !showBuiltinFallback && <div className="mcp-filter-empty">{t('automation.filter.empty')}</div>
           )}
           {visibleConfigs.flatMap(cfg => {
               const linkedProjects = cfg.is_global ? projects.filter(p => !isHiddenPath(p.path)).length : cfg.project_ids.length;
               const isSelected = selectedConfigId === cfg.id;
+              const isBuiltin = isBuiltinConfig(cfg);
               // 0.7.0 — derive plugin kind from the server registry so
               // we can hide host-sync UI on API-only plugins (they're
               // injected into prompts, never written to ~/.claude.json
@@ -2139,6 +2226,7 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                   className={`mcp-installed-card${isSelected ? ' mcp-installed-card-selected' : ''}`}
                   data-kind={cfgKind}
                   data-config-id={cfg.id}
+                  data-testid={isBuiltin ? 'mcp-kronn-internal-card' : undefined}
                   onClick={() => setSelectedConfigId(isSelected ? null : cfg.id)}
                   aria-label={`${cfg.label} — ${t('mcp.openDetails')}`}
                 >
@@ -2150,6 +2238,11 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         <span className="mcp-plugin-card-server">{cfg.server_name}</span>
                       )}
                     </div>
+                    {isBuiltin && (
+                      <span className="mcp-origin-badge mcp-origin-official">
+                        {t('mcp.builtin.tileBadge')}
+                      </span>
+                    )}
                     <ChevronRight size={15} className="mcp-plugin-card-chevron" />
                   </div>
 
@@ -2193,6 +2286,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 setSelectedConfigId(null);
               };
               const serverIncomp = mcpOverview.incompatibilities.filter(i => i.server_id === cfg.server_id);
+              const probeResult = probeByConfig[cfg.id];
+              const isProbing = probingConfigId === cfg.id;
+              const availableInterfaces: PluginInterface[] = [];
+              if (cfgServer?.api_spec) availableInterfaces.push('api');
+              if (cfgServer && cfgServer.transport !== 'ApiOnly') availableInterfaces.push('mcp');
+              if (def?.tags.includes('cli')) availableInterfaces.push('cli');
+              const effectivePreferredInterface = availableInterfaces.includes(cfg.preferred_interface)
+                ? cfg.preferred_interface
+                : availableInterfaces[0] ?? 'mcp';
 
               // 0.8.6 (#29) — open the edit form pre-filled with the
               // current Custom plugin's spec. Shared between the Edit
@@ -2243,8 +2345,15 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                 && cfgServer?.api_spec
                 && (cfgServer.api_spec.endpoints?.length ?? 0) === 0;
               const detail = (
-                <div key={`detail-${cfg.id}`} className="mcp-modal-overlay" onClick={closePluginModal}>
-                <div className="mcp-detail-inline mcp-plugin-modal" onClick={e => e.stopPropagation()}>
+                // Non-blocking side panel (no backdrop): the list behind stays
+                // clickable, so another card swaps this content directly.
+                <aside
+                  key={`detail-${cfg.id}`}
+                  className="mcp-detail-inline mcp-plugin-panel"
+                  style={{ top: panelTop }}
+                  aria-label={cfg.label}
+                  data-testid="mcp-plugin-panel"
+                >
                   <div className="mcp-detail-header">
                     <div className="mcp-registry-card-icon" style={{ width: 40, height: 40 }}><Puzzle size={20} /></div>
                     <div className="flex-1">
@@ -2303,6 +2412,108 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                         editing: everything happens here, no jump to the
                         top Add panel, no scroll. */}
                     {isEditingThisCustom ? customApiForm : (<>
+                    <section className="mcp-detail-section mcp-interface-section">
+                      <h3 className="mcp-detail-section-title">
+                        <Plug size={12} /> {t('mcp.interfaces')}
+                      </h3>
+                      <p className="mcp-interface-hint">{t('mcp.interfacesHint')}</p>
+                      <div className="mcp-interface-availability" aria-label={t('mcp.availableInterfaces')}>
+                        {(['api', 'mcp', 'cli'] as PluginInterface[]).map(pluginInterface => {
+                          const available = availableInterfaces.includes(pluginInterface);
+                          return (
+                            <span
+                              key={pluginInterface}
+                              className={`mcp-interface-chip${available ? ' mcp-interface-chip-on' : ''}`}
+                              data-interface={pluginInterface}
+                              data-available={available}
+                            >
+                              {available ? <Check size={11} /> : <Minus size={11} />}
+                              {t(`mcp.interface.${pluginInterface}`)}
+                            </span>
+                          );
+                        })}
+                      </div>
+                      <label className="mcp-interface-preference">
+                        <span>{t('mcp.preferredInterface')}</span>
+                        <select
+                          className="input"
+                          value={effectivePreferredInterface}
+                          onChange={event => handleSetPreferredInterface(
+                            cfg.id,
+                            event.target.value as PluginInterface,
+                          )}
+                          disabled={availableInterfaces.length < 2}
+                          data-testid="mcp-preferred-interface"
+                        >
+                          {availableInterfaces.map(pluginInterface => (
+                            <option key={pluginInterface} value={pluginInterface}>
+                              {t(`mcp.interface.${pluginInterface}`)}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <p className="mcp-interface-rule">
+                        {t('mcp.preferredInterfaceRule', t(`mcp.interface.${effectivePreferredInterface}`))}
+                      </p>
+                    </section>
+                    <section className="mcp-detail-section mcp-probe-section" data-testid="mcp-plugin-probe">
+                      <div className="mcp-probe-heading">
+                        <div>
+                          <h3 className="mcp-detail-section-title">
+                            <RefreshCw size={12} /> {t('mcp.diagnostics')}
+                          </h3>
+                          <p className="mcp-probe-hint">{t('mcp.diagnosticsHint')}</p>
+                        </div>
+                        <div className="mcp-probe-actions">
+                          {probeResult && (
+                            <span
+                              className={`mcp-probe-status ${probeResult.ready ? 'mcp-probe-status-ready' : 'mcp-probe-status-failed'}`}
+                              data-testid="mcp-probe-status"
+                            >
+                              {probeResult.ready ? <Check size={11} /> : <X size={11} />}
+                              {t(probeResult.ready ? 'mcp.ready' : 'mcp.notReady')}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="mcp-btn-action"
+                            onClick={() => handleProbeConfig(cfg.id)}
+                            disabled={isProbing}
+                            data-testid="mcp-probe-button"
+                          >
+                            <RefreshCw size={12} className={isProbing ? 'spin' : undefined} />
+                            {t(isProbing ? 'mcp.probing' : 'mcp.runProbe')}
+                          </button>
+                        </div>
+                      </div>
+                      {probeResult && (
+                        <div className="mcp-probe-checks">
+                          {probeResult.checks.map(check => {
+                            const labelKey = `mcp.probeCheck.${check.id}`;
+                            const translatedLabel = t(labelKey);
+                            const checkState = check.ok ? 'ready' : check.required ? 'failed' : 'optional';
+                            return (
+                              <div className="mcp-probe-check" data-state={checkState} key={check.id}>
+                                <span className="mcp-probe-check-icon">
+                                  {check.ok
+                                    ? <Check size={12} />
+                                    : check.required
+                                      ? <X size={12} />
+                                      : <Minus size={12} />}
+                                </span>
+                                <div>
+                                  <strong>
+                                    {translatedLabel === labelKey ? check.label : translatedLabel}
+                                    {!check.required && <small>{t('mcp.optional')}</small>}
+                                  </strong>
+                                  <span>{check.detail}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </section>
                     {/* 0.8.6 (#29) — autodiscovery banner for legacy
                         Custom plugins with no endpoints declared. CTA
                         opens the same edit form as the header button,
@@ -2523,11 +2734,33 @@ export function McpPage({ projects, mcpOverview, mcpRegistry, refetchMcps, initi
                     )}
                     </>)}
                   </div>
-                </div>
-                </div>
+                </aside>
               );
               return [card, detail];
             })}
+          {showBuiltinFallback && (
+            <article
+              className="mcp-installed-card mcp-installed-card-static"
+              data-kind="mcp"
+              data-testid="mcp-kronn-internal-card"
+              title={t('mcp.builtin.tooltip')}
+            >
+              <div className="mcp-plugin-card-header">
+                <span className="mcp-plugin-card-icon"><Plug size={16} /></span>
+                <div className="mcp-plugin-card-identity">
+                  <span className="mcp-installed-name">{t('mcp.builtin.tileTitle')}</span>
+                  <span className="mcp-plugin-card-server">{t('mcp.builtin.tileCat')}</span>
+                </div>
+                <span className="mcp-origin-badge mcp-origin-official">{t('mcp.builtin.tileBadge')}</span>
+              </div>
+              <div className="mcp-plugin-card-meta">
+                <span className="mcp-scope-badge mcp-scope-global">Global</span>
+              </div>
+              <div className="mcp-plugin-card-footer">
+                <PluginKindBadge kind="mcp" />
+              </div>
+            </article>
+          )}
         </div>
       ) : !showAddMcp ? (
         <div className="mcp-card mcp-empty">

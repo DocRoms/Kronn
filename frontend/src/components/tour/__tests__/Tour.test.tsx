@@ -3,6 +3,8 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import { TourProvider, useTour } from '../TourProvider';
 import { TourOverlay } from '../TourOverlay';
 import { TOUR_STEPS } from '../tourSteps';
+import { loadTourProgress, TOUR_PROGRESS_KEYS } from '../tourProgress';
+import { discussions as discussionsApi } from '../../../lib/api';
 
 vi.mock('../../../lib/I18nContext', () => ({
   useT: () => ({ t: (key: string) => key }),
@@ -10,6 +12,17 @@ vi.mock('../../../lib/I18nContext', () => ({
 
 vi.mock('../../../hooks/useMediaQuery', () => ({
   useIsMobile: () => false,
+}));
+
+vi.mock('../../../lib/api', () => ({
+  discussions: {
+    ensureTourDemo: vi.fn().mockResolvedValue({
+      discussion_id: 'tour-demo',
+      created: true,
+      prompt: 'Build a demo page',
+    }),
+    update: vi.fn().mockResolvedValue(undefined),
+  },
 }));
 
 const STORAGE_KEY = 'kronn:tour-completed';
@@ -23,17 +36,41 @@ function TestConsumer() {
       <span data-testid="step">{tour.stepIndex}</span>
       <span data-testid="total">{tour.totalSteps}</span>
       <button data-testid="start" onClick={() => tour.start(true)}>Start</button>
+      <button data-testid="resume" onClick={() => tour.start(false)}>Resume</button>
       <button data-testid="next" onClick={tour.next}>Next</button>
       <button data-testid="prev" onClick={tour.prev}>Prev</button>
       <button data-testid="skip" onClick={tour.skip}>Skip</button>
+      <button data-testid="finish" onClick={tour.finish}>Finish</button>
+      <textarea data-testid="tour-editable" defaultValue="editable" />
     </div>
   );
 }
 
-function renderTour() {
+/**
+ * Stand-ins for the elements the steps point at. Without them every step is
+ * skipped (a step with no target has nothing to show), so navigation tests would
+ * only ever observe the tour running to its end — they used to pass because the
+ * provider displayed steps that pointed at nothing.
+ */
+function TourAnchors() {
+  const selectors = [...new Set(TOUR_STEPS.map(s => s.selector).filter(Boolean))] as string[];
+  return (
+    <div>
+      {selectors.map(selector => {
+        const tourId = /\[data-tour-id="([^"]+)"\]/.exec(selector)?.[1];
+        if (tourId) return <div key={selector} data-tour-id={tourId} />;
+        if (selector.startsWith('#')) return <div key={selector} id={selector.slice(1)} />;
+        return <div key={selector} className={selector.replace(/^\./, '')} />;
+      })}
+    </div>
+  );
+}
+
+function renderTour({ withAnchors = true } = {}) {
   return render(
     <TourProvider setPage={setPage}>
       <TestConsumer />
+      {withAnchors && <TourAnchors />}
       <TourOverlay />
     </TourProvider>
   );
@@ -42,6 +79,8 @@ function renderTour() {
 beforeEach(() => {
   localStorage.clear();
   setPage.mockClear();
+  vi.mocked(discussionsApi.ensureTourDemo).mockClear();
+  vi.mocked(discussionsApi.update).mockClear();
 });
 
 describe('Guided Tour', () => {
@@ -87,14 +126,58 @@ describe('Guided Tour', () => {
     expect(Number(screen.getByTestId('step').textContent)).toBeGreaterThanOrEqual(1);
   });
 
-  it('skip persists completion to localStorage', () => {
+  it('skips a step whose target no longer exists instead of stalling on it', async () => {
+    // KT-117 — an outdated step used to be displayed anyway: no spotlight, so no
+    // darkness, while the full-screen backdrop still swallowed every click. The
+    // app looked untouched and ignored the mouse, which reads as "frozen, reload
+    // to escape". A step with nothing to show must go quiet and let the tour
+    // continue. Rendered WITHOUT anchors so every targeted step is missing.
+    vi.useFakeTimers();
+    renderTour({ withAnchors: false });
+    fireEvent.click(screen.getByTestId('start'));
+    expect(screen.getByTestId('active').textContent).toBe('true');
+
+    // Each skipped step first exhausts its own bounded wait, so give the walk
+    // room: the point is that it walks, not that it walks instantly.
+    await act(async () => {
+      fireEvent.keyDown(document, { key: 'ArrowRight' });
+      await vi.advanceTimersByTimeAsync(80_000);
+    });
+
+    // Every targeted step in between is missing, so the tour walks over all of
+    // them and lands on the final centered step instead of parking on an empty
+    // card. It is still active — the last step has something to say.
+    expect(screen.getByTestId('step').textContent).toBe(String(TOUR_STEPS.length - 1));
+    expect(screen.getByTestId('active').textContent).toBe('true');
+    vi.useRealTimers();
+  });
+
+  it('never leaves an undimmed backdrop swallowing clicks with no spotlight', () => {
+    // Defence in depth for the transient window before a target is measured:
+    // the darkness comes from the spotlight, so no spotlight must mean a dimmed
+    // backdrop — never an invisible one that still blocks the page.
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+
+    const backdrop = document.querySelector('.tour-backdrop');
+    expect(backdrop).not.toBeNull();
+    expect(document.querySelector('.tour-spotlight')).toBeNull();
+    expect(backdrop).toHaveAttribute('data-dimmed', 'true');
+    expect(screen.getByText('tour.skip')).toBeInTheDocument();
+  });
+
+  it('skip preserves an interrupted tour for the Settings resume CTA', () => {
     renderTour();
     fireEvent.click(screen.getByTestId('start'));
     expect(screen.getByTestId('active').textContent).toBe('true');
 
     fireEvent.click(screen.getByTestId('skip'));
     expect(screen.getByTestId('active').textContent).toBe('false');
-    expect(localStorage.getItem(STORAGE_KEY)).toBe('true');
+    expect(loadTourProgress(TOUR_STEPS.map(step => step.id))).toMatchObject({
+      currentStepId: TOUR_STEPS[0].id,
+      hasStarted: true,
+      isComplete: false,
+    });
   });
 
   it('Escape key closes the tour', () => {
@@ -104,6 +187,53 @@ describe('Guided Tour', () => {
 
     fireEvent.keyDown(document, { key: 'Escape' });
     expect(screen.getByTestId('active').textContent).toBe('false');
+  });
+
+  it('does not hijack arrow keys from an editable field', () => {
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    const editable = screen.getByTestId('tour-editable');
+    editable.focus();
+
+    fireEvent.keyDown(editable, { key: 'ArrowRight' });
+
+    expect(screen.getByTestId('step').textContent).toBe('0');
+    expect(editable).toHaveFocus();
+  });
+
+  it('focuses the dialog and restores the previous focus on close', async () => {
+    renderTour();
+    const start = screen.getByTestId('start');
+    start.focus();
+    fireEvent.click(start);
+
+    await act(async () => { await new Promise(requestAnimationFrame); });
+    expect(screen.getByRole('dialog')).toHaveFocus();
+
+    fireEvent.click(screen.getByTestId('skip'));
+    expect(start).toHaveFocus();
+  });
+
+  it('finish never fabricates completion for steps that were not shown', () => {
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    fireEvent.click(screen.getByTestId('finish'));
+
+    expect(loadTourProgress(TOUR_STEPS.map(step => step.id))).toMatchObject({
+      completedCount: 1,
+      currentStepId: TOUR_STEPS[1].id,
+      isComplete: false,
+    });
+  });
+
+  it('does not create a demo discussion before the discussion act', async () => {
+    renderTour();
+    fireEvent.click(screen.getByTestId('start'));
+    await act(async () => { await Promise.resolve(); });
+    expect(discussionsApi.ensureTourDemo).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByTestId('finish'));
+    await act(async () => { await Promise.resolve(); });
   });
 
   it('renders tooltip with step title when active', () => {
@@ -129,6 +259,8 @@ describe('Guided Tour', () => {
     expect(pages.has('mcps')).toBe(true);
     expect(pages.has('discussions')).toBe(true);
     expect(pages.has('settings')).toBe(true);
+    // Planning arrived after v2 of the tour and was invisible to newcomers.
+    expect(pages.has('planning')).toBe(true);
   });
 
   it('totalSteps matches TOUR_STEPS length', () => {
@@ -150,39 +282,34 @@ describe('Guided Tour', () => {
       fireEvent.keyDown(document, { key: 'ArrowRight' });
       await new Promise(r => setTimeout(r, 2500));
     });
-    expect(localStorage.getItem('kronn:tour-step')).toBe('1');
+    expect(loadTourProgress(TOUR_STEPS.map(step => step.id))).toMatchObject({
+      completedStepIds: [TOUR_STEPS[0].id],
+      currentStepId: TOUR_STEPS[1].id,
+      resumeStepIndex: 1,
+    });
   });
 
-  it('clears the saved step when the tour is completed (skip)', () => {
+  it('keeps the saved step when the tour is interrupted', async () => {
     localStorage.setItem('kronn:tour-step', '3');
     renderTour();
+    fireEvent.click(screen.getByTestId('resume'));
+    await act(async () => { await new Promise(r => setTimeout(r, 2500)); });
     fireEvent.click(screen.getByTestId('skip'));
-    expect(localStorage.getItem('kronn:tour-step')).toBeNull();
-    // And the completion flag is set.
-    expect(localStorage.getItem(STORAGE_KEY)).toBe('true');
+    expect(loadTourProgress(TOUR_STEPS.map(step => step.id))).toMatchObject({
+      currentStepId: TOUR_STEPS[3].id,
+      isComplete: false,
+    });
   });
 
   it('auto-resumes from a saved step when starting the tour', async () => {
     localStorage.setItem('kronn:tour-step', '3');
     renderTour();
     // Explicit non-forced start — resumeStep is read from localStorage.
-    const tourRef = { start: null as null | ((force?: boolean) => void) };
-    const GrabStart = () => {
-      const tour = useTour();
-      tourRef.start = tour.start;
-      return null;
-    };
-    render(
-      <TourProvider setPage={setPage}>
-        <TestConsumer />
-        <GrabStart />
-      </TourProvider>
-    );
-    act(() => { tourRef.start?.(false); });
+    fireEvent.click(screen.getByTestId('resume'));
     // Wait for navigateToStep to settle (50ms kickoff + 300ms page wait
     // + 2s waitForElement timeout).
     await act(async () => { await new Promise(r => setTimeout(r, 2500)); });
-    expect(localStorage.getItem('kronn:tour-step')).toBe('3');
+    expect(loadTourProgress(TOUR_STEPS.map(step => step.id)).resumeStepIndex).toBe(3);
   });
 
   it('start(force=true) always restarts at step 0 regardless of saved step', () => {
@@ -191,7 +318,9 @@ describe('Guided Tour', () => {
     renderTour();
     fireEvent.click(screen.getByTestId('start'));
     expect(Number(screen.getByTestId('step').textContent)).toBe(0);
-    expect(localStorage.getItem('kronn:tour-step')).toBe('0');
+    // Replaying does not erase the already-earned completion state. If the
+    // user closes a voluntary replay, the Settings CTA stays completed.
+    expect(loadTourProgress(TOUR_STEPS.map(step => step.id)).isComplete).toBe(true);
   });
 
   // ─── Manual nav still works during waitForClick (steps 11/12 fix) ──
@@ -260,5 +389,6 @@ describe('Guided Tour', () => {
     // Tour stays active, completion flag stays unset.
     expect(screen.getByTestId('active').textContent).toBe('true');
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
+    expect(localStorage.getItem(TOUR_PROGRESS_KEYS.current)).not.toBeNull();
   });
 });

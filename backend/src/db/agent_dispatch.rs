@@ -232,9 +232,16 @@ pub fn enqueue_for_latest_user(
 
 pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let mut statement = conn.prepare(
-        "SELECT id FROM agent_dispatch_jobs
-         WHERE status = 'Pending' AND available_at <= ?1 AND attempts < ?2
-         ORDER BY created_at, id LIMIT ?3",
+        "SELECT candidate.id
+         FROM agent_dispatch_jobs AS candidate
+         JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
+         WHERE candidate.status = 'Pending'
+           AND candidate.available_at <= ?1
+           AND (
+               (discussion.no_agent = 0 AND candidate.attempts < ?2)
+               OR discussion.no_agent = 1
+           )
+         ORDER BY candidate.created_at, candidate.id LIMIT ?3",
     )?;
     let rows = statement.query_map(
         params![
@@ -249,9 +256,14 @@ pub fn list_runnable_ids(conn: &Connection, limit: usize) -> Result<Vec<String>>
 
 pub fn list_exhausted_ids(conn: &Connection, limit: usize) -> Result<Vec<String>> {
     let mut statement = conn.prepare(
-        "SELECT id FROM agent_dispatch_jobs
-         WHERE status = 'Pending' AND available_at <= ?1 AND attempts >= ?2
-         ORDER BY created_at, id LIMIT ?3",
+        "SELECT candidate.id
+         FROM agent_dispatch_jobs AS candidate
+         JOIN discussions AS discussion ON discussion.id = candidate.discussion_id
+         WHERE candidate.status = 'Pending'
+           AND candidate.available_at <= ?1
+           AND candidate.attempts >= ?2
+           AND discussion.no_agent = 0
+         ORDER BY candidate.created_at, candidate.id LIMIT ?3",
     )?;
     let rows = statement.query_map(
         params![
@@ -279,6 +291,12 @@ pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
                AND status = 'Pending'
                AND available_at <= ?2
                AND attempts < ?3
+               AND EXISTS (
+                   SELECT 1
+                   FROM discussions AS discussion
+                   WHERE discussion.id = candidate.discussion_id
+                     AND discussion.no_agent = 0
+               )
                AND NOT EXISTS (
                    SELECT 1
                    FROM agent_dispatch_jobs AS same_discussion
@@ -301,7 +319,28 @@ pub fn claim(conn: &Connection, id: &str) -> Result<Option<AgentDispatchJob>> {
         map_job,
     )
     .optional()
-    .map_err(Into::into)
+    .map_err(anyhow::Error::from)
+    .and_then(|claimed| {
+        if claimed.is_some() {
+            return Ok(claimed);
+        }
+
+        // A human can disable the native responder after a route decided to
+        // enqueue but before this claim. Refuse the launch atomically above,
+        // then retire that stale obligation so it cannot hot-loop forever.
+        let cancelled = cancel_pending_job_if_agent_disabled(conn, id)?;
+        if cancelled > 0 && !has_active_for_discussion_by_job(conn, id)? {
+            conn.execute(
+                "UPDATE discussions
+                 SET awaiting_agent = 0
+                 WHERE id = (
+                     SELECT discussion_id FROM agent_dispatch_jobs WHERE id = ?1
+                 )",
+                [id],
+            )?;
+        }
+        Ok(None)
+    })
 }
 
 pub fn reset_running_after_restart(conn: &Connection) -> Result<u64> {
@@ -413,6 +452,55 @@ pub fn cancel_for_discussion(conn: &Connection, discussion_id: &str) -> Result<u
         params![discussion_id, now],
     )?;
     Ok(changed as u64)
+}
+
+/// Cancel every queued native response for a discussion. Running work is left
+/// alone: the no-agent toggle prevents future claims, but does not pretend an
+/// already-started process was stopped.
+pub fn cancel_pending_for_discussion(conn: &Connection, discussion_id: &str) -> Result<u64> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs
+         SET status = 'Cancelled', completed_at = ?2, updated_at = ?2,
+             last_error = 'agent_disabled'
+         WHERE discussion_id = ?1 AND status = 'Pending'",
+        params![discussion_id, now],
+    )?;
+    Ok(changed as u64)
+}
+
+fn cancel_pending_job_if_agent_disabled(conn: &Connection, id: &str) -> Result<u64> {
+    let now = Utc::now().to_rfc3339();
+    let changed = conn.execute(
+        "UPDATE agent_dispatch_jobs AS candidate
+         SET status = 'Cancelled', completed_at = ?2, updated_at = ?2,
+             last_error = 'agent_disabled'
+         WHERE id = ?1
+           AND status = 'Pending'
+           AND EXISTS (
+               SELECT 1 FROM discussions AS discussion
+               WHERE discussion.id = candidate.discussion_id
+                 AND discussion.no_agent = 1
+           )",
+        params![id, now],
+    )?;
+    Ok(changed as u64)
+}
+
+fn has_active_for_discussion_by_job(conn: &Connection, id: &str) -> Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(
+             SELECT 1
+             FROM agent_dispatch_jobs AS active
+             WHERE active.discussion_id = (
+                 SELECT discussion_id FROM agent_dispatch_jobs WHERE id = ?1
+             )
+               AND active.status IN ('Pending', 'Running')
+         )",
+        [id],
+        |row| row.get(0),
+    )
+    .map_err(Into::into)
 }
 
 pub fn has_active_for_discussion(conn: &Connection, discussion_id: &str) -> Result<bool> {
@@ -550,6 +638,129 @@ mod tests {
         assert!(claim(&connection, "j2").unwrap().is_none());
         assert!(mark_completed(&connection, "j1").unwrap());
         assert!(claim(&connection, "j2").unwrap().is_some());
+    }
+
+    #[test]
+    fn claim_retires_a_queued_job_when_native_agent_is_disabled() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        connection
+            .execute(
+                "UPDATE discussions
+                 SET no_agent = 1, awaiting_agent = 1
+                 WHERE id = 'd1'",
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            list_runnable_ids(&connection, 10).unwrap(),
+            vec!["j1".to_string()],
+            "disabled pending work stays visible only long enough for claim to retire it"
+        );
+        assert!(claim(&connection, "j1").unwrap().is_none());
+        let job = get(&connection, "j1").unwrap().unwrap();
+        assert_eq!(job.status, DispatchStatus::Cancelled);
+        assert_eq!(job.last_error.as_deref(), Some("agent_disabled"));
+        assert!(list_runnable_ids(&connection, 10).unwrap().is_empty());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn disabled_exhausted_job_is_retired_instead_of_reported_failed() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        connection
+            .execute(
+                "UPDATE agent_dispatch_jobs SET attempts = ?1 WHERE id = 'j1'",
+                [i64::from(MAX_DISPATCH_ATTEMPTS)],
+            )
+            .unwrap();
+        connection
+            .execute("UPDATE discussions SET no_agent = 1 WHERE id = 'd1'", [])
+            .unwrap();
+
+        assert!(list_exhausted_ids(&connection, 10).unwrap().is_empty());
+        assert_eq!(
+            list_runnable_ids(&connection, 10).unwrap(),
+            vec!["j1".to_string()]
+        );
+        assert!(claim(&connection, "j1").unwrap().is_none());
+        assert_eq!(
+            get(&connection, "j1").unwrap().unwrap().status,
+            DispatchStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn disabling_native_agent_cancels_every_pending_job_and_clears_awaiting() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        enqueue_default(&connection, "j2", "force:j2");
+        crate::db::discussions::set_awaiting_agent(&connection, "d1", true).unwrap();
+
+        assert!(crate::db::discussions::set_disc_no_agent(&connection, "d1", true).unwrap());
+        for id in ["j1", "j2"] {
+            let job = get(&connection, id).unwrap().unwrap();
+            assert_eq!(job.status, DispatchStatus::Cancelled);
+            assert_eq!(job.last_error.as_deref(), Some("agent_disabled"));
+        }
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT awaiting_agent FROM discussions WHERE id = 'd1'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn disabling_native_agent_rolls_back_the_flag_when_queue_retirement_fails() {
+        let connection = connection();
+        enqueue_default(&connection, "j1", "message:u1");
+        crate::db::discussions::set_awaiting_agent(&connection, "d1", true).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TRIGGER reject_agent_disabled_cancellation
+                 BEFORE UPDATE OF status ON agent_dispatch_jobs
+                 WHEN NEW.status = 'Cancelled'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'injected cancellation failure');
+                 END;",
+            )
+            .unwrap();
+
+        assert!(
+            crate::db::discussions::set_disc_no_agent(&connection, "d1", true).is_err(),
+            "the setter must surface a queue-retirement failure"
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT no_agent, awaiting_agent FROM discussions WHERE id = 'd1'",
+                    [],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            (0, 1),
+            "the mode and awaiting flag must roll back together"
+        );
+        assert_eq!(
+            get(&connection, "j1").unwrap().unwrap().status,
+            DispatchStatus::Pending
+        );
     }
 
     #[test]

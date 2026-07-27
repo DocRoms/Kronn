@@ -1,12 +1,19 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, type CSSProperties } from 'react';
 import { config as configApi, agents as agentsApi } from '../../lib/api';
 import { userError } from '../../lib/userError';
 import { OllamaCard } from './OllamaCard';
 import { CompressionSection } from './CompressionSection';
 import { useApi } from '../../hooks/useApi';
-import type { AgentDetection, AgentsConfig, ModelTiersConfig } from '../../types/generated';
+import type { AgentDetection, AgentsConfig, AgentType, ModelTiersConfig } from '../../types/generated';
 import type { ToastFn } from '../../hooks/useToast';
 import { isUpdateAvailable } from '../../lib/version';
+import {
+  AGENT_LABELS,
+  ALL_AGENT_TYPES,
+  agentColor,
+  agentMentionColors,
+  type AgentMentionColors,
+} from '../../lib/constants';
 import {
   Key, AlertTriangle, Save,
   Plus, Trash2, Download, Check,
@@ -43,6 +50,7 @@ export function AgentsSection({
   const [addingKeyFor, setAddingKeyFor] = useState<string | null>(null);
   const [tokenVisible, setTokenVisible] = useState<Set<string>>(new Set());
   const [tierEditing, setTierEditing] = useState<Record<string, { economy: string; default: string; reasoning: string }>>({});
+  const [mentionColorOverrides, setMentionColorOverrides] = useState<AgentMentionColors>({});
   // When set to an agent name, the per-agent update modal is shown. The
   // modal is small + global to the section (rather than per-row state) so
   // we never re-render rows on its open/close — keeps the agent grid
@@ -69,6 +77,30 @@ export function AgentsSection({
       setDefaultSummaryStrategy('Off');
     });
   }, []);
+
+  const mentionColors: AgentMentionColors = {
+    ...agentMentionColors(agentAccess),
+    ...mentionColorOverrides,
+  };
+
+  const saveMentionColor = async (agent: AgentType, color: string) => {
+    const previous = mentionColorOverrides[agent];
+    setMentionColorOverrides(current => ({ ...current, [agent]: color }));
+    try {
+      await configApi.setAgentMentionColor({ agent, color });
+      refetchAgentAccess();
+      window.dispatchEvent(new Event('kronn:agent-mention-colors-changed'));
+      toast(t('config.saved'), 'success');
+    } catch {
+      setMentionColorOverrides(current => {
+        const next = { ...current };
+        if (previous) next[agent] = previous;
+        else delete next[agent];
+        return next;
+      });
+      toast(t('config.saveError'), 'error');
+    }
+  };
 
   const saveDefaultTier = async (tier: 'economy' | 'default' | 'reasoning') => {
     // Optimistic update so the dropdown feels snappy ; revert on error.
@@ -179,6 +211,34 @@ export function AgentsSection({
         })()}
 
         <CompressionSection agents={agents} onActivated={refetchAgents} toast={toast} t={t} />
+
+        <div className="set-mention-colors" data-testid="agent-mention-colors">
+          <div>
+            <div className="font-semibold text-sm">{t('config.mentionColors')}</div>
+            <p className="text-xs text-muted">{t('config.mentionColorsHint')}</p>
+          </div>
+          <div className="set-mention-colors-grid">
+            {ALL_AGENT_TYPES.map(agentType => {
+              const color = agentColor(agentType, mentionColors);
+              return (
+                <label
+                  key={agentType}
+                  className="set-mention-color"
+                  style={{ '--mention-color': color } as CSSProperties}
+                >
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={event => saveMentionColor(agentType, event.target.value)}
+                    aria-label={t('config.mentionColorFor', AGENT_LABELS[agentType])}
+                    data-testid={`mention-color-${agentType}`}
+                  />
+                  <span>@{AGENT_LABELS[agentType]}</span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
 
         {/* 0.8.6 phase 4 — Default model tier for new disc / QP / WF
             agent steps. Strict semantic — never retroactive. Sibling of
@@ -294,12 +354,21 @@ export function AgentsSection({
         {agents.map(agent => {
           // Ollama gets its own dedicated card with health check + model picker
           if (agent.agent_type === 'Ollama') {
-            return <OllamaCard key="ollama" t={t} />;
+            return (
+              <div
+                key="ollama"
+                className="set-agent-row set-agent-row-ollama"
+                data-agent-type="Ollama"
+                style={{ '--agent-color': agentColor('Ollama', mentionColors) } as CSSProperties}
+              >
+                <OllamaCard t={t} />
+              </div>
+            );
           }
 
           const permFlag: Record<string, { flag: string; descKey: string }> = {
             ClaudeCode: { flag: '--dangerously-skip-permissions', descKey: 'config.fullAccess' },
-            Codex: { flag: '--full-auto', descKey: 'config.autoApply' },
+            Codex: { flag: '--sandbox=danger-full-access', descKey: 'config.fullAccess' },
             GeminiCli: { flag: '--yolo', descKey: 'config.fullAccess' },
             CopilotCli: { flag: '--allow-all-tools', descKey: 'config.fullAccess' },
           };
@@ -312,6 +381,7 @@ export function AgentsSection({
             CopilotCli: { key: 'github', hint: 'GH_TOKEN', url: 'https://github.com/settings/tokens' },
           };
           const tf = tokenField[agent.agent_type];
+          const authReady = agent.auth_ready !== false;
           const isFullAccess = agent.agent_type === 'ClaudeCode'
             ? agentAccess?.claude_code?.full_access ?? false
             : agent.agent_type === 'Codex'
@@ -325,17 +395,35 @@ export function AgentsSection({
                     : false;
 
           return (
-          <div key={agent.name} className="set-agent-row">
-            <div className="flex-row gap-5">
-              <div className="relative">
-                <div className="set-dot" data-on={agent.installed && agent.enabled} aria-hidden="true" />
+          <div
+            key={agent.name}
+            className="set-agent-row"
+            data-agent-type={agent.agent_type}
+            style={{ '--agent-color': agentColor(agent.agent_type, mentionColors) } as CSSProperties}
+          >
+            <div className="set-agent-card-header">
+              <div className="set-agent-identity">
+                <div
+                  className="set-dot"
+                  data-state={!agent.enabled
+                    ? 'disabled'
+                    : !authReady
+                      ? 'auth-required'
+                      : agent.installed || agent.runtime_available
+                        ? 'ready'
+                        : 'missing'}
+                  aria-hidden="true"
+                />
                 <span className="set-sr-only">
-                  {agent.installed && agent.enabled ? t('config.enabled') : t('config.disabled')}
+                  {!authReady && agent.enabled
+                    ? t('config.agentAuthRequired')
+                    : agent.enabled && (agent.installed || agent.runtime_available)
+                      ? t('config.enabled')
+                    : t('config.disabled')}
                 </span>
-              </div>
-              <div className="flex-1">
-                <div className="flex-row gap-3">
-                  <span className="font-semibold text-base">{agent.name}</span>
+                <div className="set-agent-heading">
+                  <div className="set-agent-title-row">
+                  <span className="set-agent-title">{agent.name}</span>
                   <span className="set-origin-badge">{agent.origin}</span>
                   {agent.version && <code className="set-code text-xs">v{agent.version}</code>}
                   {/* Lenient semver compare (mirror of backend `versions.rs`).
@@ -433,23 +521,49 @@ export function AgentsSection({
                       </a>
                     );
                   })()}
+                  </div>
+                  <div className="set-agent-runtime-state">
+                    {!agent.installed && !agent.runtime_available && (
+                      <div className="text-xs text-faint mt-2">
+                        <code className="set-code">{agent.install_command}</code>
+                      </div>
+                    )}
+                    {!agent.installed && agent.runtime_available && (
+                      <div className="text-xs mt-2" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>
+                        runtime OK <span className="text-ghost">— via npx</span>
+                      </div>
+                    )}
+                    {agent.runtime_warning && (
+                      <div className="set-agent-runtime-warning" role="note">
+                        ⚠️ {t(`agentRuntimeWarning.${agent.runtime_warning}`)}
+                      </div>
+                    )}
+                    {!authReady && agent.enabled && (
+                      <div className="set-agent-auth-required" role="note">
+                        <AlertTriangle size={13} aria-hidden="true" />
+                        <span>
+                          <strong>{t('config.agentAuthRequired')}</strong>
+                          {' — '}
+                          {t('config.agentAuthRequiredHint')}
+                        </span>
+                        {agent.auth_setup_command && (
+                          <button
+                            type="button"
+                            className="set-agent-auth-command"
+                            onClick={() => {
+                              navigator.clipboard.writeText(agent.auth_setup_command ?? '').catch(() => {});
+                              toast(t('common.copied'), 'success');
+                            }}
+                          >
+                            <Copy size={11} aria-hidden="true" />
+                            <code>{agent.auth_setup_command}</code>
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
-                {!agent.installed && !agent.runtime_available && (
-                  <div className="text-xs text-faint mt-2">
-                    <code className="set-code">{agent.install_command}</code>
-                  </div>
-                )}
-                {!agent.installed && agent.runtime_available && (
-                  <div className="text-xs mt-2" style={{ color: 'rgba(var(--kr-success-rgb), 0.5)' }}>
-                    runtime OK <span className="text-ghost">— via npx</span>
-                  </div>
-                )}
-                {agent.runtime_warning && (
-                  <div className="set-agent-runtime-warning" role="note">
-                    ⚠️ {t(`agentRuntimeWarning.${agent.runtime_warning}`)}
-                  </div>
-                )}
-              </div>
+                </div>
               {/* Only a binary actually installed in the container gets the
                   enable/uninstall controls. An agent reachable only via the
                   npx runtime is NOT considered installed — it keeps the
@@ -457,7 +571,7 @@ export function AgentsSection({
                   install, so the user isn't told an agent they never installed
                   is "Activé". */}
               {agent.installed ? (
-                <div className="flex-row gap-3">
+                <div className="set-agent-actions">
                   <button
                     className="set-enable-btn"
                     data-on={agent.enabled}
@@ -503,8 +617,7 @@ export function AgentsSection({
                 </div>
               ) : (
                 <button
-                  className="set-install-btn"
-                  style={{ padding: '4px 10px', fontSize: 11 }}
+                  className="set-install-btn set-agent-install-btn"
                   onClick={() => handleInstallAgent(agent)}
                   disabled={installing !== null || inDocker}
                   title={inDocker ? t('config.dockerInstallTooltip', agent.install_command ?? '') : undefined}
@@ -517,13 +630,18 @@ export function AgentsSection({
                 </button>
               )}
             </div>
+            <div className="set-agent-card-body">
             {perm && (agent.installed || agent.runtime_available) && (
-              <div className="set-perm-box">
+              <div className="set-agent-panel set-agent-panel-access">
+                <div className="set-agent-section-title">
+                  <span>{t('config.fullAccessBadge')}</span>
+                  <code>{perm.flag}</code>
+                </div>
                 <div
                   role="switch"
                   aria-checked={isFullAccess}
                   tabIndex={0}
-                  className="flex-row gap-4 cursor-pointer"
+                  className="set-agent-access-switch"
                   onClick={async () => {
                     try { await configApi.setAgentAccess({ agent: agent.agent_type, full_access: !isFullAccess }); } catch (err) { console.warn('Settings action failed:', err); toast(t('common.actionFailed', userError(err)), 'error'); }
                     refetchAgentAccess();
@@ -539,11 +657,11 @@ export function AgentsSection({
                   <div className="set-toggle-track" data-on={isFullAccess}>
                     <div className="set-toggle-thumb" data-on={isFullAccess} style={{ left: isFullAccess ? 16 : 1 }} />
                   </div>
-                  <code className={`text-xs ${isFullAccess ? 'text-accent' : 'text-muted'}`}>{perm.flag}</code>
+                  <span className={isFullAccess ? 'text-accent' : 'text-muted'}>
+                    {isFullAccess ? t('config.enabled') : t('config.disabled')}
+                  </span>
                 </div>
-                <p className="text-xs text-muted" style={{ marginTop: 4, marginLeft: 38 }}>
-                  {t(perm.descKey)}
-                </p>
+                <p>{t(perm.descKey)}</p>
               </div>
             )}
             {tf && (agent.installed || agent.runtime_available) && (() => {
@@ -552,7 +670,18 @@ export function AgentsSection({
               const isAdding = addingKeyFor === tf.key;
               const newInput = newKeyInputs[tf.key] ?? { name: '', value: '' };
               return (
-              <div className="set-agent-sub">
+              <div className="set-agent-panel set-agent-panel-auth">
+                <div className="set-agent-section-title">
+                  <span>{t('config.apiKeys')}</span>
+                  <a
+                    href={tf.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    title={t('config.getKey')}
+                  >
+                    <ExternalLink size={10} />
+                  </a>
+                </div>
                 {/* Provider-level override toggle */}
                 {providerKeys.length > 0 && (
                   <div className="flex-row gap-3 mb-2">
@@ -573,14 +702,6 @@ export function AgentsSection({
                     <span className="text-xs" style={{ color: isDisabled ? 'var(--kr-text-ghost)' : 'rgba(var(--kr-success-rgb), 0.6)' }}>
                       {isDisabled ? t('config.overrideDisabled') : t('config.overrideActive')}
                     </span>
-                    <a
-                      href={tf.url} target="_blank" rel="noopener noreferrer"
-                      className="flex-row text-ghost flex-shrink-0"
-                      style={{ marginLeft: 'auto' }}
-                      title={t('config.getKey')}
-                    >
-                      <ExternalLink size={10} />
-                    </a>
                   </div>
                 )}
 
@@ -632,11 +753,6 @@ export function AgentsSection({
                   <div className="flex-row gap-4" style={{ paddingLeft: 16 }}>
                     <Key size={10} className="text-ghost flex-shrink-0" />
                     <span className="text-xs text-faint">{t('config.localAuth')}</span>
-                    <a href={tf.url} target="_blank" rel="noopener noreferrer"
-                      className="flex-row text-ghost flex-shrink-0"
-                      title={t('config.getKey')}>
-                      <ExternalLink size={10} />
-                    </a>
                   </div>
                 )}
 
@@ -819,12 +935,11 @@ export function AgentsSection({
               };
 
               return (
-                <div className="set-agent-sub">
-                  <div className="flex-row gap-3 mb-2">
-                    <span className="text-xs text-muted font-semibold">{t('disc.modelTier')}</span>
+                <div className="set-agent-panel set-agent-panel-models">
+                  <div className="set-agent-section-title">
+                    <span>{t('disc.modelTier')}</span>
                     {models.modelsUrl && (
                       <a href={models.modelsUrl} target="_blank" rel="noopener noreferrer"
-                        className="flex-row gap-1 text-2xs" style={{ color: 'rgba(var(--kr-info-rgb), 0.5)', textDecoration: 'none' }}
                         title={t('config.viewModels')}
                       >
                         <ExternalLink size={8} /> {t('config.viewModels')}
@@ -839,7 +954,7 @@ export function AgentsSection({
                 </div>
               );
             })()}
-
+            </div>
           </div>
           );
         })}

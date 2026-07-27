@@ -19,5 +19,20 @@
     "en": "only a human",
     "fr": "seul un humain",
     "es": "solo un humano"
+  },
+  "maintain_on_change": {
+    "en": "materially changes",
+    "fr": "change réellement",
+    "es": "cambia realmente"
+  },
+  "no_noop_writes": {
+    "en": "never reload or rewrite an unchanged task",
+    "fr": "ne recharge ou réécris jamais une tâche inchangée",
+    "es": "nunca recargues o reescribas una tarea sin cambios"
+  },
+  "stale_surface_fallback": {
+    "en": "read-only `plan_snapshot`",
+    "fr": "instantané `plan_snapshot`",
+    "es": "`plan_snapshot` de `disc_join` en modo de solo lectura"
   }
 }

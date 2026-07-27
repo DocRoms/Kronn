@@ -1,15 +1,18 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import '../pages/DiscussionsPage.css';
 import { ProfileTooltip } from './ProfileTooltip';
 import { Dropdown } from './Dropdown';
 import { skills as skillsApi, profiles as profilesApi, directives as directivesApi, config as configApi } from '../lib/api';
 import type { Project, AgentDetection, AgentType, AgentsConfig, Skill, AgentProfile, Directive } from '../types/generated';
-import { AGENT_LABELS, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
+import { AGENT_LABELS, AGENT_MENTIONS, mentionedAgents, isAgentRestricted as isAgentRestrictedUtil, isUsable, isHiddenPath, RTK_APPLICABLE, isRtkActive } from '../lib/constants';
 import {
   Folder, ChevronRight, GitBranch,
   MessageSquare, X, AlertTriangle,
-  Settings, Check, Zap, UserCircle, FileText, Paperclip, Image,
+  Settings, Check, Zap, UserCircle, FileText, Paperclip, Image, Smile,
 } from 'lucide-react';
+
+const PROMPT_AGENT_MODE = '__prompt_agents__';
+const COMMON_EMOJIS = ['😀', '👍', '🎉', '❤️', '🚀', '👀', '✅', '🤔', '🔥', '🙏', '😂', '😅'];
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
@@ -26,6 +29,9 @@ export interface NewDiscConfig {
   branchName: string;
   baseBranch: string;
   pendingFiles?: File[];
+  /** Agents explicitly mentioned in the initial prompt. Empty means the
+   * legacy single-agent picker owns the launch. */
+  targetAgents: AgentType[];
   /** 0.8.6 phase 2 — when `false`, the parent should create the disc
    *  WITHOUT auto-launching an agent (CLI run skipped). The user is
    *  expected to invite agents later via the `[+ Inviter]` header
@@ -62,6 +68,7 @@ export function NewDiscussionForm({
   // ─── Internal state ──────────────────────────────────────────────────────
   const [newDiscTitle, setNewDiscTitle] = useState('');
   const [newDiscAgent, setNewDiscAgent] = useState<AgentType | ''>('');
+  const [agentLaunchMode, setAgentLaunchMode] = useState<'selected' | 'prompt'>('selected');
   const [newDiscProjectId, setNewDiscProjectId] = useState<string>('');
   const [newDiscPrompt, setNewDiscPrompt] = useState('');
   const [newDiscPrefilled, setNewDiscPrefilled] = useState(false);
@@ -88,9 +95,29 @@ export function NewDiscussionForm({
   const [newDiscBaseBranch, setNewDiscBaseBranch] = useState('main');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const newDiscFileInputRef = useRef<HTMLInputElement>(null);
+  const newDiscPromptRef = useRef<HTMLTextAreaElement>(null);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const previousPromptAgentsRef = useRef('');
 
   // ─── Derived ─────────────────────────────────────────────────────────────
   const installedAgentsList = agents.filter(isUsable);
+  const promptMentionedAgents = useMemo(
+    () => mentionedAgents(newDiscPrompt),
+    [newDiscPrompt],
+  );
+  const installedAgentTypes = useMemo(
+    () => new Set(installedAgentsList.map(agent => agent.agent_type)),
+    [installedAgentsList],
+  );
+  const promptLaunchAgents = promptMentionedAgents.filter(agent => installedAgentTypes.has(agent));
+  const unavailablePromptAgents = promptMentionedAgents.filter(agent => !installedAgentTypes.has(agent));
+  const effectiveLaunchAgents: AgentType[] = agentLaunchMode === 'prompt'
+    ? promptLaunchAgents
+    : (newDiscAgent ? [newDiscAgent] : []);
+  const promptModeReady = agentLaunchMode !== 'prompt'
+    || (promptLaunchAgents.length > 0 && unavailablePromptAgents.length === 0);
+  const launchReady = Boolean(newDiscPrompt.trim())
+    && (agentLaunchMode === 'prompt' ? promptModeReady : Boolean(newDiscAgent));
 
   const isAgentRestricted = (agentType: AgentType): boolean =>
     isAgentRestrictedUtil(agentAccess ?? undefined, agentType);
@@ -117,6 +144,20 @@ export function NewDiscussionForm({
       setNewDiscAgent(installedAgentsList[0].agent_type);
     }
   }, [installedAgentsList.length, newDiscAgent]);
+
+  // A newly-detected canonical mention switches the picker to prompt-driven
+  // launch. The user may still override it manually afterwards; adding or
+  // removing mentions re-evaluates the automatic choice.
+  const promptAgentKey = promptMentionedAgents.join(',');
+  useEffect(() => {
+    const previous = previousPromptAgentsRef.current;
+    if (promptAgentKey && promptAgentKey !== previous) {
+      setAgentLaunchMode('prompt');
+    } else if (!promptAgentKey && previous) {
+      setAgentLaunchMode('selected');
+    }
+    previousPromptAgentsRef.current = promptAgentKey;
+  }, [promptAgentKey]);
 
   // 0.8.6 phase 4 — apply the user's saved default model tier ONCE on
   // form mount. The user can still override per-disc by clicking another
@@ -173,6 +214,21 @@ export function NewDiscussionForm({
   const [creating, setCreating] = useState(false);
   const creatingRef = useRef(false);
 
+  const insertEmoji = (emoji: string) => {
+    if (newDiscPrefilled) return;
+    const textarea = newDiscPromptRef.current;
+    const start = textarea?.selectionStart ?? newDiscPrompt.length;
+    const end = textarea?.selectionEnd ?? start;
+    const next = `${newDiscPrompt.slice(0, start)}${emoji}${newDiscPrompt.slice(end)}`;
+    const cursor = start + emoji.length;
+    setNewDiscPrompt(next);
+    setShowEmojiPicker(false);
+    requestAnimationFrame(() => {
+      newDiscPromptRef.current?.focus();
+      newDiscPromptRef.current?.setSelectionRange(cursor, cursor);
+    });
+  };
+
   const handleCreate = async () => {
     // Submit gate :
     //   - launch mode  → prompt + agent both required (legacy contract)
@@ -181,7 +237,7 @@ export function NewDiscussionForm({
     //                    the title to a placeholder when both blank.
     if (creatingRef.current) return;
     if (launchAgentNow) {
-      if (!newDiscPrompt.trim() || !newDiscAgent) return;
+      if (!launchReady) return;
     } else {
       if (!newDiscPrompt.trim() && !newDiscTitle.trim()) return;
     }
@@ -203,7 +259,12 @@ export function NewDiscussionForm({
         // placeholder ; the parent skips `runAgent` so no CLI runs.
         // The new `discussion_sessions` table is the source of truth for
         // actual participants from 0.8.6 onward.
-        agent: (newDiscAgent || installedAgentsList[0]?.agent_type || 'ClaudeCode') as AgentType,
+        agent: (
+          agentLaunchMode === 'prompt'
+            ? promptLaunchAgents[0]
+            : newDiscAgent
+        || installedAgentsList[0]?.agent_type
+        || 'ClaudeCode') as AgentType,
         projectId: newDiscProjectId || null,
         prompt: newDiscPrompt.trim(),
         skillIds: newDiscSkillIds,
@@ -214,6 +275,7 @@ export function NewDiscussionForm({
         branchName: newDiscBranchName,
         baseBranch: newDiscBaseBranch,
         pendingFiles: pendingFiles.length > 0 ? pendingFiles : undefined,
+        targetAgents: agentLaunchMode === 'prompt' ? promptLaunchAgents : [],
         launchAgentNow,
       }));
     } catch (e) {
@@ -256,16 +318,164 @@ export function NewDiscussionForm({
         }}
       >
         <div className="disc-new-header">
-          <span className="disc-new-title">{t('disc.newTitle')}</span>
+          <div className="disc-new-heading">
+            <span className="disc-new-heading-icon" aria-hidden="true">
+              <MessageSquare size={16} />
+            </span>
+            <span>
+              <span className="disc-new-title">{t('disc.newTitle')}</span>
+              <span className="disc-new-subtitle">{t('disc.newSubtitle')}</span>
+            </span>
+          </div>
           <button className="disc-icon-btn" onClick={handleClose} aria-label="Close"><X size={14} /></button>
         </div>
+
+        <div className="disc-new-layout">
+          <section className="disc-new-section disc-new-brief" aria-labelledby="disc-new-brief-title">
+            <div className="disc-new-section-heading">
+              <span className="disc-new-section-icon" aria-hidden="true"><FileText size={14} /></span>
+              <span>
+                <strong id="disc-new-brief-title">{t('disc.brief')}</strong>
+                <small>{t('disc.briefHint')}</small>
+              </span>
+            </div>
+
+            <label className="disc-form-label">{t('disc.prompt')}</label>
+            <div className="disc-new-prompt-wrap">
+              <textarea
+                ref={newDiscPromptRef}
+                className="disc-textarea-styled"
+                data-locked={newDiscPrefilled}
+                placeholder={t('disc.promptPlaceholder')}
+                value={newDiscPrompt}
+                aria-label={t('disc.prompt')}
+                onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
+                readOnly={newDiscPrefilled}
+                rows={7}
+                autoFocus={!newDiscPrefilled}
+              />
+              {!newDiscPrefilled && (
+                <div className="disc-new-emoji-control">
+                  <button
+                    type="button"
+                    className="disc-new-emoji-toggle"
+                    aria-label={t('disc.addEmoji')}
+                    aria-expanded={showEmojiPicker}
+                    onClick={() => setShowEmojiPicker(open => !open)}
+                  >
+                    <Smile size={14} />
+                  </button>
+                  {showEmojiPicker && (
+                    <div className="disc-new-emoji-picker" role="listbox" aria-label={t('disc.addEmoji')}>
+                      {COMMON_EMOJIS.map(emoji => (
+                        <button
+                          key={emoji}
+                          type="button"
+                          role="option"
+                          aria-selected="false"
+                          aria-label={`${t('disc.insertEmoji')} ${emoji}`}
+                          onClick={() => insertEmoji(emoji)}
+                        >
+                          {emoji}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <label className="disc-form-label" style={{ marginTop: 12 }}>{t('disc.title')}</label>
+            <input
+              className="disc-input-styled"
+              data-locked={newDiscPrefilled}
+              placeholder={t('disc.titlePlaceholder')}
+              value={newDiscTitle}
+              aria-label={t('disc.title')}
+              onChange={e => {
+                if (newDiscPrefilled) return;
+                const val = e.target.value;
+                setNewDiscTitle(val);
+                if (newDiscWorkspaceMode === 'Isolated') {
+                  const slug = val.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+                  setNewDiscBranchName(slug || `disc-${Date.now()}`);
+                }
+              }}
+              readOnly={newDiscPrefilled}
+            />
+
+            {/* Context files */}
+            <div className="disc-new-files-row">
+              <input
+                type="file"
+                multiple
+                style={{ display: 'none' }}
+                ref={newDiscFileInputRef}
+                aria-label={t('disc.attachFiles')}
+                onChange={e => {
+                  const files = Array.from(e.target.files ?? []);
+                  if (files.length > 0) {
+                    setPendingFiles(prev => [...prev, ...files]);
+                  }
+                  e.target.value = '';
+                }}
+              />
+              <button
+                type="button"
+                className="disc-new-attach-btn"
+                onClick={() => newDiscFileInputRef.current?.click()}
+              >
+                <Paperclip size={12} /> {pendingFiles.length > 0 ? `${pendingFiles.length} ${t('disc.attachFile')}` : t('disc.attachFile')}
+              </button>
+              {pendingFiles.length > 0 && (
+                <div className="disc-new-files-list">
+                  {pendingFiles.map((f, i) => (
+                    <span key={i} className="disc-context-file-badge">
+                      {f.type.startsWith('image/') ? <Image size={10} /> : <FileText size={10} />}
+                      <span className="disc-context-file-name">{f.name}</span>
+                      <button type="button" className="disc-context-file-remove" onClick={() => setPendingFiles(prev => prev.filter((_, j) => j !== i))}>
+                        <X size={9} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Warnings for validation discussion */}
+            {newDiscPrefilled && (
+              <div className="disc-audit-warn">
+                <p className="disc-audit-warn-title">
+                  <AlertTriangle size={11} /> {t('disc.auditWarn')}
+                </p>
+                <p className="disc-audit-warn-hint">
+                  {t('disc.auditHint')}
+                </p>
+              </div>
+            )}
+          </section>
+
+          <section className="disc-new-section disc-new-configuration" aria-labelledby="disc-new-config-title">
+            <div className="disc-new-section-heading">
+              <span className="disc-new-section-icon" aria-hidden="true"><Settings size={14} /></span>
+              <span>
+                <strong id="disc-new-config-title">{t('disc.configuration')}</strong>
+                <small>{t('disc.configurationHint')}</small>
+              </span>
+            </div>
 
         {/* No-RTK cost warning: when launching an RTK-capable agent that has no
             active RTK hook, shell output isn't compressed → more tokens burned.
             Red, pinned at the top. Skipped for non-RTK agents (Kiro/Copilot/
             Vibe/Ollama) and when RTK is active. */}
-        {launchAgentNow && RTK_APPLICABLE.has(newDiscAgent as AgentType) && (() => {
-          const sel = agents.find(a => a.agent_type === newDiscAgent);
+        {launchAgentNow && effectiveLaunchAgents.some(agent => RTK_APPLICABLE.has(agent)) && (() => {
+          const warnedAgent = effectiveLaunchAgents.find(agent => {
+            if (!RTK_APPLICABLE.has(agent)) return false;
+            const detection = agents.find(candidate => candidate.agent_type === agent);
+            return !detection || !isRtkActive(detection);
+          });
+          if (!warnedAgent) return null;
+          const sel = agents.find(a => a.agent_type === warnedAgent);
           if (sel && isRtkActive(sel)) return null;
           return (
             <div className="disc-rtk-warn" data-testid="disc-rtk-warn" role="alert">
@@ -298,7 +508,7 @@ export function NewDiscussionForm({
             </select>
           </div>
           <div>
-            <label className="disc-form-label">
+            <label className="disc-form-label disc-launch-control">
               <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
                 <input
                   type="checkbox"
@@ -325,13 +535,34 @@ export function NewDiscussionForm({
               // 0.8.6 (#62) — Dropdown migration : native <select>
               // ignored page CSS for <option> rows on Firefox/Safari.
               <Dropdown<string>
-                value={newDiscAgent}
+                value={agentLaunchMode === 'prompt' ? PROMPT_AGENT_MODE : newDiscAgent}
                 options={
                   installedAgentsList.length === 0
-                    ? [{ value: '', label: t('disc.noAgent'), disabled: true }]
-                    : installedAgentsList.map(a => ({ value: a.agent_type, label: a.name }))
+                    ? [
+                      {
+                        value: PROMPT_AGENT_MODE,
+                        label: t('disc.agentFromPrompt'),
+                        description: t('disc.agentFromPromptHint'),
+                      },
+                      { value: '', label: t('disc.noAgent'), disabled: true },
+                    ]
+                    : [
+                      {
+                        value: PROMPT_AGENT_MODE,
+                        label: t('disc.agentFromPrompt'),
+                        description: t('disc.agentFromPromptHint'),
+                      },
+                      ...installedAgentsList.map(a => ({ value: a.agent_type, label: a.name })),
+                    ]
                 }
-                onChange={v => setNewDiscAgent(v as AgentType)}
+                onChange={value => {
+                  if (value === PROMPT_AGENT_MODE) {
+                    setAgentLaunchMode('prompt');
+                    return;
+                  }
+                  setAgentLaunchMode('selected');
+                  setNewDiscAgent(value as AgentType);
+                }}
                 ariaLabel={t('disc.agent')}
                 testId="new-disc-agent-picker"
               />
@@ -343,11 +574,53 @@ export function NewDiscussionForm({
           </div>
         </div>
 
-        {newDiscAgent && isAgentRestricted(newDiscAgent as AgentType) && (
+        {launchAgentNow && agentLaunchMode === 'prompt' && (
+          <div className="disc-prompt-agent-summary" data-testid="prompt-agent-summary">
+            <span className="disc-form-hint">{t('disc.promptAgentsDetected')}</span>
+            <div className="disc-prompt-agent-chips">
+              {promptMentionedAgents.length === 0 ? (
+                <span className="disc-form-hint" data-state="missing">
+                  {t('disc.promptAgentsMissing')}
+                </span>
+              ) : promptMentionedAgents.map(agent => {
+                const available = installedAgentTypes.has(agent);
+                const mention = AGENT_MENTIONS.find(candidate => candidate.type === agent);
+                return (
+                  <span
+                    key={agent}
+                    className="disc-prompt-agent-chip"
+                    data-available={available}
+                    title={available ? undefined : t('disc.promptAgentUnavailable')}
+                  >
+                    {mention?.trigger ?? `@${AGENT_LABELS[agent] ?? agent}`}
+                  </span>
+                );
+              })}
+            </div>
+            {unavailablePromptAgents.length > 0 && (
+              <span className="disc-form-error" role="alert">
+                {t(
+                  'disc.promptAgentsUnavailable',
+                  unavailablePromptAgents
+                    .map(agent => AGENT_LABELS[agent] ?? agent)
+                    .join(', '),
+                )}
+              </span>
+            )}
+          </div>
+        )}
+
+        {effectiveLaunchAgents.some(agent => isAgentRestricted(agent)) && (
           <div className="disc-restricted-warn">
             <AlertTriangle size={11} style={{ color: 'var(--kr-warning)', flexShrink: 0 }} />
             <span className="disc-restricted-warn-text">
-              {t('config.restrictedAgent', AGENT_LABELS[newDiscAgent] ?? newDiscAgent)}
+              {t(
+                'config.restrictedAgent',
+                effectiveLaunchAgents
+                  .filter(agent => isAgentRestricted(agent))
+                  .map(agent => AGENT_LABELS[agent] ?? agent)
+                  .join(', '),
+              )}
               {' — '}
               <span style={{ cursor: 'pointer', textDecoration: 'underline' }} onClick={() => { onClose(); onNavigate('settings'); }}>{t('config.restrictedAgentLink')}</span>
             </span>
@@ -571,106 +844,29 @@ export function NewDiscussionForm({
             )}
           </div>
         )}
-
-        <label className="disc-form-label">{t('disc.title')}</label>
-        <input
-          className="disc-input-styled"
-          data-locked={newDiscPrefilled}
-          placeholder={t('disc.titlePlaceholder')}
-          value={newDiscTitle}
-          aria-label={t('disc.title')}
-          onChange={e => {
-            if (newDiscPrefilled) return;
-            const val = e.target.value;
-            setNewDiscTitle(val);
-            if (newDiscWorkspaceMode === 'Isolated') {
-              const slug = val.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-              setNewDiscBranchName(slug || `disc-${Date.now()}`);
-            }
-          }}
-          readOnly={newDiscPrefilled}
-        />
-
-        <label className="disc-form-label" style={{ marginTop: 12 }}>{t('disc.prompt')}</label>
-        <textarea
-          className="disc-textarea-styled"
-          data-locked={newDiscPrefilled}
-          placeholder={t('disc.promptPlaceholder')}
-          value={newDiscPrompt}
-          aria-label={t('disc.prompt')}
-          onChange={e => !newDiscPrefilled && setNewDiscPrompt(e.target.value)}
-          readOnly={newDiscPrefilled}
-          rows={4}
-          autoFocus={!newDiscPrefilled}
-        />
-
-        {/* Context files */}
-        <div className="disc-new-files-row">
-          <input
-            type="file"
-            multiple
-            style={{ display: 'none' }}
-            ref={newDiscFileInputRef}
-            aria-label={t('disc.attachFiles')}
-            onChange={e => {
-              const files = Array.from(e.target.files ?? []);
-              if (files.length > 0) {
-                setPendingFiles(prev => [...prev, ...files]);
-              }
-              e.target.value = '';
-            }}
-          />
-          <button
-            type="button"
-            className="disc-new-attach-btn"
-            onClick={() => newDiscFileInputRef.current?.click()}
-          >
-            <Paperclip size={12} /> {pendingFiles.length > 0 ? `${pendingFiles.length} ${t('disc.attachFile')}` : t('disc.attachFile')}
-          </button>
-          {pendingFiles.length > 0 && (
-            <div className="disc-new-files-list">
-              {pendingFiles.map((f, i) => (
-                <span key={i} className="disc-context-file-badge">
-                  {f.type.startsWith('image/') ? <Image size={10} /> : <FileText size={10} />}
-                  <span className="disc-context-file-name">{f.name}</span>
-                  <button className="disc-context-file-remove" onClick={() => setPendingFiles(prev => prev.filter((_, j) => j !== i))}>
-                    <X size={9} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
+          </section>
         </div>
 
-        {/* Warnings for validation discussion */}
-        {newDiscPrefilled && (
-          <div className="disc-audit-warn">
-            <p className="disc-audit-warn-title">
-              <AlertTriangle size={11} /> {t('disc.auditWarn')}
-            </p>
-            <p className="disc-audit-warn-hint">
-              {t('disc.auditHint')}
-            </p>
-          </div>
-        )}
-
-        <button
-          className="disc-create-btn"
-          data-ready={launchAgentNow ? !!newDiscPrompt.trim() : (!!newDiscPrompt.trim() || !!newDiscTitle.trim())}
-          onClick={handleCreate}
-          // 0.8.6 phase 2 — disc-first mode allows submitting WITHOUT a
-          // prompt (just a title) since the agent will be invited later.
-          // Launch mode keeps the legacy gates.
-          disabled={
-            creating ||
-            (launchAgentNow
-              ? !newDiscPrompt.trim() || !newDiscAgent
-              : !newDiscPrompt.trim() && !newDiscTitle.trim())
-          }
-        >
-          <MessageSquare size={14} /> {launchAgentNow ? t('disc.start') : t('disc.createEmpty')}
-          <span className="disc-create-shortcut">Ctrl+Enter</span>
-        </button>
+        <div className="disc-new-footer">
+          <span className="disc-new-footer-hint">{t('disc.createHint')}</span>
+          <button
+            className="disc-create-btn"
+            data-ready={launchAgentNow ? launchReady : (!!newDiscPrompt.trim() || !!newDiscTitle.trim())}
+            onClick={handleCreate}
+            // 0.8.6 phase 2 — disc-first mode allows submitting WITHOUT a
+            // prompt (just a title) since the agent will be invited later.
+            // Launch mode keeps the legacy gates.
+            disabled={
+              creating ||
+              (launchAgentNow
+                ? !launchReady
+                : !newDiscPrompt.trim() && !newDiscTitle.trim())
+            }
+          >
+            <MessageSquare size={14} /> {launchAgentNow ? t('disc.start') : t('disc.createEmpty')}
+            <span className="disc-create-shortcut">Ctrl+Enter</span>
+          </button>
+        </div>
       </div>
     </div>
   );

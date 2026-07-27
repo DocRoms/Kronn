@@ -283,7 +283,7 @@ describe('WorkflowDetail — collapsed steps pipeline', () => {
     expect(trigger).toHaveClass('kr-agent-switch-btn');
     fireEvent.click(trigger);
     expect(trigger.closest('.kr-agent-switch')).toHaveAttribute('data-open', 'true');
-    expect(trigger.closest('.wf-pipe-chip')).toContainElement(screen.getByRole('menu'));
+    expect(screen.getByRole('menu').parentElement).toBe(document.body);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Codex' }));
 
     await waitFor(() => expect(onChangeStepAgent).toHaveBeenCalledWith(0, 'Codex'));

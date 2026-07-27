@@ -10,6 +10,8 @@ import {
 import type { HonestPresenceState } from '../lib/discPresence';
 import type { ToastFn } from '../hooks/useToast';
 import { UserPlus, Copy, Loader2, X } from 'lucide-react';
+import { CopyIdPill } from './CopyIdPill';
+import { AGENT_MENTIONS } from '../lib/constants';
 
 /// 0.8.6 phase 2 — discussion participants header.
 ///
@@ -44,6 +46,7 @@ interface ParticipantRow {
   /// Optional self-declared model captured at JOIN time. This is durable
   /// metadata, not a live probe: the UI labels it explicitly as such.
   model?: string | null;
+  conversation_id?: string | null;
   session_id: string | null;
   role: string;
   status: string;
@@ -79,6 +82,16 @@ const AGENT_ICON: Record<string, string> = {
 
 const iconFor = (agentType: string) => AGENT_ICON[agentType] ?? '👤';
 
+export function resumeCommandFor(
+  agentType: string,
+  conversationId?: string | null,
+): string | null {
+  if (!conversationId) return null;
+  if (agentType === 'ClaudeCode') return `claude --resume ${conversationId}`;
+  if (agentType === 'Codex') return `codex resume ${conversationId}`;
+  return null;
+}
+
 function presenceLabel(
   participant: ParticipantRow,
   state: HonestPresenceState,
@@ -107,7 +120,11 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
   const [awayAfterMs, setAwayAfterMs] = useState(DEFAULT_AWAY_AFTER_MS);
   const [inviting, setInviting] = useState(false);
   const [showModal, setShowModal] = useState(false);
-  const [invite, setInvite] = useState<{ token: string; instruction: string; expiresAt: string; ttlSecs: number } | null>(null);
+  const [invite, setInvite] = useState<{ token: string; instruction: string; instructionMinimal: string; expiresAt: string; ttlSecs: number } | null>(null);
+  // KT-52 — the enriched handoff is the default: an invited agent that reads
+  // only the pasted line still learns to read the plan and to stay. The bare
+  // call stays one click away for a human who just wants the token.
+  const [handoffMinimal, setHandoffMinimal] = useState(false);
 
   const fetchParticipants = useCallback(async () => {
     try {
@@ -157,9 +174,11 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
       setInvite({
         token: r.token,
         instruction: r.instruction_text,
+        instructionMinimal: r.instruction_text_minimal,
         expiresAt: r.expires_at,
         ttlSecs: r.ttl_seconds,
       });
+      setHandoffMinimal(false);
       setShowModal(true);
       // Refresh in case a previous peer just left.
       fetchParticipants();
@@ -170,10 +189,14 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
     }
   };
 
+  const shownHandoff = invite
+    ? (handoffMinimal ? invite.instructionMinimal : invite.instruction)
+    : '';
+
   const handleCopy = async () => {
     if (!invite) return;
     try {
-      await navigator.clipboard.writeText(invite.instruction);
+      await navigator.clipboard.writeText(shownHandoff);
       toast(t('disc.inviteCopied'), 'success');
     } catch {
       toast(t('disc.inviteCopyFailed'), 'error');
@@ -200,6 +223,7 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
           const label = presenceLabel(p, presence, t);
           const readLive = p.read_live ?? presence === 'listening';
           const writeState = p.write_state ?? 'unknown';
+          const resumeCommand = resumeCommandFor(p.agent_type, p.conversation_id);
           return (
             <span
               key={p.id}
@@ -230,7 +254,11 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
                 />
               )}
               <span aria-hidden>{iconFor(p.agent_type)}</span>
-              <span>{p.agent_type}</span>
+              <span>
+                {AGENT_MENTIONS.find(mention => mention.type === p.agent_type)?.trigger
+                  ?? p.agent_type}
+                <span className="disc-participant-kind"> · {t('disc.targetCli')}</span>
+              </span>
               {p.model && (
                 <span
                   className="disc-participant-model"
@@ -238,6 +266,14 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
                 >
                   · {p.model}
                 </span>
+              )}
+              {resumeCommand && (
+                <CopyIdPill
+                  id={resumeCommand}
+                  label={t('disc.resumeCli')}
+                  title={t('disc.resumeCliCopy', resumeCommand)}
+                  className="disc-participant-resume"
+                />
               )}
               <span className="disc-participant-activity" data-presence={presence}>
                 {label}
@@ -285,10 +321,19 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
             <p className="disc-invite-modal-intro">
               {t('disc.inviteModalIntro', Math.floor(invite.ttlSecs / 60))}
             </p>
-            <pre className="disc-invite-instruction">
-              {invite.instruction}
+            <pre className="disc-invite-instruction" data-testid="disc-invite-instruction">
+              {shownHandoff}
             </pre>
             <div className="disc-invite-modal-actions">
+              <label className="disc-invite-handoff-toggle">
+                <input
+                  type="checkbox"
+                  checked={!handoffMinimal}
+                  onChange={e => setHandoffMinimal(!e.target.checked)}
+                  data-testid="disc-invite-handoff-toggle"
+                />
+                {t('disc.inviteHandoffFull')}
+              </label>
               <button
                 type="button"
                 className="disc-invite-copy-btn"
@@ -297,6 +342,9 @@ export function DiscParticipantsHeader({ discId, toast, t }: DiscParticipantsHea
                 <Copy size={11} /> {t('disc.inviteCopyBtn')}
               </button>
             </div>
+            <p className="disc-invite-handoff-hint">
+              {t(handoffMinimal ? 'disc.inviteHandoffMinimalHint' : 'disc.inviteHandoffFullHint')}
+            </p>
             <p className="disc-invite-expires-hint">
               {t('disc.inviteExpiresHint', invite.expiresAt)}
             </p>

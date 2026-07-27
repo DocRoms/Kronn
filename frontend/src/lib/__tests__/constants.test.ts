@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive } from '../constants';
+import { AGENT_COLORS, AGENT_LABELS, ALL_AGENT_TYPES, agentColor, agentMentionColors, mentionedAgents, getProjectGroup, isHiddenPath, isUsable, isValidationDisc, isBriefingDisc, isBootstrapDisc, agentSupportsIntrospection, isTrackerMcp, TRACKER_MCP_NEEDLES, parseRepoUrl, buildOldestIssueRequest, inferTrackerSlugFromRepoUrl, RTK_APPLICABLE, isRtkActive } from '../constants';
 
 describe('constants', () => {
   describe('AGENT_COLORS', () => {
@@ -85,6 +85,22 @@ describe('constants', () => {
     });
   });
 
+  describe('mentionedAgents()', () => {
+    it('returns unique canonical mentions in textual order', () => {
+      expect(mentionedAgents('@codex puis @claude et encore @codex')).toEqual([
+        'Codex',
+        'ClaudeCode',
+      ]);
+    });
+
+    it('is case-insensitive and respects mention boundaries', () => {
+      expect(mentionedAgents('(@GEMINI), x@codex.example et @ollama')).toEqual([
+        'GeminiCli',
+        'Ollama',
+      ]);
+    });
+  });
+
   describe('agentColor()', () => {
     it('returns correct color for known agent', () => {
       expect(agentColor('ClaudeCode')).toBe('#D4714E');
@@ -104,6 +120,20 @@ describe('constants', () => {
     it('handles display name keys', () => {
       expect(agentColor('Claude Code')).toBe('#D4714E');
       expect(agentColor('Gemini CLI')).toBe('#4285f4');
+    });
+
+    it('uses a valid configured mention color ahead of the built-in palette', () => {
+      expect(agentColor('Codex', { Codex: '#123abc' })).toBe('#123abc');
+      expect(agentColor('Codex', { Codex: 'red' })).toBe('#10a37f');
+    });
+  });
+
+  describe('agentMentionColors()', () => {
+    it('extracts valid colors and ignores invalid hand-edited values', () => {
+      expect(agentMentionColors({
+        codex: { path: null, installed: true, version: null, full_access: false, mention_color: '#123abc' },
+        claude_code: { path: null, installed: true, version: null, full_access: false, mention_color: 'red' },
+      } as never)).toEqual({ Codex: '#123abc' });
     });
   });
 
@@ -168,6 +198,19 @@ describe('constants', () => {
 
     it('returns false when disabled', () => {
       expect(isUsable({ installed: true, runtime_available: true, enabled: false })).toBe(false);
+    });
+
+    it('returns false when the installed runner still needs authentication', () => {
+      expect(isUsable({
+        installed: true,
+        runtime_available: true,
+        enabled: true,
+        auth_ready: false,
+      })).toBe(false);
+    });
+
+    it('keeps older API payloads usable when auth_ready is absent', () => {
+      expect(isUsable({ installed: true, runtime_available: false, enabled: true })).toBe(true);
     });
 
     it('returns false when neither installed nor runtime available', () => {

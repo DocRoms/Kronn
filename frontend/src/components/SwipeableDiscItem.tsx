@@ -1,8 +1,9 @@
 import { useState, useRef, memo } from 'react';
-import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star, Download, AlertTriangle, Check } from 'lucide-react';
+import { ShieldCheck, Zap, Rocket, GitBranch, Loader2, Users, Users2, Square, Star, Link2, Download, AlertTriangle, Check } from 'lucide-react';
 import type { Discussion } from '../types/generated';
 import { isValidationDisc, isBriefingDisc, isBootstrapDisc } from '../lib/constants';
 import { formatRelativeTime } from '../lib/relativeTime';
+import { gravatarUrl } from '../lib/gravatar';
 import { useT } from '../lib/I18nContext';
 import { MatrixText } from './MatrixText';
 import '../pages/DiscussionsPage.css';
@@ -43,20 +44,27 @@ export interface SwipeableDiscItemProps {
   t: (key: string, ...args: (string | number)[]) => string;
   archiveLabel?: string;
   /**
-   * 0.8.4 (#294) — cross-agent source binding. When set, the row
-   * renders a "📥 ClaudeCode" badge so the user can see at a glance
-   * that this disc was imported from an external CLI session.
-   * `diverged` flips the icon to a warning when the disc has been
-   * edited inside Kronn AFTER the import (a re-push would overwrite
-   * the user's edits).
+   * 0.8.4 (#294) — cross-agent source binding: this disc is BOUND to a live
+   * external CLI session, which is not the same thing as having been imported
+   * from one. The badge says so ("Liée à ClaudeCode"); a real portable-bundle
+   * import is a separate provenance (KT-74).
+   * `diverged` flips the icon to a warning when the disc has been edited
+   * inside Kronn after the last sync (a re-push would overwrite those edits).
    */
-  sourceAgent?: string | null;
-  sourceDiverged?: boolean;
+  /** KT-85 — one entry per CLI session bound to this disc. A cross-agent room
+   *  has several; a single value silently showed only one of them. */
+  sourceAgents?: { source_agent: string; diverged: boolean }[] | null;
+  /**
+   * KT-74 — this disc came from a portable bundle. `pseudo`/`avatarEmail` are
+   * null when the exporting instance had no identity configured: a real import
+   * by an unknown person, rendered without an author instead of a placeholder.
+   */
+  importedBy?: { pseudo: string | null; avatarEmail: string | null } | null;
 }
 
 export const SwipeableDiscItem = memo(function SwipeableDiscItem({
   disc, isActive, lastSeenCount, isSending, isQueued = false, onSelect, onArchive, onDelete, onStop, t, archiveLabel,
-  sourceAgent, sourceDiverged, selectionMode = false, isSelected = false, onToggleSelection,
+  sourceAgents, importedBy, selectionMode = false, isSelected = false, onToggleSelection,
 }: SwipeableDiscItemProps) {
   const [offsetX, setOffsetX] = useState(0);
   const [swiping, setSwiping] = useState(false);
@@ -124,6 +132,7 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
       </div>
       <div
         className="disc-item"
+        data-tour-disc-id={disc.id}
         data-active={isActive}
         data-selected={selectionMode && isSelected}
         // Accessibility: this row is interactive (click/Enter selects the
@@ -180,25 +189,55 @@ export const SwipeableDiscItem = memo(function SwipeableDiscItem({
                 show which discs are in Favorites. The toggle lives in
                 ChatHeader where there's room for a proper button. */}
             {disc.pinned && <Star size={9} style={{ color: 'var(--kr-warning)', fill: 'var(--kr-warning)', flexShrink: 0 }} />}
-            {sourceAgent && (
+            {(sourceAgents ?? []).map(({ source_agent, diverged }) => (
               <span
+                key={source_agent}
                 data-testid="disc-source-badge"
                 className="disc-source-badge"
-                title={sourceDiverged
-                  ? t('disc.source.divergedHint', sourceAgent)
-                  : t('disc.source.importedHint', sourceAgent)}
+                title={diverged
+                  ? t('disc.source.divergedHint', source_agent)
+                  : t('disc.source.boundHint', source_agent)}
                 style={{
                   display: 'inline-flex', alignItems: 'center', gap: 2,
                   fontSize: 9, padding: '1px 4px', borderRadius: 4,
-                  background: sourceDiverged
+                  background: diverged
                     ? 'rgba(220, 53, 69, 0.15)'
                     : 'var(--kr-bg-elevated, rgba(255,255,255,0.06))',
-                  color: sourceDiverged ? 'var(--kr-danger)' : 'var(--kr-text-secondary)',
+                  color: diverged ? 'var(--kr-danger)' : 'var(--kr-text-secondary)',
                   flexShrink: 0,
                 }}
               >
-                {sourceDiverged ? <AlertTriangle size={8} /> : <Download size={8} />}
-                {sourceAgent}
+                {diverged ? <AlertTriangle size={8} /> : <Link2 size={8} />}
+                {t('disc.source.boundBadge', source_agent)}
+              </span>
+            ))}
+            {importedBy && (
+              <span
+                data-testid="disc-import-badge"
+                className="disc-source-badge"
+                title={importedBy.pseudo
+                  ? t('disc.import.byHint', importedBy.pseudo)
+                  : t('disc.import.anonymousHint')}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 3,
+                  fontSize: 9, padding: '1px 4px', borderRadius: 4,
+                  background: 'var(--kr-bg-elevated, rgba(255,255,255,0.06))',
+                  color: 'var(--kr-text-secondary)',
+                  flexShrink: 0,
+                }}
+              >
+                {importedBy.avatarEmail
+                  ? <img
+                      src={gravatarUrl(importedBy.avatarEmail, 16)}
+                      alt=""
+                      width={10}
+                      height={10}
+                      style={{ borderRadius: '50%' }}
+                    />
+                  : <Download size={8} />}
+                {importedBy.pseudo
+                  ? t('disc.import.byBadge', importedBy.pseudo)
+                  : t('disc.import.anonymousBadge')}
               </span>
             )}
           </div>

@@ -362,20 +362,31 @@
 }
 
 .planning-detail {
-  width: min(420px, 42vw);
+  position: sticky;
+  top: 52px;
+  width: min(480px, 44vw);
+  height: calc(100vh - 52px);
+  align-self: flex-start;
   flex-shrink: 0;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
   border-left: 1px solid var(--kr-border);
   background: var(--kr-bg-surface);
+  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08);
+  animation: planning-panel-enter 180ms ease-out;
 }
 
 .planning-detail > header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  min-height: 48px;
-  padding: 8px 14px;
+  min-height: 56px;
+  padding: var(--kr-sp-5) var(--kr-sp-7);
   border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
   color: var(--kr-accent-ink);
   font-family: var(--kr-font-mono);
   font-size: var(--kr-fs-xs);
@@ -388,10 +399,28 @@
   cursor: pointer;
 }
 
+.planning-detail > header .planning-detail-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--kr-r-md);
+  transition: background 0.15s, color 0.15s;
+}
+
+.planning-detail > header .planning-detail-close:hover {
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-primary);
+}
+
 .planning-detail-form {
   display: grid;
-  gap: 14px;
-  padding: 16px;
+  flex: 1;
+  min-height: 0;
+  gap: var(--kr-sp-8);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--kr-sp-7);
 }
 
 .planning-parent-link {
@@ -408,7 +437,9 @@
 }
 
 .planning-detail-title {
-  padding: 8px 9px;
+  padding: 10px 11px;
+  border-color: rgba(var(--kr-accent-rgb), 0.22) !important;
+  background: var(--kr-bg-base) !important;
   font-size: var(--kr-fs-lg);
   font-weight: 650;
 }
@@ -459,15 +490,22 @@
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
 }
 
 .planning-detail-dod,
 .planning-detail-links,
 .planning-detail-subtasks,
 .planning-detail-projects,
-.planning-detail-blockers {
+.planning-detail-blockers,
+.planning-detail-events {
   display: grid;
-  gap: 5px;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-hover);
 }
 
 .planning-detail-dod button,
@@ -489,6 +527,8 @@
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
 }
 
 .planning-detail-projects h3,
@@ -497,6 +537,8 @@
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-xs);
   font-weight: 600;
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
 }
 
 .planning-edit-row {
@@ -568,10 +610,7 @@
 }
 
 .planning-detail-events {
-  display: grid;
-  gap: 6px;
-  padding-top: 10px;
-  border-top: 1px solid var(--kr-border);
+  gap: var(--kr-sp-4);
 }
 
 .planning-detail-events h3 {
@@ -581,6 +620,8 @@
   margin: 0;
   color: var(--kr-text-muted);
   font-size: var(--kr-fs-xs);
+  letter-spacing: 0.045em;
+  text-transform: uppercase;
 }
 
 .planning-detail-events > div {
@@ -661,6 +702,17 @@
   cursor: pointer;
 }
 
+@keyframes planning-panel-enter {
+  from { transform: translateX(24px); opacity: 0.7; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .planning-detail {
+    animation: none;
+  }
+}
+
 @media (max-width: 900px) {
   .planning-header {
     padding: 16px;
@@ -680,10 +732,13 @@
     padding: 14px 16px 32px;
   }
   .planning-detail {
-    position: absolute;
+    position: fixed;
     z-index: 30;
-    inset: 0 0 0 auto;
-    width: min(100%, 420px);
+    inset: auto 0 0 auto;
+    top: 52px;
+    height: calc(100vh - 52px);
+    align-self: auto;
+    width: min(100%, 480px);
     box-shadow: var(--kr-shadow-xl);
   }
 }

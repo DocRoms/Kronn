@@ -14,6 +14,8 @@
   display: flex;
   min-height: 0;
   flex-direction: column;
+  /* Containing block for the commit-detail popover (KT-67). */
+  position: relative;
 }
 
 .source-tree-panel {
@@ -317,12 +319,16 @@
 
 .source-blame {
   display: table-cell;
-  width: 1%;
-  max-width: 190px;
+  width: 180px;
+  min-width: 180px;
+  max-width: 180px;
   padding: 0 10px;
   overflow: hidden;
   border-right: 1px solid rgba(255, 255, 255, .06);
-  color: rgba(255, 255, 255, .42);
+  /* Mixed from the theme's on-dark colour rather than hardcoded white: the code
+     pane stays dark in every theme, but its ink is not always white. 42% landed
+     at 4.1:1 on 10px text — unreadable; 68% clears AA. */
+  color: color-mix(in srgb, var(--kr-text-on-dark) 68%, transparent);
   font-size: 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -511,4 +517,134 @@
   .source-content-panel {
     height: 500px;
   }
+}
+
+/* ── KT-67 — commit detail behind an annotated line ───────────────────────
+   Anchored inside the code pane rather than a modal: the reader is comparing
+   it against the line they clicked, so covering the code would defeat it. */
+/* Fills its table cell instead of replacing it — see the comment in the TSX. */
+.source-blame-btn {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-blame-btn:hover,
+.source-blame-btn:focus-visible {
+  text-decoration: underline;
+  color: var(--kr-accent);
+}
+
+.source-commit-detail {
+  position: absolute;
+  right: var(--kr-sp-5);
+  bottom: var(--kr-sp-5);
+  z-index: 5;
+  width: min(420px, 92%);
+  max-height: 60%;
+  overflow-y: auto;
+  padding: var(--kr-sp-5);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-surface);
+  box-shadow: var(--kr-shadow-xl);
+  font-size: var(--kr-fs-xs);
+}
+
+.source-commit-detail > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--kr-sp-3);
+  font-family: var(--kr-font-mono);
+}
+
+.source-commit-detail > header button {
+  border: 0;
+  background: none;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.source-commit-subject {
+  margin: 0 0 var(--kr-sp-3);
+  font-weight: 650;
+  line-height: 1.4;
+}
+
+.source-commit-body {
+  margin: 0 0 var(--kr-sp-3);
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-hover);
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.45;
+}
+
+.source-commit-meta {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px var(--kr-sp-4);
+  margin: 0 0 var(--kr-sp-3);
+}
+
+.source-commit-meta dt {
+  color: var(--kr-text-muted);
+}
+
+.source-commit-meta dd {
+  margin: 0;
+  word-break: break-word;
+}
+
+.source-commit-sha {
+  display: block;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-tertiary);
+  word-break: break-all;
+}
+
+.source-commit-state,
+.source-commit-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--kr-text-muted);
+}
+
+.source-commit-error {
+  color: var(--kr-error);
+}
+
+/* KT-75 — from "what was this commit" to the change itself. */
+.source-commit-open-patch {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: var(--kr-sp-3);
+  padding: 5px 9px;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+  font: inherit;
+  font-size: var(--kr-fs-2xs);
+  cursor: pointer;
+}
+
+.source-commit-open-patch:hover {
+  border-color: var(--kr-accent);
 }

@@ -27,6 +27,7 @@ const {
   toggleMock,
   detectMock,
   setAgentAccessMock,
+  setAgentMentionColorMock,
 } = vi.hoisted(() => ({
   getServerConfigMock: vi.fn(),
   installMock: vi.fn(),
@@ -34,12 +35,14 @@ const {
   toggleMock: vi.fn(),
   detectMock: vi.fn(),
   setAgentAccessMock: vi.fn(),
+  setAgentMentionColorMock: vi.fn(),
 }));
 
 vi.mock('../../../lib/api', () => buildApiMock({
   config: {
     getServerConfig: getServerConfigMock as never,
     setAgentAccess: setAgentAccessMock as never,
+    setAgentMentionColor: setAgentMentionColorMock as never,
   },
   agents: {
     install: installMock as never,
@@ -111,6 +114,8 @@ beforeEach(() => {
   detectMock.mockResolvedValue([]);
   setAgentAccessMock.mockReset();
   setAgentAccessMock.mockResolvedValue(undefined);
+  setAgentMentionColorMock.mockReset();
+  setAgentMentionColorMock.mockResolvedValue(undefined);
 });
 
 afterEach(() => {
@@ -273,6 +278,15 @@ describe('AgentsSection — full-access switch', () => {
     expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true');
   });
 
+  it('describes the effective Codex sandbox flag', () => {
+    renderSection({
+      agents: [makeAgent({ name: 'AgentCodex', agent_type: 'Codex', installed: true, enabled: true })],
+      agentAccess: accessConfig(),
+    });
+    expect(screen.getByText('--sandbox=danger-full-access')).toBeTruthy();
+    expect(screen.queryByText('--full-auto')).toBeNull();
+  });
+
   it('calls configApi.setAgentAccess + refetchAgentAccess on click (toggles the flag)', async () => {
     const { refetchAgentAccess } = renderSection({
       agents: [makeAgent({ name: 'AgentClaude', agent_type: 'ClaudeCode', installed: true, enabled: true })],
@@ -307,6 +321,89 @@ describe('AgentsSection — full-access switch', () => {
     fireEvent.click(screen.getByRole('switch'));
     await waitFor(() => expect(refetchAgentAccess).toHaveBeenCalled());
     warnSpy.mockRestore();
+  });
+});
+
+describe('AgentsSection — configurable mention colors', () => {
+  it('uses the configured mention color as the matching agent card accent', () => {
+    const agentAccess = {
+      claude_code: {
+        path: null,
+        installed: true,
+        version: null,
+        full_access: true,
+        mention_color: '#123abc',
+      },
+    } as AgentsConfig;
+    const { container } = renderSection({
+      agents: [makeAgent({
+        name: 'AgentClaude',
+        agent_type: 'ClaudeCode',
+        installed: true,
+        runtime_available: true,
+        enabled: true,
+      })],
+      agentAccess,
+    });
+
+    const card = container.querySelector<HTMLElement>('[data-agent-type="ClaudeCode"]');
+    expect(card?.style.getPropertyValue('--agent-color')).toBe('#123abc');
+    expect(card?.querySelector('.set-agent-card-header')).toBeTruthy();
+    expect(card?.querySelector('.set-agent-panel-access')).toHaveTextContent('config.fullAccessBadge');
+    expect(card?.querySelector('.set-agent-panel-auth')).toHaveTextContent('config.apiKeys');
+  });
+
+  it('keeps Ollama in the same accented card system', async () => {
+    const { container } = renderSection({
+      agents: [makeAgent({
+        name: 'Ollama',
+        agent_type: 'Ollama',
+        installed: true,
+        runtime_available: true,
+        enabled: true,
+      })],
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const card = container.querySelector<HTMLElement>('[data-agent-type="Ollama"]');
+    expect(card).toHaveClass('set-agent-row-ollama');
+    expect(card?.style.getPropertyValue('--agent-color').toLowerCase()).toBe('#60a5fa');
+    expect(card?.querySelector('.set-ollama-card')).toBeTruthy();
+  });
+
+  it('persists the selected agent color, refreshes config, and notifies renderers', async () => {
+    const eventSpy = vi.fn();
+    window.addEventListener('kronn:agent-mention-colors-changed', eventSpy);
+    const { refetchAgentAccess, toastFn } = renderSection();
+
+    fireEvent.change(screen.getByTestId('mention-color-Codex'), {
+      target: { value: '#123abc' },
+    });
+
+    await waitFor(() => {
+      expect(setAgentMentionColorMock).toHaveBeenCalledWith({
+        agent: 'Codex',
+        color: '#123abc',
+      });
+    });
+    expect(refetchAgentAccess).toHaveBeenCalled();
+    expect(eventSpy).toHaveBeenCalled();
+    expect(toastFn).toHaveBeenCalledWith('config.saved', 'success');
+    window.removeEventListener('kronn:agent-mention-colors-changed', eventSpy);
+  });
+
+  it('restores the displayed color when persistence fails', async () => {
+    setAgentMentionColorMock.mockRejectedValueOnce(new Error('offline'));
+    const { toastFn } = renderSection();
+    const input = screen.getByTestId<HTMLInputElement>('mention-color-Codex');
+    expect(input.value).toBe('#10a37f');
+
+    fireEvent.change(input, { target: { value: '#123abc' } });
+
+    await waitFor(() => expect(input.value).toBe('#10a37f'));
+    expect(toastFn).toHaveBeenCalledWith('config.saveError', 'error');
   });
 });
 
@@ -359,5 +456,28 @@ describe('AgentsSection — runtime-available rendering', () => {
       })],
     });
     expect(screen.getByText(/agentRuntimeWarning\.vibe\.sdk_fallback/)).toBeTruthy();
+  });
+
+  it('shows authentication required separately from installed and copies the setup command', () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+    renderSection({
+      agents: [makeAgent({
+        name: 'AgentVibe',
+        agent_type: 'Vibe',
+        installed: true,
+        runtime_available: true,
+        enabled: true,
+        auth_ready: false,
+        auth_setup_command: 'vibe --setup',
+      })],
+    });
+
+    expect(screen.getAllByText('config.agentAuthRequired')).toHaveLength(2);
+    fireEvent.click(screen.getByText('vibe --setup').closest('button')!);
+    expect(writeText).toHaveBeenCalledWith('vibe --setup');
   });
 });

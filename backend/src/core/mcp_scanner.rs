@@ -3307,6 +3307,7 @@ pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
             ApiAuthKind::TokenExchange { creds_env_keys, .. } => {
                 auth_env_keys.extend(creds_env_keys.iter().map(String::as_str));
             }
+            ApiAuthKind::CliToken { .. } => {}
             ApiAuthKind::None => {}
         }
         let public_env: std::collections::HashMap<String, String> = spec
@@ -3371,6 +3372,20 @@ pub fn build_api_context_block(plugins_with_env: &[ActiveApiPlugin]) -> String {
                 };
                 out.push_str(&format!(
                     "Auth: exchanged token injected server-side by `api_call` as {location}.\n"
+                ));
+            }
+            ApiAuthKind::CliToken { inject, .. } => {
+                let location = match inject {
+                    crate::models::TokenInjection::BearerHeader => "Bearer header".to_string(),
+                    crate::models::TokenInjection::CustomHeader { name } => {
+                        format!("header `{name}`")
+                    }
+                    crate::models::TokenInjection::QueryParam { name } => {
+                        format!("query parameter `{name}`")
+                    }
+                };
+                out.push_str(&format!(
+                    "Auth: local CLI credential injected server-side by `api_call` as {location}.\n"
                 ));
             }
             ApiAuthKind::None => {
@@ -3463,6 +3478,88 @@ pub type ActiveApiPlugin = (
     String,
     std::collections::HashMap<String, String>,
 );
+
+pub type ActivePluginPreference = (
+    crate::models::McpServer,
+    String,
+    crate::models::PluginInterface,
+);
+
+pub fn collect_active_plugin_preferences(
+    conn: &rusqlite::Connection,
+    project_id: Option<&str>,
+) -> Result<Vec<ActivePluginPreference>, anyhow::Error> {
+    let servers = crate::db::mcps::list_servers(conn)?;
+    let configs = crate::db::mcps::list_configs(conn)?;
+    let preferences = crate::db::mcps::list_config_preferences(conn)?;
+    let server_map: std::collections::HashMap<&str, &crate::models::McpServer> = servers
+        .iter()
+        .map(|server| (server.id.as_str(), server))
+        .collect();
+
+    let mut active = Vec::new();
+    for config in configs {
+        let enabled = match project_id {
+            Some(project_id) => {
+                config.is_global || config.project_ids.iter().any(|id| id == project_id)
+            }
+            None => config.include_general,
+        };
+        if !enabled {
+            continue;
+        }
+        let Some(server) = server_map.get(config.server_id.as_str()) else {
+            continue;
+        };
+        let preference = preferences.get(&config.id).copied().unwrap_or_default();
+        active.push(((*server).clone(), config.label, preference));
+    }
+    Ok(active)
+}
+
+pub fn build_plugin_invocation_preferences(plugins: &[ActivePluginPreference]) -> String {
+    use crate::models::PluginInterface;
+
+    let mut rules = Vec::new();
+    for (server, label, preference) in plugins {
+        let available = crate::core::registry::available_plugin_interfaces(server);
+        if available.len() < 2 {
+            continue;
+        }
+        let preference = if available.contains(preference) {
+            *preference
+        } else {
+            available[0]
+        };
+        let fallbacks = available
+            .iter()
+            .copied()
+            .filter(|interface| *interface != preference)
+            .map(|interface| match interface {
+                PluginInterface::Api => "API for deterministic declared calls",
+                PluginInterface::Mcp => "MCP for exploration",
+                PluginInterface::Cli => "CLI as fallback",
+            })
+            .collect::<Vec<_>>();
+        let preferred = match preference {
+            PluginInterface::Api => "API first via `api_call`",
+            PluginInterface::Mcp => "MCP tools first",
+            PluginInterface::Cli => "CLI first",
+        };
+        let suffix = if fallbacks.is_empty() {
+            String::new()
+        } else {
+            format!("; {}", fallbacks.join("; "))
+        };
+        rules.push(format!("- {label}: {preferred}{suffix}."));
+    }
+
+    if rules.is_empty() {
+        String::new()
+    } else {
+        format!("## Plugin invocation preferences\n\n{}\n", rules.join("\n"))
+    }
+}
 
 pub fn collect_active_api_plugins(
     conn: &rusqlite::Connection,

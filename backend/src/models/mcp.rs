@@ -109,6 +109,19 @@ pub enum ApiAuthKind {
     /// 1 (the secret) and avoids forcing operators to type a placeholder
     /// "empty password" in Settings → APIs.
     BasicApiKey { env_key: String },
+    /// Resolve a token from a trusted local CLI command at request time, then
+    /// inject it into the API call without persisting the token in Kronn or in
+    /// generated MCP configuration files. Registry definitions are the only
+    /// source of this command contract; custom plugins cannot create one.
+    ///
+    /// Fastly uses this with `fastly auth token`, allowing the same local CLI
+    /// identity to power both the CLI-backed MCP server and deterministic
+    /// `ApiCall` steps.
+    CliToken {
+        command: String,
+        args: Vec<String>,
+        inject: TokenInjection,
+    },
     /// OAuth2 client-credentials grant — Kronn exchanges `client_id` +
     /// `client_secret` against `token_url` to get a short-lived
     /// `access_token`, caches it until expiry, and injects a fresh
@@ -310,6 +323,20 @@ fn default_host_sync() -> HostSyncMode {
     HostSyncMode::None
 }
 
+/// Preferred way for agents to invoke a configured plugin.
+///
+/// Availability is derived from the server definition; this value only stores
+/// the operator's choice among those capabilities.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum PluginInterface {
+    Api,
+    #[default]
+    Mcp,
+    Cli,
+}
+
 /// Display-safe version of McpConfig (secrets masked)
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -332,6 +359,31 @@ pub struct McpConfigDisplay {
     /// See `McpConfig::host_sync`.
     #[serde(default = "default_host_sync")]
     pub host_sync: HostSyncMode,
+    #[serde(default)]
+    pub preferred_interface: PluginInterface,
+}
+
+/// Result of a real plugin readiness probe. Checks are deliberately
+/// display-safe: command stdout/stderr and credentials never cross the API.
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpProbeResponse {
+    pub server_id: String,
+    pub ready: bool,
+    pub checks: Vec<McpProbeCheck>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct McpProbeCheck {
+    pub id: String,
+    pub label: String,
+    pub ok: bool,
+    /// Whether this capability is required for the plugin's primary supported
+    /// path. Optional capabilities remain visible without making the whole
+    /// plugin appear broken.
+    pub required: bool,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -362,8 +414,7 @@ pub struct McpDefinition {
     pub official: bool,
     /// Alternative package names that map to this same MCP server.
     /// Used during scan to match detected .mcp.json entries that use a different
-    /// runtime (e.g. npm package vs Go binary) to the canonical registry entry.
-    /// Example: Fastly registry uses `fastly-mcp` (Go) but users may have `fastly-mcp-server` (npm).
+    /// runtime (e.g. npm package vs a vendor CLI) to the canonical registry entry.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     #[ts(skip)]
     pub alt_packages: Vec<String>,
@@ -473,6 +524,7 @@ pub struct UpdateMcpConfigRequest {
     pub is_global: Option<bool>,
     pub include_general: Option<bool>,
     pub host_sync: Option<HostSyncMode>,
+    pub preferred_interface: Option<PluginInterface>,
 }
 
 #[derive(Debug, Deserialize, TS)]

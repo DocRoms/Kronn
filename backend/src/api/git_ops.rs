@@ -5,6 +5,8 @@ use crate::models::*;
 use rusqlite::Connection;
 use std::path::Path;
 
+const PROJECT_GIT_GRAPH_LIMIT: usize = 80;
+
 /// Resolve a GitHub token from MCP configs in the database.
 /// Looks for configs with server_id "mcp-github" and extracts GITHUB_PERSONAL_ACCESS_TOKEN.
 pub fn resolve_github_token(conn: &Connection, secret: &str) -> Option<String> {
@@ -255,6 +257,198 @@ pub fn run_git_status(repo_path: &Path) -> Result<GitStatusResponse, String> {
     })
 }
 
+fn run_git(repo_path: &Path, args: &[&str]) -> Result<std::process::Output, String> {
+    sync_cmd("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git: {error}"))
+}
+
+fn git_output(repo_path: &Path, args: &[&str]) -> Result<String, String> {
+    let output = run_git(repo_path, args)?;
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if error.is_empty() {
+            format!("git {} failed", args.join(" "))
+        } else {
+            error
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn parse_branch_summary(line: &str, current_branch: &str) -> Option<GitBranchSummary> {
+    let fields: Vec<&str> = line.split('\u{1f}').collect();
+    if fields.len() != 8 {
+        return None;
+    }
+    let ref_name = fields[0].to_string();
+    let is_remote = ref_name.starts_with("refs/remotes/");
+    let name = ref_name
+        .strip_prefix("refs/heads/")
+        .or_else(|| ref_name.strip_prefix("refs/remotes/"))?
+        .to_string();
+    if name.ends_with("/HEAD") {
+        return None;
+    }
+    let upstream = (!fields[6].is_empty()).then(|| fields[6].to_string());
+    let (ahead, behind) = fields[7]
+        .split_once(' ')
+        .and_then(|(ahead, behind)| Some((ahead.parse().ok()?, behind.parse().ok()?)))
+        .unwrap_or((0, 0));
+    Some(GitBranchSummary {
+        is_current: !is_remote && name == current_branch,
+        name,
+        ref_name,
+        commit: fields[1].to_string(),
+        subject: fields[2].to_string(),
+        author: fields[3].to_string(),
+        committed_at: fields[4].parse().unwrap_or_default(),
+        is_remote,
+        upstream,
+        ahead,
+        behind,
+    })
+}
+
+fn parse_graph_commit(line: &str) -> Option<GitGraphCommit> {
+    let fields: Vec<&str> = line.split('\u{1f}').collect();
+    if fields.len() != 6 {
+        return None;
+    }
+    let hash = fields[0].to_string();
+    Some(GitGraphCommit {
+        short_hash: hash.chars().take(8).collect(),
+        hash,
+        parents: fields[1]
+            .split_whitespace()
+            .map(ToOwned::to_owned)
+            .collect(),
+        refs: fields[2]
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && !value.contains("HEAD ->"))
+            .map(ToOwned::to_owned)
+            .collect(),
+        subject: fields[3].to_string(),
+        author: fields[4].to_string(),
+        committed_at: fields[5].parse().unwrap_or_default(),
+    })
+}
+
+/// Return a bounded, structured overview of local/remote branches and recent
+/// commits. Every Git value is passed as a distinct argument; no shell is used.
+pub fn run_git_branches(repo_path: &Path) -> Result<GitBranchesResponse, String> {
+    let current_branch = git_output(repo_path, &["branch", "--show-current"])?;
+    let default_branch = resolve_default_branch(repo_path);
+    let refs = git_output(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)%1f%(objectname)%1f%(subject)%1f%(authorname)%1f%(authordate:unix)%1f%(HEAD)%1f%(upstream:short)%1f%(ahead-behind:HEAD)",
+            "refs/heads",
+            "refs/remotes",
+        ],
+    )?;
+    let branches = refs
+        .lines()
+        .filter_map(|line| parse_branch_summary(line, &current_branch))
+        .collect();
+
+    let max_count = format!("--max-count={}", PROJECT_GIT_GRAPH_LIMIT + 1);
+    let log = git_output(
+        repo_path,
+        &[
+            "log",
+            "--all",
+            "--topo-order",
+            "--date-order",
+            &max_count,
+            "--pretty=format:%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%at",
+        ],
+    )?;
+    let mut commits: Vec<_> = log.lines().filter_map(parse_graph_commit).collect();
+    let truncated = commits.len() > PROJECT_GIT_GRAPH_LIMIT;
+    commits.truncate(PROJECT_GIT_GRAPH_LIMIT);
+
+    Ok(GitBranchesResponse {
+        current_branch,
+        default_branch,
+        branches,
+        commits,
+        truncated,
+    })
+}
+
+/// Safely switch to an existing local branch or an unambiguous `origin/*`
+/// remote branch. A dirty worktree is never stashed or reset implicitly.
+pub fn run_git_switch_branch(
+    repo_path: &Path,
+    requested_branch: &str,
+) -> Result<GitBranchResponse, String> {
+    let branch = requested_branch.trim();
+    if branch.is_empty() || branch.len() > 255 {
+        return Err("Nom de branche invalide.".to_string());
+    }
+    let valid = run_git(repo_path, &["check-ref-format", "--branch", branch])?;
+    if !valid.status.success() {
+        return Err("Nom de branche invalide.".to_string());
+    }
+
+    let overview = run_git_branches(repo_path)?;
+    if branch == overview.current_branch {
+        return Ok(GitBranchResponse {
+            branch: branch.to_string(),
+        });
+    }
+
+    let selected = overview
+        .branches
+        .iter()
+        .find(|candidate| candidate.name == branch)
+        .ok_or_else(|| "Branche introuvable. Actualisez la liste puis réessayez.".to_string())?;
+
+    let dirty = git_output(repo_path, &["status", "--porcelain=v1", "-uall"])?;
+    if !dirty.is_empty() {
+        return Err(
+            "Le changement de branche est bloqué : le projet contient des modifications locales. Committez ou mettez-les de côté explicitement, puis réessayez."
+                .to_string(),
+        );
+    }
+
+    let output = if selected.is_remote {
+        let local_name = branch.strip_prefix("origin/").ok_or_else(|| {
+            "Seules les branches distantes origin/* peuvent être suivies automatiquement."
+                .to_string()
+        })?;
+        if overview
+            .branches
+            .iter()
+            .any(|candidate| !candidate.is_remote && candidate.name == local_name)
+        {
+            return Err(format!(
+                "La branche locale {local_name} existe déjà. Sélectionnez-la directement."
+            ));
+        }
+        run_git(repo_path, &["switch", "--track", "-c", local_name, branch])?
+    } else {
+        run_git(repo_path, &["switch", "--", branch])?
+    };
+
+    if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if error.is_empty() {
+            "Git n’a pas pu changer de branche.".to_string()
+        } else {
+            format!("Git n’a pas pu changer de branche : {error}")
+        });
+    }
+    let switched = git_output(repo_path, &["branch", "--show-current"])?;
+    Ok(GitBranchResponse { branch: switched })
+}
+
 /// Convert an origin remote into a browser-safe repository URL.
 ///
 /// Supports HTTPS, SSH URLs and SCP-like Git remotes. Local filesystem
@@ -502,6 +696,225 @@ pub fn run_git_blame(repo_path: &Path, file_path: &str) -> Result<GitBlameRespon
     Ok(GitBlameResponse {
         path: file_path.to_string(),
         lines: parse_git_blame_porcelain(&stdout),
+    })
+}
+
+/// How many containing branches we report before truncating.
+const COMMIT_BRANCHES_CAP: usize = 12;
+
+/// A commit-ish is only ever accepted as a hex hash here. It is interpolated
+/// into a git invocation, and blame only ever hands us hashes — so anything
+/// else is either a bug or an attempt, and both deserve a refusal rather than
+/// a best effort.
+fn valid_commit_ish(sha: &str) -> bool {
+    let len = sha.len();
+    (7..=40).contains(&len) && sha.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// KT-67 — the commit behind an annotated line.
+///
+/// Deliberately NOT the diff: this feeds a detail popover opened from a blame
+/// gutter, and a merge commit's patch would be megabytes. Metadata, message,
+/// a bounded list of containing branches, and the number of files touched.
+pub fn run_git_commit_detail(
+    repo_path: &Path,
+    sha: &str,
+) -> Result<crate::models::git::GitCommitDetail, String> {
+    if !valid_commit_ish(sha) {
+        return Err("invalid commit hash".to_string());
+    }
+
+    // Unit separator between fields, so a subject containing tabs or pipes
+    // can't shift the parse.
+    let format = "%H%x1f%h%x1f%an%x1f%ae%x1f%at%x1f%cn%x1f%ct%x1f%s%x1f%b";
+    let output = sync_cmd("git")
+        .args(["show", "--no-patch", &format!("--format={format}"), sha])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git show: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git show failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let fields: Vec<&str> = stdout.trim_end().split('\u{1f}').collect();
+    if fields.len() < 9 {
+        return Err("git show returned an unexpected format".to_string());
+    }
+
+    // `diff-tree` rather than `git show --name-only`: `--no-patch` would have
+    // suppressed the file list too, and a merge commit prints nothing without
+    // `-m` — so an empty result here means "nothing attributable", not an error.
+    let files = sync_cmd("git")
+        .args([
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--root",
+            sha,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count() as u32
+        })
+        .unwrap_or(0);
+
+    let mut branches: Vec<String> = sync_cmd("git")
+        .args([
+            "branch",
+            "-a",
+            "--contains",
+            sha,
+            "--format=%(refname:short)",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    let branches_truncated = branches.len() > COMMIT_BRANCHES_CAP;
+    branches.truncate(COMMIT_BRANCHES_CAP);
+
+    Ok(crate::models::git::GitCommitDetail {
+        sha: fields[0].to_string(),
+        short_sha: fields[1].to_string(),
+        author_name: fields[2].to_string(),
+        author_email: fields[3].to_string(),
+        author_time: fields[4].parse().unwrap_or(0),
+        committer_name: fields[5].to_string(),
+        commit_time: fields[6].parse().unwrap_or(0),
+        subject: fields[7].to_string(),
+        body: fields[8].trim().to_string(),
+        branches,
+        branches_truncated,
+        files_changed: files,
+    })
+}
+
+/// Bytes of patch we are willing to ship for one commit. Past this the reader
+/// is not reading anymore, and the JSON response starts costing real memory.
+const COMMIT_PATCH_MAX_BYTES: usize = 400 * 1024;
+
+/// KT-75 — the historical patch of one commit: `parent → commit`, every file,
+/// every hunk. `--root` is what makes the first commit of a repository work at
+/// all; without it `git show` prints its message and no diff.
+pub fn run_git_commit_patch(
+    repo_path: &Path,
+    sha: &str,
+) -> Result<crate::models::git::GitCommitPatch, String> {
+    if !valid_commit_ish(sha) {
+        return Err("invalid commit hash".to_string());
+    }
+
+    let header = sync_cmd("git")
+        .args(["show", "--no-patch", "--format=%H%x1f%h%x1f%s", sha])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git show: {error}"))?;
+    if !header.status.success() {
+        return Err(format!(
+            "git show failed: {}",
+            String::from_utf8_lossy(&header.stderr).trim()
+        ));
+    }
+    let header_out = String::from_utf8_lossy(&header.stdout);
+    let fields: Vec<&str> = header_out.trim_end().split('\u{1f}').collect();
+    if fields.len() < 3 {
+        return Err("git show returned an unexpected format".to_string());
+    }
+
+    // No parent listed → root commit. Asked separately because `--root` changes
+    // what the patch means, and the UI says so.
+    let is_root = sync_cmd("git")
+        .args(["rev-list", "--parents", "-n", "1", sha])
+        .current_dir(repo_path)
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .split_whitespace()
+                .count()
+                <= 1
+        })
+        .unwrap_or(false);
+
+    // `-m` splits a merge into one patch per parent instead of printing nothing.
+    let patch_out = sync_cmd("git")
+        .args([
+            "show",
+            "--format=",
+            "--patch",
+            "--root",
+            "-m",
+            "--no-color",
+            sha,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|error| format!("Failed to run git show: {error}"))?;
+    if !patch_out.status.success() {
+        return Err(format!(
+            "git show failed: {}",
+            String::from_utf8_lossy(&patch_out.stderr).trim()
+        ));
+    }
+
+    let full = String::from_utf8_lossy(&patch_out.stdout);
+    let truncated = full.len() > COMMIT_PATCH_MAX_BYTES;
+    let patch = if truncated {
+        // Cut on a char boundary, then back off to the last complete line so the
+        // viewer never renders half a hunk header.
+        let mut cut = COMMIT_PATCH_MAX_BYTES;
+        while cut > 0 && !full.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let slice = &full[..cut];
+        match slice.rfind('\n') {
+            Some(end) => slice[..=end].to_string(),
+            None => slice.to_string(),
+        }
+    } else {
+        full.to_string()
+    };
+
+    let files_changed = sync_cmd("git")
+        .args([
+            "diff-tree",
+            "--no-commit-id",
+            "--name-only",
+            "-r",
+            "--root",
+            sha,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map(|out| {
+            String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count() as u32
+        })
+        .unwrap_or(0);
+
+    Ok(crate::models::git::GitCommitPatch {
+        sha: fields[0].to_string(),
+        short_sha: fields[1].to_string(),
+        subject: fields[2].to_string(),
+        patch,
+        truncated,
+        files_changed,
+        is_root,
     })
 }
 
@@ -1210,6 +1623,95 @@ mod tests {
     }
 
     #[test]
+    fn git_branches_returns_bounded_local_branch_graph() {
+        let repo = make_test_repo("branch-graph");
+        std::process::Command::new("git")
+            .args(["switch", "-c", "feature/graph"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::fs::write(repo.path().join("feature.txt"), "feature").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "feature.txt"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", "feature commit"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        let graph = run_git_branches(repo.path()).unwrap();
+
+        assert_eq!(graph.current_branch, "feature/graph");
+        assert_eq!(graph.default_branch, "main");
+        assert!(graph
+            .branches
+            .iter()
+            .any(|branch| branch.name == "feature/graph" && branch.is_current));
+        assert!(graph
+            .branches
+            .iter()
+            .any(|branch| branch.name == "main" && !branch.is_remote));
+        assert_eq!(graph.commits[0].subject, "feature commit");
+        assert!(!graph.truncated);
+    }
+
+    #[test]
+    fn git_switch_changes_clean_local_branch() {
+        let repo = make_test_repo("switch-clean");
+        std::process::Command::new("git")
+            .args(["branch", "feature/safe"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+
+        let switched = run_git_switch_branch(repo.path(), "feature/safe").unwrap();
+
+        assert_eq!(switched.branch, "feature/safe");
+        assert_eq!(
+            git_output(repo.path(), &["branch", "--show-current"]).unwrap(),
+            "feature/safe"
+        );
+    }
+
+    #[test]
+    fn git_switch_refuses_dirty_worktree_without_changing_branch() {
+        let repo = make_test_repo("switch-dirty");
+        std::process::Command::new("git")
+            .args(["branch", "feature/blocked"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::fs::write(repo.path().join("init.txt"), "local edit").unwrap();
+
+        let error = run_git_switch_branch(repo.path(), "feature/blocked").unwrap_err();
+
+        assert!(error.contains("modifications locales"));
+        assert_eq!(
+            git_output(repo.path(), &["branch", "--show-current"]).unwrap(),
+            "main"
+        );
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("init.txt")).unwrap(),
+            "local edit"
+        );
+    }
+
+    #[test]
+    fn git_switch_rejects_unknown_or_malformed_branch() {
+        let repo = make_test_repo("switch-invalid");
+
+        assert!(run_git_switch_branch(repo.path(), "--upload-pack=evil").is_err());
+        assert!(run_git_switch_branch(repo.path(), "missing").is_err());
+        assert_eq!(
+            git_output(repo.path(), &["branch", "--show-current"]).unwrap(),
+            "main"
+        );
+    }
+
+    #[test]
     fn commit_adds_signoff_by_default() {
         let repo = make_test_repo("signoff");
         std::fs::write(repo.path().join("file.txt"), "content").unwrap();
@@ -1434,6 +1936,253 @@ filename src/main.rs
             result.is_ok(),
             "commit should succeed with --no-gpg-sign even when gpgsign=true: {:?}",
             result.err()
+        );
+    }
+    // ─── KT-67 — commit detail behind an annotated line ─────────────────────
+
+    #[test]
+    fn commit_detail_refuses_anything_that_is_not_a_hash() {
+        // The value is interpolated into a git invocation and blame only ever
+        // hands us hashes, so a refusal is the right answer — not a best effort.
+        for bad in [
+            "HEAD",
+            "main",
+            "../../etc/passwd",
+            "abc123; rm -rf /",
+            "abc",                                       // too short
+            "0123456789012345678901234567890123456789a", // too long
+            "zzzzzzz",                                   // not hex
+            "",
+        ] {
+            assert!(!valid_commit_ish(bad), "{bad:?} must be refused");
+        }
+        for good in ["abc1234", "0123456789abcdef0123456789abcdef01234567"] {
+            assert!(valid_commit_ish(good), "{good:?} must be accepted");
+        }
+
+        let repo = make_test_repo("commit-detail-refuse");
+        let err = run_git_commit_detail(repo.path(), "HEAD").unwrap_err();
+        assert!(err.contains("invalid commit hash"), "{err}");
+    }
+
+    #[test]
+    fn commit_detail_reports_message_author_and_branches() {
+        let repo = make_test_repo("commit-detail-ok");
+        std::fs::write(repo.path().join("a.txt"), "a").unwrap();
+        std::process::Command::new("git")
+            .args(["add", "."])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args([
+                "commit",
+                "-m",
+                "sujet du commit",
+                "-m",
+                "corps sur\nplusieurs lignes",
+            ])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        let detail = run_git_commit_detail(repo.path(), &sha).unwrap();
+        assert_eq!(detail.sha, sha);
+        assert_eq!(detail.short_sha, sha[..detail.short_sha.len()]);
+        assert_eq!(detail.subject, "sujet du commit");
+        assert!(
+            detail.body.contains("corps sur"),
+            "body was {:?}",
+            detail.body
+        );
+        assert_eq!(detail.author_name, "Test User");
+        assert_eq!(detail.author_email, "test@test.com");
+        assert!(detail.author_time > 0, "author_time must be a real epoch");
+        assert_eq!(detail.files_changed, 1);
+        assert!(
+            detail.branches.contains(&"main".to_string()),
+            "{:?}",
+            detail.branches
+        );
+        assert!(!detail.branches_truncated);
+    }
+
+    #[test]
+    fn commit_detail_truncates_a_long_branch_list_honestly() {
+        let repo = make_test_repo("commit-detail-branches");
+        let sha = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        // Every branch here contains the root commit.
+        for i in 0..COMMIT_BRANCHES_CAP + 3 {
+            std::process::Command::new("git")
+                .args(["branch", &format!("topic-{i}")])
+                .current_dir(repo.path())
+                .output()
+                .unwrap();
+        }
+
+        let detail = run_git_commit_detail(repo.path(), &sha).unwrap();
+        assert_eq!(
+            detail.files_changed, 1,
+            "the initial commit must count its root-tree file"
+        );
+        assert_eq!(
+            detail.branches.len(),
+            COMMIT_BRANCHES_CAP,
+            "list must be capped"
+        );
+        assert!(
+            detail.branches_truncated,
+            "a capped list must SAY it was capped — otherwise the UI implies it is complete",
+        );
+    }
+
+    #[test]
+    fn commit_detail_on_an_unknown_hash_fails_instead_of_inventing() {
+        let repo = make_test_repo("commit-detail-unknown");
+        let err = run_git_commit_detail(repo.path(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+            .unwrap_err();
+        assert!(err.contains("git show failed"), "{err}");
+    }
+
+    fn commit_all(repo: &Path, message: &str) -> String {
+        std::process::Command::new("git")
+            .args(["add", "-A"])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .args(["commit", "-m", message])
+            .current_dir(repo)
+            .output()
+            .unwrap();
+        String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(repo)
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string()
+    }
+
+    /// KT-75 — the patch must be the commit against its PARENT, not against
+    /// whatever the file looks like today.
+    #[test]
+    fn commit_patch_shows_the_change_as_it_was_made() {
+        let repo = make_test_repo("commit-patch-parent");
+        std::fs::write(repo.path().join("a.txt"), "premiere ligne\n").unwrap();
+        commit_all(repo.path(), "initial");
+        std::fs::write(
+            repo.path().join("a.txt"),
+            "premiere ligne\ndeuxieme ligne\n",
+        )
+        .unwrap();
+        let second = commit_all(repo.path(), "ajoute une ligne");
+        // The file moves on afterwards: the patch of `second` must not change.
+        std::fs::write(repo.path().join("a.txt"), "tout autre chose\n").unwrap();
+        commit_all(repo.path(), "reecrit tout");
+
+        let patch = run_git_commit_patch(repo.path(), &second).unwrap();
+        assert_eq!(patch.sha, second);
+        assert_eq!(patch.subject, "ajoute une ligne");
+        assert!(!patch.is_root);
+        assert_eq!(patch.files_changed, 1);
+        assert!(patch.patch.contains("+deuxieme ligne"), "{}", patch.patch);
+        assert!(
+            !patch.patch.contains("tout autre chose"),
+            "the later rewrite leaked into an older commit's patch: {}",
+            patch.patch
+        );
+        assert!(!patch.truncated);
+    }
+
+    /// The first commit has no parent. Without `--root`, `git show` prints the
+    /// message and no diff at all — the tab would open empty.
+    #[test]
+    fn commit_patch_covers_the_root_commit() {
+        // `make_test_repo` already lands one commit, so the root is ITS commit —
+        // asking git for it beats assuming the one we just made is first.
+        let repo = make_test_repo("commit-patch-root");
+        std::fs::write(repo.path().join("second.txt"), "suite\n").unwrap();
+        let child = commit_all(repo.path(), "deuxieme commit");
+        let root = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["rev-list", "--max-parents=0", "HEAD"])
+                .current_dir(repo.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+        assert_ne!(root, child);
+
+        let patch = run_git_commit_patch(repo.path(), &root).unwrap();
+        assert!(patch.is_root, "the first commit must be reported as root");
+        assert!(
+            patch.patch.contains("+init"),
+            "root patch was {:?}",
+            patch.patch
+        );
+        assert_eq!(patch.files_changed, 1);
+        assert!(!run_git_commit_patch(repo.path(), &child).unwrap().is_root);
+    }
+
+    #[test]
+    fn commit_patch_truncates_on_a_line_boundary_and_says_so() {
+        let repo = make_test_repo("commit-patch-truncate");
+        // Comfortably past the cap, so the branch is actually exercised.
+        let big: String = (0..40_000).map(|i| format!("ligne numero {i}\n")).collect();
+        std::fs::write(repo.path().join("big.txt"), big).unwrap();
+        let sha = commit_all(repo.path(), "gros fichier");
+
+        let patch = run_git_commit_patch(repo.path(), &sha).unwrap();
+        assert!(patch.truncated, "a 600 KB patch must be reported as cut");
+        assert!(patch.patch.len() <= COMMIT_PATCH_MAX_BYTES);
+        assert!(
+            patch.patch.ends_with('\n'),
+            "the cut must land on a line boundary, not mid-hunk"
+        );
+    }
+
+    #[test]
+    fn commit_patch_refuses_a_non_hash_and_an_unknown_hash() {
+        let repo = make_test_repo("commit-patch-guards");
+        assert!(run_git_commit_patch(repo.path(), "HEAD")
+            .unwrap_err()
+            .contains("invalid commit hash"));
+        assert!(run_git_commit_patch(repo.path(), "../../etc/passwd")
+            .unwrap_err()
+            .contains("invalid commit hash"));
+        assert!(
+            run_git_commit_patch(repo.path(), "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef")
+                .unwrap_err()
+                .contains("git show failed")
         );
     }
 }

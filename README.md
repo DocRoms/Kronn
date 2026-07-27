@@ -99,6 +99,22 @@ cd Kronn
 > host agents (Claude, Codex, …) or read the Keychain — `start-dev` runs backend + UI
 > natively in one command. (`make install` also lands on the guided setup.)
 
+`start-dev` is the contributor/development mode with backend hot-reload. It
+requires Rust, Node ≥ 24, pnpm and
+[Watchexec](https://watchexec.github.io/downloads/watchexec/):
+
+```bash
+# macOS
+brew install node watchexec
+
+# Linux / WSL (after Rust is installed)
+cargo install --locked watchexec-cli
+```
+
+The command checks these tools before starting and names every missing
+executable with an install hint. Watchexec is **development-only**: the desktop
+app, Docker deployment and a bare `make run-backend` do not require it.
+
 <details>
 <summary><strong>Self-hosted (team-shared, always-on, headless server)</strong></summary>
 

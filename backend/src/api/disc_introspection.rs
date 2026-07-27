@@ -77,6 +77,8 @@ pub struct DiscussionMessageRead {
     pub role: MessageRole,
     pub content: String,
     pub agent_type: Option<AgentType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub tokens_used: u64,
     /// Files attached to this message (0.8.8). Lets an agent that navigates to
@@ -102,6 +104,8 @@ pub struct DiscussionMessageContextItem {
     pub role: MessageRole,
     pub content: String,
     pub agent_type: Option<AgentType>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_message_id: Option<String>,
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
@@ -411,6 +415,7 @@ fn context_item(idx: usize, message: &DiscussionMessage) -> DiscussionMessageCon
         role: message.role.clone(),
         content: message.content.clone(),
         agent_type: message.agent_type.clone(),
+        reply_to_message_id: message.reply_to_message_id.clone(),
         timestamp: message.timestamp,
     }
 }
@@ -494,6 +499,7 @@ pub async fn disc_get_message(
         role: msg.role.clone(),
         content: msg.content.clone(),
         agent_type: msg.agent_type.clone(),
+        reply_to_message_id: msg.reply_to_message_id.clone(),
         timestamp: msg.timestamp,
         tokens_used: msg.tokens_used,
         attachments,

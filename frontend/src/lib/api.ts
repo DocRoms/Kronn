@@ -1,4 +1,5 @@
 import type {
+  DiscussionImportProvenance,
   SetupStatus,
   SetScanPathsRequest,
   SaveApiKeyRequest,
@@ -10,6 +11,12 @@ import type {
   McpDefinition,
   McpOverview,
   McpConfigDisplay,
+  McpProbeResponse,
+  InviteResponse,
+  MessageSearchHit,
+  DiscLinkRequest,
+  DiscSourceDetail,
+  DiscSessionStatusResponse,
   McpEnvEntry,
   CustomApiPayload,
   UpdateCustomSpecResponse,
@@ -17,7 +24,13 @@ import type {
   CreateMcpConfigRequest,
   UpdateMcpConfigRequest,
   LinkMcpConfigRequest,
+  PluginBundleSelectionRequest,
+  PluginBundlePreview,
+  ExportPluginBundleRequest,
+  ImportPluginBundleRequest,
+  ImportPluginBundleReport,
   Discussion,
+  DiscussionNativeAgentMode,
   DiscussionMeta,
   DiscussionSession,
   ParticipantView,
@@ -34,6 +47,7 @@ import type {
   TokenUsageSummary,
   DbInfo,
   SetAgentAccessRequest,
+  SetAgentMentionColorRequest,
   AgentsConfig,
   McpContextEntry,
   DiscoveredHostMcp,
@@ -72,6 +86,9 @@ import type {
   AiFileContent,
   AiSearchResult,
   GitBlameResponse,
+  GitCommitDetail,
+  GitCommitPatch,
+  GitBranchesResponse,
   GitStatusResponse,
   DependencyUpdateSummary,
   ModelTier,
@@ -82,6 +99,8 @@ import type {
   ContextFile,
   UploadContextFileResponse,
   ImportResult,
+  ImportDiscussionRequest,
+  ImportDiscussionReport,
   TestStepRequest,
   QuickPrompt,
   CreateQuickPromptRequest,
@@ -587,6 +606,8 @@ export const config = {
   setScanDepth: (depth: number) => api<number>('POST', '/config/scan-depth', depth),
   getAgentAccess: () => api<AgentsConfig>('GET', '/config/agent-access'),
   setAgentAccess: (req: SetAgentAccessRequest) => api<void>('POST', '/config/agent-access', req),
+  setAgentMentionColor: (req: SetAgentMentionColorRequest) =>
+    api<void>('POST', '/config/agent-mention-color', req),
   getModelTiers: () => api<ModelTiersConfig>('GET', '/config/model-tiers'),
   setModelTiers: (tiers: ModelTiersConfig) => api<void>('POST', '/config/model-tiers', tiers),
   dbInfo: () => api<DbInfo>('GET', '/config/db-info'),
@@ -784,8 +805,8 @@ export const projects = {
    * 0.8.4 (#294) — cross-agent memory source bindings.
    * Returns every disc currently bound to a (source_agent, source_session_id)
    * pair. The DiscussionsPage sidebar fetches this once at mount to
-   * decorate disc rows with an "imported from X" badge + drive the
-   * source-filter dropdown.
+   * decorate disc rows with a "bound to X" badge + drive the source-filter
+   * dropdown. A binding is not an import — see `discImports` (KT-74).
    */
   discSources: () =>
     api<Array<{
@@ -795,6 +816,14 @@ export const projects = {
       imported_at?: string | null;
       diverged_at?: string | null;
     }>>('GET', '/disc/sources'),
+  /**
+   * KT-74 — provenance of discussions imported from a portable bundle. A
+   * bundle exported before the envelope carried an identity yields null
+   * pseudo/avatar: a real import by an unknown person, which the UI shows
+   * without an author rather than filling in a placeholder.
+   */
+  discImports: () =>
+    api<DiscussionImportProvenance[]>('GET', '/disc/imports'),
   /**
    * 0.8.4 (#294) — per-disc source binding + full history chain.
    * Used by ChatHeader tooltip to render "first owned by CC sess A,
@@ -855,6 +884,17 @@ export const projects = {
   setSourceExclusions: (id: string, paths: string[]) =>
     api<string[]>('PUT', `/projects/${id}/source-exclusions`, paths),
   gitBlame: (id: string, path: string) => api<GitBlameResponse>('GET', `/projects/${id}/git-blame?path=${encodeURIComponent(path)}`),
+  /** KT-67 — the commit behind an annotated line: metadata, message and the
+   *  branches containing it. Never the patch: this feeds a popover, and a merge
+   *  commit's diff would be megabytes. */
+  gitCommitDetail: (id: string, sha: string) =>
+    api<GitCommitDetail>('GET', `/projects/${id}/git-commit?sha=${encodeURIComponent(sha)}`),
+  /** KT-75 — the commit's own patch (parent → commit), for the temporary tab. */
+  gitCommitPatch: (id: string, sha: string) =>
+    api<GitCommitPatch>('GET', `/projects/${id}/git-commit-patch?sha=${encodeURIComponent(sha)}`),
+  gitBranches: (id: string) => api<GitBranchesResponse>('GET', `/projects/${id}/git-branches`),
+  gitSwitchBranch: (id: string, branch: string) =>
+    api<{ branch: string }>('POST', `/projects/${id}/git-switch`, { branch }),
   gitStatus: (id: string, refreshLanguages = false) =>
     api<GitStatusResponse>('GET', `/projects/${id}/git-status${refreshLanguages ? '?refresh=true' : ''}`),
   dependencyUpdates: (id: string, refresh = false) =>
@@ -1156,8 +1196,39 @@ export const mcps = {
   overview: () => api<McpOverview>('GET', '/mcps'),
   registry: (q?: string) => api<McpDefinition[]>('GET', `/mcps/registry${q ? `?q=${encodeURIComponent(q)}` : ''}`),
   refresh: () => api<McpOverview>('POST', '/mcps/refresh'),
+  previewBundle: (request: PluginBundleSelectionRequest) =>
+    api<PluginBundlePreview>('POST', '/mcps/bundles/preview', request),
+  exportBundle: async (
+    request: ExportPluginBundleRequest,
+  ): Promise<{ filename: string; blob: Blob }> => {
+    const response = await fetch(`${_apiBase}/api/mcps/bundles/export`, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(request),
+    });
+    if (!response.ok) {
+      let message = `Export failed (${response.status})`;
+      try {
+        const payload = await response.json();
+        if (typeof payload?.error === 'string') message = payload.error;
+      } catch {
+        // Keep the status fallback for non-JSON proxy failures.
+      }
+      throw new Error(message);
+    }
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    return {
+      filename: match?.[1] || 'plugins.kronn-plugins.json',
+      blob: await response.blob(),
+    };
+  },
+  importBundle: (request: ImportPluginBundleRequest) =>
+    api<ImportPluginBundleReport>('POST', '/mcps/bundles/import', request),
   createConfig: (req: CreateMcpConfigRequest) => api<McpConfigDisplay>('POST', '/mcps/configs', req),
   updateConfig: (id: string, req: UpdateMcpConfigRequest) => api<McpConfigDisplay>('PATCH', `/mcps/configs/${id}`, req),
+  probeConfig: (id: string) => api<McpProbeResponse>('POST', `/mcps/configs/${id}/probe`),
   /** 0.8.6 — update an existing Custom API plugin's spec
    *  (name/base_url/description/docs_url/fields/endpoints). Server_id
    *  is preserved so configs and workflow `ApiCall` refs stay valid.
@@ -1246,7 +1317,9 @@ export const discussions = {
   get: (id: string) => api<Discussion>('GET', `/discussions/${id}`),
   create: (req: CreateDiscussionRequest) => api<Discussion>('POST', '/discussions', req),
   delete: (id: string) => api<void>('DELETE', `/discussions/${id}`),
-  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off' }) => api<void>('PATCH', `/discussions/${id}`, body),
+  update: (id: string, body: { title?: string; archived?: boolean; pinned?: boolean; skill_ids?: string[]; profile_ids?: string[]; directive_ids?: string[]; project_id?: string | null; tier?: ModelTier; agent?: AgentType; summary_strategy?: 'Auto' | 'OnDemand' | 'Off'; no_agent?: boolean }) => api<void>('PATCH', `/discussions/${id}`, body),
+  nativeAgentMode: (id: string) =>
+    api<DiscussionNativeAgentMode>('GET', `/discussions/${id}/native-agent`),
   share: (id: string, contactIds: string[]) => api<string>('POST', `/discussions/${id}/share`, { contact_ids: contactIds }),
   /** Unified "join by code": paste any `kr-join-…` token and the backend
    *  resolves it LOCAL or cross-instance. If it isn't a local room, the backend
@@ -1273,8 +1346,64 @@ export const discussions = {
    *  agent's tool-call wire) + the human-readable instruction the
    *  copy-paste modal displays. Each call yields a fresh token, so
    *  inviting N peers = N calls. TTL 10 min. */
+  // Shape comes from the backend's `InviteResponse` (ts-rs), so the handoff
+  // wording can change server-side without a frontend release.
   invitePeer: (id: string) =>
-    api<{ token: string; disc_id: string; expires_at: string; ttl_seconds: number; instruction_text: string }>('POST', `/discussions/${id}/invite-peer`, {}),
+    api<InviteResponse>('POST', `/discussions/${id}/invite-peer`, {}),
+  /** KT-65 — message-level search across every discussion. Filters combine
+   *  with AND; the backend clamps the limit and caps the offset, so the caller
+   *  pages instead of asking for the whole history. */
+  searchMessages: (params: {
+    q: string;
+    discussionId?: string;
+    projectId?: string;
+    author?: string;
+    since?: string;
+    until?: string;
+    limit?: number;
+    offset?: number;
+  }) => {
+    const query = new URLSearchParams({ q: params.q });
+    if (params.discussionId) query.set('discussion_id', params.discussionId);
+    if (params.projectId) query.set('project_id', params.projectId);
+    if (params.author) query.set('author', params.author);
+    if (params.since) query.set('since', params.since);
+    if (params.until) query.set('until', params.until);
+    if (params.limit != null) query.set('limit', String(params.limit));
+    if (params.offset != null) query.set('offset', String(params.offset));
+    return api<MessageSearchHit[]>('GET', `/disc/search/messages?${query.toString()}`);
+  },
+  sourceDetail: (id: string) =>
+    api<DiscSourceDetail>('GET', `/discussions/${id}/source`),
+  linkSourceSession: (request: DiscLinkRequest) =>
+    api<boolean>('POST', '/disc/link', request),
+  unlinkSourceSession: (discId: string) =>
+    api<boolean>('POST', '/disc/unlink', { disc_id: discId }),
+  sourceSessionStatus: (sourceAgent: string, sourceSessionId: string) => {
+    const query = new URLSearchParams({
+      source_agent: sourceAgent,
+      source_session_id: sourceSessionId,
+    });
+    return api<DiscSessionStatusResponse>('GET', `/disc/session-status?${query.toString()}`);
+  },
+  exportDiscussion: async (id: string): Promise<{ filename: string; blob: Blob }> => {
+    const response = await fetch(`/api/discussions/${encodeURIComponent(id)}/export`, {
+      credentials: 'same-origin',
+      headers: authHeaders(),
+    });
+    if (!response.ok) throw new Error(`Export failed (${response.status})`);
+    const disposition = response.headers.get('content-disposition') || '';
+    const match = disposition.match(/filename="([^"]+)"/);
+    return {
+      filename: match?.[1] || `discussion-${id}.kronn-discussion.json`,
+      blob: await response.blob(),
+    };
+  },
+  importDiscussion: (request: ImportDiscussionRequest) =>
+    api<ImportDiscussionReport>('POST', '/discussions/import', request),
+  /** Seed or reopen the deterministic, agentless discussion used by the tour. */
+  ensureTourDemo: () =>
+    api<{ discussion_id: string; created: boolean; prompt: string }>('POST', '/tour/demo-discussion', {}),
   /** Abort the currently-running agent on this discussion. Backend kills the
    *  child process and saves a partial response with an "⏹️ Interrompu" footer. */
   stop: (id: string) => api<{ cancelled: boolean }>('POST', `/discussions/${id}/stop`, {}),

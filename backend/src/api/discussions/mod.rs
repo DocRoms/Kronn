@@ -19,6 +19,7 @@ pub mod context;
 pub mod crud;
 pub mod messaging;
 pub mod orchestration;
+pub(crate) mod routing;
 pub mod runtime;
 pub mod slash_markers;
 pub mod streaming;

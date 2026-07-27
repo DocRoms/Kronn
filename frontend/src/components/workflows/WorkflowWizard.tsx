@@ -1487,6 +1487,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
             const hasAdvanced = (step.on_result && step.on_result.length > 0) ||
               step.agent_settings ||
               step.stall_timeout_secs || step.retry || step.delay_after_secs;
+            const multiAgentReview = step.multi_agent_review;
 
             return (
               <div key={i}>
@@ -3048,7 +3049,7 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                           />
                           {t('wiz.multiReview.toggle')}
                         </label>
-                        {step.multi_agent_review && (
+                        {multiAgentReview && (
                           <div className="wf-subpanel mt-2" style={{ borderLeft: '2px solid var(--kr-accent-border)', paddingLeft: 'var(--kr-sp-3)' }}>
                             <p className="text-2xs text-muted" style={{ margin: '0 0 var(--kr-sp-2)' }}>
                               {t('wiz.multiReview.hint')}
@@ -3058,10 +3059,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <label className="wf-label text-2xs">{t('wiz.multiReview.reviewer')}</label>
                                 <select
                                   className="wf-select"
-                                  value={step.multi_agent_review.reviewer_agent}
+                                  value={multiAgentReview.reviewer_agent}
                                   aria-label={t('wiz.multiReview.reviewer')}
                                   onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...step.multi_agent_review!, reviewer_agent: e.target.value as AgentType },
+                                    multi_agent_review: { ...multiAgentReview, reviewer_agent: e.target.value as AgentType },
                                   })}
                                 >
                                   {availableAgents.map(a => (
@@ -3073,10 +3074,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <label className="wf-label text-2xs">{t('wiz.multiReview.tier')}</label>
                                 <select
                                   className="wf-select"
-                                  value={step.multi_agent_review.reviewer_tier ?? ''}
+                                  value={multiAgentReview.reviewer_tier ?? ''}
                                   aria-label={t('wiz.multiReview.tier')}
                                   onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...step.multi_agent_review!, reviewer_tier: (e.target.value || null) as typeof step.multi_agent_review.reviewer_tier },
+                                    multi_agent_review: { ...multiAgentReview, reviewer_tier: (e.target.value || null) as typeof multiAgentReview.reviewer_tier },
                                   })}
                                 >
                                   <option value="">default</option>
@@ -3089,10 +3090,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                                 <input
                                   type="number" min={1} max={5}
                                   className="wf-input"
-                                  value={step.multi_agent_review.max_rounds ?? 3}
+                                  value={multiAgentReview.max_rounds ?? 3}
                                   aria-label={t('wiz.multiReview.rounds')}
                                   onChange={e => updateStep(i, {
-                                    multi_agent_review: { ...step.multi_agent_review!, max_rounds: e.target.value ? parseInt(e.target.value) : null },
+                                    multi_agent_review: { ...multiAgentReview, max_rounds: e.target.value ? parseInt(e.target.value) : null },
                                   })}
                                 />
                               </div>
@@ -3102,10 +3103,10 @@ export function WorkflowWizard({ projects, editWorkflow, onDone, onCancel, insta
                               <textarea
                                 className="wf-textarea"
                                 rows={3}
-                                value={step.multi_agent_review.debate_prompt}
+                                value={multiAgentReview.debate_prompt}
                                 aria-label={t('wiz.multiReview.prompt')}
                                 onChange={e => updateStep(i, {
-                                  multi_agent_review: { ...step.multi_agent_review!, debate_prompt: e.target.value },
+                                  multi_agent_review: { ...multiAgentReview, debate_prompt: e.target.value },
                                 })}
                               />
                             </div>

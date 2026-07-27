@@ -1,14 +1,15 @@
 import { useState, useMemo, useRef, useDeferredValue, useEffect, useCallback } from 'react';
 import '../pages/DiscussionsPage.css';
 import { SwipeableDiscItem, unseenBasis } from './SwipeableDiscItem';
-import type { Discussion, Project, Contact, BatchRunSummary } from '../types/generated';
+import { GlobalSearchPanel } from './GlobalSearchPanel';
+import type { Discussion, Project, Contact, BatchRunSummary, MessageSearchHit } from '../types/generated';
 import { projects as projectsApi } from '../lib/api';
 import { getProjectGroup, isHiddenPath } from '../lib/constants';
 import { gravatarUrl } from '../lib/gravatar';
 import { formatRelativeTime } from '../lib/relativeTime';
 import type { ToastFn } from '../hooks/useToast';
 import {
-  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn, Loader2,
+  Folder, ChevronLeft, ChevronRight, Plus, X, MessageSquare, Archive, Search, SlidersHorizontal, Users2, Trash2, Star, CheckCheck, ListChecks, LogIn, Loader2, Upload,
 } from 'lucide-react';
 
 export interface DiscussionSidebarProps {
@@ -32,6 +33,7 @@ export interface DiscussionSidebarProps {
   onBulkDelete?: (discIds: string[]) => Promise<void>;
   onTogglePin: (discId: string, pinned: boolean) => void;
   onNewDiscussion: () => void;
+  onImportDiscussion?: (file: File) => Promise<void>;
   onClose: () => void;
   /** Called when the user clicks the ⏹ stop button inline on a disc that
    *  is currently Running (isSending). Parent calls `discussionsApi.stop`
@@ -85,6 +87,14 @@ export interface DiscussionSidebarProps {
    *  sidebar header, gated on a non-zero total unread count so it
    *  doesn't bait the user when nothing's unread. */
   onMarkAllRead?: () => void;
+  /** KT-70 — expands the sidebar's shared search field into the advanced
+   *  server-side message search. Optional: the affordance is hidden when the
+   *  parent doesn't wire it. */
+  onOpenGlobalSearch?: () => void;
+  globalSearchOpen?: boolean;
+  globalSearchAuthors?: string[];
+  onCloseGlobalSearch?: () => void;
+  onOpenGlobalSearchResult?: (hit: MessageSearchHit) => void;
 }
 
 /** Default cap on loose discs per project group in the sidebar. The full
@@ -123,6 +133,7 @@ export function DiscussionSidebar({
   onBulkDelete,
   onTogglePin,
   onNewDiscussion,
+  onImportDiscussion,
   onClose,
   onStopDiscussion,
   onContactAdd,
@@ -141,6 +152,11 @@ export function DiscussionSidebar({
   onToggleGroup,
   onCollapse,
   onMarkAllRead,
+  onOpenGlobalSearch,
+  globalSearchOpen = false,
+  globalSearchAuthors = [],
+  onCloseGlobalSearch,
+  onOpenGlobalSearchResult,
 }: DiscussionSidebarProps) {
   // ─── Sidebar-only state ───────────────────────────────────────────────
   // Search input — kept fresh for the controlled input. The actual filter
@@ -177,6 +193,9 @@ export function DiscussionSidebar({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [bulkActionBusy, setBulkActionBusy] = useState(false);
   const bulkActionInFlightRef = useRef(false);
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const importInFlightRef = useRef(false);
+  const [importing, setImporting] = useState(false);
 
   const toggleSelection = useCallback((discId: string) => {
     setSelectedIds(previous => {
@@ -216,21 +235,58 @@ export function DiscussionSidebar({
   // 0.8.4 (#294) — cross-agent source bindings. Fetched once at mount
   // + on each disc list change so newly-imported discs get the badge
   // without a manual refresh. The map keys on disc.id.
-  const [sourceBindings, setSourceBindings] = useState<Map<string, { source_agent: string; diverged: boolean }>>(() => new Map());
+  // KT-85 — a LIST per disc, not one binding: a cross-agent room carries one
+  // per joined CLI session, and keying a single value here silently showed only
+  // whichever row the API returned last.
+  const [sourceBindings, setSourceBindings] = useState<Map<string, { source_agent: string; diverged: boolean }[]>>(() => new Map());
   // 0.8.4 (#294) — source filter dropdown. Empty string = "all".
   // Otherwise filters the sidebar to discs whose binding.source_agent
   // matches. The selector populates from the unique set of agents in
   // `sourceBindings`.
   const [sourceFilter, setSourceFilter] = useState<string>('');
 
+  // KT-74 — provenance of PORTABLE imports, kept separate from the bindings
+  // above on purpose: a disc can be bound to a CLI session, imported from a
+  // colleague's bundle, or both, and the row must not merge the two.
+  const [importProvenance, setImportProvenance] = useState<
+    Map<string, { pseudo: string | null; avatarEmail: string | null }>
+  >(() => new Map());
+
+  const refreshImportProvenance = useCallback(() => {
+    projectsApi.discImports()
+      .then((rows) => {
+        const m = new Map<string, { pseudo: string | null; avatarEmail: string | null }>();
+        for (const row of rows ?? []) {
+          // Only the portable route has a human to attribute; the reserved
+          // `agent_transcript` kind is not implemented and must not render.
+          if (row.provenance_kind !== 'portable_bundle') continue;
+          m.set(row.disc_id, {
+            pseudo: row.imported_by_pseudo,
+            avatarEmail: row.imported_by_avatar_email,
+          });
+        }
+        setImportProvenance(m);
+      })
+      .catch((e) => {
+        console.warn('discImports fetch failed', e);
+      });
+  }, []);
+
   useEffect(() => {
-    let cancelled = false;
+    refreshImportProvenance();
+  }, [discussions.length, refreshImportProvenance]);
+
+  const refreshSourceBindings = useCallback(() => {
     projectsApi.discSources()
       .then((rows) => {
-        if (cancelled) return;
-        const m = new Map<string, { source_agent: string; diverged: boolean }>();
+        const m = new Map<string, { source_agent: string; diverged: boolean }[]>();
         for (const r of rows ?? []) {
-          m.set(r.disc_id, { source_agent: r.source_agent, diverged: r.diverged_at != null });
+          const entry = { source_agent: r.source_agent, diverged: r.diverged_at != null };
+          const list = m.get(r.disc_id);
+          // Same agent twice (an older bridge session of the same CLI) must not
+          // render two identical chips.
+          if (!list) m.set(r.disc_id, [entry]);
+          else if (!list.some(b => b.source_agent === entry.source_agent)) list.push(entry);
         }
         setSourceBindings(m);
       })
@@ -239,15 +295,22 @@ export function DiscussionSidebar({
         // the user has no remediation path.
         console.warn('discSources fetch failed', e);
       });
-    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    refreshSourceBindings();
+    window.addEventListener('kronn:disc-source-changed', refreshSourceBindings);
+    return () => {
+      window.removeEventListener('kronn:disc-source-changed', refreshSourceBindings);
+    };
     // Re-run on discussions length change to catch newly-created discs
     // bound via `disc_create` after mount. discussions.length is a cheap
     // proxy for "list shape changed".
-  }, [discussions.length]);
+  }, [discussions.length, refreshSourceBindings]);
 
   const sourceAgentsAvailable = useMemo(() => {
     const set = new Set<string>();
-    for (const b of sourceBindings.values()) set.add(b.source_agent);
+    for (const list of sourceBindings.values()) for (const b of list) set.add(b.source_agent);
     return Array.from(set).sort();
   }, [sourceBindings]);
 
@@ -267,7 +330,7 @@ export function DiscussionSidebar({
     }
     if (sourceFilter) {
       const bind = sourceBindings.get(d.id);
-      if (!bind || bind.source_agent !== sourceFilter) return false;
+      if (!bind || !bind.some(b => b.source_agent === sourceFilter)) return false;
     }
     return true;
   };
@@ -474,6 +537,47 @@ export function DiscussionSidebar({
                   <ListChecks size={14} />
                 </button>
               )}
+              {onImportDiscussion && (
+                <>
+                  {/* The labelled control is the button below, which opens this
+                      picker programmatically. Left in the a11y tree it is an
+                      unlabelled form field — an axe `label` violation, and a
+                      focus stop that announces nothing. */}
+                  <input
+                    ref={importInputRef}
+                    type="file"
+                    accept=".json,.kronn-discussion.json,application/json"
+                    className="disc-sidebar-visually-hidden"
+                    tabIndex={-1}
+                    aria-hidden="true"
+                    onChange={async event => {
+                      const file = event.target.files?.[0];
+                      event.target.value = '';
+                      if (!file || importInFlightRef.current) return;
+                      importInFlightRef.current = true;
+                      setImporting(true);
+                      try {
+                        await onImportDiscussion(file);
+                      } catch (error) {
+                        toast(t('disc.portability.importError', String(error)), 'error');
+                      } finally {
+                        importInFlightRef.current = false;
+                        setImporting(false);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="disc-icon-btn"
+                    disabled={importing}
+                    onClick={() => importInputRef.current?.click()}
+                    aria-label={t('disc.portability.import')}
+                    title={t('disc.portability.importHint')}
+                  >
+                    {importing ? <Loader2 size={14} className="spin" /> : <Upload size={14} />}
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 className="disc-icon-btn"
@@ -498,8 +602,27 @@ export function DiscussionSidebar({
         </div>
       </div>
 
-      {/* Search filter */}
-      <div className="disc-search-wrap">
+      {globalSearchOpen && onCloseGlobalSearch && onOpenGlobalSearchResult && (
+        <GlobalSearchPanel
+          projects={projects}
+          authors={globalSearchAuthors}
+          initialQuery={discSearchFilter}
+          onQueryChange={setDiscSearchFilter}
+          onOpenResult={onOpenGlobalSearchResult}
+          onClose={() => {
+            setDiscSearchFilter('');
+            onCloseGlobalSearch();
+          }}
+          t={t}
+          lang={lang}
+        />
+      )}
+
+      {/* KT-70 — one search entry point. The field filters discussion titles
+          and ids immediately; the sliders expand that SAME query into the
+          server-side message search instead of presenting a second magnifier
+          in the header. */}
+      <div className="disc-search-wrap" hidden={globalSearchOpen}>
         <div className="disc-search-box">
           <Search size={11} className="disc-search-icon" />
           <input
@@ -508,6 +631,12 @@ export function DiscussionSidebar({
             value={discSearchFilter}
             onChange={e => setDiscSearchFilter(e.target.value)}
             placeholder={t('disc.searchPlaceholder')}
+            onKeyDown={event => {
+              if (event.key === 'Enter' && onOpenGlobalSearch) {
+                event.preventDefault();
+                onOpenGlobalSearch();
+              }
+            }}
           />
           {discSearchFilter && (
             <button
@@ -517,6 +646,19 @@ export function DiscussionSidebar({
               title={t('disc.searchClear')}
             >
               <X size={10} />
+            </button>
+          )}
+          {onOpenGlobalSearch && (
+            <button
+              type="button"
+              className="disc-search-advanced"
+              onClick={onOpenGlobalSearch}
+              aria-label={t('disc.globalSearch.open')}
+              title={t('disc.globalSearch.open')}
+              data-testid="disc-open-global-search"
+              data-tour-id="global-search-open"
+            >
+              <SlidersHorizontal size={12} />
             </button>
           )}
         </div>
@@ -529,6 +671,8 @@ export function DiscussionSidebar({
             className="disc-source-filter-select"
             value={sourceFilter}
             onChange={e => setSourceFilter(e.target.value)}
+            // A title alone is not an accessible name (axe `label-title-only`).
+            aria-label={t('disc.source.filterTooltip')}
             title={t('disc.source.filterTooltip')}
             style={{
               marginTop: 4, fontSize: 11, padding: '2px 4px',
@@ -546,7 +690,7 @@ export function DiscussionSidebar({
       </div>
 
       {/* Discussion list grouped by project */}
-      <div className="disc-sidebar-list">
+      <div className="disc-sidebar-list" hidden={globalSearchOpen}>
         {/* Contacts section — always visible */}
         <div>
           <div className="disc-group-header" data-no-border="true">
@@ -626,40 +770,55 @@ export function DiscussionSidebar({
               </button>
             </div>
           )}
-          {/* Contact list — click a row to open a 1:1 chat with that contact */}
-          {contacts.map(c => (
-            <div
-              key={c.id}
-              className="disc-contact-row"
-              role={onStartChat ? 'button' : undefined}
-              style={onStartChat ? { cursor: 'pointer' } : undefined}
-              title={onStartChat ? t('contacts.startChat', c.pseudo) : undefined}
-              onClick={onStartChat ? () => onStartChat(c) : undefined}
-            >
-              <span className="disc-contact-dot" data-online={contactsOnline[c.id] ?? false} />
-              {c.avatar_email ? (
-                <img src={gravatarUrl(c.avatar_email, 20)} alt="" className="disc-contact-avatar" />
-              ) : (
-                <span className="disc-contact-initials">
-                  {c.pseudo.slice(0, 2).toUpperCase()}
-                </span>
-              )}
-              <span className="disc-contact-name">{c.pseudo}</span>
-              {c.status === 'pending' && !contactsOnline[c.id] && (
-                <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
-              )}
-              {c.status === 'accepted' && !contactsOnline[c.id] && (
-                <span className="disc-contact-offline">offline</span>
-              )}
-              <button
-                onClick={(e) => { e.stopPropagation(); onContactDelete(c.id); }}
-                className="disc-contact-del-btn"
-                title={t('contacts.delete')}
-              >
-                <X size={10} />
-              </button>
-            </div>
-          ))}
+          {/* Contact list — click a row to open a 1:1 chat with that contact.
+              The identity is its own <button> rather than a clickable row: the
+              delete button must not sit inside an interactive ancestor (axe
+              `nested-interactive`), and a real button gives keyboard activation
+              that the previous `div role="button"` only pretended to offer. */}
+          {contacts.map(c => {
+            const identity = (
+              <>
+                <span className="disc-contact-dot" data-online={contactsOnline[c.id] ?? false} />
+                {c.avatar_email ? (
+                  <img src={gravatarUrl(c.avatar_email, 20)} alt="" className="disc-contact-avatar" />
+                ) : (
+                  <span className="disc-contact-initials">
+                    {c.pseudo.slice(0, 2).toUpperCase()}
+                  </span>
+                )}
+                <span className="disc-contact-name">{c.pseudo}</span>
+                {c.status === 'pending' && !contactsOnline[c.id] && (
+                  <span className="disc-contact-pending" title="Contact injoignable — vérifiez que les deux machines sont sur le même réseau">{t('contacts.pending')}</span>
+                )}
+                {c.status === 'accepted' && !contactsOnline[c.id] && (
+                  <span className="disc-contact-offline">offline</span>
+                )}
+              </>
+            );
+            return (
+              <div key={c.id} className="disc-contact-row">
+                {onStartChat ? (
+                  <button
+                    type="button"
+                    className="disc-contact-open"
+                    title={t('contacts.startChat', c.pseudo)}
+                    onClick={() => onStartChat(c)}
+                  >
+                    {identity}
+                  </button>
+                ) : (
+                  <span className="disc-contact-open">{identity}</span>
+                )}
+                <button
+                  onClick={() => onContactDelete(c.id)}
+                  className="disc-contact-del-btn"
+                  title={t('contacts.delete')}
+                >
+                  <X size={10} />
+                </button>
+              </div>
+            );
+          })}
         </div>
 
         {/* Pinned / Favorites — always at the top, cross-project, collapsible
@@ -701,8 +860,8 @@ export function DiscussionSidebar({
                   onStop={onStopDiscussion}
                   onTogglePin={onTogglePin}
                   t={t}
-                  sourceAgent={sourceBindings.get(disc.id)?.source_agent}
-                  sourceDiverged={sourceBindings.get(disc.id)?.diverged}
+                  sourceAgents={sourceBindings.get(disc.id)}
+                  importedBy={importProvenance.get(disc.id) ?? null}
                 />
               ))}
             </div>
@@ -748,8 +907,8 @@ export function DiscussionSidebar({
                   onStop={onStopDiscussion}
                   onTogglePin={onTogglePin}
                   t={t}
-                  sourceAgent={sourceBindings.get(disc.id)?.source_agent}
-                  sourceDiverged={sourceBindings.get(disc.id)?.diverged}
+                  sourceAgents={sourceBindings.get(disc.id)}
+                  importedBy={importProvenance.get(disc.id) ?? null}
                 />
               ))}
             </div>
@@ -1037,8 +1196,8 @@ export function DiscussionSidebar({
                                           onDelete={onDelete}
                                           onStop={onStopDiscussion}
                                           t={t}
-                                          sourceAgent={sourceBindings.get(disc.id)?.source_agent}
-                                          sourceDiverged={sourceBindings.get(disc.id)?.diverged}
+                                          sourceAgents={sourceBindings.get(disc.id)}
+                                          importedBy={importProvenance.get(disc.id) ?? null}
                                         />
                                       ))}
                                     </div>
@@ -1076,8 +1235,8 @@ export function DiscussionSidebar({
                                       onStop={onStopDiscussion}
                                       onTogglePin={onTogglePin}
                                       t={t}
-                                      sourceAgent={sourceBindings.get(disc.id)?.source_agent}
-                                      sourceDiverged={sourceBindings.get(disc.id)?.diverged}
+                                      sourceAgents={sourceBindings.get(disc.id)}
+                                      importedBy={importProvenance.get(disc.id) ?? null}
                                     />
                                   ))}
                                   {hiddenCount > 0 && (
@@ -1145,8 +1304,8 @@ export function DiscussionSidebar({
                 onDelete={onDelete}
                 archiveLabel={t('disc.unarchive')}
                 t={t}
-                sourceAgent={sourceBindings.get(disc.id)?.source_agent}
-                sourceDiverged={sourceBindings.get(disc.id)?.diverged}
+                sourceAgents={sourceBindings.get(disc.id)}
+                importedBy={importProvenance.get(disc.id) ?? null}
               />
             ))}
           </div>

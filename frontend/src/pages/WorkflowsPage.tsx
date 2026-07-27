@@ -33,6 +33,7 @@ import { MatrixText } from '../components/MatrixText';
 import { AgentSwitchPicker } from '../components/AgentSwitchPicker';
 import { ListControls } from '../components/ListControls';
 import { CopyIdPill } from '../components/CopyIdPill';
+import { ContextHelp } from '../components/ContextHelp';
 import {
   sortQuickApis,
   sortQuickPrompts,
@@ -1346,12 +1347,23 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
     <div>
       <div className="flex-between mb-4 automation-page-header">
         <div>
-          <h1 className="wf-h1"><MatrixText text={t('wf.title')} /></h1>
+          <div className="kr-context-help-title-row">
+            <h1 className="wf-h1"><MatrixText text={t('wf.title')} /></h1>
+            <ContextHelp title={t('contextHelp.automation.title')}>
+              <p>{t('contextHelp.automation.intro')}</p>
+              <ul>
+                <li>{t('contextHelp.automation.qp')}</li>
+                <li>{t('contextHelp.automation.qa')}</li>
+                <li>{t('contextHelp.automation.wf')}</li>
+              </ul>
+              <p className="kr-context-help-agent-note">{t('contextHelp.automation.mcp')}</p>
+            </ContextHelp>
+          </div>
         </div>
         {tab === 'workflows' ? (
-        <div className="flex-row gap-3 automation-header-actions">
+        <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
           {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+            <button className="wf-create-ai-btn" data-tour-id="automation-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
               <Zap size={14} /> {t('wf.createWithAI')}
             </button>
           )}
@@ -1374,9 +1386,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
           </button>
         </div>
         ) : tab === 'quickPrompts' ? (
-        <div className="flex-row gap-3 automation-header-actions">
+        <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
           {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+            <button className="wf-create-ai-btn" data-tour-id="automation-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
               <Zap size={14} /> {t('wf.createWithAI')}
             </button>
           )}
@@ -1399,9 +1411,9 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
         ) : (
         // Quick APIs mirror the other tabs. Manual creation still needs a
         // wired plugin; import and AI-assisted setup remain useful without one.
-        <div className="flex-row gap-3 automation-header-actions">
+        <div className="flex-row gap-3 automation-header-actions" data-tour-id="automation-actions">
           {onNavigateDiscussion && (
-            <button className="wf-create-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
+            <button className="wf-create-ai-btn" data-tour-id="automation-ai-btn" title={aiCreation.hint} onClick={handleCreateWithAI}>
               <Zap size={14} /> {t('wf.createWithAI')}
             </button>
           )}
@@ -1427,14 +1439,29 @@ export function WorkflowsPage({ projects, installedAgentTypes, agentAccess, conf
       </div>
 
       {/* Tab bar */}
-      <div className="dash-tab-bar mb-6">
-        <button className="dash-tab" data-active={tab === 'workflows'} onClick={() => setTab('workflows')}>
+      <div className="dash-tab-bar mb-6" data-tour-id="automation-kinds">
+        <button
+          className="dash-tab"
+          data-tour-id="automation-kind-workflow"
+          data-active={tab === 'workflows'}
+          onClick={() => setTab('workflows')}
+        >
           {t('wf.tabWorkflows')} {workflowList ? `(${workflowList.length})` : ''}
         </button>
-        <button className="dash-tab" data-active={tab === 'quickPrompts'} onClick={() => setTab('quickPrompts')}>
+        <button
+          className="dash-tab"
+          data-tour-id="automation-kind-quick-prompt"
+          data-active={tab === 'quickPrompts'}
+          onClick={() => setTab('quickPrompts')}
+        >
           {t('wf.tabQuickPrompts')} {quickPromptList ? `(${quickPromptList.length})` : ''}
         </button>
-        <button className="dash-tab" data-active={tab === 'quickApis'} onClick={() => setTab('quickApis')}>
+        <button
+          className="dash-tab"
+          data-tour-id="automation-kind-quick-api"
+          data-active={tab === 'quickApis'}
+          onClick={() => setTab('quickApis')}
+        >
           {t('wf.tabQuickApis')} {quickApiList ? `(${quickApiList.length})` : ''}
         </button>
       </div>

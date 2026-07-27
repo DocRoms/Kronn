@@ -2,39 +2,39 @@
 
 > Instructions for AI agents using **Fastly** MCP in this project.
 
-**Server:** Official Fastly MCP (Go binary wrapping Fastly CLI)
+**Server:** Hybrid plugin: official Fastly MCP (Go binary wrapping Fastly CLI)
+for exploration, plus deterministic Fastly API calls for repeatable workflows.
 
-## 0. If `fastly CLI not found in PATH` — READ FIRST
+## 0. Installation, authentication and readiness
 
-The MCP shells out to the `fastly` CLI under the hood. Inside Kronn's Docker
-container, three symptoms point to the same root cause:
+Kronn's image bundles pinned Fastly CLI and MCP binaries. The container reads
+the host CLI profile through the read-only `/host-home` mount. The API broker
+resolves `fastly auth token` in memory when a request runs; the token is never
+copied into Kronn's plugin settings, Docker environment, or generated MCP files.
 
-- `fastly_execute` returns *"fastly CLI not found in PATH"*
-- `which fastly` inside the container: not found
-- But on the host, `fastly version` works fine
+Authenticate once on the host:
 
-**Root cause**: on Linux/WSL, `npm i -g @fastly/cli` installs a JS wrapper
-(`/usr/local/bin/fastly` → `../lib/node_modules/@fastly/cli/fastly.js`).
-Kronn mounts `/usr/local/bin` but, until v0.5.0, did NOT mount
-`/usr/local/lib`, so the relative symlink resolved to a non-existent
-path inside the container. v0.5.0+ adds the `/host-bin/lib` mount which
-fixes this transparently — if the problem persists, verify you're on
-an up-to-date Kronn image (`./kronn version` / `make start`).
-
-**Alternative fix that works on any Kronn version**: replace the JS
-wrapper with the standalone Go binary from
-[fastly/cli releases](https://github.com/fastly/cli/releases). The Go
-binary is self-contained → no symlink gymnastics → works from any
-mount layout.
-
-Verify auth after install:
 ```bash
-fastly profile list          # shows configured profiles
-fastly auth list             # shows active tokens
-fastly service list --json   # smoke test against the API
+fastly auth login
+fastly auth list
 ```
 
-## 1. Performance rules (result size)
+Use the plugin drawer's readiness action to check four distinct layers:
+Fastly CLI, active authentication, a real authenticated API request, and the
+official MCP executable. CLI, authentication and API are required for Fastly's
+primary deterministic path. The exploratory MCP is optional outside the Docker
+image: its absence stays visible but does not mark an otherwise working plugin
+as broken.
+
+## 1. Choose the cheapest interface
+
+- Prefer an existing Quick API or deterministic `api_call` for repeatable reads
+  such as services, domains, historical stats and usage.
+- Use the MCP for exploration or operations that are not declared in the
+  deterministic endpoint list.
+- Use the raw CLI only as a manual fallback.
+
+## 2. Performance rules (result size)
 
 Service listings return 100K+ chars easily. Mitigations, in order of
 effectiveness:
@@ -51,7 +51,7 @@ jq '.[0].text | fromjson | .data[] | {Name, ServiceID, ActiveVersion}' <file>
 The MCP result format is `[{"type": "text", "text": "<JSON_STRING>"}]`
 — the inner JSON has a `data` key containing the actual array.
 
-## 2. Common operations
+## 3. Common operations
 
 ```
 # List services
@@ -80,7 +80,7 @@ fastly_execute(command: "purge", args: ["--key", "<KEY>"], flags: [{"name": "ser
 fastly_execute(command: "domain", args: ["list"], flags: [{"name": "service-id", "value": "<ID>"}, {"name": "version", "value": "active"}])
 ```
 
-## 3. Traffic-correlation playbook
+## 4. Traffic-correlation playbook
 
 When the user reports a traffic anomaly in an external analytics tool
 (Chartbeat, GA, etc.) and asks "is it the site or a Discover-style
@@ -99,11 +99,11 @@ referrer chute?", Fastly stats are the tie-breaker:
 Surface both the Chartbeat-style number AND the Fastly hit number in
 the final report so the user can judge for themselves.
 
-## 4. Rules
+## 5. Rules
 
 - Always use `--json` flag when available to get structured output
 - Never purge without explicit user confirmation
 - Prefer `fastly_result_summary` to get an overview before reading full results
-- If the CLI reports "no profile selected" → the token is missing;
-  stop and ask the user to run `fastly profile create` rather than
+- If the CLI reports that no token is selected, stop and ask the user to run
+  `fastly auth login` rather than
   guessing a service id

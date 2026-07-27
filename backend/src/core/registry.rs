@@ -1,5 +1,6 @@
 use crate::models::{
-    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpTransport, OAuth2ExtraHeader,
+    ApiAuthKind, ApiConfigKey, ApiEndpoint, ApiSpec, McpDefinition, McpServer, McpTransport,
+    OAuth2ExtraHeader, PluginInterface, TokenInjection,
 };
 
 /// Sentinel id surfaced at the top of the registry. Picking it in the UI
@@ -8,6 +9,54 @@ use crate::models::{
 /// the user-provided `CustomApiPayload`. Prefixed `api-` to conform to the
 /// registry-id naming convention (enforced by `registry_test`).
 pub const CUSTOM_API_SERVER_ID: &str = "api-custom";
+
+/// A deliberately side-effect-free API request used by the Plugins drawer
+/// readiness probe. Only built-in definitions may opt in: imported/custom
+/// specs must never turn an arbitrary endpoint into an automatic request.
+pub struct ApiReadinessProbe {
+    pub path: &'static str,
+    /// Query parameter → non-secret config key stored with the plugin.
+    pub query_from_config: &'static [(&'static str, &'static str)],
+}
+
+pub fn api_readiness_probe(server_id: &str) -> Option<ApiReadinessProbe> {
+    let probe = match server_id {
+        "mcp-github" => ApiReadinessProbe {
+            path: "/user",
+            query_from_config: &[],
+        },
+        "mcp-atlassian" => ApiReadinessProbe {
+            path: "/rest/api/3/myself",
+            query_from_config: &[],
+        },
+        "mcp-resend" => ApiReadinessProbe {
+            path: "/domains",
+            query_from_config: &[],
+        },
+        "api-mailjet" => ApiReadinessProbe {
+            path: "/v3/REST/sender",
+            query_from_config: &[],
+        },
+        "mcp-fastly" => ApiReadinessProbe {
+            path: "/current_user",
+            query_from_config: &[],
+        },
+        "api-chartbeat" => ApiReadinessProbe {
+            path: "/live/quickstats/v4/",
+            query_from_config: &[("host", "CHARTBEAT_HOST")],
+        },
+        "api-adobe-analytics" => ApiReadinessProbe {
+            path: "/users/me",
+            query_from_config: &[],
+        },
+        "api-speedcurve" => ApiReadinessProbe {
+            path: "/v1/account",
+            query_from_config: &[],
+        },
+        _ => return None,
+    };
+    Some(probe)
+}
 
 /// Return the built-in MCP registry — official servers only
 pub fn builtin_registry() -> Vec<McpDefinition> {
@@ -1509,7 +1558,7 @@ Official docs: https://dev.mailjet.com/email/reference/
         McpDefinition {
             id: "mcp-fastly".into(),
             name: "Fastly".into(),
-            description: "CDN management, cache purge, VCL, WAF, backends, domains, stats — official Fastly Go server (wraps Fastly CLI). Requires the `fastly` CLI installed locally.".into(),
+            description: "CDN, services, domains and stats — official CLI-backed MCP for exploration plus deterministic Fastly API calls for workflows".into(),
             transport: McpTransport::Stdio {
                 command: "fastly-mcp".into(),
                 args: vec![],
@@ -1518,46 +1567,30 @@ Official docs: https://dev.mailjet.com/email/reference/
             // `cli` first so the filter UI groups this plugin under the
             // "CLI wrappers" category — distinct from the pure-MCP
             // bucket (Anthropic-shipped servers, third-party MCP-only).
-            tags: vec!["cli".into(), "cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
+            tags: vec!["cli".into(), "api".into(), "cdn".into(), "cache".into(), "infrastructure".into(), "edge".into(), "waf".into()],
             token_url: Some("https://manage.fastly.com/account/personal/tokens".into()),
-            token_help: Some("Requires the Fastly CLI installed on the host (the MCP shells out to it). Install: `brew install fastly/tap/fastly` (macOS) or the tarball from https://github.com/fastly/cli/releases (Linux/WSL — prefer this over `npm i -g @fastly/cli` which ships a JS wrapper that breaks inside Docker). Then `fastly profile create <name>` and paste your API token. No env var needed — auth is read from CLI profiles.".into()),
+            token_help: Some("Kronn bundles the Fastly CLI and official MCP server. Authenticate once with `fastly auth login`, then verify the active identity with `fastly auth list`. Kronn reuses that local CLI credential in memory for both MCP and deterministic API calls; no token is copied into plugin settings.".into()),
             publisher: "Fastly".into(),
             official: true,
-            alt_packages: vec!["fastly-mcp-server".into()],
+            alt_packages: vec![],
             default_context: Some(r#"# Fastly — Usage Context
 
 > Instructions for AI agents using **Fastly** MCP in this project.
 
-**Server:** Official Fastly MCP (Go binary wrapping Fastly CLI)
+**Server:** Official Fastly MCP (Go binary wrapping Fastly CLI) plus the
+deterministic `api_call` broker for read-only service and stats queries.
 
-## 0. If `fastly CLI not found in PATH` — READ FIRST
+## 0. Authentication and readiness
 
-The MCP shells out to the `fastly` CLI under the hood. Inside Kronn's Docker
-container, three symptoms point to the same root cause:
+Kronn bundles both `fastly` and `fastly-mcp`. They reuse the CLI profile from
+the host; the API token is resolved in memory and is never copied into plugin
+settings or generated MCP configuration files.
 
-- `fastly_execute` returns *"fastly CLI not found in PATH"*
-- `which fastly` inside the container: not found
-- But on the host, `fastly version` works fine
-
-**Root cause**: on Linux/WSL, `npm i -g @fastly/cli` installs a JS wrapper
-(`/usr/local/bin/fastly` → `../lib/node_modules/@fastly/cli/fastly.js`).
-Kronn mounts `/usr/local/bin` but, until v0.5.0, did NOT mount
-`/usr/local/lib`, so the relative symlink resolved to a non-existent
-path inside the container. v0.5.0+ adds the `/host-bin/lib` mount which
-fixes this transparently — if the problem persists, verify you're on
-an up-to-date Kronn image (`./kronn version` / `make start`).
-
-**Alternative fix that works on any Kronn version**: replace the JS
-wrapper with the standalone Go binary from
-[fastly/cli releases](https://github.com/fastly/cli/releases). The Go
-binary is self-contained → no symlink gymnastics → works from any
-mount layout.
-
-Verify auth after install:
+If readiness reports that no Fastly identity is available, authenticate on the
+host and retry:
 ```bash
-fastly profile list          # shows configured profiles
-fastly auth list             # shows active tokens
-fastly service list --json   # smoke test against the API
+fastly auth login
+fastly auth list
 ```
 
 ## 1. Performance rules (result size)
@@ -1630,11 +1663,34 @@ the final report so the user can judge for themselves.
 - Always use `--json` flag when available to get structured output
 - Never purge without explicit user confirmation
 - Prefer `fastly_result_summary` to get an overview before reading full results
-- If the CLI reports "no profile selected" → the token is missing;
-  stop and ask the user to run `fastly profile create` rather than
-  guessing a service id
+- If the CLI reports that no token is selected, stop and ask the user to run
+  `fastly auth login` rather than guessing a service id.
 "#.into()),
-            api_spec: None,
+            api_spec: Some(ApiSpec {
+                base_url: "https://api.fastly.com".into(),
+                auth: ApiAuthKind::CliToken {
+                    command: "fastly".into(),
+                    args: vec!["auth".into(), "token".into()],
+                    inject: TokenInjection::CustomHeader {
+                        name: "Fastly-Key".into(),
+                    },
+                },
+                docs_url: Some("https://www.fastly.com/documentation/reference/api/".into()),
+                config_keys: vec![],
+                endpoints: vec![
+                    ApiEndpoint { path: "/current_user".into(), method: "GET".into(), description: "[USER · sanity] Authenticated Fastly user. Use first to verify that the local CLI credential is valid.".into() },
+                    ApiEndpoint { path: "/service".into(), method: "GET".into(), description: "[SERVICES] List services visible to the authenticated account.".into() },
+                    ApiEndpoint { path: "/service/{service_id}".into(), method: "GET".into(), description: "[SERVICES] Metadata for one service.".into() },
+                    ApiEndpoint { path: "/service/{service_id}/details".into(), method: "GET".into(), description: "[SERVICES] Detailed service state, including versions and active configuration.".into() },
+                    ApiEndpoint { path: "/service/{service_id}/domain".into(), method: "GET".into(), description: "[DOMAINS] Domains attached to a service.".into() },
+                    ApiEndpoint { path: "/stats".into(), method: "GET".into(), description: "[STATS] Historical aggregate stats. Narrow the time range and grouping through query parameters.".into() },
+                    ApiEndpoint { path: "/stats/service/{service_id}".into(), method: "GET".into(), description: "[STATS] Historical stats for one service.".into() },
+                    ApiEndpoint { path: "/stats/aggregate".into(), method: "GET".into(), description: "[STATS] Aggregate historical metrics across services.".into() },
+                    ApiEndpoint { path: "/stats/regions".into(), method: "GET".into(), description: "[STATS] Regions available for historical stats grouping.".into() },
+                    ApiEndpoint { path: "/stats/usage".into(), method: "GET".into(), description: "[USAGE] Account-level usage totals.".into() },
+                    ApiEndpoint { path: "/stats/usage_by_service".into(), method: "GET".into(), description: "[USAGE] Usage grouped by Fastly service.".into() },
+                ],
+            }),
         },
         McpDefinition {
             id: "mcp-tavily".into(),
@@ -2381,9 +2437,58 @@ pub fn search(query: &str) -> Vec<McpDefinition> {
         .collect()
 }
 
+pub fn available_plugin_interfaces(server: &McpServer) -> Vec<PluginInterface> {
+    let mut interfaces = Vec::with_capacity(3);
+    if server.api_spec.is_some() {
+        interfaces.push(PluginInterface::Api);
+    }
+    if !matches!(server.transport, McpTransport::ApiOnly) {
+        interfaces.push(PluginInterface::Mcp);
+    }
+    if builtin_registry()
+        .iter()
+        .find(|definition| definition.id == server.id)
+        .is_some_and(|definition| definition.tags.iter().any(|tag| tag == "cli"))
+    {
+        interfaces.push(PluginInterface::Cli);
+    }
+    interfaces
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_probes_are_explicit_and_side_effect_free() {
+        for (server_id, path) in [
+            ("mcp-github", "/user"),
+            ("mcp-atlassian", "/rest/api/3/myself"),
+            ("mcp-resend", "/domains"),
+            ("api-mailjet", "/v3/REST/sender"),
+            ("mcp-fastly", "/current_user"),
+            ("api-chartbeat", "/live/quickstats/v4/"),
+            ("api-adobe-analytics", "/users/me"),
+            ("api-speedcurve", "/v1/account"),
+        ] {
+            let probe = api_readiness_probe(server_id).expect("declared safe probe");
+            assert_eq!(probe.path, path);
+            let definition = builtin_registry()
+                .into_iter()
+                .find(|definition| definition.id == server_id)
+                .expect("registry definition");
+            let endpoint = definition
+                .api_spec
+                .expect("API capability")
+                .endpoints
+                .into_iter()
+                .find(|endpoint| endpoint.path == path)
+                .expect("probe endpoint belongs to the declared API surface");
+            assert_eq!(endpoint.method, "GET", "readiness probes must be safe");
+        }
+        assert!(api_readiness_probe(CUSTOM_API_SERVER_ID).is_none());
+        assert!(api_readiness_probe("api-google-search").is_none());
+    }
     use std::collections::HashSet;
 
     /// Packages whose upstream switched runtime (e.g. to bun) and MUST stay pinned to a Node-compatible version.

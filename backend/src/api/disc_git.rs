@@ -923,6 +923,14 @@ async fn build_global_mcp_context(state: &AppState) -> Option<String> {
         result.push_str(&format!("- **{}** ({})\n", cfg.label, name));
     }
     result.push('\n');
+    let preference_plugins = state
+        .db
+        .with_conn(|conn| crate::core::mcp_scanner::collect_active_plugin_preferences(conn, None))
+        .await
+        .unwrap_or_default();
+    result.push_str(
+        &crate::core::mcp_scanner::build_plugin_invocation_preferences(&preference_plugins),
+    );
 
     Some(result)
 }

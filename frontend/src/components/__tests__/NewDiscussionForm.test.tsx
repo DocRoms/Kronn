@@ -56,6 +56,13 @@ const AGENT: AgentDetection = {
   runtime_available: false, rtk_available: false, rtk_hook_configured: false,
 };
 
+const CODEX_AGENT: AgentDetection = {
+  ...AGENT,
+  name: 'Codex',
+  agent_type: 'Codex',
+  path: '/usr/bin/codex',
+};
+
 const mount = (projects: Project[]) => {
   const onSubmit = vi.fn();
   return render(
@@ -71,6 +78,116 @@ const mount = (projects: Project[]) => {
     />
   );
 };
+
+describe('NewDiscussionForm — creation flow layout', () => {
+  it('separates the starting brief from launch configuration', () => {
+    mount([PROJECT_WITH_REPO]);
+
+    const brief = document.querySelector('.disc-new-brief');
+    const configuration = document.querySelector('.disc-new-configuration');
+    const footer = document.querySelector('.disc-new-footer');
+
+    expect(brief).not.toBeNull();
+    expect(configuration).not.toBeNull();
+    expect(footer).not.toBeNull();
+    expect(brief?.querySelector('textarea')).not.toBeNull();
+    expect(configuration?.querySelector('[data-testid="new-disc-agent-picker"]')).not.toBeNull();
+    if (!brief || !configuration) throw new Error('expected both creation-flow panels');
+    expect(brief.compareDocumentPosition(configuration) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps the prepare-without-agent path explicit and hides the agent picker', async () => {
+    mount([]);
+
+    const launchCheckbox = screen.getByRole('checkbox', { name: 'disc.launchAgentNow' });
+    expect(launchCheckbox).toBeChecked();
+
+    await act(async () => {
+      fireEvent.click(launchCheckbox);
+    });
+
+    expect(launchCheckbox).not.toBeChecked();
+    expect(screen.queryByTestId('new-disc-agent-picker')).toBeNull();
+    expect(screen.getByText('disc.discFirstHint')).toBeTruthy();
+  });
+
+  it('auto-selects prompt-driven launch and submits every mentioned installed agent', async () => {
+    const onSubmit = vi.fn();
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT, CODEX_AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={onSubmit}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' });
+    await act(async () => {
+      fireEvent.change(prompt, {
+        target: { value: '@codex et @claude, donnez-moi vos avis.' },
+      });
+    });
+
+    expect(screen.getByTestId('new-disc-agent-picker')).toHaveTextContent(
+      'disc.agentFromPrompt',
+    );
+    expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@codex');
+    expect(screen.getByTestId('prompt-agent-summary')).toHaveTextContent('@claude');
+
+    const create = document.querySelector('.disc-create-btn') as HTMLButtonElement;
+    expect(create.disabled).toBe(false);
+    await act(async () => { fireEvent.click(create); });
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+
+    expect(onSubmit.mock.calls[0][0]).toEqual(expect.objectContaining({
+      agent: 'Codex',
+      targetAgents: ['Codex', 'ClaudeCode'],
+      launchAgentNow: true,
+    }));
+  });
+
+  it('blocks prompt-driven launch when a mentioned agent is unavailable', async () => {
+    render(
+      <NewDiscussionForm
+        projects={[]}
+        agents={[AGENT]}
+        configLanguage="fr"
+        agentAccess={null}
+        onSubmit={vi.fn()}
+        onClose={vi.fn()}
+        onNavigate={vi.fn()}
+        t={(key: string) => key}
+      />,
+    );
+
+    await act(async () => {
+      fireEvent.change(screen.getByRole('textbox', { name: 'disc.prompt' }), {
+        target: { value: '@claude et @codex, vérifiez ceci.' },
+      });
+    });
+
+    expect(screen.getByText('disc.promptAgentsUnavailable')).toBeTruthy();
+    expect((document.querySelector('.disc-create-btn') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('inserts an emoji at the prompt caret from the compact picker', async () => {
+    mount([]);
+    const prompt = screen.getByRole('textbox', { name: 'disc.prompt' }) as HTMLTextAreaElement;
+    fireEvent.change(prompt, { target: { value: 'Bravo ' } });
+    prompt.setSelectionRange(6, 6);
+
+    fireEvent.click(screen.getByRole('button', { name: 'disc.addEmoji' }));
+    fireEvent.click(screen.getByRole('option', { name: 'disc.insertEmoji 🎉' }));
+
+    expect(prompt.value).toBe('Bravo 🎉');
+    expect(screen.queryByRole('listbox', { name: 'disc.addEmoji' })).toBeNull();
+  });
+});
 
 describe('NewDiscussionForm — no-RTK cost warning', () => {
   const renderForm = (agents: AgentDetection[]) => render(

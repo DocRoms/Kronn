@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, ChevronDown, Loader2, RefreshCw } from 'lucide-react';
 import { AGENT_COLORS, AGENT_LABELS } from '../lib/constants';
 import type { AgentType } from '../types/generated';
@@ -13,6 +14,8 @@ interface AgentSwitchPickerProps {
   title: string;
   ariaLabel: string;
   staticClassName?: string;
+  suffix?: string;
+  displayName?: string;
 }
 
 /**
@@ -29,29 +32,62 @@ export function AgentSwitchPicker({
   title,
   ariaLabel,
   staticClassName,
+  suffix,
+  displayName,
 }: AgentSwitchPickerProps) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [popoverPosition, setPopoverPosition] = useState<{ top: number; left: number } | null>(null);
   const savingRef = useRef(false);
   const rootRef = useRef<HTMLSpanElement>(null);
+  const popoverRef = useRef<HTMLSpanElement>(null);
   const choices = Array.from(new Set<AgentType>([currentAgent, ...availableAgents]));
   const canChange = Boolean(onChange) && choices.length > 1;
 
+  const updatePopoverPosition = useCallback(() => {
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (!rect) return;
+
+    const viewportPadding = 8;
+    const popoverWidth = 170;
+    const estimatedHeight = choices.length * 31 + 8;
+    const hasRoomBelow = rect.bottom + 5 + estimatedHeight <= window.innerHeight - viewportPadding;
+    const top = hasRoomBelow
+      ? rect.bottom + 5
+      : Math.max(viewportPadding, rect.top - estimatedHeight - 5);
+    const left = Math.max(
+      viewportPadding,
+      Math.min(rect.left, window.innerWidth - popoverWidth - viewportPadding),
+    );
+    setPopoverPosition({ top, left });
+  }, [choices.length]);
+
   useEffect(() => {
     if (!open) return;
+    updatePopoverPosition();
     const closeOutside = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (
+        !rootRef.current?.contains(target)
+        && !popoverRef.current?.contains(target)
+      ) {
+        setOpen(false);
+      }
     };
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') setOpen(false);
     };
     document.addEventListener('mousedown', closeOutside);
     document.addEventListener('keydown', closeOnEscape);
+    window.addEventListener('resize', updatePopoverPosition);
+    window.addEventListener('scroll', updatePopoverPosition, true);
     return () => {
       document.removeEventListener('mousedown', closeOutside);
       document.removeEventListener('keydown', closeOnEscape);
+      window.removeEventListener('resize', updatePopoverPosition);
+      window.removeEventListener('scroll', updatePopoverPosition, true);
     };
-  }, [open]);
+  }, [open, updatePopoverPosition]);
 
   if (!canChange) {
     return (
@@ -59,7 +95,8 @@ export function AgentSwitchPicker({
         className={staticClassName ?? 'kr-agent-switch-static'}
         style={{ color: AGENT_COLORS[currentAgent] ?? 'var(--kr-text-faint)' }}
       >
-        {AGENT_LABELS[currentAgent] ?? currentAgent}
+        {displayName ?? AGENT_LABELS[currentAgent] ?? currentAgent}
+        {suffix && <span className="kr-agent-switch-suffix"> · {suffix}</span>}
       </span>
     );
   }
@@ -80,14 +117,23 @@ export function AgentSwitchPicker({
         aria-label={ariaLabel}
         aria-expanded={open}
         disabled={disabled || saving}
-        onClick={() => setOpen(value => !value)}
+        onClick={() => {
+          if (!open) updatePopoverPosition();
+          setOpen(value => !value);
+        }}
       >
         {saving ? <Loader2 size={9} className="spin" /> : <RefreshCw size={9} />}
-        <span>{AGENT_LABELS[currentAgent] ?? currentAgent}</span>
+        <span>{displayName ?? AGENT_LABELS[currentAgent] ?? currentAgent}</span>
+        {suffix && <span className="kr-agent-switch-suffix"> · {suffix}</span>}
         <ChevronDown size={9} />
       </button>
-      {open && (
-        <span className="kr-agent-switch-popover" role="menu">
+      {open && popoverPosition && createPortal(
+        <span
+          ref={popoverRef}
+          className="kr-agent-switch-popover"
+          role="menu"
+          style={popoverPosition}
+        >
           {choices.map(agent => (
             <button
               key={agent}
@@ -120,7 +166,8 @@ export function AgentSwitchPicker({
               {agent === currentAgent && <Check size={10} />}
             </button>
           ))}
-        </span>
+        </span>,
+        document.body,
       )}
     </span>
   );

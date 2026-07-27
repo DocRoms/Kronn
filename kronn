@@ -235,7 +235,7 @@ cmd_start_dev() {
         [[ "$have_cargo" == "1" ]] || printf "  ${DIM}  cargo → curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh${RESET}\n"
         [[ "$have_node"  == "1" ]] || printf "  ${DIM}  node  → brew install node   (macOS) · Node ≥ 24${RESET}\n"
         [[ "$have_pnpm"  == "1" ]] || printf "  ${DIM}  pnpm  → npm install -g pnpm   (or: corepack enable)${RESET}\n"
-        [[ "$have_watchexec" == "1" ]] || printf "  ${DIM}  watchexec → brew install watchexec   (macOS) · cargo install watchexec-cli (other)${RESET}\n"
+        [[ "$have_watchexec" == "1" ]] || printf "  ${DIM}  watchexec → brew install watchexec   (macOS) · cargo install --locked watchexec-cli   (Linux / WSL; start-dev hot-reload only)${RESET}\n"
         return 1
     fi
 
@@ -281,17 +281,24 @@ cmd_start_dev() {
     # in native dev :3140 serves the API ONLY, so an unqualified "→ :3140" in the
     # banner is misleading. See main.rs `banner_entry_url`.
     export KRONN_DEV_UI_URL="http://localhost:5173"
+    KRONN_DEV_BACKEND_FAILURE_FILE="${TMPDIR:-/tmp}/kronn-dev-backend-failure-$$"
+    export KRONN_DEV_BACKEND_FAILURE_FILE
+    rm -f "$KRONN_DEV_BACKEND_FAILURE_FILE"
     ( cd "$KRONN_DIR" && make dev-backend ) &
     # NOT `local`: the EXIT trap fires AFTER this function returns, so a local
     # would be out of scope there → `set -u` "unbound variable" (the bug this
     # replaces). A script-global + ${:-} guard makes teardown robust whether the
     # trap fires on Ctrl+C (INT, still in-function) or at script EXIT.
     KRONN_DEV_BACKEND_PID=$!
+    KRONN_DEV_FRONTEND_PID=""
     # Teardown must kill the whole native stack, not just the `make` pid: the
     # actual backend is a watcher grandchild that survives a single-pid kill
     # (the leak that stranded orphaned backends holding the data-dir lock). Kill
     # the direct child, then reap the grandchildren by pattern. Quiet on Ctrl+C.
-    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" 2>/dev/null || true; reap_native_backend >/dev/null 2>&1 || true' EXIT INT TERM
+    trap 'kill "${KRONN_DEV_BACKEND_PID:-}" "${KRONN_DEV_FRONTEND_PID:-}" 2>/dev/null || true; reap_native_backend >/dev/null 2>&1 || true; rm -f "${KRONN_DEV_BACKEND_FAILURE_FILE:-}"' EXIT
+    # An intentional Ctrl+C exits directly; the EXIT trap above performs the
+    # cleanup without misreporting the resulting child deaths as a crash.
+    trap 'exit 130' INT TERM
 
     # Do not start Vite until the API really answers. Starting both processes
     # concurrently made a fresh Rust build flood the UI with proxy ECONNREFUSED
@@ -331,8 +338,40 @@ cmd_start_dev() {
         ) >/dev/null 2>&1 &
     fi
 
-    # Frontend (Vite) in the foreground.
-    ( cd "$KRONN_DIR" && make dev-frontend )
+    # Keep both long-lived children under one supervisor. Vite used to stay in
+    # the foreground with no post-readiness check on the backend child: if
+    # watchexec disappeared later, the UI survived and retried `/api/*`
+    # forever, making a dead backend look like a very slow reconnect.
+    #
+    # Bash 3.2 (the macOS system shell) has no `wait -n`, hence the portable
+    # one-second liveness poll. Any unexpected child exit tears down the other
+    # side via the EXIT trap and returns a clear terminal error.
+    ( cd "$KRONN_DIR" && make dev-frontend ) &
+    KRONN_DEV_FRONTEND_PID=$!
+    local stack_status
+    while true; do
+        if [[ -s "$KRONN_DEV_BACKEND_FAILURE_FILE" ]]; then
+            local backend_exit_status
+            backend_exit_status="$(sed -n '1p' "$KRONN_DEV_BACKEND_FAILURE_FILE")"
+            fail "Backend command failed (exit ${backend_exit_status:-unknown}) — stopping the UI instead of retrying forever."
+            printf "  ${DIM}Fix the backend error above, then run ${BOLD}kronn start-dev${RESET}${DIM} again.${RESET}\n"
+            return 1
+        fi
+        if dev_stack_process_state "$KRONN_DEV_BACKEND_PID" "$KRONN_DEV_FRONTEND_PID" >/dev/null; then
+            sleep 1
+            continue
+        else
+            stack_status=$?
+        fi
+
+        if [[ "$stack_status" == "2" ]]; then
+            fail "Backend watcher exited after startup — stopping the UI instead of leaving it disconnected."
+            printf "  ${DIM}Fix the backend error above, then run ${BOLD}kronn start-dev${RESET}${DIM} again.${RESET}\n"
+        else
+            fail "Frontend dev server exited — stopping the backend watcher."
+        fi
+        return 1
+    done
 }
 
 cmd_repos() {
@@ -671,10 +710,10 @@ cmd_init() {
 # start. Pattern-matched (not process-group / setsid, which macOS lacks) and a
 # no-op when nothing native is running. Never matches this script itself: its
 # cmdline is `bash …/kronn`, which contains none of these patterns.
-# NOTE on patterns: match `watchexec … cargo run`, never bare `watchexec`, so
-# stopping Kronn cannot kill an unrelated watcher. Killing the backend alone is
-# not enough: a surviving watcher respawns it on the next file change and
-# re-grabs the data-dir lock, so the watcher MUST be reaped too.
+# NOTE on patterns: match Kronn's watched backend command, never bare
+# `watchexec`, so stopping Kronn cannot kill an unrelated watcher. Killing the
+# backend alone is not enough: a surviving watcher respawns it on the next file
+# change and re-grabs the data-dir lock, so the watcher MUST be reaped too.
 #
 # Frontend: `make dev-frontend` spawns `vite` as a node grandchild that
 # survives/wedges the same way (process alive but no longer bound to :5173 → the

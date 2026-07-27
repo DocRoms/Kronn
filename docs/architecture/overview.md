@@ -34,6 +34,18 @@ Three Docker services behind nginx gateway:
 - **Runtime probe**: if no local binary is found, `probe_runtime()` tests npx availability (15s timeout, 5min cache). `AgentDetection.runtime_available` distinguishes "installed locally" from "runnable via npx". Frontend uses `isUsable(agent) = (installed || runtime_available) && enabled`.
 - MCPs work with all 6 agents: Claude Code (`.mcp.json`), Kiro (`.kiro/settings/mcp.json`), Gemini CLI (`.gemini/settings.json`), Vibe (`.vibe/config.toml`), Codex (`~/.codex/config.toml`), Copilot (prompt-injected). Disk sync writes all formats simultaneously. Claude/Kiro/Gemini use identical JSON format (`mcpServers`). Kiro auth via AWS Builder ID.
 - **Prompt injection order**: profiles → skills → directives → MCP context. All injected via `extra_context` parameter to `agent_command()`.
+- **Plugin invocation preference**: each configuration persists one preferred
+  available interface (`api`, `mcp` or `cli`). Active hybrid plugins append a
+  compact “preferred first, alternatives as fallback” rule to the shared MCP
+  context. Pure single-interface plugins do not spend prompt tokens on an
+  obvious rule, and all agent runners consume the same resulting context.
+- **Plugin readiness**: diagnostics execute the configured interface instead
+  of checking that a URL or binary merely exists. API checks reuse the
+  production auth/SSRF/allowlist path against a built-in safe GET and discard
+  the body; stdio MCP checks require a bounded `initialize` response, SSE
+  checks negotiate the event stream, and Streamable HTTP checks send a bounded
+  `initialize` request. Only the preferred (or sole) interface is required for
+  the overall status; alternate interfaces remain visible as optional.
 - `AgentConfig` has `full_access: bool` field (persisted in config.toml). When enabled, runner adds `--dangerously-skip-permissions` (Claude), `--full-auto` (Codex), `--trust-all-tools` (Kiro), `--allow-all-tools` (Copilot).
 - API: `GET/POST /api/config/agent-access` to read/set the full_access flag. UI toggle in Config > Agents card.
 - **Agent lifecycle**: agents can be uninstalled (`POST /api/agents/uninstall`) or toggled on/off (`POST /api/agents/toggle`). Disabled agents tracked in `AppConfig.disabled_agents: Vec<AgentType>`. `AgentDetection` includes `enabled: bool`. Uninstall uses platform-specific commands (npm for Claude/Codex/Copilot, uv/pipx/pip3 for Vibe).
@@ -49,22 +61,38 @@ Three Docker services behind nginx gateway:
 ### Discussions
 - `Discussion.project_id` is `Option<String>` (Rust) / `string | null` (TS).
 - Discussions without a project are "global" — shown under "Général" group in the sidebar.
+- **Portable bundles**: `GET /api/discussions/{id}/export` emits the versioned
+  `kronn.discussion` format; `POST /api/discussions/import` restores the
+  transcript, author attribution, available attachment content, revision audit
+  events and directly linked plan tasks. Runtime credentials and local
+  execution/session state are excluded. Imports are atomic and tracked by
+  source discussion id + semantic content hash, so an exact replay is a no-op
+  and changed content is an explicit conflict.
+  [src: file: backend/src/api/disc_portability.rs:36-39]
+  [src: file: backend/src/api/disc_portability.rs:291-359]
+  [src: file: backend/src/api/disc_portability.rs:439-764]
+  [src: file: backend/src/db/sql/093_discussion_imports.sql:1-15]
 - Agent runs in a temp directory for global discussions (no project context).
 - `CreateDiscussionRequest.project_id` is also optional; frontend offers "Aucun projet" option.
 - **Discussion search/filter**: sidebar includes a search input (`discSearchFilter` state) that filters discussions by title (case-insensitive substring match). When a search term is active, collapsed groups are auto-expanded and only matching discussions are shown. A clear button resets the filter.
 - **Archive/unarchive**: `Discussion.archived: bool` (default false). Swipe right on sidebar item to archive, swipe left to delete. Archived discussions shown in a collapsible "Archives" section at the bottom of the sidebar. `PATCH /api/discussions/:id` with `UpdateDiscussionRequest { title?, archived? }`.
 - **Title editing**: double-click or pencil icon in chat header for inline rename.
 - **Disabled agent detection**: if a discussion's agent is uninstalled or disabled, the text input is grayed out with a warning banner linking to agent config.
+- **Canonical mentions (0.9.2 / KT-47)**: agents address one another with the stable `@claude`, `@codex`, `@vibe`, `@gemini`, `@kiro`, `@copilot` and `@ollama` triggers, and address the local human as `@user` (rendered with the configured Kronn pseudo/Gravatar). The dispatch target is persisted separately from Markdown so the awaited responder is unambiguous. Settings stores an optional validated `#RRGGBB` color per agent; the global identity context applies it to message attribution and mention chips immediately, with the built-in palette as a safe fallback.
+- **Explicit external-session ownership (0.9.2 / KT-51)**: `discussions.source_agent + source_session_id` is a versioned (`source_binding_version = 1`) durable resume key, distinct from live `discussion_sessions` presence. Migration 092 closes legacy duplicate open owners and a partial unique index guarantees that one concrete CLI session owns at most one discussion. The header chip links/unlinks, displays and copies the full session id and reports connected vs offline; `/api/disc/session-status` exposes both durable ownership and current peer presence. `disc_link` refuses to transfer an already-owned session unless the caller explicitly sets `force_reassign`.
 - **Agent switch**: the primary agent (`Discussion.agent`) can be changed mid-conversation via `PATCH /api/discussions/:id` with `{ agent: AgentType }`. On switch: agent is updated, `summary_cache` is invalidated (different agent = different budget), a User message is inserted prompting the new agent to summarize and continue, and `runAgent` is auto-triggered. UI: clickable agent name in chat header with dropdown of installed agents.
-- **Disc-first refactor (0.8.6 phase 2)**: a discussion is now a TOPIC, decoupled from agent sessions. Schema: `discussion_sessions(disc_id, agent_type, session_id, role 'owner'|'peer', status 'active'|'paused'|'left', joined_at, left_at)` lies N CLI sessions to 1 disc. The form for creating a discussion exposes a checkbox "Launch an agent right away" (default ON, legacy 80% case unchanged). Unchecked → disc created empty, the user invites agents later from the header's `[+ Inviter]` button. Migration 060 backfills existing discs with `source_agent` set into one `'owner'` row each. The legacy `Discussion.agent` column stays for back-compat but `discussion_sessions` is now the source of truth for "who is in this room".
+- **Disc-first refactor (0.8.6 phase 2)**: a discussion is now a TOPIC, decoupled from agent sessions. Schema: `discussion_sessions(disc_id, agent_type, session_id, conversation_id, role 'owner'|'peer', status 'active'|'paused'|'left', joined_at, left_at)` links N CLI sessions to 1 disc. `session_id` identifies the Kronn bridge; nullable `conversation_id` is distinct native CLI metadata used only for a verified resume affordance. The form for creating a discussion exposes a checkbox "Launch an agent right away" (default ON, legacy 80% case unchanged). Unchecked → disc created empty, the user invites agents later from the header's `[+ Inviter]` button. Migration 060 backfills existing discs with `source_agent` set into one `'owner'` row each; migration 097 adds the native conversation id. The legacy `Discussion.agent` column stays for back-compat but `discussion_sessions` is now the source of truth for "who is in this room".
 - **Cross-agent collab (0.8.6 phase 2)**: N CLI agents (Claude Code, Codex, Gemini, Kiro, Vibe, Copilot…) can share one Kronn discussion in real time. Flow:
   1. User clicks `[+ Inviter]` once → backend mints a `kr-join-…` token (TTL 10 min, **multi-use** : same token works for N peers).
-  2. Modal displays a copy-paste instruction with `disc_join({token: "kr-join-…"})`.
+  2. Modal displays an enriched copy-paste handoff by default: call
+     `disc_join`, load the shared plan on demand, use the authorized Planning
+     writes, then remain on `disc_wait_for_peer`. A bare token-only form remains
+     selectable when the human supplies the briefing separately.
   3. User launches each CLI host-launched (in its own terminal) and pastes the instruction.
-  4. Each CLI's MCP bridge (`disc-introspection-mcp.py`) calls `POST /api/discussions/peer-join` → atomic transaction validates token, creates `discussion_sessions` row, returns `{disc_id, peer_count, disc_title, recent_messages, next_steps}`.
+  4. Each CLI's MCP bridge (`disc-introspection-mcp.py`) calls `POST /api/discussions/peer-join` → atomic transaction validates token, creates `discussion_sessions` row, returns `{disc_id, peer_count, disc_title, recent_messages, plan_snapshot, next_steps}`. `plan_snapshot` is bounded (objective, up to eight current tasks and three recently completed tasks) so a client with a stale MCP tool catalogue can resume read-only without inflating context; `next_steps` tells it to reconnect MCP before claiming any mutation.
   5. The bridge stashes the disc_id in a module-level `_CURRENT_DISC_ID` (runtime binding, no env-var required for host-launched).
   6. Agent's `agent_type` is **auto-derived** from the MCP `clientInfo.name` handshake (Claude Code → ClaudeCode, codex-cli → Codex, vibe → Vibe), with `/proc/<ppid>/cmdline` fallback for CLIs that send a useless clientInfo. No need to set `KRONN_AGENT_TYPE` env.
-  7. Agents talk via `disc_append({content: "..."})` (simple mode auto-fills disc_id, source_msg_id, agent_type, role=Agent). Anything they reply only in their local terminal is invisible to peers — the `next_steps` directive makes that explicit and imperative. Routing is asymmetric by design: a human turn is left to connected MCP peers (no duplicate native answer), while a live peer Agent turn wakes the discussion's native principal. Bulk imports, duplicate appends and no-agent rooms never wake it. `disc_create_room` creates a no-agent room by default, so only explicitly joined peers answer; the lower-level `disc_create` can still opt into a native principal.
+  7. Agents talk via `disc_append({content: "..."})` (simple mode auto-fills disc_id, source_msg_id, agent_type, role=Agent). Human and joined-agent routing use the same typed identities: no mention addresses only the configured discussion agent; canonical mentions can address punctual native agents; `-cli[-N]` aliases address one exact joined session; `@all` expands only to active responders already visible in the room and excludes a configured agent disabled by `no_agent`. Unrelated CLI sessions do not receive targeted User or Agent prompts, which prevents wasted context tokens. Compatibility `target_agents` / `target_agent` projections remain on the wire for rolling upgrades. No-agent rooms never start a native process. Bulk imports and duplicate appends never wake an agent. The complete decision matrix lives in [`discussion-agent-routing.md`](discussion-agent-routing.md).
   8. Agents block on `disc_wait_for_peer({timeout_secs: 60})` for new peer messages — long-poll endpoint that filters out the caller's own `agent_type`. Default 60 s, clamped 1–90 s server-side.
   9. Agents leave via `disc_leave()` — marks `status='left'`, idempotent. The bridge clears its local `_CURRENT_DISC_ID`. `(agent_type, session_id)` pair is stable per bridge lifetime (`_BRIDGE_SESSION_ID` module-level, 2026-05-21 fix — was regenerated per call, broke disc_leave).
   10. UI header shows live participant chips per agent_type (🤖 Claude, 💠 Codex, ✨ Gemini, 🐙 Kiro, 💻 Copilot, 🐱 Vibe, 🦙 Ollama, ⚙️ Custom, 👤 Unknown), polled every 5 s. Messages auto-refresh every 5 s on the active disc.
@@ -84,7 +112,15 @@ Three Docker services behind nginx gateway:
 - **Component split (2026-03-28)**: DiscussionsPage split into 7 files: orchestrator (1218L) + ChatHeader, ChatInput, DiscussionSidebar, NewDiscussionForm, MessageBubble, SwipeableDiscItem.
 - **CSS system (2026-03-28)**: token-based CSS (`src/styles/tokens.css`, `utilities.css`, `components.css`) + per-page CSS. No CSS framework.
 - **Backend split (2026-03-28)**: `projects.rs` split into projects (1396L) + audit (1848L) + ai_docs (184L) + discover (426L).
-- **Vibe agent**: uses `vibe-runner.py` (calls `run_programmatic()` SDK directly, bypasses CLI stdin hang). Falls back to Mistral API if vibe not installed.
+- **Vibe agent**: uses `vibe-runner.py` (calls `run_programmatic()` SDK directly,
+  bypasses CLI stdin hang). Falls back to Mistral API if vibe not installed.
+  Agent detection keeps three independent states: binary/runtime presence,
+  operator enablement, and authentication readiness. For Vibe, readiness accepts
+  the effective configured Mistral token, `MISTRAL_API_KEY`, or
+  `~/.vibe/.env` without returning the credential. Settings exposes
+  `vibe --setup`; discussion streaming performs the same preflight and persists
+  an actionable System message instead of spawning a runner that cannot
+  authenticate.
 - **Multi-line input**: `<textarea>` with auto-resize (Shift+Enter for newlines, Enter to send).
 - **Full access badge**: "Full access" indicator on agent messages when `full_access: true`.
 - **Multi-user (Phase 1 — contacts + Phase 2 — WebSocket sync)**: `contacts` table (migration 022) with CRUD API (`/api/contacts`). Invite code format `kronn:pseudo@host:port`. Sidebar section shows contacts with online/offline status via real-time WebSocket. Settings > Identity displays the invite code.
@@ -95,6 +131,15 @@ Three Docker services behind nginx gateway:
 - **Cross-platform**: `core/env.rs` provides `is_docker()` and `host_os_label()`. Docker-specific logic (chown, safe.directory, /host-home) is conditional. Agent uninstall commands use `#[cfg(unix)]`/`#[cfg(windows)]`. Tauri desktop app embeds the backend with `get_backend_url` command.
 
 ### Security & auth
+
+**Plugin portability**: `POST /api/mcps/bundles/preview|export|import` provides
+versioned multi-plugin bundles. Configuration-only exports are clear JSON and
+exclude every environment value; value-bearing exports require typed
+confirmation plus a passphrase and encrypt the complete payload. Imports use
+the receiving instance's trusted registry, refuse unknown executables and
+silent overwrites, never inherit global/project/host scope, and record a
+value-free audit event. See
+[`plugin-portability.md`](plugin-portability.md).
 
 **Bearer token authentication** (opt-in):
 - Middleware in `lib.rs` checks `Authorization: Bearer <token>` on all routes except `/api/health`.
@@ -293,6 +338,15 @@ Sync triggers: toggle project, toggle global, toggle host_sync, create/update/de
 
 **Agent API broker (0.8.6)** — `POST /api/agent-api/call` + `api_call` MCP tool let an agent invoke any Kronn-configured plugin (registry OR custom) **without ever seeing the credentials**. Reuses the workflow `ApiCall` executor byte-for-byte. Project scope resolved server-side from 3 fallback sources (in priority) : (1) explicit `project_id` arg, (2) `disc_id` → `disc.project_id` (Kronn-spawned agents), (3) `api_config_id` → `config.project_ids[0]` (host-CLI sessions outside Kronn). Auth happens server-side per `ApiSpec.auth` ; the agent provides plugin_slug + endpoint + (optional) query/headers/body/path_params. Non-secret identifiers (organization_id, account_id, workspace_slug) are referenceable via **`${ENV.KEY}` placeholders** that Kronn substitutes from the encrypted env at request build time — works in `endpoint_path`, `query`, `headers`, `body` (string leaves) and `path_params`. The substitution is case-insensitive on the `ENV.` prefix and normalises keys to UPPER_SNAKE for the lookup. The `mcp_list` MCP tool surfaces each plugin's `config_keys[]` with an `auth_managed: bool` flag so the agent distinguishes credentials (don't reference) from free-form identifiers (free to use as `${ENV.X}`). Deferred after 0.9.0: side_effect opt-in gate and per-disc rate limiting; the persistent audit log is already shipped (cf. `project_api_call_logs_0_8_6`).
 
+**Built-in CLI credential providers (0.9.2)** — A trusted registry plugin may
+declare `ApiAuthKind::CliToken`, which executes one fixed binary with literal
+arguments (no shell), keeps stdout in memory and injects it into the broker
+request. Custom and imported plugin specifications cannot select this auth kind,
+so plugin JSON cannot become an arbitrary local-command primitive. Fastly is the
+first consumer: `fastly auth token` remains the single local credential source,
+and the deterministic API broker injects the result as `Fastly-Key` without
+persisting or returning it.
+
 **Custom API plugins (0.8.1, extended 0.8.6)** — Sentinel `api-custom` server id in the registry surfaces a "Custom API" tile pinned at the top of the Add-plugin drawer. Picking it swaps the panel to a freeform editor (name, base URL, free-form description, optional docs URL, N {label, value} fields, **endpoints[] declared inline + auth picker (0.8.6)**). On submit, the backend materializes a fresh `McpServer` with `source = McpSource::Manual`, transport `ApiOnly`, id `custom-{slug}-{nano}`. The `ApiSpec.config_keys` are derived by uppercasing/snake-casing the field labels (helper `slug_env_key`). **0.8.6** : `ApiSpec.auth` is no longer hardcoded to `ApiAuthKind::None` — the form exposes a picker for `None` / `Bearer` / `TokenExchange` (Didomi-shape : `POST /sessions` JSON body with `${ENV.KEY}` placeholders → `$.access_token` extracted via JSONPath → Bearer header injected on all subsequent calls, cached per-config with same `oauth2_cache` Mutex+TTL pattern as `OAuth2ClientCredentials`). Endpoints declared on the form land in `ApiSpec.endpoints[]` so the `api_call` MCP broker's allowlist allows them. `PUT /api/mcps/custom/:server_id` (0.8.6) lets the user edit the spec post-creation without delete-and-recreate ; the `server_id` is preserved across edits so existing references (configs, workflow ApiCall steps) stay valid. The unified form ALSO patches encrypted env values in the same submit so structure + credentials are managed in one place — the legacy "Edit secrets" drawer is hidden on Custom plugins (kept for registry plugins as their only env path). The AI helper (cf. § below) learns to fill endpoints + auth from the plugin's docs URL.
 
 **AI helper bubble (shared, 0.8.1 UX refactor)** — Single-phase chat used by both `ApiCallAiHelper` (workflow steps) and `CustomApiAiHelper` (custom API form). Phase `picking-agent` removed; agent selection is a dropdown in the bubble header. Welcome state with 3 starter chips (curl / docs link / freeform) when no message has been sent yet — avoids auto-firing the agent for a generic intro. CSS lives in `frontend/src/components/aiHelper.css` (extracted from `WorkflowsPage.css` so styles load on McpPage too). Both helpers share `parseApplyBlocks` from `ApiCallAiHelper.tsx` (the `KRONN:APPLY` wire contract). TD-helpers-unify: a future refactor should extract a shared `<AiChatHelperShell>` so the two helpers stop duplicating ~60% of lifecycle code.
@@ -301,7 +355,11 @@ Sync triggers: toggle project, toggle global, toggle host_sync, create/update/de
 - `GET /api/mcps` — overview (servers + configs with masked secrets + customized_contexts)
 - `GET /api/mcps/registry` — built-in registry (searchable, includes token_url/token_help)
 - `POST /api/mcps/refresh` — scan & detect
+- `POST /api/mcps/bundles/preview` — review selected keys and their exportability
+- `POST /api/mcps/bundles/export` — download a safe-clear or encrypted-value bundle
+- `POST /api/mcps/bundles/import` — validate and import a bundle without widening scope
 - `POST /api/mcps/configs` — create config (auto-creates server from registry if needed)
+- `POST /api/mcps/configs/:id/probe` — run display-safe readiness checks for a configured plugin
 - `PUT /api/mcps/configs/:id` — update config (label, env, global, args)
 - `DELETE /api/mcps/configs/:id` — delete config
 - `PUT /api/mcps/configs/:id/projects` — set project linkages

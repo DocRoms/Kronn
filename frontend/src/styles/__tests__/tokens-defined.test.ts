@@ -31,6 +31,15 @@ function definedVars(): Set<string> {
   return defined;
 }
 
+function themeBlock(name: string): string {
+  const tokens = readFileSync(join(SRC, 'styles', 'tokens.css'), 'utf8');
+  const match = tokens.match(
+    new RegExp(`:root\\[data-theme="${name}"\\]\\s*\\{([\\s\\S]*?)\\n\\}`),
+  );
+  expect(match, `Missing token block for theme "${name}"`).not.toBeNull();
+  return match?.[1] ?? '';
+}
+
 /** Every `var(--kr-…)` usage WITHOUT a fallback, with its file. */
 function usagesWithoutFallback(): { name: string; file: string }[] {
   const out: { name: string; file: string }[] = [];
@@ -52,5 +61,13 @@ describe('CSS design tokens', () => {
     const unique = [...new Map(offenders.map(o => [`${o.name}@${o.file}`, o])).values()];
     expect(unique, `Undefined --kr-* vars (define in tokens.css or add a fallback):\n` +
       unique.map(o => `  ${o.name}  (${o.file})`).join('\n')).toEqual([]);
+  });
+
+  it('keeps Euronews text overlays on its light palette', () => {
+    const euronews = themeBlock('euronews');
+    for (const token of ['--kr-text-rgb', '--kr-text-faint-rgb', '--kr-text-ghost-rgb']) {
+      expect(euronews, `${token} must not inherit the dark theme RGB triple`)
+        .toMatch(new RegExp(`${token}\\s*:`));
+    }
   });
 });

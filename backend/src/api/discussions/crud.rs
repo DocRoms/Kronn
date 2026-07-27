@@ -68,6 +68,22 @@ pub async fn get(
     }
 }
 
+/// GET /api/discussions/{id}/native-agent
+pub async fn native_agent_mode(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<DiscussionNativeAgentMode>> {
+    match state
+        .db
+        .with_read_conn(move |conn| crate::db::discussions::get_disc_no_agent(conn, &id))
+        .await
+    {
+        Ok(Some(disabled)) => Json(ApiResponse::ok(DiscussionNativeAgentMode { disabled })),
+        Ok(None) => Json(ApiResponse::err("Discussion not found")),
+        Err(error) => Json(ApiResponse::err(format!("DB error: {error}"))),
+    }
+}
+
 /// POST /api/discussions
 pub async fn create(
     State(state): State<AppState>,
@@ -161,6 +177,8 @@ pub async fn create(
         author_avatar_email,
         source_msg_id: None,
         duration_ms: None,
+        target_agent: None,
+        reply_to_message_id: None,
     };
 
     let workspace_mode = req.workspace_mode.unwrap_or_else(|| "Direct".into());
@@ -327,6 +345,7 @@ pub async fn update(
     let tier = req.tier;
     let new_agent = req.agent;
     let summary_strategy = req.summary_strategy;
+    let no_agent = req.no_agent;
 
     // Reject conflicting directives on update
     if let Some(ref ids) = directive_ids {
@@ -390,6 +409,10 @@ pub async fn update(
                     crate::db::discussions::update_discussion_agent(conn, &id, agent)? || updated;
                 // Invalidate summary — new agent has different budget/context
                 crate::db::discussions::invalidate_summary_cache(conn, &id)?;
+            }
+            if let Some(disabled) = no_agent {
+                updated =
+                    crate::db::discussions::set_disc_no_agent(conn, &id, disabled)? || updated;
             }
             Ok(updated)
         })
@@ -630,5 +653,38 @@ mod tests {
         let state = state_with_disc("d-idle").await;
         let resp = delete(State(state), Path("d-idle".to_string())).await;
         assert!(resp.0.success);
+    }
+
+    #[tokio::test]
+    async fn native_agent_mode_can_be_disabled_restored_and_reloaded() {
+        let state = state_with_disc("d-peer-only").await;
+
+        let initial =
+            native_agent_mode(State(state.clone()), Path("d-peer-only".to_string())).await;
+        assert!(!initial.0.data.expect("mode").disabled);
+
+        for disabled in [true, false] {
+            let request: UpdateDiscussionRequest =
+                serde_json::from_value(serde_json::json!({ "no_agent": disabled })).unwrap();
+            let updated = update(
+                State(state.clone()),
+                Path("d-peer-only".to_string()),
+                Json(request),
+            )
+            .await;
+            assert!(updated.0.success);
+
+            let persisted =
+                native_agent_mode(State(state.clone()), Path("d-peer-only".to_string())).await;
+            assert_eq!(persisted.0.data.expect("mode").disabled, disabled);
+        }
+    }
+
+    #[tokio::test]
+    async fn native_agent_mode_rejects_an_unknown_discussion() {
+        let state = state_with_disc("d-existing").await;
+        let response = native_agent_mode(State(state), Path("d-missing".to_string())).await;
+        assert!(!response.0.success);
+        assert_eq!(response.0.error.as_deref(), Some("Discussion not found"));
     }
 }

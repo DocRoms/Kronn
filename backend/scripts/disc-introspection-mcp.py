@@ -84,6 +84,27 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "resolve_id",
+        "description": (
+            "Resolve one opaque Kronn UUID without probing multiple tools. "
+            "Supports messages, discussions, projects, workflows, Planning "
+            "tasks, Quick Prompts and Quick APIs. Returns a compact kind, "
+            "copyable reference when one exists, title/summary, parent "
+            "context and the suggested object-specific MCP tool. Use this "
+            "FIRST when the user pastes an ID without saying what it is."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": "Full opaque Kronn object UUID.",
+                },
+            },
+            "required": ["id"],
+        },
+    },
+    {
         "name": "disc_meta",
         "description": (
             "Return metadata about the current discussion (message_count, "
@@ -100,7 +121,8 @@ TOOLS = [
             "Return one message by either 0-indexed position (`idx`) or its "
             "copyable `MSG-xxxxxxxx` / full UUID (`message_id`). Negative idx "
             "counts from the end (-1 = last). Optional `before` / `after` "
-            "return a bounded surrounding window (maximum 10 each). Use this "
+            "return a bounded surrounding window (maximum 10 each). Replies "
+            "expose their durable `reply_to_message_id`. Use this "
             "when you need verbatim local context without loading or "
             "summarising the whole discussion. Cheap."
         ),
@@ -466,19 +488,42 @@ TOOLS = [
             "Ready to play.\"})`. The bridge auto-fills disc_id "
             "(from disc_join binding), generates a fresh message id, "
             "defaults role=Agent, and stamps your agent_type from "
-            "the MCP clientInfo handshake. One unambiguous structured "
-            "`@agent` mention outside code is carried as `target_agent`, "
-            "so one-shot agents such as Ollama can be durably re-run.\n"
+            "the MCP clientInfo handshake. Structured mentions outside code "
+            "are carried as ordered typed `targets`: canonical `@codex` / "
+            "`@claude` identities invoke the native discussion or punctual "
+            "agent, while `@codex-cli`, `@codex-cli-2`, … select one exact "
+            "joined CLI session. Multiple mentions fan out once per identity.\n"
+            "  To answer one specific message, also pass its durable "
+            "`reply_to_message_id` (available from `disc_get_message`). "
+            "Kronn validates that the target belongs to this discussion.\n"
+            "  ⚠ POSTING ALSO LISTENS : in SIMPLE mode this call keeps the "
+            "long-poll open after posting (result under `waited`), so you "
+            "cannot speak without getting back into the room. That is "
+            "deliberate — an agent that posts and stops polling shows as "
+            "offline and reads to the human as having left. Pass "
+            "`wait_for_reply: false` only to post twice in a row.\n"
+            "  ⚠ MENTIONS — use the identities Kronn exposes and NEVER invent "
+            "a pseudo. Native agents: `@claude`, `@codex`, `@vibe`, "
+            "`@gemini`, `@kiro`, `@copilot`, `@ollama`. Joined CLIs use the "
+            "matching `-cli` alias shown in the discussion (`@codex-cli`, "
+            "`@codex-cli-2`, etc.). `@codex` NEVER means `@codex-cli`. "
+            "The human of this "
+            "instance : `@user` — that exact trigger, not their first name, "
+            "not their pseudo, not `@romu`. A canonical mention renders as a "
+            "chip with the right identity and colour; an invented one renders "
+            "as dead text and the person it was meant for never sees they "
+            "were addressed.\n"
             "  • BULK (for cross-agent-memory transcript import, "
             "0.8.4) — pass `messages: [{source_msg_id, role, "
             "content, agent_type}, …]` to push a whole conversation "
             "history at once. Idempotent on (disc_id, source_msg_id) "
             "— re-pushing the same transcript does NOT duplicate.\n\n"
             "Returns `{appended, skipped_as_duplicates, diverged, "
-            "last_sort_order}`. ALWAYS use `last_sort_order` as the "
-            "`since_sort_order` of your next `disc_wait_for_peer` — "
-            "NEVER estimate your position (+1 per post drifts under "
-            "concurrent posters and silently skips messages). "
+            "last_sort_order}`. `last_sort_order` is only the WRITE receipt "
+            "for the message just posted — NEVER use it as a read cursor: a "
+            "peer message may have landed immediately before this write and "
+            "would be skipped. The bridge keeps a distinct durable read "
+            "cursor and uses it automatically for the chained wait. "
             "`diverged=true` means the Kronn UI was edited after a "
             "previous import — warn the user before more updates."
         ),
@@ -489,6 +534,23 @@ TOOLS = [
                 "role": {"type": "string", "description": "Simple mode : role override (default Agent). Use User if you're echoing the user's words."},
                 "agent_type": {"type": "string", "description": "Simple mode : explicit author override (default = auto from clientInfo)."},
                 "target_agent": {"type": "string", "description": "Simple mode : explicit one-shot responder override. Normally inferred from one unambiguous structured @agent mention outside code. AgentType value such as ClaudeCode, Codex or Ollama."},
+                "targets": {
+                    "type": "array",
+                    "description": "Simple mode: ordered exact responder identities. Prefer natural mentions; pass this only when a caller already knows the durable CLI session id.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "kind": {"type": "string", "enum": ["discussion_agent", "agent", "cli"]},
+                            "agent_type": {"type": "string"},
+                            "cli_session_id": {"type": "integer"},
+                        },
+                        "required": ["kind", "agent_type"],
+                    },
+                },
+                "reply_to_message_id": {"type": "string", "description": "Simple mode : durable id of the message being answered. Obtain it from disc_get_message; the target must belong to this discussion."},
+                "wait_for_reply": {"type": "boolean", "description": "Simple mode, default TRUE : after posting, the same call keeps listening for the next peer message (result under `waited`). Leave it on — posting without listening is what makes an agent look like it left the room. Pass false only when you are about to post again immediately."},
+                "source_msg_id": {"type": "string", "description": "Simple mode : dedup key. Derived from the message itself by default, so a retried tool call is idempotent instead of posting twice. Pass an explicit value only to post the SAME text twice on purpose."},
+                "wait_timeout_secs": {"type": "integer", "description": "Blocking seconds for the chained wait (default 60, clamped server-side). Prefer a long window."},
                 "disc_id": {"type": "string", "description": "Defaults to the runtime-bound disc from disc_join. Override only when you need to post to a DIFFERENT disc."},
                 "messages": {
                     "type": "array",
@@ -501,6 +563,20 @@ TOOLS = [
                             "content": {"type": "string"},
                             "agent_type": {"type": "string"},
                             "target_agent": {"type": "string", "description": "Optional explicit responder for this live message. Ignored as a dispatch signal by bulk historical imports."},
+                            "targets": {
+                                "type": "array",
+                                "description": "Typed responder identities for a live single-message append.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "kind": {"type": "string", "enum": ["discussion_agent", "agent", "cli"]},
+                                        "agent_type": {"type": "string"},
+                                        "cli_session_id": {"type": "integer"},
+                                    },
+                                    "required": ["kind", "agent_type"],
+                                },
+                            },
+                            "reply_to_message_id": {"type": "string", "description": "Optional durable id of an existing message in this discussion being answered."},
                         },
                         "required": ["source_msg_id", "role", "content"],
                     },
@@ -516,49 +592,83 @@ TOOLS = [
     {
         "name": "disc_link",
         "description": (
-            "Bind an existing Kronn disc to a (source_agent, "
-            "source_session_id) pair. Last-link-wins: any previous "
-            "binding is closed automatically. Use this when transferring "
-            "ownership of a thread from one agent CLI to another."
+            "Bind a Kronn disc to a durable CLI session, so a later MCP reload "
+            "finds the room again via `disc_find_by_session` without a fresh "
+            "invite token. ⚠ EVERY ARGUMENT IS OPTIONAL: called bare, "
+            "`disc_link({})` binds THIS CLI session to the currently-bound "
+            "disc — you cannot know your own durable session id, the bridge "
+            "derives it. `disc_join` already does this for you; call this only "
+            "to bind a disc you reached another way. Safe by default: if that "
+            "session already owns another discussion the call fails instead of "
+            "silently stealing it. Set force_reassign=true only when the user "
+            "explicitly asks to transfer ownership."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "disc_id": {"type": "string"},
-                "source_agent": {"type": "string"},
-                "source_session_id": {"type": "string"},
+                "disc_id": {"type": "string", "description": "Defaults to the bound disc."},
+                "source_agent": {"type": "string", "description": "Defaults to this client's agent type."},
+                "source_session_id": {
+                    "type": "string",
+                    "description": "Defaults to this bridge's durable CLI session id.",
+                },
+                "force_reassign": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Transfer an already-bound session. Explicit user intent required.",
+                },
             },
-            "required": ["disc_id", "source_agent", "source_session_id"],
+            "required": [],
         },
     },
     {
         "name": "disc_unlink",
         "description": (
-            "Release the current source binding on a disc. The "
-            "append-only history chain is preserved so the UI can still "
-            "show 'was previously imported from X'."
+            "Release YOUR OWN session binding on a disc. Every argument is "
+            "optional: bare, `disc_unlink({})` releases this CLI session's link "
+            "on the bound disc. ⚠ It does NOT detach the other agents — a shared "
+            "room holds one binding per joined session, and releasing them all is "
+            "a human action from the Kronn UI, not an agent one. The append-only "
+            "history chain is preserved either way."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"disc_id": {"type": "string"}},
-            "required": ["disc_id"],
+            "properties": {
+                "disc_id": {"type": "string", "description": "Defaults to the bound disc."},
+                "source_agent": {"type": "string", "description": "Defaults to this client's agent type."},
+                "source_session_id": {
+                    "type": "string",
+                    "description": "Defaults to this bridge's durable CLI session id.",
+                },
+            },
+            "required": [],
         },
     },
     {
         "name": "disc_find_by_session",
         "description": (
-            "Look up the Kronn disc_id currently bound to a (source_agent, "
-            "source_session_id) pair, or `null` if none. Call this FIRST "
-            "to decide between `disc_create` (no prior thread) and "
-            "`disc_append` (resume existing thread)."
+            "Look up the Kronn disc_id bound to a CLI session, or `null` if "
+            "none. ⚠ BOTH ARGUMENTS ARE OPTIONAL: called bare, "
+            "`disc_find_by_session({})` answers « which room is MY session "
+            "bound to? » and actively restores THIS bridge's runtime binding "
+            "and durable read cursor after an MCP reload. A legacy/pre-fix "
+            "session can still have a server link but no local resume "
+            "credential; that exceptional response carries "
+            "`rejoin_required: true` instead of falsely claiming the bridge is "
+            "ready, and needs one fresh kr-join bootstrap. "
+            "Also the way to decide between `disc_create` (no prior thread) "
+            "and `disc_append` (resume an existing one)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "source_agent": {"type": "string"},
-                "source_session_id": {"type": "string"},
+                "source_agent": {"type": "string", "description": "Defaults to this client's agent type."},
+                "source_session_id": {
+                    "type": "string",
+                    "description": "Defaults to this bridge's durable CLI session id.",
+                },
             },
-            "required": ["source_agent", "source_session_id"],
+            "required": [],
         },
     },
     {
@@ -616,10 +726,21 @@ TOOLS = [
             "ROOM. Other CLI agents (Claude, Codex, Gemini, Vibe, …) "
             "are listening. To talk to them you MUST call "
             "`disc_append({content: \"...\"})` — anything you reply "
-            "only in your own terminal is INVISIBLE to peers. The "
+            "only in your own terminal is INVISIBLE to peers. "
+            "⚠ JOINING IS NOT THE TASK : joining then going quiet "
+            "reads to the human as having left. You are expected to "
+            "STAY and FOLLOW the room — loop on "
+            "`disc_wait_for_peer` and answer what arrives, and when "
+            "the room is quiet pick up the next task from the shared "
+            "plan (`plan_get` / `task_list`) instead of idling. You "
+            "may read AND update those tasks. BEFORE your first "
+            "substantive action, announce the task / scope / next "
+            "action in the room with `disc_append`; peers must know "
+            "what you are taking before you edit or execute it. The "
             "response includes a `next_steps` field with the full "
-            "protocol; READ AND FOLLOW IT before doing anything "
-            "else. Tokens are single-use and expire after 10 min."
+            "protocol; READ AND "
+            "FOLLOW IT before doing anything else. Tokens are "
+            "single-use and expire after 10 min."
         ),
         "inputSchema": {
             "type": "object",
@@ -716,15 +837,30 @@ TOOLS = [
         "name": "disc_wait_for_peer",
         "description": (
             "Long-poll the current Kronn discussion for new messages "
-            "from OTHER agents. Blocks server-side (up to 90 s) until "
+            "from OTHER agents. Blocks server-side (up to 170 s) until "
             "either a new message appears (newer than `since_sort_order`, "
             "from an agent type different from this CLI's) or the "
             "timeout fires. Cheap on tokens — replaces polling loops "
             "where the agent kept calling `disc_meta` every few "
             "seconds. Returns `{timed_out, messages, "
-            "latest_sort_order}`. Pass back `latest_sort_order` as "
-            "the next `since_sort_order` to chain calls without "
-            "re-receiving the same messages. IMPORTANT: `timed_out=true` "
+            "latest_sort_order, withheld_by_routing}`. "
+            "`withheld_by_routing` counts newer peer turns deliberately "
+            "omitted because they target another identity, so a moving cursor "
+            "cannot be mistaken for a lost message. Omit `since_sort_order` in normal use: the "
+            "bridge keeps a durable cursor and acknowledges a delivered batch "
+            "only when the CLI makes its next subsequent tool call, tracked by "
+            "a bridge-local sequence rather than the client JSON-RPC id. An "
+            "unacknowledged batch is replayed after reconnect. When manually overriding it, only reuse "
+            "`latest_sort_order` returned by a WAIT — never "
+            "`last_sort_order` returned by an append. Every delivered item carries "
+            "a durable `message_id`; acknowledge or reply using those exact ids "
+            "(use `reply_to_message_id` for one transcript message). Current messages carry typed "
+            "`targets` that distinguish the configured discussion agent, a "
+            "punctual native agent, and one exact joined CLI. A joined CLI "
+            "receives User turns only when its own CLI identity is selected; "
+            "unrelated prompts are omitted to save tokens. Legacy "
+            "`target_agents` / `target_agent` remain compatibility projections. IMPORTANT: "
+            "`timed_out=true` "
             "(no peer activity in the window) is NORMAL in an active "
             "collaboration — call this tool AGAIN to keep waiting. A timeout "
             "is NOT end-of-conversation; only stop/`disc_leave()` when the "
@@ -735,11 +871,11 @@ TOOLS = [
             "properties": {
                 "since_sort_order": {
                     "type": "integer",
-                    "description": "Highest sort_order already seen (default -1 = from the start).",
+                    "description": "Advanced override: highest sort_order actually read. Normally omit it so the bridge uses its durable read cursor. Never pass an append's last_sort_order.",
                 },
                 "timeout_secs": {
                     "type": "integer",
-                    "description": "Max blocking seconds (default 60, clamped server-side to [1, 90]).",
+                    "description": "Max blocking seconds (default 60, clamped server-side to [1, 170]). Prefer a LONG wait: every return is a window where nobody is listening.",
                 },
             },
             "required": [],
@@ -1038,8 +1174,8 @@ TOOLS = [
             "  • Gate: `{\"name\":\"Validate\",\"step_type\":{\"type\":\"Gate\"},\"gate_message\":\"Approve?\",\"gate_request_changes_target\":\"<step name to loop back to>\"}`\n"
             "  • Notify: `{\"name\":\"Done\",\"step_type\":{\"type\":\"Notify\"},\"notify_config\":{...}}`\n"
             "  • BatchQuickPrompt: `{\"name\":\"Fan out\",\"step_type\":{\"type\":\"BatchQuickPrompt\"},\"batch_quick_prompt_id\":\"<qp id>\",\"batch_items_from\":\"{{previous_step.data}}\",\"batch_wait_for_completion\":true}`\n"
-            "  • BatchApiCall: `{\"name\":\"Bulk\",\"step_type\":{\"type\":\"BatchApiCall\"},\"batch_items_from\":\"{{previous_step.data}}\",\"api_plugin_slug\":\"…\",\"api_config_id\":\"…\",\"api_endpoint_path\":\"…\",\"api_method\":\"POST\"}` (fan one ApiCall over a list, zero tokens)\n"
-            "  • JsonData: `{\"name\":\"Seed\",\"step_type\":{\"type\":\"JsonData\"},\"json_data_payload\":\"[{...}]\"}` (deterministic data source, zero tokens — feeds `{{steps.Seed.data}}`)\n"
+            "  • BatchApiCall: `{\"name\":\"Bulk\",\"step_type\":{\"type\":\"BatchApiCall\"},\"batch_items_from\":\"{{previous_step.data}}\",\"api_plugin_slug\":\"…\",\"api_config_id\":\"…\",\"api_endpoint_path\":\"…\",\"api_method\":\"POST\"}` (fans one ApiCall over a list without starting a model)\n"
+            "  • JsonData: `{\"name\":\"Seed\",\"step_type\":{\"type\":\"JsonData\"},\"json_data_payload\":\"[{...}]\"}` (deterministic data source that starts no model — feeds `{{steps.Seed.data}}`)\n"
             "  • SubWorkflow: `{\"name\":\"Implement\",\"step_type\":{\"type\":\"SubWorkflow\"},\"sub_workflow_id\":\"<child id>\"}` — runs ANOTHER workflow as a step. Add `\"sub_workflow_foreach_file\":\".kronn/tasks.json\"` to run the child ONCE PER ITEM. **FOREACH RUNTIME CONTRACT (run-breaking): the engine exposes each item to the child as template vars `{{current_task.<field>}}` (e.g. path `/pulls/{{current_task.number}}/reviews`) AND as the file `.kronn/current_task.json`. Accessor is FIXED `current_task.*` — NOT `{{item.*}}`, NOT derived from the foreach file name.** Child must exist first. Call `workflow_step_schema` for the full contract.\n"
             "Advanced (Agent step): `output_format` = `{\"type\":\"TypedSchema\",\"schema\":{…}}` (validates+repairs the agent's JSON) or `{\"type\":\"Structured\"}`; `multi_agent_review:true` = second agent debates the output.\n"
             "Better than hand-authoring: `workflow_get`/`workflow_clone` a RICH workflow (e.g. AutoPilot) and adapt. Returns the created workflow JSON (id + all fields)."
@@ -1693,7 +1829,7 @@ TOOLS = [
             "and returns the canonical envelope `{data, status, summary}`.\n\n"
             "**Reuse first (cheapest)**: before hand-building a call, run "
             "`qa_list` — if a saved Quick API matches the action, run it via "
-            "`qa_run` (zero token cost on request construction; same shape "
+            "`qa_run` (the HTTP call starts no model; same shape "
             "across agents). Only fall through to a fresh `api_call` when no "
             "QA fits.\n\n"
             "**Discovery first**: call `mcp_list` to find available "
@@ -2034,9 +2170,10 @@ TOOLS = [
             "`next_check` (QAs are fast, sub-second to a few seconds) "
             "— just await the response.\n\n"
             "**Why use this over `api_call`** :\n"
-            "  - Zero token cost on request construction — the QA "
-            "already encodes endpoint, method, headers, query, body, "
-            "extract, pagination. You only pass the `vars`.\n"
+            "  - The HTTP call itself starts no model. The agent turn "
+            "that invokes it and any result retained in context still "
+            "consume normal agent tokens. The QA already encodes endpoint, "
+            "method, headers, query, body, extract and pagination.\n"
             "  - Same result across agents — Claude / Codex / Vibe / "
             "Ollama all call the same QA → identical request shape, "
             "identical result. Pure mechanical work, deagentified.\n"
@@ -2517,10 +2654,19 @@ def _binding_identity():
     """Best available identity for this logical CLI session.
 
     Prefer a platform session id because daemon/spare process topology is not
-    a logical-session boundary.  Other clients retain the proven outermost-CLI
-    fallback, so existing Codex and generic CLI binding keys do not rotate.
+    a logical-session boundary. Codex has no equivalent terminal/project
+    scope, but a verified native conversation UUID survives `codex resume`
+    across a complete CLI reboot and is therefore stronger than its outer
+    process id. Other clients retain the proven outermost-CLI fallback.
     """
-    return _platform_session_identity() or _cli_ancestor_identity()
+    platform = _platform_session_identity()
+    if platform is not None:
+        return platform
+    if _agent_type_for_session() == "Codex":
+        conversation_id = _native_conversation_id()
+        if conversation_id:
+            return ("codex-session", conversation_id)
+    return _cli_ancestor_identity()
 
 
 def _identity_key_from(identity):
@@ -2532,7 +2678,7 @@ def _identity_key_from(identity):
     without a platform session id keep finding their existing binding file."""
     if identity is None:
         return None
-    if identity[0] in ("claude-terminal", "claude-session"):
+    if identity[0] in ("claude-terminal", "claude-session", "codex-session"):
         raw = json.dumps(identity, separators=(",", ":"), ensure_ascii=False)
     else:
         raw = f"pid:{identity[0]}:{identity[1]}"
@@ -2555,6 +2701,80 @@ _BRIDGE_SESSION_ID = _resolve_bridge_session_id()
 def _session_id_for_caller():
     """Stable per-process session id. See `_BRIDGE_SESSION_ID` rationale."""
     return _BRIDGE_SESSION_ID
+
+
+def _native_conversation_id():
+    """Return the CLI's own resume id when the runtime exposes it.
+
+    This is intentionally separate from `_session_id_for_caller()`: the latter
+    identifies the Kronn bridge process, while this value is what the human can
+    pass to the CLI's native resume command. Unknown clients and malformed
+    values degrade to `None`; Kronn never fabricates a resumable id.
+    """
+    agent_type = _agent_type_for_session()
+    env_name = {
+        "ClaudeCode": "CLAUDE_CODE_SESSION_ID",
+        "Codex": "CODEX_THREAD_ID",
+    }.get(agent_type)
+    if not env_name:
+        return None
+    raw = os.environ.get(env_name)
+    if raw in (None, ""):
+        # Codex currently exposes CODEX_THREAD_ID to the interactive shell but
+        # some MCP launch paths do not forward it to the stdio server. A
+        # resumed Codex process still carries the exact native id in its own
+        # `codex resume <uuid>` argv, so recover that verified value from the
+        # CLI ancestor rather than leaving the participant permanently
+        # non-resumable. Claude has no equivalent stable argv contract here.
+        return _codex_resume_id_from_ancestors() if agent_type == "Codex" else None
+    if not raw or raw != raw.strip() or len(raw) > 512 or not raw.isprintable():
+        return None
+    try:
+        canonical = str(uuid.UUID(raw))
+    except (AttributeError, ValueError):
+        return None
+    return canonical if raw.lower() == canonical else None
+
+
+_CODEX_RESUME_CMD_RE = re.compile(
+    r"^\s*(?:(?:\S*/)?(?:node|nodejs|npx|pnpm|bun)\s+)?"
+    r"(?:\S*/)?codex\s+resume\s+([0-9a-fA-F-]{36})(?:\s|$)"
+)
+
+
+def _codex_resume_id_from_cmdline(cmdline):
+    """Extract only an actual `codex resume <uuid>` process invocation.
+
+    The expression is anchored and permits at most one known JS launcher
+    prefix. This deliberately rejects the same words appearing later inside a
+    `codex exec` prompt, where accepting a UUID would invent provenance.
+    """
+    if not isinstance(cmdline, str) or len(cmdline) > 64 * 1024:
+        return None
+    match = _CODEX_RESUME_CMD_RE.match(cmdline)
+    if not match:
+        return None
+    raw = match.group(1)
+    try:
+        canonical = str(uuid.UUID(raw))
+    except (AttributeError, ValueError):
+        return None
+    return canonical if raw.lower() == canonical else None
+
+
+def _codex_resume_id_from_ancestors():
+    """Find the nearest verified resumed Codex CLI in the MCP process tree."""
+    cur = os.getppid()
+    seen = set()
+    for _ in range(24):
+        if cur is None or cur <= 1 or cur in seen:
+            break
+        seen.add(cur)
+        conversation_id = _codex_resume_id_from_cmdline(_cmdline_of(cur))
+        if conversation_id:
+            return conversation_id
+        cur = _ppid_of(cur)
+    return None
 
 
 def _parent_process_cmdline():
@@ -2628,6 +2848,10 @@ def _agent_type_for_session():
 # settable at runtime by `disc_join({token})`. Same `_disc_id()`
 # entry point for all downstream tools = zero changes elsewhere.
 _CURRENT_DISC_ID = os.environ.get("KRONN_DISCUSSION_ID") or None
+_LAST_READ_SORT_ORDER_BY_DISC = {}
+_PENDING_READ_SORT_ORDER_BY_DISC = {}
+_RPC_SEQUENCE = 0
+_CURRENT_RPC_SEQUENCE = None
 
 
 def _set_current_disc_id(disc_id):
@@ -2638,6 +2862,45 @@ def _set_current_disc_id(disc_id):
     _CURRENT_DISC_ID = disc_id
     _CURRENT_DISC_META_CACHE["checked"] = False
     _CURRENT_DISC_META_CACHE["value"] = None
+
+
+def _set_read_cursor(disc_id, sort_order):
+    """Remember only a cursor the bridge has actually delivered to its caller."""
+    if (
+        isinstance(disc_id, str)
+        and disc_id
+        and isinstance(sort_order, int)
+        and not isinstance(sort_order, bool)
+        and sort_order >= -1
+    ):
+        current = _LAST_READ_SORT_ORDER_BY_DISC.get(disc_id)
+        if current is None or sort_order > current:
+            _LAST_READ_SORT_ORDER_BY_DISC[disc_id] = sort_order
+
+
+def _read_cursor(disc_id):
+    return _LAST_READ_SORT_ORDER_BY_DISC.get(disc_id)
+
+
+def _stage_read_cursor(disc_id, sort_order):
+    """Keep a delivered batch pending until the CLI makes another tool call."""
+    if (
+        not isinstance(disc_id, str)
+        or not disc_id
+        or not isinstance(sort_order, int)
+        or isinstance(sort_order, bool)
+        or sort_order < -1
+    ):
+        return
+    committed = _read_cursor(disc_id)
+    if committed is not None and sort_order <= committed:
+        return
+    pending = _PENDING_READ_SORT_ORDER_BY_DISC.get(disc_id)
+    if pending is None or sort_order > pending["sort_order"]:
+        _PENDING_READ_SORT_ORDER_BY_DISC[disc_id] = {
+            "sort_order": sort_order,
+            "rpc_sequence": _CURRENT_RPC_SEQUENCE,
+        }
 
 
 # 0.9.0 — presence root-fix: reload recovery via a persisted resume
@@ -2666,11 +2929,72 @@ def _binding_path():
     return _BINDING_PATH_CACHE["path"]
 
 
+def _legacy_codex_binding_path():
+    """Return the pre-KT-82 PID-keyed binding path for this Codex process.
+
+    The first MCP reload after upgrading still needs to consume the credential
+    written by the old bridge. The outer Codex process has not changed during
+    that reload, so its historical key remains discoverable. A successful
+    resume then writes the rotated credential at the new conversation-keyed
+    path, which survives later full CLI reboots. Missing/ambiguous ancestry
+    simply disables the compatibility read.
+    """
+    identity = _binding_identity()
+    if not identity or identity[0] != "codex-session":
+        return None
+    legacy_identity = _cli_ancestor_identity()
+    legacy_key = _identity_key_from(legacy_identity)
+    if not legacy_key:
+        return None
+    legacy_path = os.path.join(_BINDING_DIR, f"disc-binding-{legacy_key}.json")
+    return None if legacy_path == _binding_path() else legacy_path
+
+
+def _durable_session_id():
+    """The CLI session id that SURVIVES an MCP reload, or `None`.
+
+    KT-76 — `_session_id_for_caller()` is the bridge PROCESS identity and is
+    documented to rotate on reconnect, so it cannot anchor a lasting link. The
+    resume credential already relies on a stronger key (terminal+project, or
+    `CLAUDE_CODE_SESSION_ID`, or the outermost CLI); reuse exactly that one so
+    `disc_find_by_session` keeps finding the room after a reload. Fail-closed:
+    no durable identity means no link rather than a link that lies.
+    """
+    key = _identity_key_from(_binding_identity())
+    return f"cli-{key}" if key else None
+
+
+def _bind_session_to_disc(disc_id, agent_type):
+    """Link the durable CLI session to `disc_id`. Returns a dict the caller can
+    hand back to the agent verbatim.
+
+    Never passes `force_reassign`: stealing a session that another discussion
+    owns would silently redirect that other room's reconnects.
+    """
+    session_id = _durable_session_id()
+    if not session_id:
+        return {"session_bound": False, "session_bind_skipped": "no durable CLI identity"}
+    if not agent_type or agent_type == "Unknown":
+        return {"session_bound": False, "session_bind_skipped": "unknown agent type"}
+    try:
+        _unwrap(_http("POST", "/api/disc/link", {
+            "disc_id": disc_id,
+            "source_agent": agent_type,
+            "source_session_id": session_id,
+        }))
+    except Exception as exc:
+        # A session already owned by ANOTHER disc lands here — reported, not
+        # forced, and never fatal to the join itself.
+        return {"session_bound": False, "session_bind_error": str(exc)}
+    return {"session_bound": True, "session_id": session_id}
+
+
 def _write_binding(
     disc_id,
     resume_token,
     agent_type=None,
     pending_resume_token=None,
+    last_read_sort_order=None,
 ):
     """Persist the reload credential atomically, mode 0600. No-op when there is
     no durable identity (fail-closed). `pending_resume_token` is written before
@@ -2688,6 +3012,14 @@ def _write_binding(
         # 0600, no symlink follow), then atomic rename over `path`. A symlink
         # pre-placed at a PREDICTABLE temp name can no longer redirect the
         # truncating write to an arbitrary file.
+        existing = _read_binding_path(path)
+        if (
+            last_read_sort_order is None
+            and existing
+            and existing.get("disc_id") == disc_id
+        ):
+            last_read_sort_order = existing.get("last_read_sort_order")
+
         fd, tmp = tempfile.mkstemp(prefix=".disc-binding-", suffix=".tmp", dir=_BINDING_DIR)
         try:
             with os.fdopen(fd, "w") as f:
@@ -2696,6 +3028,12 @@ def _write_binding(
                     state["agent_type"] = agent_type
                 if pending_resume_token:
                     state["pending_resume_token"] = pending_resume_token
+                if (
+                    isinstance(last_read_sort_order, int)
+                    and not isinstance(last_read_sort_order, bool)
+                    and last_read_sort_order >= -1
+                ):
+                    state["last_read_sort_order"] = last_read_sort_order
                 json.dump(state, f)
                 f.flush()
                 os.fsync(f.fileno())
@@ -2800,12 +3138,14 @@ def _binding_transaction_lock():
             _close_binding_lock(lock)
 
 
-def _read_binding():
-    """Read the credential, refusing anything an attacker could have swapped
-    in: a symlink (O_NOFOLLOW), a non-regular file, one not owned by us, or one
-    readable by group/world. Returns the dict or `None`."""
+def _read_binding_path(path):
+    """Securely read one binding path, or return `None`.
+
+    Refuse anything an attacker could have swapped in: a symlink
+    (O_NOFOLLOW), a non-regular file, one not owned by us, or one readable by
+    group/world.
+    """
     import stat as _stat
-    path = _binding_path()
     if not path:
         return None
     try:
@@ -2847,6 +3187,21 @@ def _read_binding():
     return None
 
 
+def _read_binding():
+    """Read the current credential, with one Codex upgrade bridge.
+
+    A bridge written before Codex conversation-keyed bindings stored its file
+    under the outer process identity. During the first MCP-only reload that
+    same ancestor is still available, so accept the secure legacy file once.
+    The successful resume rotates and writes the credential to the new primary
+    path; a later full `codex resume` reboot then finds it by conversation id.
+    """
+    current = _read_binding_path(_binding_path())
+    if current is not None:
+        return current
+    return _read_binding_path(_legacy_codex_binding_path())
+
+
 def _clear_binding():
     path = _binding_path()
     if not path:
@@ -2854,6 +3209,72 @@ def _clear_binding():
     try:
         os.remove(path)
     except Exception:
+        pass
+
+
+def _commit_read_cursor(disc_id, sort_order):
+    """Advance the durable read cursor without conflating it with a write.
+
+    Memory is authoritative for this bridge process. Persistence is best
+    effort: a bridge without a durable identity remains correct until reload,
+    while a bound CLI resumes from the exact last wait it consumed.
+    """
+    _set_read_cursor(disc_id, sort_order)
+    cursor = _read_cursor(disc_id)
+    if cursor is None:
+        return
+    with _binding_transaction_lock() as locked:
+        if not locked:
+            return
+        binding = _read_binding()
+        if not binding or binding.get("disc_id") != disc_id:
+            return
+        persisted = binding.get("last_read_sort_order")
+        if isinstance(persisted, int) and persisted >= cursor:
+            return
+        _write_binding(
+            disc_id,
+            binding["resume_token"],
+            agent_type=binding.get("agent_type"),
+            pending_resume_token=binding.get("pending_resume_token"),
+            last_read_sort_order=cursor,
+        )
+
+
+def _ack_pending_read_cursors(next_rpc_sequence):
+    """Commit batches after any subsequent tool call reaches the bridge.
+
+    The sequence is generated locally instead of trusting the JSON-RPC `id`:
+    clients may legally reuse an id after receiving a response or omit it.
+    This is a transport-consumption acknowledgement, not proof that the model
+    semantically processed every delivered message.
+    """
+    for disc_id, pending in list(_PENDING_READ_SORT_ORDER_BY_DISC.items()):
+        if pending.get("rpc_sequence") == next_rpc_sequence:
+            continue
+        _commit_read_cursor(disc_id, pending.get("sort_order"))
+        if _read_cursor(disc_id) >= pending.get("sort_order"):
+            _PENDING_READ_SORT_ORDER_BY_DISC.pop(disc_id, None)
+
+
+def _clear_promoted_legacy_codex_binding(disc_id, resume_token):
+    """Remove the obsolete PID-keyed credential after a proven promotion.
+
+    Match the exact credential that was consumed before unlinking: a malformed,
+    weakly protected, replaced, or unrelated legacy path is left untouched.
+    """
+    path = _legacy_codex_binding_path()
+    state = _read_binding_path(path)
+    if (
+        not path
+        or not state
+        or state.get("disc_id") != disc_id
+        or state.get("resume_token") != resume_token
+    ):
+        return
+    try:
+        os.remove(path)
+    except OSError:
         pass
 
 
@@ -2897,6 +3318,7 @@ def _attempt_resume():
                 # backend accepted it, so a transient `Unknown` can self-heal.
                 agent_type=stored_agent_type,
                 pending_resume_token=next_token,
+                last_read_sort_order=b.get("last_read_sort_order"),
             ):
                 return None  # never mutate the server before pending is durable
 
@@ -2906,6 +3328,9 @@ def _attempt_resume():
             "resume_token": old_token,
             "next_resume_token": next_token,
         }
+        conversation_id = _native_conversation_id()
+        if conversation_id:
+            body["conversation_id"] = conversation_id
         try:
             result = _unwrap(_http("POST", "/api/discussions/peer-resume", body))
         except Exception:
@@ -2917,9 +3342,22 @@ def _attempt_resume():
         if disc_id != disc_id_before or acknowledged_token != next_token:
             return None  # fail closed on a mismatched ack; keep pending
         _set_current_disc_id(disc_id)
+        _set_read_cursor(disc_id, b.get("last_read_sort_order"))
         # Promotion failure is recoverable: the pending file still contains
         # `(old,next)` and the backend accepts that exact replay.
-        _write_binding(disc_id, next_token, agent_type=agent_type)
+        promoted = _write_binding(
+            disc_id,
+            next_token,
+            agent_type=agent_type,
+            last_read_sort_order=b.get("last_read_sort_order"),
+        )
+        if promoted:
+            _clear_promoted_legacy_codex_binding(disc_id_before, old_token)
+        # KT-76 — re-link on resume too. The durable key can legitimately change
+        # between reloads (new terminal, moved project), which would leave the
+        # old link pointing at a room this identity no longer uses. Rebinding the
+        # disc we just re-attached to is safe by definition.
+        _bind_session_to_disc(disc_id, agent_type)
         return disc_id
 
 
@@ -3079,6 +3517,14 @@ def _unwrap(envelope):
 
 def call_disc_meta(_args):
     return _unwrap(_http("GET", f"/api/discussions/{_disc_id()}/meta"))
+
+
+def call_resolve_id(args):
+    object_id = (args.get("id") or "").strip()
+    if not object_id:
+        raise RuntimeError("resolve_id: id is required")
+    encoded = urllib.parse.quote(object_id, safe="")
+    return _unwrap(_http("GET", f"/api/resolve/{encoded}"))
 
 
 def call_disc_get_message(args):
@@ -3334,7 +3780,7 @@ def _structured_target_agent(content):
     """
     if not isinstance(content, str) or not content:
         return None
-    prose = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+    prose = re.sub(r"```.*?(?:```|$)", "", content, flags=re.DOTALL)
     prose = re.sub(r"`[^`\n]*`", "", prose)
     pattern = r"(?<![\w@])@(" + "|".join(_MENTION_TARGETS) + r")(?![\w-])"
     targets = {
@@ -3342,6 +3788,116 @@ def _structured_target_agent(content):
         for match in re.finditer(pattern, prose, flags=re.IGNORECASE)
     }
     return next(iter(targets)) if len(targets) == 1 else None
+
+
+def _structured_message_targets(content, disc_id):
+    """Resolve ordered native and exact-CLI mentions from prose.
+
+    Canonical mentions (`@codex`) are native identities. A joined CLI must be
+    addressed through its stable room alias (`@codex-cli`, then
+    `@codex-cli-2`, …), resolved against the participants endpoint whose
+    `joined_at` ordering is also used by the UI.
+    """
+    if not isinstance(content, str) or not content:
+        return []
+    prose = re.sub(r"```.*?(?:```|$)", "", content, flags=re.DOTALL)
+    prose = re.sub(r"`[^`\n]*`", "", prose)
+    pattern = (
+        r"(?<![\w@])@("
+        + "|".join(_MENTION_TARGETS)
+        + r")(-cli(?:-(\d+))?)?(?![\w-])"
+    )
+    matches = list(re.finditer(pattern, prose, flags=re.IGNORECASE))
+    if not matches:
+        return []
+
+    meta = _current_disc_meta() or {}
+    principal = meta.get("agent")
+    participants = None
+    targets = []
+    for match in matches:
+        agent_type = _MENTION_TARGETS[match.group(1).lower()]
+        cli_suffix = match.group(2)
+        if cli_suffix:
+            if participants is None:
+                participants = _unwrap(
+                    _http("GET", f"/api/discussions/{disc_id}/participants")
+                )
+                if not isinstance(participants, list):
+                    participants = []
+            matching = [
+                participant
+                for participant in participants
+                if participant.get("agent_type") == agent_type
+            ]
+            ordinal = int(match.group(3) or "1")
+            if ordinal < 1 or ordinal > len(matching):
+                alias = match.group(0)
+                raise RuntimeError(
+                    f"disc_append: {alias} does not identify a joined CLI in "
+                    "this discussion; use an alias exposed by the room"
+                )
+            target = {
+                "kind": "cli",
+                "agent_type": agent_type,
+                "cli_session_id": matching[ordinal - 1]["id"],
+            }
+        else:
+            target = {
+                "kind": (
+                    "discussion_agent"
+                    if agent_type == principal
+                    else "agent"
+                ),
+                "agent_type": agent_type,
+            }
+        if target not in targets:
+            targets.append(target)
+    return targets
+
+
+def _legacy_agent_target(agent_type):
+    """Project the old one-provider override onto a typed native identity."""
+    meta = _current_disc_meta() or {}
+    return {
+        "kind": (
+            "discussion_agent"
+            if agent_type == meta.get("agent")
+            else "agent"
+        ),
+        "agent_type": agent_type,
+    }
+
+
+def _live_message_id(disc_id, args):
+    """Dedup key for a simple-mode append, DERIVED from the call instead of
+    random.
+
+    The backend dedups on `(disc_id, source_msg_id)`. A random id per call means
+    a host that retries the tool call — after ITS own timeout, while the message
+    is already stored — creates a duplicate instead of hitting that dedup. A
+    retry replays the same arguments, so deriving the id from them makes the
+    replay idempotent. Chaining a long wait inside the append (KT-43) stretched
+    the call from ~200 ms to up to 60 s, i.e. it widened exactly that window,
+    which is why this is derived now.
+
+    Two identical messages posted DELIBERATELY would also collapse; pass an
+    explicit `source_msg_id` to force a distinct one.
+    """
+    payload = json.dumps(
+        {
+            "disc": disc_id,
+            "role": args.get("role") or "Agent",
+            "agent": args.get("agent_type") or _agent_type_for_session(),
+            "content": args.get("content"),
+            "target": args.get("target_agent"),
+            "targets": args.get("targets"),
+            "reply_to": args.get("reply_to_message_id"),
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return f"live-{hashlib.sha256(payload.encode()).hexdigest()[:32]}"
 
 
 def call_disc_append(args):
@@ -3368,7 +3924,7 @@ def call_disc_append(args):
     # Light shorthand : an agent passed `content` directly.
     if not messages and args.get("content"):
         message = {
-            "source_msg_id": f"live-{uuid.uuid4()}",
+            "source_msg_id": args.get("source_msg_id") or _live_message_id(disc_id, args),
             "role": args.get("role") or "Agent",
             "content": args["content"],
             "agent_type": (
@@ -3378,10 +3934,20 @@ def call_disc_append(args):
             ),
         }
         target_agent = args.get("target_agent")
-        if target_agent is None and message["role"] == "Agent":
-            target_agent = _structured_target_agent(message["content"])
-        if target_agent:
+        targets = args.get("targets")
+        if targets is None and message["role"] == "Agent":
+            if target_agent:
+                targets = [_legacy_agent_target(target_agent)]
+            else:
+                targets = _structured_message_targets(message["content"], disc_id)
+        if targets:
+            message["targets"] = targets
+            # Compatibility projection for pre-KT-116 servers/readers.
+            message["target_agent"] = targets[0]["agent_type"]
+        elif target_agent:
             message["target_agent"] = target_agent
+        if args.get("reply_to_message_id"):
+            message["reply_to_message_id"] = args["reply_to_message_id"]
         messages = [message]
 
     if not isinstance(messages, list) or not messages:
@@ -3395,41 +3961,150 @@ def call_disc_append(args):
     # never to every session of the same agent_type (multi-machine / sibling
     # peer safety). A legacy bridge that omits it gets no presence refresh on
     # append — deliberately conservative, matching disc_wait_for_peer.
-    return _unwrap(_http("POST", "/api/disc/append", {
+    appended = _unwrap(_http("POST", "/api/disc/append", {
         "disc_id": disc_id,
         "messages": messages,
         "session_id": _session_id_for_caller(),
     }))
 
+    # KT-43 — post AND listen in ONE tool call.
+    #
+    # Every append used to hand the turn back, leaving the next wait to the
+    # agent's discipline; a runtime that forgets goes `offline` and the human
+    # reads it as "it left the room" (measured live on 2026-07-28: a Claude
+    # session posted, never reopened a wait, and showed offline for 20 min).
+    # Raising the wait ceiling only helps agents that already re-poll, so the
+    # fix has to be structural: chaining the long-poll here makes speaking and
+    # listening the same call. The wait must resume from the last position
+    # actually READ, not this append's write receipt: another message can land
+    # between those two positions.
+    #
+    # Never for a bulk transcript import (nobody is waiting on a backfill),
+    # and `wait_for_reply: false` opts out for an agent posting twice in a row.
+    is_live_single = bool(args.get("content")) and len(messages) == 1
+    if not is_live_single or args.get("wait_for_reply") is False:
+        return appended
+
+    cursor = _read_cursor(disc_id)
+    try:
+        wait_args = {
+            "_disc_id": disc_id,
+            "timeout_secs": args.get("wait_timeout_secs"),
+        }
+        if cursor is not None:
+            wait_args["since_sort_order"] = cursor
+        waited = call_disc_wait_for_peer(wait_args)
+    except Exception as exc:  # noqa: BLE001 — the append already succeeded
+        # The message IS posted; a failed wait must not read as a failed post.
+        appended["wait_error"] = f"{type(exc).__name__}: {exc}"
+        appended["hint"] = (
+            "Your message was posted, but the chained wait failed. Call "
+            "disc_wait_for_peer yourself to get back into the room."
+        )
+        return appended
+
+    appended["waited"] = waited
+    if isinstance(waited, dict) and isinstance(waited.get("latest_sort_order"), int):
+        appended["pending_read_cursor"] = waited["latest_sort_order"]
+    if isinstance(waited, dict) and waited.get("hint"):
+        appended["hint"] = waited["hint"]
+    return appended
+
 
 def call_disc_link(args):
-    for k in ("disc_id", "source_agent", "source_session_id"):
-        if not args.get(k):
-            raise RuntimeError(f"disc_link: missing required '{k}'")
+    # KT-76 — an agent cannot know its own durable key (it is derived inside the
+    # bridge), so both identity fields fall back to what this session actually
+    # is. `disc_id` still defaults to the bound disc, making the common case
+    # `disc_link({})`.
+    disc_id = args.get("disc_id") or _disc_id()
+    source_agent = args.get("source_agent") or _agent_type_for_session()
+    source_session_id = args.get("source_session_id") or _durable_session_id()
+    if not source_session_id:
+        raise RuntimeError(
+            "disc_link: no durable CLI session id for this bridge — pass "
+            "source_session_id explicitly"
+        )
+    if not source_agent or source_agent == "Unknown":
+        raise RuntimeError("disc_link: could not infer source_agent — pass it explicitly")
     return _unwrap(_http("POST", "/api/disc/link", {
-        "disc_id": args["disc_id"],
-        "source_agent": args["source_agent"],
-        "source_session_id": args["source_session_id"],
+        "disc_id": disc_id,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+        "force_reassign": bool(args.get("force_reassign", False)),
     }))
 
 
 def call_disc_unlink(args):
-    disc_id = args.get("disc_id")
-    if not disc_id:
-        raise RuntimeError("disc_unlink: missing required 'disc_id'")
-    return _unwrap(_http("POST", "/api/disc/unlink", {"disc_id": disc_id}))
+    # KT-85 — release THIS session's binding, never the whole room's. A shared
+    # discussion carries one binding per joined CLI, so the unscoped call would
+    # detach every other peer as a side effect of one agent letting go.
+    # Releasing every binding stays possible, but only as an explicit human
+    # action from the UI, not from an agent tool call.
+    disc_id = args.get("disc_id") or _disc_id()
+    source_agent = args.get("source_agent") or _agent_type_for_session()
+    source_session_id = args.get("source_session_id") or _durable_session_id()
+    if not source_session_id or not source_agent or source_agent == "Unknown":
+        raise RuntimeError(
+            "disc_unlink: no durable identity for this bridge, so the binding to "
+            "release cannot be identified — pass source_agent and "
+            "source_session_id explicitly"
+        )
+    return _unwrap(_http("POST", "/api/disc/unlink", {
+        "disc_id": disc_id,
+        "source_agent": source_agent,
+        "source_session_id": source_session_id,
+    }))
 
 
 def call_disc_find_by_session(args):
-    src_agent = args.get("source_agent")
-    src_sess = args.get("source_session_id")
-    if not src_agent or not src_sess:
-        raise RuntimeError("disc_find_by_session: missing required 'source_agent' or 'source_session_id'")
+    # KT-76 — symmetric with `disc_link`: bare, this answers "which room is MY
+    # session bound to?", which is what an agent actually needs after a reload.
+    src_agent = args.get("source_agent") or _agent_type_for_session()
+    src_sess = args.get("source_session_id") or _durable_session_id()
+    if not src_agent or src_agent == "Unknown" or not src_sess:
+        raise RuntimeError(
+            "disc_find_by_session: no durable identity for this bridge — pass "
+            "source_agent and source_session_id explicitly"
+        )
     qs = urllib.parse.urlencode({
         "source_agent": src_agent,
         "source_session_id": src_sess,
     })
-    return _unwrap(_http("GET", f"/api/disc/find_by_session?{qs}"))
+    found = _unwrap(_http("GET", f"/api/disc/find_by_session?{qs}"))
+
+    # KT-76 follow-up, found by using it: the link is written by JOIN and by
+    # resume, and resume is LAZY — it only runs when a tool needs a disc id.
+    # Looking up our own durable link is NOT enough: after a process reload the
+    # server can still return a disc_id while this bridge has neither restored
+    # `_CURRENT_DISC_ID` nor its durable read cursor. Returning immediately in
+    # that state produced a dangerous false positive ("room found") followed by
+    # `disc_append: no disc bound`, and could tempt callers to continue without
+    # replaying the unread gap. Always resume our own unbound runtime, whether
+    # the durable link already exists or not. Explicit third-party lookups stay
+    # pure reads.
+    asked_about_self = not args.get("source_agent") and not args.get("source_session_id")
+    if not asked_about_self or _CURRENT_DISC_ID:
+        return found
+    resumed = _attempt_resume()
+    if resumed:
+        # The resume path re-links the possibly-evolved durable identity. Read
+        # once more so the response reflects that authoritative server state.
+        return _unwrap(_http("GET", f"/api/disc/find_by_session?{qs}"))
+
+    if isinstance(found, dict) and found.get("disc_id"):
+        # Legacy/pre-fix sessions can have a server-side link but no local
+        # resume credential (and therefore no durable read cursor). Do not
+        # pretend that the runtime is ready: one fresh join bootstraps the
+        # credential, after which reload recovery is automatic.
+        found["runtime_bound"] = False
+        found["rejoin_required"] = True
+        found["hint"] = (
+            "The durable session link still points to this room, but this "
+            "bridge could not restore its resume credential/read cursor. "
+            "Join once with a fresh kr-join token before appending."
+        )
+        return found
+    return found
 
 
 def call_disc_search(args):
@@ -3504,6 +4179,9 @@ def call_disc_join(args):
         "agent_type": agent_type,
         "session_id": session_id,
     }
+    conversation_id = _native_conversation_id()
+    if conversation_id:
+        body["conversation_id"] = conversation_id
     # KT-37 — optional self-DECLARED model. Explicit arg wins; else an
     # env-declared default (KRONN_AGENT_MODEL). Never inferred: if neither is
     # set we omit it and the backend leaves any prior declaration untouched.
@@ -3512,6 +4190,7 @@ def call_disc_join(args):
         model = os.environ.get("KRONN_AGENT_MODEL")
     if isinstance(model, str) and model.strip():
         body["model"] = model.strip()
+    prior_binding = _read_binding()
     result = _unwrap(_http("POST", "/api/discussions/peer-join", body))
 
     # Bind THIS process to the joined disc so subsequent tool calls
@@ -3520,11 +4199,46 @@ def call_disc_join(args):
     disc_id = result.get("disc_id") if isinstance(result, dict) else None
     if disc_id:
         _set_current_disc_id(disc_id)
+        recent_messages = result.get("recent_messages") or []
+        recent_orders = [
+            message.get("sort_order")
+            for message in recent_messages
+            if isinstance(message, dict)
+            and isinstance(message.get("sort_order"), int)
+            and not isinstance(message.get("sort_order"), bool)
+        ]
+        join_read_cursor = max(recent_orders, default=-1)
+        prior_same_disc = bool(
+            prior_binding and prior_binding.get("disc_id") == disc_id
+        )
+        prior_read_cursor = (
+            prior_binding.get("last_read_sort_order")
+            if prior_same_disc
+            and isinstance(prior_binding.get("last_read_sort_order"), int)
+            and not isinstance(prior_binding.get("last_read_sort_order"), bool)
+            else None
+        )
+        if prior_read_cursor is not None:
+            _set_read_cursor(disc_id, prior_read_cursor)
+        elif _read_cursor(disc_id) is None:
+            _set_read_cursor(disc_id, -1)
+        if not prior_same_disc:
+            _stage_read_cursor(disc_id, join_read_cursor)
         # 0.9.0 — stash the resume credential so a later MCP reload can
         # re-attach to THIS disc via `/peer-resume` without a fresh token.
         resume_token = result.get("resume_token") if isinstance(result, dict) else None
         if resume_token:
-            _write_binding(disc_id, resume_token, agent_type=agent_type)
+            _write_binding(
+                disc_id,
+                resume_token,
+                agent_type=agent_type,
+                last_read_sort_order=_read_cursor(disc_id),
+            )
+        # KT-76 — link the DURABLE session here rather than asking the agent to
+        # remember a step: a protocol that depends on the model's discipline is
+        # the failure mode this room documented all day.
+        if isinstance(result, dict):
+            result.update(_bind_session_to_disc(disc_id, agent_type))
 
     # The resume credential is a secret persisted 0600 — it must NEVER reach
     # the model's context. Strip it from the value handed back to the agent.
@@ -3675,8 +4389,10 @@ def call_disc_wait_for_peer(args):
     caller's own `agent_type` (env-derived, same way as `disc_join`)
     so an agent doesn't wake itself on its own `disc_append`.
     """
-    disc_id = _disc_id()
+    disc_id = args.get("_disc_id") or _disc_id()
     since = args.get("since_sort_order")
+    if since is None:
+        since = _read_cursor(disc_id)
     timeout_secs = args.get("timeout_secs")
     params = {}
     if since is not None:
@@ -3699,10 +4415,88 @@ def call_disc_wait_for_peer(args):
     # Transport-level retry (bounded): a backend restart mid-poll must not
     # surface as a tool error — the wait is idempotent on since_sort_order.
     result = _unwrap(_http_transport_retry("GET", f"/api/discussions/{disc_id}/wait{sep}{qs}"))
+    if isinstance(result, dict):
+        if result.get("messages"):
+            _stage_read_cursor(disc_id, result.get("latest_sort_order"))
+            delivered_message_ids = [
+                message.get("message_id")
+                for message in result["messages"]
+                if isinstance(message, dict)
+                and isinstance(message.get("message_id"), str)
+                and message.get("message_id")
+            ]
+            if delivered_message_ids:
+                result["delivered_message_ids"] = delivered_message_ids
+                result["delivery_ack_hint"] = (
+                    "Acknowledge or answer the exact delivered message id(s): "
+                    + ", ".join(delivered_message_ids)
+                    + ". For one transcript message, pass its id as "
+                    "`reply_to_message_id` when replying."
+                )
+        else:
+            _commit_read_cursor(disc_id, result.get("latest_sort_order"))
+        withheld = result.get("withheld_by_routing")
+        if isinstance(withheld, int) and withheld > 0:
+            result["routing_visibility"] = (
+                f"{withheld} newer peer turn(s) were intentionally withheld "
+                "because they target another identity. The read cursor moved "
+                "past them by design; do not claim to have read their content."
+            )
     # A timed-out wait (no peer activity in the window) is NORMAL in an ongoing
     # collaboration — but literal agents (notably Codex) otherwise read the empty
     # result as "conversation over" and STOP after ~60s. Surface an explicit
     # next-action hint so the agent keeps waiting instead of leaving.
+    if isinstance(result, dict):
+        addressed_here = False
+        other_targets = set()
+        for message in result.get("messages", []):
+            if not isinstance(message, dict):
+                continue
+            typed_targets = message.get("targets") or []
+            if typed_targets:
+                message_addressed_here = bool(message.get("addressed_to_caller"))
+                addressed_here = addressed_here or message_addressed_here
+                for target in typed_targets:
+                    if not isinstance(target, dict):
+                        continue
+                    agent = target.get("agent_type")
+                    kind = target.get("kind")
+                    if not agent:
+                        continue
+                    label = (
+                        f"{agent} CLI"
+                        if kind == "cli"
+                        else f"{agent} discussion agent"
+                        if kind == "discussion_agent"
+                        else f"{agent} punctual agent"
+                    )
+                    if not (message_addressed_here and kind == "cli"):
+                        other_targets.add(label)
+                continue
+            targets = message.get("target_agents") or []
+            if not targets and message.get("target_agent"):
+                targets = [message["target_agent"]]
+            if exclude in targets:
+                addressed_here = True
+            other_targets.update(target for target in targets if target != exclude)
+        other_targets = sorted(other_targets)
+        if addressed_here:
+            result["routing_hint"] = (
+                f"This exact {exclude} CLI session is explicitly listed and addressed: "
+                "answer this turn once. Other listed agents own their own replies; do not "
+                "synthesize or wait for them unless the human asks."
+            )
+        if other_targets:
+            awareness_hint = (
+                "Read targeted messages for room awareness, but do NOT answer "
+                f"messages addressed to {', '.join(other_targets)} while that "
+                "target owns the turn. Step in only after an explicit target "
+                "failure/interruption or a new message asks you to."
+            )
+            if addressed_here:
+                result["routing_hint"] += " " + awareness_hint
+            else:
+                result["routing_hint"] = awareness_hint
     if isinstance(result, dict) and result.get("timed_out"):
         pacing = result.get("pacing") or {}
         delay = pacing.get("next_delay_seconds")
@@ -5180,7 +5974,7 @@ def call_workflow_step_schema(_args):
             "BatchApiCall": {
                 "required": ["batch_items_from", "api_plugin_slug", "api_config_id", "api_endpoint_path"],
                 "optional": ["api_method"],
-                "note": "fan one ApiCall over a list, zero tokens.",
+                "note": "fan one ApiCall over a list without starting a model.",
                 "PER_ITEM_VARS": (
                     "Each item's fields are templatable in api_endpoint_path AND api_body/"
                     "api_query as `{{batch.item.<field>}}` (canonical), `{{item.<field>}}` "
@@ -5203,7 +5997,7 @@ def call_workflow_step_schema(_args):
             },
             "JsonData": {
                 "required": ["json_data_payload"],
-                "note": "deterministic data source, zero tokens — feeds {{steps.<name>.data}}.",
+                "note": "deterministic data source that starts no model — feeds {{steps.<name>.data}}.",
                 "example": {"name": "Seed", "step_type": {"type": "JsonData"}, "json_data_payload": "[{...}]"},
             },
             "SubWorkflow": {
@@ -5589,8 +6383,10 @@ def call_kronn_intro(_args):
     return {
         "guide": (
             "# Kronn en 2 minutes — ce que tu peux faire d'ici, sans quitter ton terminal\n\n"
-            "Kronn est ton orchestrateur d'agents AI self-hosted : il garde la mémoire, "
-            "les pipelines et les credentials — et moi (ton CLI) je peux tout piloter.\n\n"
+            "Kronn centralise les discussions, plans, automatisations et configurations. "
+            "Depuis une CLI compatible reliée au MCP kronn-internal, je peux piloter les "
+            "capacités exposées ci-dessous ; certaines validations et la saisie des secrets "
+            "restent dans l'interface lorsqu'elles sont requises.\n\n"
             "## 💬 Discussions sauvegardées — ta mémoire partagée\n"
             "Chaque conversation vit dans Kronn, cherchable et rechargeable par N'IMPORTE quel agent.\n"
             "→ 'Retrouve ce qu'on a décidé sur l'auth le mois dernier' (disc_search + disc_load_other)\n"
@@ -5612,15 +6408,16 @@ def call_kronn_intro(_args):
             "→ 'Crée un workflow : récupère les PRs ouvertes, review chacune, poste un résumé' "
             "(workflow_create_draft — je connais le schéma canonique des 9 types de steps)\n"
             "→ 'Lance le PR-review sur la 123' (workflow_trigger) · 'Qu'est-ce qui tourne ?' (workflow_active_runs)\n\n"
-            "## 🌐 N'importe quelle API configurée — SANS toucher un secret\n"
-            "Jira, Chartbeat, Cloudflare, GitHub… Kronn détient les credentials côté serveur et signe "
-            "les appels pour moi.\n"
+            "## 🌐 APIs déclarées dans Kronn — sans exposer le secret au modèle\n"
+            "mcp_list indique les plugins qui exposent une interface API et leurs endpoints autorisés. "
+            "Le broker refuse les chemins non déclarés et applique l'authentification côté serveur. "
+            "Tous les plugins MCP ne disposent pas forcément d'une interface API.\n"
             "→ 'Combien de tickets ouverts sur le projet EW ?' (mcp_list → api_call, auth injectée)\n"
             "→ Un appel que tu referas ? Je le sauvegarde en Quick API rejouable (qa_create_draft).\n\n"
             "## 🧠 La désagentification (LE concept clé pour bien commencer)\n"
-            "Un agent LLM qui fait un appel HTTP brûle des tokens pour RIEN : la requête est "
-            "déterministe. Kronn exécute donc les steps mécaniques (API, extraction JSON, notifications) "
-            "en Rust pur — ZÉRO token — et réserve les agents aux steps qui demandent du raisonnement. "
+            "Une étape mécanique ApiCall, Exec, JsonData ou Notify s'exécute sans lancer de modèle. "
+            "Si un agent déclenche cette étape ou consomme son résultat, sa conversation conserve "
+            "toutefois son coût normal. Kronn réserve les agents aux étapes qui demandent du raisonnement. "
             "Même pipeline, ~5x moins cher, débogable step par step. Le réflexe à prendre : "
             "'ce step a-t-il besoin de réfléchir ?' Sinon → ApiCall/Exec/JSON, pas un agent.\n\n"
             "## 🔍 Audits — rends n'importe quel repo AI-ready\n"
@@ -5837,6 +6634,7 @@ DISPATCH = {
     "audit_install_template": call_audit_install_template,
     "bridge_info": call_bridge_info,
     "kronn_intro": call_kronn_intro,
+    "resolve_id": call_resolve_id,
     "audit_launch": call_audit_launch,
     "audit_status": call_audit_status,
     "disc_meta": call_disc_meta,
@@ -5962,8 +6760,8 @@ DISPATCH = {
     "workflow_run_discussions": call_workflow_run_discussions,
     "workflow_wait_for_completion": call_workflow_wait_for_completion,
     # 0.8.6 phase 4 — synchronous QA execution. The deagentified twin
-    # of `api_call` : same end-result, zero token cost on request
-    # construction. Always prefer when a matching QA exists.
+    # of `api_call`: same end-result without starting another model for
+    # the HTTP call. Always prefer when a matching QA exists.
     "qa_run": call_qa_run,
     # 0.10.0 — Continual Learning. Propose a durable learning (typed, evidence
     # mandatory). Server gates it (existence + faithfulness) + a human validates
@@ -6009,7 +6807,10 @@ def _handle(req):
             "result": {
                 "protocolVersion": "2024-11-05",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "kronn-internal", "version": "0.1.0"},
+                # Tool-surface version, intentionally distinct from the Kronn
+                # app release. Bumping it tells clients that cache tools/list
+                # to refresh after the Planning contract was added.
+                "serverInfo": {"name": "kronn-internal", "version": "0.3.0"},
                 # Top-level orientation the client surfaces to the model: WHAT
                 # Kronn is + a MAP of the tool surface by area + how to navigate
                 # it, so an agent doesn't have to reverse-engineer capabilities
@@ -6020,11 +6821,14 @@ def _handle(req):
                 # behind on-demand tools like `mcp_list`).
                 "instructions": first_contact + (
                     "You're connected to **Kronn** — it orchestrates agents, "
-                    "discussions, multi-step workflows and external APIs, and "
-                    "owns ALL credentials server-side (never paste secrets). "
+                    "discussions, multi-step workflows and external APIs. "
+                    "Kronn stores configured credentials encrypted and injects API-broker "
+                    "authentication server-side. MCP host sync may also write environment "
+                    "values required by the local CLI configuration. Never paste secrets into prompts. "
                     "Your tools, by area:\n"
+                    "• Opaque IDs: when the user pastes an ID without naming its type, call `resolve_id` FIRST; it returns compact routing context and the object-specific tool to use next.\n"
                     "• Discussions (multi-agent threads): `disc_meta`/`disc_get_message`/`disc_search`/`disc_load_other`/`disc_create`/`disc_append`/`disc_join`/`disc_invite_peer`…\n"
-                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary.\n"
+                    "• Planning: a discussion may have a shared plan made of prioritized, editable tasks. The user may refer to it naturally as “the plan”, “the tasks”, “what remains”, “the priority”, and similar wording. Use `plan_get` (compact current objective/plan) · `task_list` (compact filtered backlog) · `task_get` (FULL task) · `task_changes` (deltas) · `proposal_list`/`proposal_get` (durable proposals, read-only) · narrow writes `task_create`/`task_update`/`task_update_dod`/`task_link_discussion`/`task_add_blocker`. Read the relevant plan first. Apply unambiguous intent directly; otherwise propose a human-gated `kronn-plan-action` fence (`create`, `create_many`, `status`, `complete`, `unblock`, `open`). You may read and propose, but only a human accepts, rejects or decides a durable proposal. Never replace a requested plan update with a prose-only summary. Whenever tracked work starts or materially changes, keep its status, DoD and priority honest in the plan. Write only on a real change: never reload or rewrite an unchanged task merely to report progress. If the announced Planning tools are missing from your MCP surface, use the read-only `plan_snapshot` from `disc_join`, ask @user to reconnect the Kronn MCP, and never fabricate an update.\n"
                     "• Workflows (multi-step pipelines): `workflow_list` (compact) · `workflow_get` (FULL, every step) · `workflow_step_schema` (CANONICAL step schema as an untruncatable result — the closed 9 `step_type`s, per-type fields, runtime contracts; call before authoring) · `workflow_create_draft` · `workflow_clone`/`workflow_update`/`workflow_set_enabled` · `workflow_trigger`/`workflow_run_status` · run history `workflow_runs`/`workflow_run_get` · `workflow_active_runs`/`workflow_cancel_run`. Agent-step bindings (full CRUD): `skills_list`/`profiles_list`/`directives_list` enumerate valid ids; `skill_get`/`profile_get`/`directive_get` read FULL bodies; `skill_create`/`skill_update`/`skill_delete` (+ `profile_*`/`directive_*`) author & edit custom ones.\n"
                     "• Quick Prompts (reusable prompt templates): `qp_list` (no body) · `qp_get` (FULL incl `prompt_template` — read this to know what a QP does, or to run it yourself) · `qp_create_draft`/`qp_update`/`qp_delete` · `qp_run`/`qp_batch_run`.\n"
                     "• Quick APIs + API broker: `qa_list`/`qa_run`/`qa_create_draft`/`qa_update` · `mcp_list` → `api_call` (configured plugins, auth injected).\n"
@@ -6055,7 +6859,15 @@ def _handle(req):
                 "error": {"code": -32601, "message": f"Unknown tool: {name}"},
             }
         try:
-            data = fn(args)
+            global _CURRENT_RPC_SEQUENCE, _RPC_SEQUENCE
+            previous_rpc_sequence = _CURRENT_RPC_SEQUENCE
+            _RPC_SEQUENCE += 1
+            _CURRENT_RPC_SEQUENCE = _RPC_SEQUENCE
+            _ack_pending_read_cursors(_CURRENT_RPC_SEQUENCE)
+            try:
+                data = fn(args)
+            finally:
+                _CURRENT_RPC_SEQUENCE = previous_rpc_sequence
             return {
                 "jsonrpc": "2.0",
                 "id": rid,

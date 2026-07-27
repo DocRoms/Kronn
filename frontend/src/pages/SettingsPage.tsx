@@ -25,6 +25,8 @@ import { useTheme, type ThemeMode } from '../lib/ThemeContext';
 import { useLayoutDensity } from '../lib/LayoutDensityContext';
 import { AgentsSection } from '../components/settings/AgentsSection';
 import { HostDiscoverySection } from '../components/settings/HostDiscoverySection';
+import { TourProgressCta } from '../components/tour/TourProgressCta';
+import { clearTourProgress } from '../components/tour/tourProgress';
 
 /** 0.7+ — Render a description paragraph and visually separate the optional
  *  attribution suffix ("Adapted from <url> (<license>).") so the user sees
@@ -442,7 +444,14 @@ export function SettingsPage({
           <div className="set-nav-version" data-testid="settings-nav-version">
             <KronnVersionLinks sourceLabel={t('config.sourceCodeLicense')} />
           </div>
+          <div className="set-nav-tour-progress">
+            <TourProgressCta />
+          </div>
         </nav>
+
+        <div className="set-mobile-tour-progress">
+          <TourProgressCta />
+        </div>
 
         <div className="set-content">
 
@@ -882,7 +891,12 @@ export function SettingsPage({
 
         {/* Agents accordion */}
         <div className="set-accordion-section" id="settings-agents">
-          <button className="set-accordion-header" onClick={() => toggleAccordion('agents')} aria-expanded={configAccordion.has('agents')}>
+          <button
+            className="set-accordion-header"
+            data-tour-id="settings-agents"
+            onClick={() => toggleAccordion('agents')}
+            aria-expanded={configAccordion.has('agents')}
+          >
             <ChevronRight size={12} className="set-accordion-chevron" data-expanded={configAccordion.has('agents')} />
             <Cpu size={14} className="text-accent" />
             <span className="font-semibold text-base">Agents</span>
@@ -1765,7 +1779,7 @@ export function SettingsPage({
           </p>
           <div className="set-inner-divider" style={{ paddingTop: 16 }}>
             <button className="set-action-btn" onClick={() => {
-              localStorage.removeItem('kronn:tour-completed');
+              clearTourProgress();
               window.location.reload();
             }}>
               <HelpCircle size={12} /> {t('tour.replay')}

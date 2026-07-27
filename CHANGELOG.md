@@ -7,10 +7,108 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
-## [0.9.2] - 2026-07-27
+## [0.9.2] - 2026-07-30
 
 ### Added
 
+- **A durable, truthful guided tour for first-time users.** The onboarding flow
+  now teaches Kronn in three acts across the real interface, with stable
+  spotlight anchors, responsive positioning, keyboard and reduced-motion
+  support, versioned progress, interruption/reload resume, and a Settings CTA
+  for unfinished steps. Its discussion demo is deterministic and preloaded:
+  it starts no agent, spends no model tokens, produces a localized HTML preview
+  that can still be exported to PDF/DOCX locally, archives itself at the end,
+  and reopens the same discussion on replay. Contextual help on the main pages,
+  corrected FR/EN/ES terminology, and factual explanations of agents, plugins,
+  Planning, Quick APIs and the `kronn-internal` MCP keep the tour useful after
+  onboarding. Dedicated steps highlight copyable discussion/message IDs with
+  equal overlay cut-outs and outlines for both targets, and
+  demonstrate the advanced search across every conversation with a real result
+  from the preloaded demo, while separate Quick Prompt, Quick API and Workflow
+  steps explain how to move work from model calls to deterministic operations.
+  Accessibility and lifecycle hardening now trap and restore focus, protect
+  interactive coachmarks from outside clicks, clean up listeners, and cover the
+  complete flow on desktop, short-laptop and half-screen viewports.
+
+- **The commit behind an annotated line.** In the project Code tab, a `git
+  blame` gutter entry is now clickable and opens the commit it points at:
+  subject and full message, author with e-mail, date, files touched, the full
+  hash, and the branches containing it. The list of branches is capped and says
+  when it was cut — a commit near the root of a busy repo is contained by
+  hundreds. From that detail, “View full diff” opens one closable temporary tab
+  with the commit's real parent-to-commit patch across every file and hunk,
+  including root and merge commits; opening another commit reuses the tab. Large
+  patches are bounded at 400 KiB and explicitly marked as truncated. That tab
+  shows **one file at a time**, with a clickable file list beside the diff as in
+  the Git changes view. The list and preview have independent bounded scroll
+  areas, so selecting the 200th file never moves its diff off screen. Reaching a
+  single file no longer means scrolling the whole commit (measured on a root
+  commit, the view went from 196 590 px tall and ~11 000 DOM nodes down to
+  1 410 px), and each file is highlighted with its own language instead of one
+  language guessed for the entire commit. Renames,
+  additions, deletions, binary files and a truncated tail all keep what git
+  printed. The commit-ish is accepted only as a hex hash, since it reaches a
+  `git` invocation.
+- **An agent that reconnects finds its room again by itself.** Joining a
+  discussion now links it to the agent's durable CLI session, so after an MCP
+  reload `disc_find_by_session` returns the room and the agent no longer has to
+  ask for a fresh invitation token. The link uses the identity that actually
+  survives a reload rather than the bridge process id, which rotates. When no
+  durable identity exists, or when the session already belongs to another
+  discussion, the join says so instead of claiming a link it does not have — and
+  never takes the session away from the other room. A shared room keeps **one
+  binding per joined session**: binding a second CLI used to close the first, so
+  in a cross-agent debate every peer but the last silently lost its ability to
+  find the room again. Handing a thread over from one CLI to another is now an
+  explicit act (release the link, or move that session to another discussion)
+  rather than a side effect of someone else joining.
+- **Reconnects cannot skip messages that arrived while the agent was away.**
+  The MCP bridge persists a read cursor independently from append write
+  receipts, replays an unacknowledged batch after reload, and resumes the first
+  chained wait from the last content actually delivered. A regression now
+  covers the full failure seen in dogfooding: reconnect, three human messages
+  pending, then an agent post with a newer `sort_order` — all three pending
+  messages must still be returned. A self `disc_find_by_session` lookup now
+  restores the runtime binding even when the durable server link already
+  exists; legacy sessions that have a link but no local resume
+  credential/cursor explicitly request one fresh join instead of reporting a
+  dangerous false-positive “room found” followed by an unbound append.
+- **Copyable native CLI resume commands.** A joined Claude Code or Codex peer
+  now reports its real native conversation UUID separately from Kronn's bridge
+  binding id. The participant header offers a one-click copy of
+  `claude --resume <id>` or `codex resume <id>`; when the runtime exposes no
+  verified id, Kronn shows no misleading action. Codex MCP launch paths that do
+  not forward `CODEX_THREAD_ID` recover the same verified UUID only from an
+  actual ancestor `codex resume <id>` invocation; prompt text and arbitrary
+  UUIDs are deliberately rejected. That verified Codex UUID also anchors the
+  room binding when available, so a full `codex resume` reboot keeps the room
+  instead of rotating with the outer process PID. The first MCP-only reload
+  after upgrading can securely read the old PID-keyed credential once and
+  promotes its rotated successor to the conversation-keyed path.
+
+- **Fastly hybrid plugin with one local authentication source.** Kronn now
+  bundles pinned, checksum-verified Fastly CLI and official MCP binaries,
+  exposes a read-only deterministic Fastly API surface, and resolves
+  `fastly auth token` in memory for broker calls without copying the credential
+  into Kronn configuration. The plugin drawer can run a real readiness probe
+  across the CLI, active authentication, an authenticated API request and the
+  MCP executable.
+- **Full-height plugin detail drawer.** Plugin details now open in a consistent
+  non-blocking right-hand panel instead of a centered modal. The plugin list
+  remains interactive, so selecting another card swaps the open detail in one
+  click; the panel also has a fixed header, independently scrollable content,
+  responsive mobile layout and translated readiness diagnostics. Its top edge
+  now aligns with the horizontal list boundary below search and filters, as in
+  Planning, and capability labels use the same lightly rounded chip shape as
+  the rest of the application. The built-in `kronn-internal` entry now uses the
+  same standard card as every other plugin, carries an explicit built-in badge
+  and no longer appears twice.
+- **Preferred interface per plugin.** Hybrid plugins expose their real API,
+  MCP and CLI capabilities in the detail drawer and persist the operator's
+  preferred invocation mode. Kronn injects one compact rule for active
+  multi-interface plugins into every supported agent runtime, while pure API
+  or MCP plugins keep a single disabled choice and add no needless prompt
+  context.
 - **Durable Planning proposals with human-gated validation.** An agent's
   `kronn-plan-action` fence is parsed and persisted the instant its message is
   stored — so a proposal exists in the inbox even if nobody opens the message —
@@ -28,9 +126,29 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   are tracked separately, a duplicate reconnect no longer leaves a phantom
   offline twin, and an absent mentioned agent's obligation surfaces as "waiting
   for a runtime".
-- **Targeted `@agent` mentions between peers.** A structured `@agent` mention in
-  a peer's message routes a durable one-shot response to that agent (including a
-  local model), instead of being dropped or answered by the wrong agent.
+- **Typed, plural discussion routing.** One human turn can now address several
+  responders without creating a third implicit answer. Kronn durably
+  distinguishes the configured discussion agent, a punctual native agent and
+  one exact joined CLI session even when they use the same provider; `@all`
+  expands only to active responders already visible in the room and excludes a
+  disabled discussion agent. The composer, message chips, header and participant
+  list use the same stable `agent de discussion` / `agent ponctuel` / `CLI`
+  identities. Mention autocomplete and its contextual help separate agents
+  active in this discussion from agents merely available to invoke, put joined
+  CLIs before punctual agents, and explain the token-saving delivery contract.
+  MCP `disc_append` resolves the same typed identities, including ordered plural
+  native mentions and exact `-cli[-N]` aliases. Exact CLI targeting is private:
+  unrelated joined sessions do not receive the targeted User or Agent turn,
+  while untargeted Agent messages remain visible for collaboration. Inline and
+  fenced code safely quote mention examples without dispatching them.
+- **Explicit joined-agents-only discussions.** The discussion header can disable
+  Kronn's native fallback without removing or pausing joined peers. The regular
+  agent selector becomes a clear grayed “discussion agent disabled” control,
+  clicking it restores the native agent, and the choice persists across reloads.
+- **Configurable canonical mention colors.** Settings exposes the seven
+  `@agent` colors in one compact palette. The selected color is persisted per
+  agent and applied immediately to both mention chips and message attribution;
+  invalid hand-edited values safely fall back to Kronn's built-in palette.
 - **Model provenance on every turn.** A reply now records the concrete model it
   ran on — including a non-zero exit, a stall, a cancel, and a partial recovered
   after a restart — and a failed agent launch labels the model it tried. Debate
@@ -44,9 +162,76 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or thousands of rows, keyboard-navigable) and, on selecting a task, shows its
   dependency neighbourhood (blockers → task → blocked tasks), with real links to
   an external blocker's own discussion or project.
+- **Portable discussions.** A conversation can be exported from its header and
+  re-imported from the discussion sidebar as a versioned JSON bundle containing
+  messages and authors, attachment contents available to Kronn, revision audit
+  events and the attached discussion plan. Imports are atomic and idempotent:
+  replay opens the first imported copy, while changed content for the same
+  source id returns an explicit conflict. Runtime credentials, source-session
+  ownership, sharing ids, worktree paths and other local execution state are
+  excluded.
+- **Portable plugin selections.** The Plugins page can export several
+  configurations and import them on another Kronn instance. The safe default
+  carries configuration only; including values requires an explicit red-zone
+  review, the exact confirmation phrase and a passphrase, then encrypts the
+  whole payload with AES-256-GCM and an Argon2id-wrapped key. CLI-resolved
+  credentials are never exportable. Imports trust the current registry,
+  refuse unknown executable definitions and silent overwrites, never broaden
+  project/global scope, are idempotent, and leave a value-free audit trail.
+- **Compact universal ID resolution for agents.** The `kronn-internal` bridge
+  now exposes `resolve_id`: one authenticated, indexed backend read identifies
+  a pasted message, discussion, project, workflow, Planning task, Quick Prompt
+  or Quick API UUID and returns only routing context plus the appropriate next
+  tool. This replaces multi-tool guessing and keeps a representative response
+  below roughly 128 tokens.
+- **In-discussion message search.** A compact search action in the discussion
+  header finds the rendered text of every message — including terms split by
+  Markdown formatting — highlights all occurrences, jumps to the exact message
+  and navigates forward or backward with buttons or Enter / Shift+Enter.
+- **Durable replies to discussion messages.** Every human or agent message has
+  a keyboard-accessible Reply action. The composer keeps a compact author,
+  excerpt and message-id preview; the sent message stores a same-discussion
+  reference that agents also receive in their history and MCP reads. Reply
+  headers jump to and highlight the original message, remain explicit when the
+  target is unavailable, survive queued turns, transient 502/reconnections and
+  cross-instance federation, and are remapped on portable discussion import.
+  Original messages show compact backlinks to every response, and MCP agents
+  can post an explicit reply through `disc_append(reply_to_message_id: …)`.
+- **Advanced search across every discussion.** The Discussions sidebar now
+  queries message content server-side with project, author and date filters,
+  bounded pagination and match-centred excerpts. Selecting a result opens its
+  discussion and stabilizes the scroll on the exact message, including a
+  message folded inside a tool-call group.
+- **Project Git workspace.** Project details gain a dedicated Git tab with
+  local and remote branches, synchronization hints and a structured recent
+  commit graph bounded to 80 entries. A branch can be switched from the panel;
+  Kronn refuses unknown branches and dirty worktrees, never stashes or resets
+  implicitly, and refreshes the project/code state after a successful switch.
+  It also refuses to move the root worktree while an agent is actively using it
+  in Direct mode, naming the affected discussions without stopping their runs;
+  isolated worktrees and unrelated workflow-run registry entries do not block.
+  A discussion whose Test mode currently occupies the root checkout blocks the
+  switch as well, identifying the discussion and explaining how to leave Test
+  mode so Kronn can restore the previous branch and stash safely.
 
 ### Changed
 
+- **Starting a discussion is easier to scan.** The creation form now separates
+  the initial brief from launch configuration in two clear, responsive panels.
+  The prompt and context stay visually primary, while project, agent, workspace
+  and advanced skills/profiles/directives remain available without crowding the
+  main task; the final action stays in a stable footer.
+- **The initial prompt can choose its agents.** Writing canonical mentions such
+  as `@codex` or `@claude` automatically selects the prompt-driven launch mode;
+  one mention starts that agent and several mentions start a one-round
+  multi-agent discussion in the same room. Unavailable agents are reported
+  before creation instead of silently falling back, and the prompt now has a
+  compact emoji picker that inserts at the current caret.
+- **One coherent Discussions sidebar search.** The quick discussion title/id
+  filter and advanced message-content search now share a single field and
+  query. Advanced project, author and date filters expand from that field
+  instead of competing with a second header action, and closing the panel
+  resets the query before returning to the full instant discussion list.
 - **Reliability core.** Durable per-discussion message sequence with an SSE
   acceptance receipt and idempotent re-submits; a durable agent-dispatch queue
   that survives restarts (Running jobs requeue with their attempt count
@@ -54,6 +239,35 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   momentarily unavailable; atomic edit/resend guarded by a compare-and-set (409
   on a stale revision); a refcounted shared power guard; and a stabler
   serve/readiness path.
+- **Native hot reload keeps serving during Rust builds.** The development
+  supervisor now compiles a changed backend while the current process remains
+  online, then performs only the short process swap after a successful build.
+  Cargo lock contention and compile failures no longer leave Vite proxying to a
+  closed port for minutes; real runtime/boot failures still stop the stack
+  visibly.
+- **Planning task details use the shared drawer language.** The task editor now
+  matches the Plugin panel with a fixed header, independently scrollable
+  content, clearer grouped sections and a responsive narrow-screen layout that
+  remains anchored to the viewport.
+- **Agent settings are easier to scan.** Every runtime now uses the same
+  structured card hierarchy for identity and health, access and authentication,
+  then model selection. The configurable mention color doubles as the card's
+  restrained visual accent, including for the dedicated Ollama surface.
+- **Agent readiness distinguishes installation from authentication.** Agent
+  discovery now reports whether an installed runtime is actually ready to run.
+  Vibe checks the effective Mistral credential without exposing it; Settings and
+  Setup show an actionable `vibe --setup` state, and a discussion refuses the
+  doomed launch as a System notice before consuming tokens.
+- **Codex native full access is effective.** Enabling Codex full access in
+  Settings now passes `--sandbox=danger-full-access` on native installations;
+  disabling it preserves Codex's restricted default. Docker keeps its existing
+  container-boundary override, and Settings displays the flag actually used.
+- **Plugin diagnostics prove readiness instead of configuration.** API
+  plugins call an explicitly safe authenticated GET endpoint, stdio MCPs
+  complete a bounded `initialize` handshake, and remote MCP transports
+  negotiate their real protocol. Missing probes, invalid authentication and
+  timeouts now produce an actionable non-ready state; credentials and response
+  bodies never enter the UI or probe logs.
 - **Release gate.** A stateful integration suite exercises restart, double-
   submit, cancel and a real old-schema→current migration on a populated
   database, so "no lost or duplicated message/job" is enforced, not assumed.
@@ -61,7 +275,20 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Kronn-launched agents and the `kronn-internal` MCP instructions now state the
   same contract — read the plan, apply an unambiguous change directly, otherwise
   propose a human-gated fence; only a human decides a durable proposal — pinned by
-  a shared-invariant test so the two surfaces cannot drift.
+  a shared-invariant test so the two surfaces cannot drift. Agents maintain
+  status, DoD, priority and blockers only when tracked work actually changes;
+  no-op rewrites are explicitly forbidden. `disc_join` also returns a bounded
+  objective/current/completed snapshot and an honest read-only fallback when a
+  client cached an older MCP tool catalogue.
+- **Fast TypeScript binding generation.** `make typegen` now limits the
+  `export_bindings` filter to the Rust library instead of launching every
+  unrelated integration-test binary.
+- **Explicit discussion ↔ CLI session ownership.** The discussion header can
+  link, display, copy, update or unlink a Claude/Codex/other external session
+  id and shows whether that exact CLI is currently connected. Binding contract
+  v1 is persisted and migrated; one concrete CLI session can own only one
+  discussion, and both the UI and MCP refuse a silent transfer unless
+  `force_reassign` is explicitly requested.
 - **Discussion-plan projection no longer fans out per task.** The plan loads in a
   fixed number of SQL queries whatever its size (the previous per-relation
   fan-out is gone), and each relation now carries its active blockers and an
@@ -70,9 +297,94 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   counters now filter the complete plan directly. Selecting a task keeps its
   detail in an independently scrollable lower pane while the task list retains
   its own position.
+- **Invitations carry a working handoff.** The discussion invite copies a
+  compact plan-aware contract by default: join, load the shared plan on demand,
+  update its tasks when useful, announce the task, scope and next action in the
+  room before substantive work starts, and remain in the room. A bare
+  token-only form stays available from the same modal.
 
 ### Fixed
 
+- The rebuilt guided tour no longer exceeds the strict ESLint warning ratchet:
+  its async navigation, DOM measurement, focus handling and resume test now
+  follow the React hook/compiler rules without suppressions. Frontend lint and
+  translation gates also run in the dedicated frontend CI job, so a frontend
+  regression no longer aborts a misleadingly red backend check. The backend
+  suite now runs immediately after Clippy, before desktop and frontend setup,
+  while the existing required-check identifiers remain stable.
+- A send refused because the previous answer is still being recovered no longer
+  freezes the tab, and no longer has to be sent again by hand. The blocking
+  `confirm()` gives way to a banner above the composer — recovery can take
+  minutes, and the user could not even copy their own text while it was open. The
+  held message now sends itself once the recovery ends, carrying its typed targets
+  and reply target, the same contract as a follow-up queued while an agent is
+  thinking; Cancel stops that automatic send and leaves the text in the composer,
+  and Send now abandons the stuck recovery for the impatient case.
+- Multi-agent discussion routing now has one shared decision table for human
+  turns and live JOIN replies. A structured `@agent` selects exactly that live
+  peer or one native override, another joined agent can no longer swallow the
+  request, and a no-agent room never starts a hidden native process. The UI and
+  MCP paths both persist the intended `target_agent`, even when no dispatch row
+  is needed, so the transcript still says who was expected to answer. Reply
+  ownership now requires fresh `listening` or `reading` activity, or a
+  server-paced `waiting` session still inside its persisted next-poll grace: a
+  disciplined peer no longer gains a duplicate native responder between two
+  polls, while a peer whose sticky membership survived a real disconnect
+  remains visible in the room header but cannot silence the native fallback.
+  Disabling the native principal also retires every queued response in the same
+  database transaction, clears the orphaned waiting state, and the final claim
+  still checks the persisted mode atomically; a job selected just before the
+  click can therefore never launch afterwards or remain in a retry loop.
+- Human `@user` mentions recover their configured Kronn pseudo and Gravatar
+  after a backend rebuild. The identity provider now retries its cosmetic
+  startup request instead of remaining on the generic label when its first call
+  happened while the Rust backend was still unavailable.
+- A silent agent killed by Kronn's watchdog now says that it reached the
+  inactivity deadline, names the elapsed duration and points to the setting to
+  change instead of showing only `exit code: None`. Non-streaming agents keep a
+  safe 15-minute floor, while a larger configured timeout is now honoured up
+  to the separate global execution ceiling.
+- Reloading the Vite dev UI no longer throws the user back to Projects and
+  loses the open discussion. The current page and discussion are checkpointed
+  for the lifetime of the browser tab, restored only after the discussion id is
+  validated, and never trigger an automatic agent or workflow action.
+- A discussion bound to a CLI session no longer claims to have been imported.
+  The sidebar badge read "imported from Codex" for what is only a live session
+  binding — nothing had been ingested — so it now reads "bound to Codex" with a
+  link icon. A real portable-bundle import is a separate badge that names the
+  person who exported it: the envelope carries their pseudo and avatar
+  e-mail, the import ledger persists it, and the row shows the Gravatar. Both
+  stay empty rather than invented when the exporting instance had no identity
+  configured, and bundles exported before this release still import untouched.
+  The exporter is deliberately left out of the content fingerprint, so a
+  colleague's copy of an already-imported discussion is still recognised as the
+  same content instead of a conflict. The ledger also reserves a distinct
+  provenance for importing an agent transcript, which does not exist yet.
+
+- The `git blame` gutter in the Code tab is readable again. Its author label
+  sat at 4:1 contrast on 10px text and, once made clickable, collapsed to a
+  one-pixel column: a `<button>` cannot take part in the surrounding CSS table
+  layout, so the shrink-to-fit width no longer applied and the name was clipped
+  away even though the click still worked. The cell is a table cell again with
+  the button inside it, and the label colour is mixed from the theme's on-dark
+  ink at 8.4:1 rather than hardcoded white, so it also follows themes whose
+  code pane is not white on black.
+
+- Opening the Code tab no longer waits for the language statistics. On a loaded
+  repository, `git-status` answered in 50.8 s cold because the decorative
+  language bar was computed inside the response; measured after the change, the
+  same call answers in 0.23 s, the bar arrives from a background computation
+  (~20 s later, served as cached), and a stale bar is shown while refreshing
+  rather than waited on. The explicit re-check button still computes inline —
+  asking for fresh numbers still gets them. At most one computation runs per
+  project, so several open tabs no longer scan the same repository in parallel.
+
+- Native `start-dev` now supervises the backend watcher after initial
+  readiness. If either Rust or Vite exits, Kronn stops the surviving child and
+  reports the failure in the terminal instead of leaving an apparently running
+  UI in an endless `ECONNREFUSED` reconnect loop. Compile, migration and boot
+  failures are also propagated through the otherwise persistent `watchexec`
+  parent, while ordinary signal-driven hot reloads remain transparent.
 - A message could be lost when the backend errored on send (HTTP 502); the draft
   is now preserved instead of discarded.
 - Ollama and other mentioned agents reliably respond when addressed; the GitHub
@@ -85,6 +397,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or more long offline-agent chips overflow on narrow screens.
 - The expanded Git panel keeps long changed-file lists independently scrollable,
   so every file remains reachable beside the diff.
+- Opening a long discussion and clicking its “latest message” arrow now both
+  reach the real bottom in one pass, even while late-rendered Markdown, diagrams
+  or media are still growing the message list; a user scroll immediately
+  cancels the short settling pass.
 
 ## [0.9.1] - 2026-07-26
 

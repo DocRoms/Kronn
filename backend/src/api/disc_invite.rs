@@ -26,9 +26,12 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;
 use ts_rs::TS;
+use uuid::Uuid;
 
 use crate::db;
-use crate::models::ApiResponse;
+use crate::models::{
+    ApiResponse, MessageTarget, MessageTargetKind, PlanningTaskStatus, PlanningTaskSummary,
+};
 use crate::AppState;
 
 /// Wire shape returned by the invite endpoint. The frontend displays
@@ -42,7 +45,12 @@ pub struct InviteResponse {
     pub disc_id: String,
     pub expires_at: String,
     pub ttl_seconds: i64,
+    /// Handoff to paste into the invited agent's terminal. This is the FIRST
+    /// thing that agent reads — before `disc_join` even answers — so it carries
+    /// the working contract, not just the token.
     pub instruction_text: String,
+    /// Token-only form, for a human who just wants the bare call (KT-52).
+    pub instruction_text_minimal: String,
 }
 
 /// Body of `POST /api/discussions/peer-join`. The token is the
@@ -65,6 +73,22 @@ pub struct PeerJoinRequest {
     /// value declared on a previous join/rebind (legacy bridges omit it).
     #[serde(default)]
     pub model: Option<String>,
+    /// Native conversation id used by the CLI's own resume command. Optional
+    /// and distinct from the Kronn bridge `session_id`.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
+}
+
+fn normalize_conversation_id(raw: Option<&str>) -> Result<Option<String>, &'static str> {
+    let Some(raw) = raw.filter(|id| !id.is_empty()) else {
+        return Ok(None);
+    };
+    if raw != raw.trim() || raw.chars().count() > 512 {
+        return Err("conversation_id must be a canonical UUID");
+    }
+    Uuid::parse_str(raw)
+        .map(|id| Some(id.to_string()))
+        .map_err(|_| "conversation_id must be a canonical UUID")
 }
 
 /// Wire shape returned by `peer-join`. Carries the disc id (so the
@@ -86,6 +110,9 @@ pub struct PeerJoinResponse {
     /// Last N messages already in the disc (default 10). Empty for a
     /// freshly-created topic.
     pub recent_messages: Vec<RecentMessagePreview>,
+    /// Compact, bounded plan state available even when the MCP client cached
+    /// an older tool catalogue and cannot call `plan_get` yet.
+    pub plan_snapshot: PeerJoinPlanSnapshot,
     /// 0.8.6 fix 2026-05-21 — explicit directive returned to the
     /// agent so it understands the multi-agent protocol. Without
     /// this, agents like Codex/Vibe would `disc_join` and then just
@@ -105,12 +132,83 @@ pub struct PeerJoinResponse {
     pub pacing: crate::api::disc_introspection::PacingState,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PeerJoinPlanTaskPreview {
+    pub reference: String,
+    pub title: String,
+    pub status: PlanningTaskStatus,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PeerJoinPlanSnapshot {
+    pub primary_objective: Option<PeerJoinPlanTaskPreview>,
+    /// First eight non-completed Active tasks, in plan order.
+    pub current: Vec<PeerJoinPlanTaskPreview>,
+    /// Three most recently updated completed Active tasks.
+    pub recently_completed: Vec<PeerJoinPlanTaskPreview>,
+    pub current_total: u32,
+    pub completed_total: u32,
+    pub later_total: u32,
+}
+
+fn peer_join_task_preview(task: &PlanningTaskSummary) -> PeerJoinPlanTaskPreview {
+    PeerJoinPlanTaskPreview {
+        reference: task.reference.clone(),
+        title: task.title.clone(),
+        status: task.status,
+    }
+}
+
+fn peer_join_plan_snapshot(
+    connection: &rusqlite::Connection,
+    discussion_id: &str,
+) -> anyhow::Result<PeerJoinPlanSnapshot> {
+    let plan = db::planning::get_discussion_plan(connection, discussion_id)?;
+    let mut completed = plan
+        .active
+        .iter()
+        .filter(|relation| relation.task.status == PlanningTaskStatus::Done)
+        .map(|relation| &relation.task)
+        .collect::<Vec<_>>();
+    completed.sort_by_key(|task| std::cmp::Reverse(task.updated_at));
+
+    let current = plan
+        .active
+        .iter()
+        .filter(|relation| {
+            !matches!(
+                relation.task.status,
+                PlanningTaskStatus::Done | PlanningTaskStatus::Archived
+            )
+        })
+        .map(|relation| peer_join_task_preview(&relation.task))
+        .collect::<Vec<_>>();
+
+    Ok(PeerJoinPlanSnapshot {
+        primary_objective: plan.primary_objective.as_ref().map(peer_join_task_preview),
+        current_total: current.len() as u32,
+        completed_total: plan.stats.done,
+        later_total: plan.stats.later,
+        current: current.into_iter().take(8).collect(),
+        recently_completed: completed
+            .into_iter()
+            .take(3)
+            .map(peer_join_task_preview)
+            .collect(),
+    })
+}
+
 #[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct PeerResumeRequest {
     pub agent_type: String,
     pub session_id: String,
     pub resume_token: String,
+    /// Native CLI conversation id observed after reconnect or `/clear`.
+    #[serde(default)]
+    pub conversation_id: Option<String>,
     /// Client-prepared successor credential. The bridge persists it as a
     /// pending value *before* this request, making the rotation retryable if
     /// the response is lost. Omitted by legacy bridges, which resume without
@@ -171,6 +269,10 @@ pub async fn peer_join(
             "model declaration too long (max 200 chars) — omit it or shorten it",
         ));
     }
+    let conversation_id = match normalize_conversation_id(req.conversation_id.as_deref()) {
+        Ok(id) => id,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
 
     let token = req.token.clone();
     let agent_type = req.agent_type.clone();
@@ -223,6 +325,18 @@ pub async fn peer_join(
             tracing::warn!("peer_join: failed to record declared model: {e}");
         }
     }
+    if let Some(conversation_id) = conversation_id {
+        let pk = session_pk;
+        if let Err(e) = state
+            .db
+            .with_conn(move |conn| {
+                db::discussion_sessions::set_session_conversation_id(conn, pk, &conversation_id)
+            })
+            .await
+        {
+            tracing::warn!("peer_join: failed to record native conversation id: {e}");
+        }
+    }
 
     // Build the response from the resolved disc (shared by local + mirror paths).
     let res = state
@@ -271,34 +385,8 @@ pub async fn peer_join(
             // numbered, and tells the agent to introduce ITSELF
             // regardless of `peer_count` (don't wait for others to
             // arrive — the human watching the UI needs to see life).
-            let next_steps = format!(
-                "✅ You joined `{}` (title: {:?}, {} active participant(s) including you).\n\n\
-                 ⚠ REQUIRED PROTOCOL — execute IN ORDER, do NOT skip step 1 :\n\n\
-                 STEP 1 (DO IMMEDIATELY, EVEN IF YOU'RE THE FIRST/ONLY PARTICIPANT) :\n\
-                 Call `disc_append({{content: \"<your introduction>\"}})` to introduce \
-                 yourself in the shared discussion. State your CLI name + your role in \
-                 this conversation. The human watching the Kronn UI needs to see you \
-                 are alive. Replying only in your local terminal is INVISIBLE to peers — \
-                 you MUST go through `disc_append`.\n\n\
-                 STEP 2 :\n\
-                 If `recent_messages` (above) contains user instructions or peer \
-                 statements that demand a substantive first reply (e.g. 'start the \
-                 match', 'propose a plan'), make that reply via a SECOND `disc_append` \
-                 call right after your intro.\n\n\
-                 STEP 3 (loop until task done or user says stop) :\n\
-                 a. Call `disc_wait_for_peer({{timeout_secs: 90}})` to block until \
-                 another agent posts something new.\n\
-                 b. If it returns `timed_out: true` with NO new messages, that is \
-                 NORMAL (the peer may still be thinking) — immediately call \
-                 `disc_wait_for_peer` AGAIN. A quiet window is NOT the end of the \
-                 conversation; never stop or leave just because a wait timed out.\n\
-                 c. When messages arrive, read them, then call `disc_append({{content: \
-                 \"<your reaction>\"}})` to reply.\n\
-                 d. Go back to (a).\n\n\
-                 To leave the room : `disc_leave()`. Don't leave until the task \
-                 is done or the user explicitly tells you to stop.",
-                disc_id, disc_title, peer_count,
-            );
+            let next_steps = join_next_steps(&disc_id, &disc_title, peer_count);
+            let plan_snapshot = peer_join_plan_snapshot(conn, &disc_id)?;
 
             Ok::<_, anyhow::Error>(PeerJoinResponse {
                 poll_policy: crate::api::disc_introspection::PollBackoffPolicy::default(),
@@ -312,6 +400,7 @@ pub async fn peer_join(
                 peer_count,
                 disc_title,
                 recent_messages: rows,
+                plan_snapshot,
                 next_steps,
             })
         })
@@ -324,6 +413,80 @@ pub async fn peer_join(
         }
         Err(e) => Json(ApiResponse::err(e.to_string())),
     }
+}
+
+/// The protocol handed to an agent that just joined a room. Extracted from
+/// the handler so the directives agents keep dropping — read the shared plan,
+/// stay in the room and follow it — are pinned by a test.
+fn join_next_steps(disc_id: &str, disc_title: &str, peer_count: i64) -> String {
+    format!(
+        "✅ You joined `{}` (title: {:?}, {} active participant(s) including you).\n\n\
+         ⚠ REQUIRED PROTOCOL — execute IN ORDER, do NOT skip step 1 :\n\n\
+         STEP 1 (DO IMMEDIATELY, EVEN IF YOU'RE THE FIRST/ONLY PARTICIPANT) :\n\
+         Call `disc_append({{content: \"<your introduction>\"}})` to introduce \
+         yourself in the shared discussion. State your CLI name + your role in \
+         this conversation. The human watching the Kronn UI needs to see you \
+         are alive. Replying only in your local terminal is INVISIBLE to peers — \
+         you MUST go through `disc_append`.\n\n\
+         STEP 2 :\n\
+         If `recent_messages` (above) contains user instructions or peer \
+         statements that demand a substantive first reply (e.g. 'start the \
+         match', 'propose a plan'), make that reply via a SECOND `disc_append` \
+         call right after your intro.\n\n\
+         STEP 3 — READ THE SHARED PLAN BEFORE ACTING :\n\
+         This room may already have an objective and tasks in flight. Call \
+         `plan_get` (current objective + active tasks) and `task_list` if you \
+         need the wider backlog, so you pick up the real work instead of \
+         guessing or asking the human to re-explain. You may READ **and \
+         UPDATE** those tasks — `task_create`, `task_update`, \
+         `task_update_dod`, `task_add_blocker` — and you are expected to keep \
+         them honest as you go (a task you finished must not stay open, a \
+         blocker you discovered must be recorded). Write only when tracked \
+         work actually starts or materially changes; do not reload or rewrite \
+         unchanged tasks merely to report progress. The whole \
+         `kronn-internal` surface is available to you, not just the `disc_*` \
+         tools: workflows, api_call, skills, directives, profiles, audits.\n\
+         If one of the Planning tools named above is missing from your actual \
+         MCP tool surface, your client cached an older catalogue: use the \
+         read-only `plan_snapshot` in this join response, tell @user to \
+         reconnect the Kronn MCP, and do not fabricate or claim any task \
+         update.\n\n\
+         STEP 4 — ANNOUNCE BEFORE THE FIRST SUBSTANTIVE ACTION :\n\
+         Before editing files, running a substantive command or triggering an \
+         external action, call `disc_append` with a concise \
+         \"task / scope / next action\" update. Peers and the human must know \
+         what you are taking before implementation starts. Pure context reads \
+         do not need a noisy announcement. If the scope changes materially, \
+         post one updated intent before continuing.\n\n\
+         RECONNECTING IS ALREADY HANDLED — DO NOT ASK FOR A NEW TOKEN :\n\
+         This join linked your durable CLI session to this room (see \
+         `session_bound` in the join result). After an MCP reload, call \
+         `disc_find_by_session` — you get this discussion back without a fresh \
+         invite. If `session_bound` is false, the reason is stated next to it: \
+         your session has no durable identity, or it already belongs to another \
+         discussion. Do not force a transfer on your own initiative; ask the \
+         human first.\n\n\
+         STEP 5 — STAY IN THE ROOM AND FOLLOW IT (this is the part agents \
+         get wrong) :\n\
+         a. Call `disc_wait_for_peer({{timeout_secs: 170}})` to block until \
+         someone posts something new.\n\
+         b. If it returns `timed_out: true` with NO new messages, that is \
+         NORMAL (the peer may still be thinking) — immediately call \
+         `disc_wait_for_peer` AGAIN. A quiet window is NOT the end of the \
+         conversation; never stop or leave just because a wait timed out.\n\
+         c. When messages arrive, read them, then call `disc_append({{content: \
+         \"<your reaction>\"}})` to reply.\n\
+         d. If the room stays quiet and you have nothing to answer, do NOT \
+         idle and do NOT end your turn on a summary: take the next actionable \
+         task from the plan, do it, and report it in the room. Silence from \
+         you is indistinguishable from having left, and the human WILL read it \
+         that way.\n\
+         e. Go back to (a).\n\n\
+         JOINING IS NOT THE TASK. Reporting progress is not the end of your \
+         work either — the room is done when the plan is done or the human \
+         says stop. To leave : `disc_leave()`, and only then.",
+        disc_id, disc_title, peer_count,
+    )
 }
 
 /// `POST /api/discussions/peer-resume`
@@ -344,6 +507,10 @@ pub async fn peer_resume(
     if req.resume_token.trim().is_empty() {
         return Json(ApiResponse::err("resume_token required"));
     }
+    let conversation_id = match normalize_conversation_id(req.conversation_id.as_deref()) {
+        Ok(id) => id,
+        Err(error) => return Json(ApiResponse::err(error)),
+    };
     if let Some(next) = req.next_resume_token.as_deref() {
         let suffix = next.strip_prefix("kr-resume-").unwrap_or_default();
         if suffix.len() != 32 || !suffix.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -359,13 +526,21 @@ pub async fn peer_resume(
     match state
         .db
         .with_conn(move |conn| {
-            db::discussion_sessions::resume_disc_session(
+            let resumed = db::discussion_sessions::resume_disc_session(
                 conn,
                 &agent_type,
                 &resume_token,
                 &session_id,
                 next_resume_token.as_deref(),
-            )
+            )?;
+            if let Some(conversation_id) = conversation_id {
+                db::discussion_sessions::set_session_conversation_id(
+                    conn,
+                    resumed.session_pk,
+                    &conversation_id,
+                )?;
+            }
+            Ok(resumed)
         })
         .await
     {
@@ -564,6 +739,10 @@ pub struct WaitForPeerQuery {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct WaitForPeerMessage {
+    /// Durable identifier of the delivered transcript message or revision
+    /// event. Callers can cite it in an acknowledgement and use it as
+    /// `reply_to_message_id` when the item is a transcript message.
+    pub message_id: String,
     pub sort_order: i64,
     pub role: String,
     pub agent_type: Option<String>,
@@ -580,6 +759,24 @@ pub struct WaitForPeerMessage {
     pub event_type: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_message_id: Option<String>,
+    /// Structured addressee for this turn. A waiting peer whose own agent type
+    /// differs must not answer it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_agent: Option<String>,
+    /// Every structured addressee, in the order written by the human. Peers
+    /// answer when their own agent type is present and otherwise only observe.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub target_agents: Vec<String>,
+    /// Authoritative target identities. Unlike `target_agents`, this tells a
+    /// native punctual agent from the configured discussion agent and from one
+    /// exact joined CLI session of the same provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<MessageTarget>,
+    /// Server-computed for the calling durable CLI session. A CLI answers only
+    /// when this is true; matching the provider name is intentionally
+    /// insufficient because `@codex` and `@codex · CLI` are distinct targets.
+    #[serde(default)]
+    pub addressed_to_caller: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -607,6 +804,14 @@ pub struct WaitForPeerResponse {
     /// activity (generic label, no countdown). `None` on a delivery (the
     /// caller replies now, not later).
     pub next_poll_at: Option<String>,
+    /// How many turns in this window were addressed to someone else and so held
+    /// back from `messages`. `latest_sort_order` still counts them, otherwise the
+    /// caller would loop on a cursor gap — which makes "withheld by routing" and
+    /// "not read yet" indistinguishable from the cursor alone. Reporting the count
+    /// lets an agent say "3 turns were not for me" instead of looking deaf when a
+    /// human asks whether it saw their message. Excludes the caller's own appends:
+    /// it wrote those, they were never news.
+    pub withheld_by_routing: u32,
 }
 
 /// stab-3 — pacing for a disc: hot while the last User message is within
@@ -644,7 +849,15 @@ pub(crate) async fn pacing_for_disc(
 
 const WAIT_POLL_INTERVAL_MS: u64 = 1000;
 const WAIT_TIMEOUT_DEFAULT_SECS: u64 = 60;
-const WAIT_TIMEOUT_MAX_SECS: u64 = 90;
+/// KT-43 — every returned wait is a dead window: the agent gets its turn back,
+/// and whether it loops again depends on the external harness, not on us. A
+/// longer single block therefore removes latency that no instruction can fix.
+/// The ceiling is NOT free to raise: the MCP bridge reads this response with a
+/// 180 s client timeout (`_http` in `backend/scripts/disc-introspection-mcp.py`),
+/// so a server block at or past that would surface as a transport error instead
+/// of a clean `timed_out`. Kept below it with room to spare; a Python test pins
+/// the relationship from the other side.
+const WAIT_TIMEOUT_MAX_SECS: u64 = 170;
 /// 0.8.12 PR B — "listening" outlives the requested wait by this margin,
 /// then expires on its own (read-side expiry, no reaper).
 const ACTIVITY_LISTENING_MARGIN_SECS: i64 = 30;
@@ -665,7 +878,7 @@ const ACTIVITY_WAITING_MARGIN_SECS: i64 = 15;
 /// Long-polling endpoint : sleeps in ~1s ticks, returning as soon as
 /// a new message (newer than `since_sort_order`, optionally excluding
 /// the caller's own `agent_type`) appears in the disc. Bounded by
-/// `timeout_secs` (default 60s, max 90s).
+/// `timeout_secs` (default 60s, max 170s).
 ///
 /// The bridge's `disc_wait_for_peer` MCP tool calls this. Polling-
 /// based rather than broadcast/SSE because (a) the disc-message
@@ -685,6 +898,27 @@ pub async fn wait_for_peer(
         .clamp(1, WAIT_TIMEOUT_MAX_SECS);
     let deadline = std::time::Instant::now() + Duration::from_secs(timeout_secs);
     let exclude = q.exclude_agent_type;
+    let session_id = q.session_id;
+    let caller_session_pk = if let (Some(agent_type), Some(caller_session_id)) =
+        (exclude.as_ref(), session_id.as_ref())
+    {
+        let agent = agent_type.clone();
+        let session = caller_session_id.clone();
+        let did = disc_id.clone();
+        state
+            .db
+            .with_read_conn(move |conn| {
+                Ok(
+                    crate::db::discussion_sessions::find_active_session(conn, &agent, &session)?
+                        .filter(|row| row.disc_id == did)
+                        .map(|row| row.id),
+                )
+            })
+            .await
+            .unwrap_or(None)
+    } else {
+        None
+    };
 
     // Liveness heartbeat (migration 064). The agent's idle loop calls
     // this every ≤90s with `exclude_agent_type = its own type` (so it
@@ -696,7 +930,6 @@ pub async fn wait_for_peer(
     // 0.8.12 PR B — presence phase 1: an open wait IS the "listening"
     // fact. TTL = requested timeout + margin, so a crashed agent's
     // placeholder dies on its own (expiry read-side, no reaper).
-    let session_id = q.session_id;
     if let (Some(agent_type), Some(caller_session_id)) = (exclude.as_ref(), session_id.as_ref()) {
         let disc_id_touch = disc_id.clone();
         let agent_touch = agent_type.clone();
@@ -726,29 +959,62 @@ pub async fn wait_for_peer(
         }
     }
 
+    let mut observed_latest_order = since;
+    // Assigned on every poll before any read; no initial value to shadow.
+    let mut withheld_by_routing: u32;
     loop {
         let disc_id_clone = disc_id.clone();
         let exclude_clone = exclude.clone();
-        let messages: anyhow::Result<Vec<WaitForPeerMessage>> = state
+        let messages: anyhow::Result<(Vec<WaitForPeerMessage>, i64, u32)> = state
             .db
             .with_conn(move |conn| {
                 // Pull every message after `since` ; filter the
                 // exclude_agent_type in Rust to avoid threading an
                 // Option<String> through the SQL binder.
                 let mut stmt = conn.prepare(
-                    "SELECT sort_order, role, agent_type, content, timestamp,
-                            author_pseudo, event_type, target_message_id
+                    "SELECT message_id, sort_order, role, agent_type, content, timestamp,
+                            author_pseudo, event_type, target_message_id, target_agent,
+                            targets
                      FROM (
-                         SELECT sort_order, role, agent_type, content, timestamp,
+                         SELECT id AS message_id, sort_order, role, agent_type, content, timestamp,
                                 author_pseudo, NULL AS event_type,
-                                NULL AS target_message_id
+                                NULL AS target_message_id, target_agent,
+                                (
+                                    SELECT GROUP_CONCAT(
+                                        ordered.target_kind || '|' ||
+                                        ordered.agent_type || '|' ||
+                                        COALESCE(ordered.cli_session_id, ''),
+                                        ','
+                                    )
+                                    FROM (
+                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                                        FROM message_targets mt
+                                        WHERE mt.message_id = messages.id
+                                        ORDER BY mt.position ASC
+                                    ) AS ordered
+                                ) AS targets
                          FROM messages
                          WHERE discussion_id = ?1 AND sort_order > ?2
                          UNION ALL
-                         SELECT sort_order, 'System' AS role, NULL AS agent_type,
+                         SELECT id AS message_id, sort_order, 'System' AS role, NULL AS agent_type,
                                 '[message_revised] ' || target_message_id || char(10) || content,
                                 created_at AS timestamp, NULL AS author_pseudo,
-                                'message_revised' AS event_type, target_message_id
+                                'message_revised' AS event_type, target_message_id,
+                                trim(target_agent_json, '\"') AS target_agent,
+                                (
+                                    SELECT GROUP_CONCAT(
+                                        ordered.target_kind || '|' ||
+                                        ordered.agent_type || '|' ||
+                                        COALESCE(ordered.cli_session_id, ''),
+                                        ','
+                                    )
+                                    FROM (
+                                        SELECT mt.target_kind, mt.agent_type, mt.cli_session_id
+                                        FROM message_targets mt
+                                        WHERE mt.message_id = message_revision_events.target_message_id
+                                        ORDER BY mt.position ASC
+                                    ) AS ordered
+                                ) AS targets
                          FROM message_revision_events
                          WHERE discussion_id = ?1 AND sort_order > ?2
                      )
@@ -756,19 +1022,65 @@ pub async fn wait_for_peer(
                 )?;
                 let rows: Vec<WaitForPeerMessage> = stmt
                     .query_map(rusqlite::params![&disc_id_clone, since], |r| {
+                        let targets = r
+                            .get::<_, Option<String>>(10)?
+                            .map(|serialized| {
+                                serialized
+                                    .split(',')
+                                    .filter_map(|target| {
+                                        let mut fields = target.splitn(3, '|');
+                                        let kind = match fields.next()? {
+                                            "discussion_agent" => MessageTargetKind::DiscussionAgent,
+                                            "cli" => MessageTargetKind::Cli,
+                                            _ => MessageTargetKind::Agent,
+                                        };
+                                        let agent_type = crate::db::discussions::parse_agent_type(
+                                            fields.next()?,
+                                        );
+                                        let cli_session_id =
+                                            fields.next().and_then(|value| value.parse().ok());
+                                        Some(MessageTarget {
+                                            kind,
+                                            agent_type,
+                                            cli_session_id,
+                                        })
+                                    })
+                                    .collect::<Vec<_>>()
+                            })
+                            .unwrap_or_default();
                         Ok(WaitForPeerMessage {
-                            sort_order: r.get(0)?,
-                            role: r.get(1)?,
-                            agent_type: r.get(2)?,
-                            content: r.get(3)?,
-                            timestamp: r.get(4)?,
-                            author_pseudo: r.get(5)?,
-                            event_type: r.get(6)?,
-                            target_message_id: r.get(7)?,
+                            message_id: r.get(0)?,
+                            sort_order: r.get(1)?,
+                            role: r.get(2)?,
+                            agent_type: r.get(3)?,
+                            content: r.get(4)?,
+                            timestamp: r.get(5)?,
+                            author_pseudo: r.get(6)?,
+                            event_type: r.get(7)?,
+                            target_message_id: r.get(8)?,
+                            target_agent: r.get(9)?,
+                            target_agents: targets
+                                .iter()
+                                .map(|target| format!("{:?}", target.agent_type))
+                                .collect(),
+                            addressed_to_caller: caller_session_pk.is_some_and(|session_pk| {
+                                targets.iter().any(|target| {
+                                    target.kind == MessageTargetKind::Cli
+                                        && target.cli_session_id == Some(session_pk)
+                                })
+                            }),
+                            targets,
                         })
                     })?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
-                let filtered = rows
+                let observed_latest = rows
+                    .iter()
+                    .map(|message| message.sort_order)
+                    .max()
+                    .unwrap_or(since);
+                let no_agent_room =
+                    crate::db::discussions::disc_is_no_agent(conn, &disc_id_clone)?;
+                let others: Vec<WaitForPeerMessage> = rows
                     .into_iter()
                     // Exclude only OUR OWN local appends (same agent_type AND no
                     // author_pseudo). A federated peer message carries an
@@ -780,17 +1092,45 @@ pub async fn wait_for_peer(
                         _ => true,
                     })
                     .collect();
-                Ok(filtered)
+                // Counted before the routing filter and after the own-append one,
+                // so the number means "addressed elsewhere", not "written by me".
+                let peer_turns = others.len();
+                let filtered: Vec<WaitForPeerMessage> = others
+                    .into_iter()
+                    // Current bridges identify their exact durable session.
+                    // Any explicitly targeted live turn is private dispatch
+                    // payload: `@codex` belongs to a native agent identity,
+                    // while only `@codex-cli[-N]` addresses this joined peer.
+                    // Untargeted Agent turns remain room-visible; untargeted
+                    // User turns remain visible only in no-agent rooms.
+                    // Legacy callers without a session id retain the historical
+                    // room-awareness projection.
+                    .filter(|message| {
+                        caller_session_pk.is_none()
+                            || message.addressed_to_caller
+                            || (message.targets.is_empty()
+                                && message.event_type.is_none()
+                                && (message.role != "User" || no_agent_room))
+                    })
+                    .collect();
+                let withheld = (peer_turns - filtered.len()) as u32;
+                Ok((filtered, observed_latest, withheld))
             })
             .await;
 
         let messages = match messages {
-            Ok(m) => m,
+            Ok((messages, observed_latest, withheld)) => {
+                observed_latest_order = observed_latest_order.max(observed_latest);
+                // The query always re-reads from the same `since`, so the latest
+                // count covers the whole window rather than one poll of it.
+                withheld_by_routing = withheld;
+                messages
+            }
             Err(e) => return Json(ApiResponse::err(format!("wait_for_peer db error: {e}"))),
         };
 
         if !messages.is_empty() {
-            let latest_sort_order = messages.iter().map(|m| m.sort_order).max().unwrap_or(since);
+            let latest_sort_order = observed_latest_order;
             // 0.8.12 PR B — messages DELIVERED and no reply posted yet:
             // that's the "reading" fact (the window the human perceives
             // as "buggé/très long"). Short TTL; disc_append clears it the
@@ -827,6 +1167,7 @@ pub async fn wait_for_peer(
                 pacing,
                 // Delivery: the caller replies now, not after a pause.
                 next_poll_at: None,
+                withheld_by_routing,
             }));
         }
 
@@ -881,9 +1222,10 @@ pub async fn wait_for_peer(
             return Json(ApiResponse::ok(WaitForPeerResponse {
                 timed_out: true,
                 messages: vec![],
-                latest_sort_order: since,
+                latest_sort_order: observed_latest_order,
                 pacing,
                 next_poll_at,
+                withheld_by_routing,
             }));
         }
 
@@ -948,10 +1290,8 @@ pub async fn invite_peer(
         Err(e) => return Json(ApiResponse::err(e.to_string())),
     };
 
-    let instruction_text = format!(
-        "Joins-toi à cette discussion Kronn en appelant l'outil MCP : disc_join({{token: \"{}\"}})",
-        issued.token
-    );
+    let instruction_text = invite_handoff(&issued.token);
+    let instruction_text_minimal = invite_handoff_minimal(&issued.token);
 
     Json(ApiResponse::ok(InviteResponse {
         token: issued.token,
@@ -959,7 +1299,39 @@ pub async fn invite_peer(
         expires_at: issued.expires_at,
         ttl_seconds: db::discussion_sessions::INVITE_TTL_SECS,
         instruction_text,
+        instruction_text_minimal,
     }))
+}
+
+/// Bare form: the call and nothing else, for a human who only wants the token.
+fn invite_handoff_minimal(token: &str) -> String {
+    format!("Joins-toi à cette discussion Kronn en appelant l'outil MCP : disc_join({{token: \"{token}\"}})")
+}
+
+/// KT-52 — the pasted handoff. The bare `disc_join` line left an invited agent
+/// with no idea that the room has a shared plan it should read, that it may
+/// write to that plan, or that it is expected to stay and follow the
+/// conversation; `disc_join`'s own protocol says all that, but only AFTER the
+/// agent decides to call it, and an agent that skims does the wrong thing
+/// first. Deliberately short — it lands in a terminal prompt — and it POINTS at
+/// the tools instead of inlining the conversation or the plan, so the context
+/// is loaded on demand rather than duplicated into the prompt.
+fn invite_handoff(token: &str) -> String {
+    format!(
+        "Joins-toi à cette discussion Kronn en appelant l'outil MCP : \
+         disc_join({{token: \"{token}\"}})\n\
+         Ensuite, avant d'agir : lis le plan partagé avec `plan_get` (objectif + \
+         tâches en cours) et `task_list` si tu as besoin du reste du backlog — \
+         ne demande pas qu'on te réexplique l'état, charge-le.\n\
+         Tu peux créer, modifier, prioriser et cocher ces tâches \
+         (`task_create`, `task_update`, `task_update_dod`, `task_add_blocker`), \
+         en utilisant les outils `kronn-internal` autorisés.\n\
+         Avant ta première action substantielle, annonce via `disc_append` la \
+         tâche, le périmètre et la prochaine action dans la room.\n\
+         Puis reste dans la room : boucle sur `disc_wait_for_peer` et réponds à \
+         ce qui arrive. Si c'est calme, prends la tâche suivante du plan et \
+         rends-en compte — te taire est lu comme un départ."
+    )
 }
 
 /// Body of `POST /api/disc/claim-by-token`. A PEER calls this to ask "do you
@@ -1435,6 +1807,55 @@ mod tests {
         assert_eq!(data.ttl_seconds, db::discussion_sessions::INVITE_TTL_SECS);
         assert!(data.instruction_text.contains(&data.token));
         assert!(data.instruction_text.contains("disc_join"));
+        // KT-52 — both forms carry the token; only the enriched one carries the
+        // working contract.
+        assert!(data.instruction_text_minimal.contains(&data.token));
+        assert!(data.instruction_text_minimal.contains("disc_join"));
+        assert!(
+            !data.instruction_text_minimal.contains("plan_get"),
+            "the minimal form must stay a bare call"
+        );
+    }
+
+    /// KT-52 — the pasted line is read BEFORE `disc_join` answers, so an agent
+    /// that only skims it must still know to read the plan, that it may write
+    /// to it, and that it has to stay. Asserted here because prose without a
+    /// test gets trimmed by the next person who finds it too long.
+    #[test]
+    fn pasted_handoff_carries_the_working_contract() {
+        let handoff = invite_handoff("kr-join-abc");
+
+        assert!(handoff.contains("kr-join-abc"));
+        assert!(handoff.contains("disc_join"));
+        assert!(
+            handoff.contains("plan_get"),
+            "must send the agent to the plan"
+        );
+        assert!(handoff.contains("task_list"));
+        for tool in [
+            "task_create",
+            "task_update",
+            "task_update_dod",
+            "task_add_blocker",
+        ] {
+            assert!(handoff.contains(tool), "must state that {tool} is allowed");
+        }
+        assert!(handoff.contains("kronn-internal"));
+        assert!(
+            handoff.contains("Avant ta première action substantielle")
+                && handoff.contains("périmètre")
+                && handoff.contains("disc_append"),
+            "must make the agent announce its intent before acting",
+        );
+        assert!(handoff.contains("disc_wait_for_peer"), "must say to stay");
+
+        // Short enough to paste into a prompt: the whole point is that it is a
+        // handoff, not a copy of the conversation.
+        assert!(
+            handoff.lines().count() <= 5,
+            "handoff grew to {} lines — keep it pasteable",
+            handoff.lines().count()
+        );
     }
 
     #[tokio::test]
@@ -1465,6 +1886,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-cdx-1".into(),
                 model: None,
+                conversation_id: Some("019f8fc7-dd84-7843-abad-162a97ca836b".into()),
             }),
         )
         .await;
@@ -1477,6 +1899,15 @@ mod tests {
         assert_eq!(data.peer_count, 1, "exactly the joining session is active");
         assert_eq!(data.disc_title, "Test disc");
         assert_eq!(data.recent_messages.len(), 0, "empty disc → no previews");
+        let sessions = state
+            .db
+            .with_conn(|conn| db::discussion_sessions::list_sessions(conn, "d-join-1", false))
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions[0].conversation_id.as_deref(),
+            Some("019f8fc7-dd84-7843-abad-162a97ca836b")
+        );
         // Empty disc ⇒ cold at the cap (no anchors). The HOT proof that
         // pacing is really computed lives in the dedicated test below.
         assert_eq!(
@@ -1505,6 +1936,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "child-before-reload".into(),
                 model: None,
+                conversation_id: Some("019f8fc7-dd84-7843-abad-162a97ca836b".into()),
             }),
         )
         .await
@@ -1519,6 +1951,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "child-after-reload".into(),
                 resume_token: joined.resume_token.clone(),
+                conversation_id: Some("019f8fc7-dd84-7843-abad-162a97ca836b".into()),
                 next_resume_token: Some(successor.clone()),
             }),
         )
@@ -1536,6 +1969,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "child-after-response-loss".into(),
                 resume_token: joined.resume_token.clone(),
+                conversation_id: Some("019f8fc7-dd84-7843-abad-162a97ca836b".into()),
                 next_resume_token: Some(successor),
             }),
         )
@@ -1551,6 +1985,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "replay".into(),
                 resume_token: joined.resume_token,
+                conversation_id: None,
                 next_resume_token: Some("kr-resume-22222222222222222222222222222222".into()),
             }),
         )
@@ -1568,6 +2003,11 @@ mod tests {
         assert_eq!(
             rows[0].session_id.as_deref(),
             Some("child-after-response-loss")
+        );
+        assert_eq!(
+            rows[0].conversation_id.as_deref(),
+            Some("019f8fc7-dd84-7843-abad-162a97ca836b"),
+            "resume refreshes native CLI metadata without replacing the bridge id"
         );
     }
 
@@ -1590,6 +2030,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "before".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await
@@ -1603,6 +2044,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "invalid".into(),
                 resume_token: joined.resume_token.clone(),
+                conversation_id: None,
                 next_resume_token: Some("kr-resume-not-hex".into()),
             }),
         )
@@ -1617,6 +2059,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "valid".into(),
                 resume_token: joined.resume_token,
+                conversation_id: None,
                 next_resume_token: Some("kr-resume-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()),
             }),
         )
@@ -1659,6 +2102,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-pace".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -1726,6 +2170,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -1743,18 +2188,21 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "s".into(),
                 model: None,
+                conversation_id: None,
             },
             PeerJoinRequest {
                 token: "kr-join-x".into(),
                 agent_type: "".into(),
                 session_id: "s".into(),
                 model: None,
+                conversation_id: None,
             },
             PeerJoinRequest {
                 token: "kr-join-x".into(),
                 agent_type: "Codex".into(),
                 session_id: "".into(),
                 model: None,
+                conversation_id: None,
             },
         ] {
             let resp = peer_join(State(state.clone()), Json(bad)).await;
@@ -1778,6 +2226,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-model".into(),
                 model: Some("  gpt-5-codex  ".into()),
+                conversation_id: None,
             }),
         )
         .await;
@@ -1812,11 +2261,45 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-long".into(),
                 model: Some("m".repeat(201)),
+                conversation_id: None,
             }),
         )
         .await;
         assert!(!rejected.0.success);
         assert!(rejected.0.error.unwrap().contains("too long"));
+    }
+
+    #[tokio::test]
+    async fn peer_join_rejects_non_uuid_conversation_id_without_creating_a_session() {
+        let state = make_state_with_disc("d-join-native-invalid").await;
+        let invite = invite_peer(
+            State(state.clone()),
+            Path("d-join-native-invalid".to_string()),
+        )
+        .await;
+        let token = invite.0.data.unwrap().token;
+
+        let rejected = peer_join(
+            State(state.clone()),
+            Json(PeerJoinRequest {
+                token,
+                agent_type: "Codex".into(),
+                session_id: "sess-native-invalid".into(),
+                model: None,
+                conversation_id: Some("$(unsafe)".into()),
+            }),
+        )
+        .await;
+        assert!(!rejected.0.success);
+        assert!(rejected.0.error.unwrap().contains("canonical UUID"));
+        let sessions = state
+            .db
+            .with_conn(|conn| {
+                db::discussion_sessions::list_sessions(conn, "d-join-native-invalid", false)
+            })
+            .await
+            .unwrap();
+        assert!(sessions.is_empty());
     }
 
     #[tokio::test]
@@ -1842,6 +2325,7 @@ mod tests {
                     agent_type: agent.into(),
                     session_id: sess.into(),
                     model: None,
+                    conversation_id: None,
                 }),
             )
             .await;
@@ -1915,6 +2399,7 @@ mod tests {
                 agent_type: "ClaudeCode".into(),
                 session_id: "sess-A".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -1953,6 +2438,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-B".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2066,6 +2552,7 @@ mod tests {
                     agent_type: agent.into(),
                     session_id: sess.into(),
                     model: None,
+                    conversation_id: None,
                 }),
             )
             .await;
@@ -2095,6 +2582,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-Z".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2203,6 +2691,68 @@ mod tests {
         assert_eq!(data.latest_sort_order, 5);
     }
 
+    /// KT-43 — the promise is "no silent latency": a wait that is ALREADY
+    /// blocking must hand over a message that lands afterwards, and do it fast
+    /// enough that the delay is the agent's loop, never Kronn. Measured on the
+    /// live backend at 6–14 ms; the bound here is loose enough for CI yet
+    /// tight enough to catch a regression to "next poll tick, maybe".
+    #[tokio::test]
+    async fn wait_already_blocking_delivers_a_later_message_within_a_bounded_delay() {
+        let state = make_state_with_disc("d-wait-bounded").await;
+        let waiting_state = state.clone();
+
+        let waiter = tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let resp = wait_for_peer(
+                State(waiting_state),
+                Path("d-wait-bounded".to_string()),
+                Query(WaitForPeerQuery {
+                    since_sort_order: Some(0),
+                    timeout_secs: Some(10),
+                    exclude_agent_type: None,
+                    session_id: None,
+                }),
+            )
+            .await;
+            (resp.0.data.unwrap(), started.elapsed())
+        });
+
+        // Let the wait actually enter its loop before the peer speaks —
+        // otherwise we would be re-testing the already-present case above.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let posted = std::time::Instant::now();
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages
+                        (id, discussion_id, role, content, agent_type, timestamp, sort_order)
+                     VALUES ('msg-late', 'd-wait-bounded', 'Agent', 'late peer', 'Codex', ?1, 7)",
+                    rusqlite::params![now],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let (data, _held) = waiter.await.unwrap();
+        let latency = posted.elapsed();
+
+        assert!(
+            !data.timed_out,
+            "a message landed — this must not read as a timeout"
+        );
+        assert_eq!(data.messages.len(), 1);
+        assert_eq!(data.messages[0].content, "late peer");
+        assert_eq!(data.latest_sort_order, 7);
+        assert!(
+            latency < Duration::from_secs(3),
+            "woke {latency:?} after the peer posted — latency must come from the \
+             agent's loop, not from Kronn"
+        );
+    }
+
     #[tokio::test]
     async fn wait_for_peer_observes_message_revision_event_beyond_cursor() {
         let state = make_state_with_disc("d-wait-revision").await;
@@ -2242,6 +2792,7 @@ mod tests {
         assert!(!data.timed_out);
         assert_eq!(data.latest_sort_order, 4);
         assert_eq!(data.messages.len(), 1);
+        assert_eq!(data.messages[0].message_id, "rev-event");
         assert_eq!(
             data.messages[0].event_type.as_deref(),
             Some("message_revised")
@@ -2292,6 +2843,274 @@ mod tests {
         let data = body.data.unwrap();
         assert!(data.timed_out, "self-message must not wake the wait");
         assert_eq!(data.messages.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_exposes_all_targets_without_hiding_the_turn() {
+        let state = make_state_with_disc("d-wait-target").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, timestamp,
+                         sort_order, target_agent
+                     ) VALUES (
+                         'msg-target', 'd-wait-target', 'User',
+                         '@codex confronte @claude', ?1, 3, 'Codex'
+                     )",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES
+                         ('msg-target', 'agent', 'Codex', NULL, 0),
+                         ('msg-target', 'agent', 'ClaudeCode', NULL, 1)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        let unrelated = wait_for_peer(
+            State(state.clone()),
+            Path("d-wait-target".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("Vibe".to_string()),
+                session_id: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(
+            !unrelated.timed_out,
+            "all peers must observe the human turn so they can detect a target failure"
+        );
+        assert_eq!(
+            unrelated.messages[0].target_agent.as_deref(),
+            Some("Codex"),
+            "an unlisted peer receives the routing marker and must abstain"
+        );
+        assert_eq!(
+            unrelated.messages[0].target_agents,
+            vec!["Codex", "ClaudeCode"],
+        );
+
+        let target = wait_for_peer(
+            State(state),
+            Path("d-wait-target".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("Codex".to_string()),
+                session_id: None,
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(!target.timed_out);
+        assert_eq!(target.messages.len(), 1);
+        assert_eq!(target.messages[0].target_agent.as_deref(), Some("Codex"));
+        assert_eq!(
+            target.messages[0].target_agents,
+            vec!["Codex", "ClaudeCode"],
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_delivers_user_turn_only_to_the_exact_cli_target() {
+        let state = make_state_with_disc("d-wait-exact-cli").await;
+        let (codex_session, _vibe_session) = state
+            .db
+            .with_conn(|conn| {
+                let codex = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-exact-cli",
+                    "Codex",
+                    Some("codex-exact"),
+                    "peer",
+                )?;
+                let vibe = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-exact-cli",
+                    "Vibe",
+                    Some("vibe-unrelated"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, timestamp, sort_order,
+                         target_agent
+                     ) VALUES (
+                         'msg-exact-cli', 'd-wait-exact-cli', 'User',
+                         'private CLI turn', ?1, 3, 'Codex'
+                     )",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES ('msg-exact-cli', 'cli', 'Codex', ?1, 0)",
+                    [codex],
+                )?;
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, agent_type, timestamp,
+                         sort_order, target_agent
+                     ) VALUES (
+                         'msg-agent-exact-cli', 'd-wait-exact-cli', 'Agent',
+                         'private peer-to-peer CLI turn', 'ClaudeCode', ?1, 4, 'Codex'
+                     )",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES ('msg-agent-exact-cli', 'cli', 'Codex', ?1, 0)",
+                    [codex],
+                )?;
+                Ok((codex, vibe))
+            })
+            .await
+            .unwrap();
+
+        let unrelated = wait_for_peer(
+            State(state.clone()),
+            Path("d-wait-exact-cli".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("Vibe".to_string()),
+                session_id: Some("vibe-unrelated".to_string()),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(unrelated.timed_out);
+        assert!(unrelated.messages.is_empty());
+        assert_eq!(
+            unrelated.latest_sort_order, 4,
+            "a hidden turn advances the cursor instead of waking the unrelated CLI forever"
+        );
+        assert_eq!(
+            unrelated.withheld_by_routing, 2,
+            "the cursor moved past two turns, so say so — otherwise this CLI cannot \
+             tell 'not for me' from 'never arrived' and reads as having ignored them"
+        );
+
+        let addressed = wait_for_peer(
+            State(state),
+            Path("d-wait-exact-cli".to_string()),
+            Query(WaitForPeerQuery {
+                since_sort_order: Some(0),
+                timeout_secs: Some(1),
+                exclude_agent_type: Some("Codex".to_string()),
+                session_id: Some("codex-exact".to_string()),
+            }),
+        )
+        .await
+        .0
+        .data
+        .unwrap();
+        assert!(!addressed.timed_out);
+        assert_eq!(addressed.messages.len(), 2);
+        assert_eq!(addressed.messages[0].message_id, "msg-exact-cli");
+        assert_eq!(addressed.messages[1].message_id, "msg-agent-exact-cli");
+        assert_eq!(
+            addressed.withheld_by_routing, 0,
+            "nothing was held back from the CLI both turns were addressed to"
+        );
+        assert!(addressed.messages[0].addressed_to_caller);
+        assert!(addressed.messages[1].addressed_to_caller);
+        assert_eq!(
+            addressed.messages[1].content,
+            "private peer-to-peer CLI turn"
+        );
+        assert_eq!(
+            addressed.messages[0].targets,
+            vec![MessageTarget::cli(
+                crate::models::AgentType::Codex,
+                codex_session,
+            )],
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_peer_delivers_target_all_expansion_to_every_joined_cli() {
+        let state = make_state_with_disc("d-wait-all-cli").await;
+        state
+            .db
+            .with_conn(|conn| {
+                let codex = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-all-cli",
+                    "Codex",
+                    Some("codex-all"),
+                    "peer",
+                )?;
+                let claude = crate::db::discussion_sessions::create_session(
+                    conn,
+                    "d-wait-all-cli",
+                    "ClaudeCode",
+                    Some("claude-all"),
+                    "peer",
+                )?;
+                let now = chrono::Utc::now().to_rfc3339();
+                conn.execute(
+                    "INSERT INTO messages (
+                         id, discussion_id, role, content, timestamp, sort_order
+                     ) VALUES (
+                         'msg-all-cli', 'd-wait-all-cli', 'User',
+                         '@all validate this batch', ?1, 5
+                     )",
+                    rusqlite::params![now],
+                )?;
+                conn.execute(
+                    "INSERT INTO message_targets (
+                         message_id, target_kind, agent_type, cli_session_id, position
+                     ) VALUES
+                         ('msg-all-cli', 'cli', 'Codex', ?1, 0),
+                         ('msg-all-cli', 'cli', 'ClaudeCode', ?2, 1)",
+                    rusqlite::params![codex, claude],
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        for (agent_type, session_id) in [("Codex", "codex-all"), ("ClaudeCode", "claude-all")] {
+            let delivered = wait_for_peer(
+                State(state.clone()),
+                Path("d-wait-all-cli".to_string()),
+                Query(WaitForPeerQuery {
+                    since_sort_order: Some(0),
+                    timeout_secs: Some(1),
+                    exclude_agent_type: Some(agent_type.to_string()),
+                    session_id: Some(session_id.to_string()),
+                }),
+            )
+            .await
+            .0
+            .data
+            .unwrap();
+            assert!(!delivered.timed_out);
+            assert_eq!(delivered.messages.len(), 1);
+            assert_eq!(delivered.messages[0].message_id, "msg-all-cli");
+            assert!(delivered.messages[0].addressed_to_caller);
+            assert_eq!(delivered.withheld_by_routing, 0);
+        }
     }
 
     #[tokio::test]
@@ -2549,15 +3368,23 @@ mod tests {
 
     #[test]
     fn wait_for_peer_timeout_clamp_constants() {
-        // We can't realistically exercise the 90s clamp end-to-end in
-        // a unit test without fake time (tokio test-util isn't on).
-        // This locks the constants instead — the test fails fast if
-        // someone changes them in a way that violates the contract.
+        // We can't realistically exercise the clamp end-to-end in a unit test
+        // without fake time (tokio test-util isn't on). This locks the
+        // constants instead — the test fails fast if someone changes them in a
+        // way that violates the contract.
         assert_eq!(WAIT_TIMEOUT_DEFAULT_SECS, 60);
-        assert_eq!(WAIT_TIMEOUT_MAX_SECS, 90);
+        // KT-43 — raised from 90 s: each returned wait is a window where the
+        // agent has its turn back and may not loop again. Must stay under the
+        // MCP bridge's 180 s HTTP client timeout, or a normal long wait would
+        // surface as a transport error instead of `timed_out`.
+        assert_eq!(WAIT_TIMEOUT_MAX_SECS, 170);
         assert_eq!(WAIT_POLL_INTERVAL_MS, 1000);
         // Default is within the [1, MAX] clamp range.
         const {
+            assert!(
+                WAIT_TIMEOUT_MAX_SECS < 180,
+                "the bridge reads this response with a 180 s client timeout"
+            );
             assert!(
                 WAIT_TIMEOUT_DEFAULT_SECS >= 1
                     && WAIT_TIMEOUT_DEFAULT_SECS <= WAIT_TIMEOUT_MAX_SECS
@@ -2593,6 +3420,7 @@ mod tests {
                 agent_type: "Codex".into(),
                 session_id: "sess-X".into(),
                 model: None,
+                conversation_id: None,
             }),
         )
         .await;
@@ -2615,5 +3443,74 @@ mod tests {
         let t1 = r1.0.data.unwrap().token;
         let t2 = r2.0.data.unwrap().token;
         assert_ne!(t1, t2, "every invite must generate a fresh token");
+    }
+
+    /// The two failure modes reported live: an agent that joins without reading
+    /// the shared plan (and asks the human to re-explain the state), and one that
+    /// joins, posts once, then goes quiet — which the human reads as "it left".
+    /// The join protocol must spell both out, so assert on it rather than trust
+    /// that a future edit keeps them.
+    #[test]
+    fn join_protocol_demands_reading_the_plan_and_staying() {
+        let steps = join_next_steps("d-1", "Room", 2);
+
+        // Read the plan, and know the tasks are writable.
+        assert!(steps.contains("plan_get"), "must point at the shared plan");
+        assert!(steps.contains("task_list"), "must point at the backlog");
+        for tool in [
+            "task_create",
+            "task_update",
+            "task_update_dod",
+            "task_add_blocker",
+        ] {
+            assert!(steps.contains(tool), "must state that {tool} is allowed");
+        }
+        assert!(
+            steps.contains("kronn-internal"),
+            "must say the whole MCP surface is available, not only disc_* tools",
+        );
+        assert!(
+            steps.contains("materially changes") && steps.contains("unchanged tasks"),
+            "plan maintenance must be event-driven, never a noisy no-op rewrite",
+        );
+        assert!(
+            steps.contains("plan_snapshot") && steps.contains("reconnect the Kronn MCP"),
+            "a stale MCP tool catalogue needs an explicit read-only fallback",
+        );
+        // KT-76 — an agent that asks the human for a fresh token after every
+        // reload is the symptom this protocol has to kill.
+        assert!(
+            steps.contains("disc_find_by_session")
+                && steps.contains("session_bound")
+                && steps.contains("DO NOT ASK FOR A NEW TOKEN"),
+            "reconnection must be described as already handled by the session link",
+        );
+        assert!(
+            steps.contains("BEFORE THE FIRST SUBSTANTIVE ACTION")
+                && steps.contains("task / scope / next action")
+                && steps.contains("disc_append"),
+            "the room must see the agent's intent before implementation starts",
+        );
+
+        // Stay and follow: the loop, the "a timeout is not the end" rule, and the
+        // explicit ban on going quiet after a summary.
+        assert!(steps.contains("disc_wait_for_peer"));
+        assert!(steps.contains("timed_out"));
+        assert!(
+            steps.contains("JOINING IS NOT THE TASK"),
+            "joining must not read as the job being done",
+        );
+        assert!(
+            steps.contains("indistinguishable from having left"),
+            "must state why silence is not acceptable",
+        );
+    }
+
+    #[test]
+    fn join_protocol_reports_the_room_it_joined() {
+        let steps = join_next_steps("disc-42", "Kronn 0.9.2", 3);
+        assert!(steps.contains("disc-42"));
+        assert!(steps.contains("Kronn 0.9.2"));
+        assert!(steps.contains("3 active participant(s)"));
     }
 }

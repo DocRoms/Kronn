@@ -1,6 +1,17 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Fragment, useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import '../pages/DiscussionsPage.css';
-import type { Discussion, AgentDetection, AgentType, Skill, Directive, ContextFile, QuickPrompt } from '../types/generated';
+import type {
+  Discussion,
+  DiscussionMessage,
+  AgentDetection,
+  AgentType,
+  MessageTarget,
+  ParticipantView,
+  Skill,
+  Directive,
+  ContextFile,
+  QuickPrompt,
+} from '../types/generated';
 import {
   AGENT_MENTIONS as ALL_AGENT_MENTIONS,
   agentColor,
@@ -25,9 +36,11 @@ import {
   Send, X, AlertTriangle, Users,
   StopCircle, RotateCcw, Loader2,
   Cpu, Mic, MicOff, Phone, PhoneOff,
-  Volume2, VolumeX, Check, Zap, FileText, Paperclip, Image,
+  Volume2, VolumeX, Check, Zap, FileText, Paperclip, Image, Reply,
+  CircleHelp,
 } from 'lucide-react';
 import { useIsMobile } from '../hooks/useMediaQuery';
+import { composerMentions, targetsFromComposerText } from '../lib/messageTargets';
 
 interface AgentMentionQuery {
   query: string;
@@ -69,9 +82,19 @@ export interface ChatInputProps {
   ttsEnabled: boolean;
   ttsState: 'idle' | 'loading' | 'playing' | 'paused';
   worktreeError: string | null;
+  /** True while a send is refused because the previous run is still recovering. */
+  partialPending?: boolean;
+  partialForcing?: boolean;
+  onPartialPendingForce?: () => void;
+  onPartialPendingDismiss?: () => void;
   availableSkills: Skill[];
   availableDirectives: Directive[];
-  onSend: (text: string, targetAgent?: AgentType) => void;
+  onSend: (
+    text: string,
+    targets?: MessageTarget[],
+    targetAll?: boolean,
+    replyToMessageId?: string,
+  ) => void;
   onStop: () => void;
   onOrchestrate: (agents: AgentType[], rounds: number, skillIds: string[], directiveIds: string[]) => void;
   onTtsToggle: () => void;
@@ -88,6 +111,8 @@ export interface ChatInputProps {
   queuedQP?: QuickPrompt | null;
   onQueueQP?: (qp: QuickPrompt) => void;
   onCancelQueuedQP?: () => void;
+  replyTarget?: DiscussionMessage | null;
+  onCancelReply?: () => void;
   toast: ToastFn;
   t: (key: string, ...args: (string | number)[]) => string;
 }
@@ -100,6 +125,10 @@ export function ChatInput({
   ttsEnabled,
   ttsState,
   worktreeError,
+  partialPending = false,
+  partialForcing = false,
+  onPartialPendingForce,
+  onPartialPendingDismiss,
   availableSkills,
   availableDirectives,
   onSend,
@@ -117,6 +146,8 @@ export function ChatInput({
   queuedQP = null,
   onQueueQP,
   onCancelQueuedQP,
+  replyTarget = null,
+  onCancelReply,
   toast,
   t,
 }: ChatInputProps) {
@@ -140,10 +171,55 @@ export function ChatInput({
 
   // ─── Internal state ──────────────────────────────────────────────────────
   const [chatInput, setChatInput] = useState('');
+  const [cliParticipants, setCliParticipants] = useState<ParticipantView[]>([]);
+  const [nativeAgentDisabled, setNativeAgentDisabled] = useState<boolean | null>(null);
   const chatInputValueRef = useRef('');
   const chatInputHasText = chatInput.trim().length > 0;
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const replyAuthor = useMemo(() => {
+    if (!replyTarget) return '';
+    if (replyTarget.agent_type) {
+      return ALL_AGENT_MENTIONS.find(mention => mention.type === replyTarget.agent_type)?.trigger
+        ?? replyTarget.agent_type;
+    }
+    return replyTarget.author_pseudo || t('disc.humanAuthor');
+  }, [replyTarget, t]);
+  const replyExcerpt = useMemo(
+    () => replyTarget?.content.replace(/\s+/g, ' ').trim().slice(0, 180) ?? '',
+    [replyTarget],
+  );
+
+  useEffect(() => {
+    if (replyTarget) chatInputRef.current?.focus();
+  }, [replyTarget]);
+
+  useEffect(() => {
+    let current = true;
+    const load = () => {
+      if (!discussion?.id) {
+        setCliParticipants([]);
+        setNativeAgentDisabled(null);
+        return;
+      }
+      void discussionsApi.participants(discussion.id)
+        .then(participants => {
+          if (current) setCliParticipants(participants as ParticipantView[]);
+        })
+        .catch(error => console.warn('[ChatInput] participants fetch failed:', error));
+      void discussionsApi.nativeAgentMode(discussion.id)
+        .then(mode => {
+          if (current) setNativeAgentDisabled(mode.disabled);
+        })
+        .catch(error => console.warn('[ChatInput] native agent mode fetch failed:', error));
+    };
+    load();
+    const interval = setInterval(load, 5_000);
+    return () => {
+      current = false;
+      clearInterval(interval);
+    };
+  }, [discussion?.id]);
 
   const updateChatInput = useCallback((val: string) => {
     chatInputValueRef.current = val;
@@ -391,6 +467,7 @@ export function ChatInput({
   const sttCancelledRef = useRef(false);
 
   const [showDebatePopover, setShowDebatePopover] = useState(false);
+  const [showRoutingHelp, setShowRoutingHelp] = useState(false);
   const [showQPPicker, setShowQPPicker] = useState(false);
   const [debateAgents, setDebateAgents] = useState<AgentType[]>([]);
   const [debateRounds, setDebateRounds] = useState(2);
@@ -416,24 +493,114 @@ export function ChatInput({
   const installedAgentsList = useMemo(() => agents.filter(isUsable), [agents]);
 
   const AGENT_MENTIONS = useMemo(() => {
-    const activeAgentTypes = new Set(installedAgentsList.map(a => a.agent_type));
-    return ALL_AGENT_MENTIONS.filter(m => activeAgentTypes.has(m.type));
-  }, [installedAgentsList]);
-
-  const parseMention = (text: string): { targetAgent?: AgentType } => {
-    const lower = text.toLowerCase();
-    for (const m of AGENT_MENTIONS) {
-      const escaped = m.trigger.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const pattern = new RegExp(
-        `(^|[\\s([{])${escaped}(?=$|[\\s\\])},.!?;:])`,
-        'i',
-      );
-      if (pattern.test(lower)) {
-        return { targetAgent: m.type };
+    if (!discussion) return [];
+    return composerMentions(
+      discussion.agent,
+      installedAgentsList.map(agent => agent.agent_type),
+      cliParticipants,
+      {
+        discussionAgent: t('disc.targetDiscussionAgent'),
+        punctualAgent: t('disc.targetPunctualAgent'),
+        cli: t('disc.targetCli'),
+        all: t('disc.targetAll'),
+      },
+    );
+  }, [discussion, installedAgentsList, cliParticipants, t]);
+  const MENTION_OPTIONS = useMemo(() => {
+    if (!discussion) return [];
+    const active: typeof AGENT_MENTIONS = [];
+    const available: typeof AGENT_MENTIONS = [];
+    for (const mention of AGENT_MENTIONS) {
+      if (
+        mention.target?.kind === 'discussion_agent'
+        && nativeAgentDisabled !== false
+      ) {
+        continue;
       }
+      const isActive = mention.targetAll
+        || mention.target?.kind === 'discussion_agent'
+        || mention.target?.kind === 'cli'
+        || (
+          mention.target?.kind === 'agent'
+          && discussion.participants.includes(mention.target.agent_type)
+        );
+      (isActive ? active : available).push(mention);
     }
-    return {};
-  };
+    const activeRank = (mention: (typeof AGENT_MENTIONS)[number]) => {
+      if (mention.target?.kind === 'discussion_agent') return 0;
+      if (mention.target?.kind === 'cli') return 1;
+      if (mention.target?.kind === 'agent') return 2;
+      return 3;
+    };
+    active.sort((left, right) => activeRank(left) - activeRank(right));
+    return [
+      ...active.map(mention => ({ mention, group: 'active' as const })),
+      ...available.map(mention => ({ mention, group: 'available' as const })),
+    ];
+  }, [discussion, AGENT_MENTIONS, nativeAgentDisabled]);
+  const DISABLED_MENTION_OPTIONS = useMemo(
+    () => nativeAgentDisabled
+      ? AGENT_MENTIONS.filter(mention => mention.target?.kind === 'discussion_agent')
+      : [],
+    [AGENT_MENTIONS, nativeAgentDisabled],
+  );
+  const routingHelp = useMemo(() => {
+    if (!discussion) {
+      return {
+        discussionAgent: null,
+        activePunctualAgents: [],
+        availablePunctualAgents: [],
+        cliSessions: [],
+        allParticipants: '',
+      };
+    }
+
+    const configuredMention = ALL_AGENT_MENTIONS.find(
+      mention => mention.type === discussion.agent,
+    );
+    const configuredTrigger = configuredMention?.trigger ?? '@agent';
+    const configuredUsable = nativeAgentDisabled === false
+      && installedAgentsList.some(agent => agent.agent_type === discussion.agent);
+    const activePunctualAgents = AGENT_MENTIONS.filter(mention => {
+      const target = mention.target;
+      return target?.kind === 'agent'
+        && discussion.participants.includes(target.agent_type);
+    });
+    const availablePunctualAgents = AGENT_MENTIONS.filter(mention => {
+      const target = mention.target;
+      return target?.kind === 'agent'
+        && !discussion.participants.includes(target.agent_type);
+    });
+    const cliSessions = AGENT_MENTIONS.filter(
+      mention => mention.target?.kind === 'cli',
+    );
+    const seenPunctual = new Set<AgentType>();
+    const allParticipants = [
+      ...(configuredUsable
+        ? [`${configuredTrigger} · ${t('disc.targetDiscussionAgent')}`]
+        : []),
+      ...discussion.participants.flatMap(agentType => {
+        if (agentType === discussion.agent || seenPunctual.has(agentType)) return [];
+        seenPunctual.add(agentType);
+        const mention = ALL_AGENT_MENTIONS.find(candidate => candidate.type === agentType);
+        return mention
+          ? [`${mention.trigger} · ${t('disc.targetPunctualAgent')}`]
+          : [];
+      }),
+      ...cliSessions.map(mention => `${mention.trigger} · ${mention.label}`),
+    ];
+
+    return {
+      discussionAgent: {
+        trigger: configuredTrigger,
+        usable: configuredUsable,
+      },
+      activePunctualAgents,
+      availablePunctualAgents,
+      cliSessions,
+      allParticipants: allParticipants.join(', '),
+    };
+  }, [discussion, installedAgentsList, AGENT_MENTIONS, nativeAgentDisabled, t]);
 
   // ─── Send handler ────────────────────────────────────────────────────────
   // Closure-stale guard : the `sending` prop is updated by the parent on
@@ -453,7 +620,7 @@ export function ChatInput({
     if (!discussion || !inputVal.trim() || sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     const msg = inputVal.trim();
-    const { targetAgent } = parseMention(msg);
+    const { targets, targetAll } = targetsFromComposerText(msg, AGENT_MENTIONS);
 
     // ── Auto-trigger skills based on message keywords ──
     // Every skill can declare regex triggers in its frontmatter
@@ -501,7 +668,12 @@ export function ChatInput({
     updateChatInput('');
     setMentionQuery(null);
     try {
-      onSend(msg, targetAgent);
+      onSend(
+        msg,
+        targets.length > 0 ? targets : undefined,
+        targetAll,
+        replyTarget?.id,
+      );
     } finally {
       // Release the synchronous re-entry guard ONE microtask later — by
       // then either the parent has flipped `sending=true` (the prop-based
@@ -511,7 +683,7 @@ export function ChatInput({
       queueMicrotask(() => { sendInFlightRef.current = false; });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills]);
+  }, [discussion, sending, onSend, updateChatInput, AGENT_MENTIONS, availableSkills, toast, t, disabledAutoSkills, replyTarget]);
 
   handleSendMessageRef.current = handleSendMessage;
 
@@ -861,28 +1033,68 @@ export function ChatInput({
       >
         {/* @mention autocomplete dropdown */}
         {mentionQuery !== null && (() => {
-          const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
-          if (filtered.length === 0) return null;
+          const filtered = MENTION_OPTIONS.filter(
+            ({ mention }) => mention.trigger.slice(1).startsWith(mentionQuery ?? ''),
+          );
+          const disabledFiltered = DISABLED_MENTION_OPTIONS.filter(
+            mention => mention.trigger.slice(1).startsWith(mentionQuery ?? ''),
+          );
+          if (filtered.length === 0 && disabledFiltered.length === 0) return null;
           return (
             <div className="disc-mention-popover">
-              {filtered.map((m, i) => (
-                <button
-                  key={m.trigger}
-                  className="disc-mention-item"
-                  data-highlighted={i === mentionIndex}
-                  onMouseDown={e => {
-                    e.preventDefault();
-                    // Event-time read only; no ref value influences render.
-                    // eslint-disable-next-line react-hooks/refs
-                    applyMentionSuggestion(m.trigger);
-                  }}
-                  onMouseEnter={() => setMentionIndex(i)}
-                >
-                  <Cpu size={12} style={{ color: agentColor(m.type) }} />
-                  <span className="font-semibold" style={{ color: agentColor(m.type) }}>{m.trigger}</span>
-                  <span className="text-muted">{m.label}</span>
-                </button>
+              {filtered.map(({ mention: m, group }, i) => (
+                <Fragment key={m.trigger}>
+                  {(i === 0 || filtered[i - 1].group !== group) && (
+                    <div className="disc-mention-group">
+                      {t(group === 'active'
+                        ? 'disc.routingActiveAgents'
+                        : 'disc.routingAvailableAgents')}
+                    </div>
+                  )}
+                  <button
+                    className="disc-mention-item"
+                    data-highlighted={i === mentionIndex}
+                    onMouseDown={e => {
+                      e.preventDefault();
+                      // Event-time read only; no ref value influences render.
+                      // eslint-disable-next-line react-hooks/refs
+                      applyMentionSuggestion(m.trigger);
+                    }}
+                    onMouseEnter={() => setMentionIndex(i)}
+                  >
+                    {m.type
+                      ? <Cpu size={12} style={{ color: agentColor(m.type) }} />
+                      : <Users size={12} className="text-accent" />}
+                    <span
+                      className="font-semibold"
+                      style={m.type ? { color: agentColor(m.type) } : undefined}
+                    >
+                      {m.displayTrigger}
+                    </span>
+                    <span className="text-muted">{m.label}</span>
+                  </button>
+                </Fragment>
               ))}
+              {disabledFiltered.length > 0 && (
+                <>
+                  <div className="disc-mention-group">
+                    {t('disc.routingDisabledAgent')}
+                  </div>
+                  {disabledFiltered.map(mention => (
+                    <div
+                      key={`disabled:${mention.trigger}`}
+                      className="disc-mention-item disc-mention-item-disabled"
+                      aria-disabled="true"
+                    >
+                      <Cpu size={12} style={{ color: agentColor(mention.type!) }} />
+                      <span className="font-semibold">
+                        {mention.displayTrigger}
+                      </span>
+                      <span className="text-muted">{t('disc.nativeAgentDisabled')}</span>
+                    </div>
+                  ))}
+                </>
+              )}
             </div>
           );
         })()}
@@ -913,6 +1125,29 @@ export function ChatInput({
           </div>
         )}
 
+        {replyTarget && (
+          <div className="disc-reply-composer-preview" role="status">
+            <Reply size={13} aria-hidden="true" />
+            <div className="disc-reply-composer-copy">
+              <span>
+                {t('disc.replyingTo', replyAuthor)}
+                <code>#{replyTarget.id.slice(0, 8)}</code>
+              </span>
+              <small>{replyExcerpt}</small>
+            </div>
+            {onCancelReply && (
+              <button
+                type="button"
+                onClick={onCancelReply}
+                aria-label={t('disc.cancelReply')}
+                title={t('disc.cancelReply')}
+              >
+                <X size={12} />
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Worktree error banner */}
         {worktreeError && (
           <div className="disc-worktree-error">
@@ -926,6 +1161,33 @@ export function ChatInput({
             </button>
             <button className="disc-worktree-dismiss-btn" onClick={onWorktreeErrorDismiss}>
               <X size={12} />
+            </button>
+          </div>
+        )}
+
+        {/* Previous run still recovering. Non-blocking on purpose: recovery can
+            last minutes, and the text is already back in the composer. */}
+        {partialPending && (
+          <div className="disc-partial-pending" role="status" data-testid="disc-partial-pending">
+            <AlertTriangle size={14} className="text-warning flex-shrink-0" />
+            <span className="flex-1">
+              {partialForcing ? t('disc.partialForcing') : t('disc.partialPendingNotice')}
+            </span>
+            <button
+              className="disc-worktree-retry-btn"
+              onClick={onPartialPendingForce}
+              disabled={partialForcing}
+              data-testid="disc-partial-pending-force"
+            >
+              <RotateCcw size={10} /> {t('disc.partialPendingForce')}
+            </button>
+            <button
+              className="disc-worktree-dismiss-btn"
+              onClick={onPartialPendingDismiss}
+              disabled={partialForcing}
+              data-testid="disc-partial-pending-dismiss"
+            >
+              <X size={12} /> {t('disc.partialPendingCancel')}
             </button>
           </div>
         )}
@@ -983,9 +1245,7 @@ export function ChatInput({
           className="disc-composer-textarea"
           rows={1}
           aria-label={t('disc.messagePlaceholder')}
-          placeholder={discussion && (discussion.participants?.length ?? 0) > 1 && AGENT_MENTIONS.length > 0
-            ? t('disc.mentionHint', AGENT_MENTIONS.map(m => m.trigger).join(', '))
-            : t('disc.messagePlaceholder')}
+          placeholder={t('disc.messagePlaceholder')}
           defaultValue=""
           onChange={e => {
             const val = e.target.value;
@@ -1058,12 +1318,14 @@ export function ChatInput({
               }
             }
             if (mentionQuery !== null) {
-              const filtered = AGENT_MENTIONS.filter(m => m.trigger.slice(1).startsWith(mentionQuery ?? ''));
+              const filtered = MENTION_OPTIONS.filter(
+                ({ mention }) => mention.trigger.slice(1).startsWith(mentionQuery ?? ''),
+              );
               if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => Math.min(i + 1, filtered.length - 1)); return; }
               if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => Math.max(i - 1, 0)); return; }
               if ((e.key === 'Tab' || e.key === 'Enter') && filtered.length > 0) {
                 e.preventDefault();
-                applyMentionSuggestion(filtered[mentionIndex].trigger);
+                applyMentionSuggestion(filtered[mentionIndex].mention.trigger);
                 return;
               }
               if (e.key === 'Escape') { setMentionQuery(null); return; }
@@ -1289,6 +1551,103 @@ export function ChatInput({
                   >
                     {t('debate.launch', debateAgents.length)}
                   </button>
+                </div>
+              )}
+            </div>
+
+            <div className="relative">
+              <button
+                type="button"
+                className="disc-tool-btn"
+                data-active={showRoutingHelp}
+                data-color="accent"
+                onClick={() => setShowRoutingHelp(current => !current)}
+                title={t('disc.routingHelpTitle')}
+                aria-label={t('disc.routingHelpTitle')}
+                aria-expanded={showRoutingHelp}
+              >
+                <CircleHelp size={15} />
+              </button>
+              {showRoutingHelp && (
+                <div className="disc-routing-help" role="dialog" aria-label={t('disc.routingHelpTitle')}>
+                  <div className="disc-debate-title">
+                    <CircleHelp size={12} /> {t('disc.routingHelpTitle')}
+                  </div>
+                  <p>{t(routingHelp.discussionAgent?.usable
+                    ? 'disc.routingHelpDefault'
+                    : 'disc.routingHelpDefaultDisabled')}</p>
+                  <div className="disc-routing-help-group">
+                    <strong>{t('disc.routingActiveAgents')}</strong>
+                    <ul>
+                    {routingHelp.discussionAgent?.usable && (
+                      <li>
+                        <code>
+                          {routingHelp.discussionAgent.trigger}
+                          <span> · {t('disc.targetDiscussionAgent')}</span>
+                        </code>
+                        {' — '}
+                        {t(routingHelp.discussionAgent.usable
+                          ? 'disc.routingHelpDiscussionAgent'
+                          : 'disc.routingHelpDiscussionAgentDisabled')}
+                      </li>
+                    )}
+                    {routingHelp.cliSessions.map(mention => (
+                      <li key={`cli:${mention.target?.cli_session_id}`}>
+                        <code>
+                          {mention.trigger}
+                          <span> · {mention.label}</span>
+                        </code>
+                        {' — '}{t('disc.routingHelpCli')}
+                      </li>
+                    ))}
+                    {routingHelp.activePunctualAgents.map(mention => (
+                      <li key={`agent:${mention.target?.agent_type}`}>
+                        <code>
+                          {mention.displayTrigger}
+                          <span> · {t('disc.targetPunctualAgent')}</span>
+                        </code>
+                        {' — '}{t('disc.routingHelpPunctual')}
+                      </li>
+                    ))}
+                    </ul>
+                  </div>
+                  {routingHelp.availablePunctualAgents.length > 0 && (
+                    <div className="disc-routing-help-group">
+                      <strong>{t('disc.routingAvailableAgents')}</strong>
+                      <ul>
+                        {routingHelp.availablePunctualAgents.map(mention => (
+                          <li key={`available:${mention.target?.agent_type}`}>
+                            <code>
+                              {mention.displayTrigger}
+                              <span> · {t('disc.targetPunctualAgent')}</span>
+                            </code>
+                            {' — '}{t('disc.routingHelpPunctual')}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {routingHelp.discussionAgent && !routingHelp.discussionAgent.usable && (
+                    <div className="disc-routing-help-group">
+                      <strong>{t('disc.routingDisabledAgent')}</strong>
+                      <ul>
+                        <li>
+                          <code>
+                            {routingHelp.discussionAgent.trigger}
+                            <span> · {t('disc.targetDiscussionAgent')}</span>
+                          </code>
+                          {' — '}{t('disc.routingHelpDiscussionAgentDisabled')}
+                        </li>
+                      </ul>
+                    </div>
+                  )}
+                  <ul>
+                    <li>
+                      <code>@all</code>
+                      {' — '}{t('disc.routingHelpAll', routingHelp.allParticipants)}
+                    </li>
+                  </ul>
+                  <p className="text-muted">{t('disc.routingHelpTokenSaver')}</p>
                 </div>
               )}
             </div>

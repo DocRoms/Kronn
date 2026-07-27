@@ -142,22 +142,6 @@
   padding: var(--kr-sp-8) var(--kr-sp-9);
 }
 
-.mcp-builtin-card {
-  position: relative;
-  margin-bottom: var(--kr-sp-5);
-  padding: var(--kr-sp-6) var(--kr-sp-7);
-  background: linear-gradient(145deg, var(--kr-bg-subtle), var(--kr-bg-elevated));
-  border-color: rgba(var(--kr-purple-rgb), 0.24);
-  box-shadow: inset 3px 0 0 var(--kr-purple);
-}
-
-.mcp-builtin-desc {
-  margin: var(--kr-sp-3) 0 0 44px;
-  color: var(--kr-text-muted);
-  font-size: var(--kr-fs-xs);
-  line-height: 1.45;
-}
-
 /* ── Add MCP panel ──────────────────────────────────────── */
 .mcp-add-panel {
   margin-bottom: var(--kr-sp-9);
@@ -406,7 +390,13 @@
   display: flex;
   align-items: center;
   gap: var(--kr-sp-5);
+  margin-bottom: var(--kr-sp-6);
+}
+
+.mcp-list-boundary {
+  width: 100%;
   margin-bottom: var(--kr-sp-8);
+  border-top: 1px solid var(--kr-border);
 }
 
 .mcp-search-wrap {
@@ -486,6 +476,16 @@
   transform: translateY(-1px);
 }
 
+.mcp-installed-card-static {
+  cursor: default;
+}
+
+.mcp-installed-card-static:hover {
+  border-color: var(--kr-border-light);
+  box-shadow: inset 3px 0 0 var(--kr-purple), var(--kr-shadow-sm);
+  transform: none;
+}
+
 .mcp-installed-card[data-kind="mcp"] {
   box-shadow: inset 3px 0 0 var(--kr-purple), var(--kr-shadow-sm);
 }
@@ -523,7 +523,7 @@
 }
 
 .mcp-installed-card[data-kind="mcp"] .mcp-plugin-card-icon,
-.mcp-builtin-card .mcp-plugin-card-icon {
+.mcp-installed-card[data-testid="mcp-kronn-internal-card"] .mcp-plugin-card-icon {
   color: var(--kr-purple);
   background: rgba(var(--kr-purple-rgb), 0.1);
   border-color: rgba(var(--kr-purple-rgb), 0.2);
@@ -708,9 +708,6 @@
     width: 100%;
   }
 
-  .mcp-builtin-desc {
-    margin-left: 0;
-  }
 }
 
 /* ── Inline detail panel (spans full grid width) ───────── */
@@ -815,7 +812,7 @@
 .mcp-config-dot {
   width: 8px;
   height: 8px;
-  border-radius: var(--kr-r-full);
+  border-radius: var(--kr-r-pill);
   margin-top: 5px;
   flex-shrink: 0;
 }
@@ -1041,15 +1038,271 @@
   gap: var(--kr-sp-6);
 }
 
-/* Plugin detail/edit modal (refonte Phase 2, 2026-06-10). The inner panel
-   reuses .mcp-detail-inline (surface/border/padding); this modifier sizes it
-   as a centered, scrollable modal instead of a full-width grid row. */
-.mcp-plugin-modal {
+/* Plugin detail panel — same mechanics as the discussion tool panels
+   (Plan / Code / Settings): a right-hand panel with no backdrop, so the
+   plugin list stays clickable and picking another card swaps the panel
+   content instead of forcing a close first. */
+.mcp-plugin-panel,
+.mcp-page-with-panel {
+  --mcp-panel-w: min(640px, 44vw);
+}
+
+.mcp-plugin-panel {
+  position: fixed;
+  inset: 0 0 0 auto;
+  z-index: 40;
+  box-sizing: border-box;
   grid-column: auto;
-  width: 90%;
-  max-width: 760px;
-  max-height: 88vh;
+  width: var(--mcp-panel-w);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  /* Panel chrome, not card chrome: square edges, neutral border, and the
+     padding moved onto the header/body so the header can stay put. */
+  padding: 0;
+  border-radius: 0;
+  border-color: var(--kr-border);
+  border-right: 0;
+  box-shadow: -10px 0 24px rgba(0, 0, 0, 0.08);
+  animation: mcp-panel-enter 180ms ease-out;
+}
+
+.mcp-plugin-panel .mcp-detail-header {
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  margin-bottom: 0;
+  padding: var(--kr-sp-5) var(--kr-sp-7);
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.mcp-plugin-panel .mcp-detail-body {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--kr-sp-7);
+}
+
+/* The page keeps the panel's width free so no card ends up hidden
+   underneath it — the grid reflows instead of being covered.
+   The page HEADER is deliberately excluded: reserving the room on the page
+   root squeezed the title and the counters too, which read as the whole page
+   shrinking rather than a panel opening beside the content (same contract as
+   the Planning page, where the header spans the full width and the panel opens
+   below it). */
+.mcp-page-with-panel > *:not(.mcp-page-header) {
+  padding-right: var(--mcp-panel-w);
+}
+
+@keyframes mcp-panel-enter {
+  from { transform: translateX(24px); opacity: 0.7; }
+  to { transform: translateX(0); opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcp-plugin-panel {
+    animation: none;
+  }
+}
+
+/* Narrow screens can't afford a split view: the panel takes the width and
+   the page stops reserving room for it. */
+@media (max-width: 760px) {
+  .mcp-plugin-panel {
+    width: min(100%, 480px);
+    box-shadow: var(--kr-shadow-xl);
+  }
+
+  .mcp-page-with-panel > *:not(.mcp-page-header) {
+    padding-right: 0;
+  }
+}
+
+/* ── Plugin readiness diagnostics ─────────────────────── */
+.mcp-interface-section {
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  padding: var(--kr-sp-6);
+}
+
+.mcp-interface-hint,
+.mcp-interface-rule {
+  margin: 0;
+  color: var(--kr-text-dim);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.5;
+}
+
+.mcp-interface-availability {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--kr-sp-3);
+  margin: var(--kr-sp-5) 0;
+}
+
+.mcp-interface-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  padding: 3px 8px;
+  color: var(--kr-text-ghost);
+  font-size: var(--kr-fs-xs);
+}
+
+.mcp-interface-chip-on {
+  border-color: rgba(var(--kr-success-rgb), 0.35);
+  background: rgba(var(--kr-success-rgb), 0.08);
+  color: var(--kr-success);
+}
+
+.mcp-interface-preference {
+  display: grid;
+  grid-template-columns: minmax(130px, 1fr) minmax(150px, 220px);
+  align-items: center;
+  gap: var(--kr-sp-4);
+  margin-bottom: var(--kr-sp-3);
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+  font-weight: 600;
+}
+
+.mcp-interface-preference .input {
+  min-width: 0;
+}
+
+@media (max-width: 520px) {
+  .mcp-interface-preference {
+    grid-template-columns: 1fr;
+  }
+}
+
+.mcp-probe-section {
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-hover);
+  padding: var(--kr-sp-6);
+}
+
+.mcp-probe-heading,
+.mcp-probe-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--kr-sp-4);
+}
+
+.mcp-probe-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.mcp-probe-hint {
+  margin: var(--kr-sp-2) 0 0;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.45;
+}
+
+.mcp-probe-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  border-radius: var(--kr-r-full);
+  padding: 3px var(--kr-sp-4);
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+}
+
+.mcp-probe-status-ready {
+  color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.12);
+}
+
+.mcp-probe-status-failed {
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.12);
+}
+
+.mcp-probe-checks {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--kr-sp-3);
+}
+
+.mcp-probe-check {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  padding: var(--kr-sp-4);
+  background: var(--kr-bg-surface);
+}
+
+.mcp-probe-check-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  border-radius: var(--kr-r-full);
+  display: grid;
+  place-items: center;
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.1);
+}
+
+.mcp-probe-check[data-state='ready'] .mcp-probe-check-icon {
+  color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.1);
+}
+
+.mcp-probe-check[data-state='optional'] .mcp-probe-check-icon {
+  color: var(--kr-text-muted);
+  background: var(--kr-bg-subtle);
+}
+
+.mcp-probe-check strong,
+.mcp-probe-check span {
+  display: block;
+}
+
+.mcp-probe-check strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-sm);
+}
+
+.mcp-probe-check strong small {
+  display: inline-block;
+  margin-left: var(--kr-sp-2);
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  font-weight: 500;
+}
+
+.mcp-probe-check div > span {
+  margin-top: 2px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
+}
+
+@media (max-width: 560px) {
+  .mcp-probe-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .mcp-probe-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .mcp-probe-checks {
+    grid-template-columns: 1fr;
+  }
 }
 
 .mcp-modal-title {
@@ -1171,6 +1424,171 @@
   font-size: var(--kr-fs-sm);
   color: var(--kr-text-secondary);
   line-height: 1.5;
+}
+
+.mcp-portability-modal {
+  width: min(720px, 100%);
+  overflow-y: auto;
+}
+
+.mcp-portability-modal .mcp-export-modal-header > span {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.mcp-portability-select-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-sm);
+}
+
+.mcp-portability-plugin-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--kr-sp-2);
+  max-height: 230px;
+  overflow-y: auto;
+}
+
+.mcp-portability-plugin-row {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-elevated);
+  cursor: pointer;
+}
+
+.mcp-portability-plugin-row > span {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.mcp-portability-plugin-row strong,
+.mcp-portability-plugin-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-portability-plugin-row small {
+  color: var(--kr-text-muted);
+}
+
+.mcp-portability-safe-note,
+.mcp-portability-encrypted {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-success);
+  background: rgba(var(--kr-success-rgb), 0.08);
+  border: 1px solid rgba(var(--kr-success-rgb), 0.25);
+  font-size: var(--kr-fs-sm);
+}
+
+.mcp-portability-danger {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+  padding: var(--kr-sp-4);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-error);
+  background: rgba(var(--kr-error-rgb), 0.07);
+  border: 1px solid rgba(var(--kr-error-rgb), 0.35);
+}
+
+.mcp-portability-danger > label:first-child {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-2);
+}
+
+.mcp-portability-danger p {
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+}
+
+.mcp-portability-danger .mcp-field-label {
+  color: var(--kr-text-secondary);
+}
+
+.mcp-portability-value-list,
+.mcp-portability-import-summary,
+.mcp-portability-report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  padding: var(--kr-sp-3);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-subtle);
+  font-size: var(--kr-fs-sm);
+}
+
+.mcp-portability-value-list > div {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-1);
+}
+
+.mcp-portability-value-list span {
+  color: var(--kr-text-secondary);
+  font-family: var(--kr-font-mono);
+}
+
+.mcp-portability-value-list span[data-sensitive='true'] {
+  color: var(--kr-error);
+}
+
+.mcp-portability-value-list span[data-excluded='true'] {
+  color: var(--kr-text-muted);
+  text-decoration: line-through;
+}
+
+.mcp-portability-encrypted {
+  color: var(--kr-warning);
+  background: rgba(var(--kr-warning-rgb), 0.08);
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+}
+
+.mcp-portability-file {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--kr-sp-3);
+  min-height: 82px;
+  border: 1px dashed var(--kr-border-medium);
+  border-radius: var(--kr-r-md);
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.mcp-portability-file:hover {
+  border-color: var(--kr-accent);
+  color: var(--kr-accent);
+}
+
+.mcp-portability-file input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.mcp-portability-import-summary .mcp-field-label {
+  margin-top: var(--kr-sp-2);
+}
+
+.mcp-portability-report {
+  color: var(--kr-text-secondary);
 }
 
 /* ── 0.8.6 (#33) Import-from-JSON form helpers ──────────── */

@@ -149,6 +149,29 @@
   display: flex;
 }
 
+.disc-search-advanced {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin: -3px -4px -3px 0;
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-dim);
+  cursor: pointer;
+}
+
+.disc-search-advanced:hover,
+.disc-search-advanced:focus-visible {
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+  outline: none;
+}
+
 /* ── Project / group headers ──────────────────────────── */
 .disc-group-header {
   font-size: var(--kr-fs-xs);
@@ -210,7 +233,8 @@
 
 .disc-group-count {
   font-weight: 400;
-  opacity: 0.5;
+  /* Same contrast fix as .disc-contacts-meta — 0.5 fell under 4.5:1. */
+  opacity: 0.9;
   margin-left: auto;
 }
 
@@ -954,7 +978,8 @@
 /* ── Contacts ─────────────────────────────────────────── */
 .disc-contacts-meta {
   font-weight: 400;
-  opacity: 0.5;
+  /* 0.5 dropped this secondary text under 4.5:1 (axe color-contrast). */
+  opacity: 0.9;
   margin-left: auto;
   display: flex;
   align-items: center;
@@ -1026,6 +1051,32 @@
   cursor: default;
 }
 
+/* Identity part of a contact row. A real button when a chat can be opened, so
+   it is focusable and Enter/Space work; the delete button stays a sibling. */
+.disc-contact-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: 0;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+button.disc-contact-open {
+  cursor: pointer;
+}
+
+.disc-contact-open:focus-visible {
+  outline: 2px solid var(--kr-accent);
+  outline-offset: 2px;
+}
+
 .disc-contact-dot {
   width: 7px;
   height: 7px;
@@ -1064,13 +1115,16 @@
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: rgba(var(--kr-accent-rgb), 0.1);
+  /* 7px initials in accent-on-10%-accent failed 4.5:1: the tint is nearly the
+     page background, so the text carried the whole contrast. Solid accent fill
+     with on-accent text passes and keeps the avatar reading as an avatar. */
+  background: var(--kr-accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 7px;
   font-weight: 700;
-  color: var(--kr-accent);
+  color: var(--kr-bg-surface);
   flex-shrink: 0;
 }
 
@@ -1174,26 +1228,26 @@
   flex-shrink: 0;
 }
 
-/* Three or more joined CLIs no longer compete with the discussion title for
+/* Two or more joined CLIs no longer compete with the discussion title/id for
  * the same horizontal line. Keep the compact one-line header for the common
- * 0–2 participant case, then promote the participant strip to its own row.
+ * 0–1 participant case, then promote the participant strip to its own row.
  * This preserves the title/id/actions and still lets a large room scroll its
  * participant strip without growing the whole page indefinitely. */
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3)) {
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2)) {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-items: start;
   gap: 6px;
 }
 
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2))
   .disc-chat-header-title,
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2))
   .disc-chat-header-presence {
   width: 100%;
 }
 
-.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(3))
+.disc-chat-header-top:has(.disc-participants-list > .disc-participant-chip:nth-of-type(2))
   .disc-chat-header-presence {
   overflow: hidden;
 }
@@ -1232,6 +1286,203 @@
   background: rgba(var(--kr-success-rgb), 0.08);
 }
 
+.disc-session-binding {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.disc-session-binding-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 190px;
+  padding: 2px 8px;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: 999px;
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-ghost);
+  font: 500 10px/1.3 var(--kr-font-mono, ui-monospace, monospace);
+  cursor: pointer;
+}
+
+.disc-session-binding-trigger span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-session-binding-trigger:hover,
+.disc-session-binding-trigger[aria-expanded="true"] {
+  color: var(--kr-text-primary);
+  border-color: var(--kr-accent-border);
+}
+
+.disc-session-binding-trigger[data-bound="true"] {
+  color: var(--kr-info);
+  border-color: rgba(var(--kr-info-rgb), 0.3);
+}
+
+.disc-session-binding-trigger[data-connected="true"] {
+  color: var(--kr-success);
+  border-color: rgba(var(--kr-success-rgb), 0.35);
+}
+
+.disc-session-binding-popover {
+  position: absolute;
+  z-index: 90;
+  top: calc(100% + 7px);
+  left: 0;
+  width: min(360px, calc(100vw - 32px));
+  padding: 12px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+  color: var(--kr-text-primary);
+  display: grid;
+  gap: 10px;
+}
+
+.disc-session-binding-popover > header,
+.disc-session-binding-popover > header > div,
+.disc-session-current,
+.disc-session-actions {
+  display: flex;
+  align-items: center;
+}
+
+.disc-session-binding-popover > header {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.disc-session-binding-popover > header > div {
+  align-items: baseline;
+  gap: 7px;
+}
+
+.disc-session-binding-popover > header span {
+  color: var(--kr-text-ghost);
+  font-size: 10px;
+}
+
+.disc-session-binding-popover > header button {
+  padding: 3px;
+  border: 0;
+  background: none;
+  color: var(--kr-text-muted);
+  cursor: pointer;
+}
+
+.disc-session-binding-popover > label {
+  display: grid;
+  gap: 4px;
+  color: var(--kr-text-muted);
+  font-size: 11px;
+}
+
+.disc-session-binding-popover select,
+.disc-session-binding-popover input {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-input);
+  color: var(--kr-text-primary);
+  font: 12px var(--kr-font-mono, ui-monospace, monospace);
+}
+
+.disc-session-current {
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.disc-session-current .copy-id-pill {
+  max-width: 230px;
+}
+
+.disc-session-current .copy-id-pill span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-session-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--kr-warning);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.disc-session-status[data-connected="true"] {
+  color: var(--kr-success);
+}
+
+.disc-session-error {
+  padding: 7px 8px;
+  border: 1px solid rgba(var(--kr-error-rgb), 0.3);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-danger);
+  font-size: 11px;
+}
+
+.disc-session-actions {
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.disc-session-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 9px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.disc-session-actions button.primary {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.disc-session-actions button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.disc-session-history {
+  border-top: 1px solid var(--kr-border-ghost);
+  padding-top: 8px;
+  color: var(--kr-text-muted);
+  font-size: 10px;
+}
+
+.disc-session-history summary {
+  cursor: pointer;
+}
+
+.disc-session-history > div {
+  display: grid;
+  grid-template-columns: 74px minmax(0, 1fr) auto;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.disc-session-history code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* Inline notice rendered under a popover section when the active
  * agent doesn't support a feature surfaced by that section (e.g. the
  * summary-strategy section warns Vibe / Ollama users that the
@@ -1263,6 +1514,50 @@
 
 .disc-chat-header-sub::-webkit-scrollbar {
   display: none;
+}
+
+.disc-native-agent-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.disc-native-agent-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--kr-border-ghost);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-ghost);
+  cursor: pointer;
+}
+
+.disc-native-agent-toggle:hover:not(:disabled) {
+  border-color: rgba(var(--kr-error-rgb), 0.35);
+  background: rgba(var(--kr-error-rgb), 0.1);
+  color: var(--kr-danger);
+}
+
+.disc-native-agent-toggle:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
+.disc-native-agent-disabled {
+  border-color: var(--kr-border-ghost);
+  background: var(--kr-bg-subtle);
+  color: var(--kr-text-faint);
+  opacity: 0.8;
+}
+
+.disc-native-agent-disabled:hover:not(:disabled) {
+  border-color: rgba(var(--kr-success-rgb), 0.35);
+  background: var(--kr-success-bg);
+  color: var(--kr-success);
 }
 
 .disc-chat-context-project {
@@ -1784,6 +2079,85 @@
   padding: 20px 20px 10px;
 }
 
+/* Current-discussion full-text search. Kept outside the scrolling message
+ * list so navigation controls remain reachable in long conversations. */
+.disc-message-search {
+  min-height: 38px;
+  padding: 5px 12px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+  color: var(--kr-text-tertiary);
+}
+
+.disc-message-search input {
+  flex: 1;
+  min-width: 80px;
+  max-width: 560px;
+  padding: 5px 8px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-base);
+  color: var(--kr-text-primary);
+  font: inherit;
+  font-size: var(--kr-fs-sm);
+  outline: none;
+}
+
+.disc-message-search input:focus {
+  border-color: var(--kr-accent-border);
+  box-shadow: 0 0 0 2px rgba(var(--kr-accent-rgb), 0.09);
+}
+
+.disc-message-search-position {
+  min-width: 64px;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-tertiary);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.disc-message-search-nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.disc-message-search-nav button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-secondary);
+  cursor: pointer;
+}
+
+.disc-message-search-nav button:hover:not(:disabled) {
+  color: var(--kr-accent-ink);
+  background: var(--kr-bg-hover);
+}
+
+.disc-message-search-nav button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+::highlight(kronn-message-search) {
+  color: inherit;
+  background: rgba(var(--kr-warning-rgb), 0.35);
+}
+
+::highlight(kronn-message-search-current) {
+  color: inherit;
+  background: rgba(var(--kr-warning-rgb), 0.78);
+}
+
 /* Streaming chunk renderer — uses MarkdownContent so headings/code/tables
    appear progressively, not just at the end of the stream. */
 .disc-streaming-md {
@@ -1829,6 +2203,10 @@
   flex-direction: column;
   gap: 8px;
   pointer-events: none; /* let clicks pass through the gap to the messages */
+}
+
+.disc-messages-col[data-replying="true"] .disc-scroll-jump-stack {
+  bottom: 150px;
 }
 
 .disc-scroll-jump-btn {
@@ -2182,6 +2560,80 @@
   justify-content: flex-start;
 }
 
+.disc-msg-row[data-search-match="true"] .disc-msg-bubble {
+  border-color: rgba(var(--kr-warning-rgb), 0.38);
+}
+
+.disc-msg-row[data-search-current="true"] .disc-msg-bubble {
+  border-color: rgba(var(--kr-warning-rgb), 0.88);
+  box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.16), var(--kr-shadow-sm);
+}
+
+.disc-reply-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  margin: 4px 0 8px;
+  padding: 6px 8px;
+  border: 0;
+  border-left: 2px solid var(--kr-accent);
+  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
+  background: var(--kr-bg-hover);
+  color: var(--kr-text-tertiary);
+  font: inherit;
+  font-size: var(--kr-fs-xs);
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-reply-header:hover:not(:disabled) {
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.disc-reply-header code {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  color: var(--kr-text-secondary);
+  font-size: 10px;
+}
+
+.disc-reply-header[data-missing="true"] {
+  border-left-color: var(--kr-text-ghost);
+  opacity: 0.7;
+  cursor: default;
+}
+
+.disc-reply-action {
+  gap: 4px;
+  padding: 2px 6px;
+  color: var(--kr-text-dim);
+  font-size: 10px;
+}
+
+.disc-tool-calls-group[data-search-current="true"] {
+  border-radius: var(--kr-r-sm);
+  box-shadow: 0 0 0 2px rgba(var(--kr-warning-rgb), 0.32);
+}
+
+@media (max-width: 640px) {
+  .disc-message-search {
+    flex-wrap: wrap;
+  }
+
+  .disc-message-search input {
+    order: 1;
+    max-width: none;
+  }
+
+  .disc-message-search-position {
+    margin-left: auto;
+  }
+}
+
 .disc-msg-bubble {
   /* 0.8.6 — bubble width refresh. Was 70% which left too much
      dead space on the right at every density. Bumped to 88% so
@@ -2201,13 +2653,19 @@
 .disc-msg-bubble[data-role="user"] {
   background: rgba(var(--kr-accent-rgb), 0.12);
   border: 1px solid rgba(var(--kr-accent-rgb), 0.22);
+  border-left: 3px solid var(--kr-accent);
   box-shadow: var(--kr-shadow-sm);
 }
 
 .disc-msg-bubble[data-role="agent"] {
   background: var(--kr-bg-surface);
   border: 1px solid var(--kr-border-strong);
+  border-left-width: 3px;
   box-shadow: var(--kr-shadow-sm);
+}
+
+.disc-msg-bubble[data-role="system"] {
+  border-left: 3px solid var(--kr-text-ghost);
 }
 
 .disc-msg-bubble[data-role="system"][data-variant="summary"] {
@@ -2232,6 +2690,11 @@
   font-size: var(--kr-fs-xs);
   font-weight: 600;
   margin-bottom: 4px;
+}
+
+.disc-msg-agent-kind {
+  color: var(--kr-text-tertiary);
+  font-weight: 500;
 }
 
 .disc-msg-attempted-model {
@@ -2262,7 +2725,33 @@
 .disc-msg-time-row {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--kr-sp-3);
+}
+
+.disc-reply-backlink {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 5px;
+  border: 1px solid rgba(var(--kr-success-rgb), 0.28);
+  border-radius: var(--kr-r-sm);
+  background: rgba(var(--kr-success-rgb), 0.08);
+  color: var(--kr-success);
+  font: inherit;
+  font-size: 9px;
+  line-height: 1.4;
+  cursor: pointer;
+}
+
+.disc-reply-backlink:hover:not(:disabled) {
+  border-color: rgba(var(--kr-success-rgb), 0.5);
+  background: rgba(var(--kr-success-rgb), 0.14);
+}
+
+.disc-reply-backlink:disabled {
+  cursor: default;
+  opacity: 0.65;
 }
 
 .disc-msg-header-row {
@@ -2626,6 +3115,65 @@
   border-color: rgba(var(--kr-error-rgb), 0.3);
 }
 
+.disc-reply-composer-preview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 10px 0;
+  padding: 7px 8px;
+  border-left: 2px solid var(--kr-accent);
+  border-radius: 0 var(--kr-r-sm) var(--kr-r-sm) 0;
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink);
+}
+
+.disc-reply-composer-copy {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+  gap: 2px;
+}
+
+.disc-reply-composer-copy > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--kr-fs-xs);
+  font-weight: 650;
+}
+
+.disc-reply-composer-copy code {
+  color: var(--kr-text-tertiary);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.disc-reply-composer-copy small {
+  overflow: hidden;
+  color: var(--kr-text-tertiary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disc-reply-composer-preview > button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+}
+
+.disc-reply-composer-preview > button:hover {
+  background: var(--kr-bg-hover-strong);
+  color: var(--kr-text-primary);
+}
+
 .disc-composer-textarea {
   width: 100%;
   padding: 12px 14px 4px;
@@ -2963,7 +3511,73 @@
   background: transparent;
 }
 
-.disc-agent-mention-chip {
+.disc-mention-item-disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.disc-mention-group {
+  padding: var(--kr-sp-6) var(--kr-sp-12) var(--kr-sp-4);
+  color: var(--kr-text-faint);
+  background: var(--kr-bg-subtle);
+  border-top: 1px solid var(--kr-border-faint);
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.disc-mention-group:first-child {
+  border-top: 0;
+}
+
+.disc-routing-help {
+  position: absolute;
+  bottom: calc(100% + var(--kr-sp-4));
+  left: 0;
+  width: min(360px, calc(100vw - 32px));
+  padding: var(--kr-sp-12);
+  color: var(--kr-text-primary);
+  background: var(--kr-bg-input);
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-lg);
+  box-shadow: var(--kr-shadow-lg);
+  font-size: var(--kr-fs-sm);
+  line-height: 1.45;
+  z-index: var(--kr-z-modal);
+}
+
+.disc-routing-help p {
+  margin: var(--kr-sp-6) 0;
+}
+
+.disc-routing-help ul {
+  display: grid;
+  gap: var(--kr-sp-4);
+  margin: var(--kr-sp-8) 0;
+  padding-left: var(--kr-sp-8);
+}
+
+.disc-routing-help-group > strong {
+  display: block;
+  margin-top: var(--kr-sp-8);
+  color: var(--kr-text-secondary);
+  font-size: var(--kr-fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.disc-routing-help-group ul {
+  margin-top: var(--kr-sp-4);
+}
+
+.disc-routing-help code {
+  color: var(--kr-accent);
+  font-weight: 700;
+}
+
+.disc-agent-mention-chip,
+.disc-user-mention-chip {
   display: inline-flex;
   align-items: center;
   gap: var(--kr-sp-2);
@@ -2974,6 +3588,49 @@
   font-weight: 700;
   line-height: 1.35;
 }
+
+.disc-agent-mention-kind {
+  font-weight: 600;
+  opacity: 0.78;
+}
+
+.disc-all-mention-chip {
+  color: var(--kr-accent);
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+/* The human gets its own identity rather than borrowing an agent colour. */
+.disc-user-mention-chip {
+  color: var(--kr-accent-ink, var(--kr-accent));
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+.disc-user-mention-avatar {
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* A mention that is merely named stays quiet; the one this message actually
+   dispatches to is the one worth spotting from across the thread. */
+.disc-msg-row[data-target-agent] .disc-agent-mention-chip {
+  opacity: 0.65;
+}
+
+.disc-msg-row[data-target-agent="ClaudeCode"] .disc-agent-mention-chip[data-agent="ClaudeCode"],
+.disc-msg-row[data-target-agent="Codex"] .disc-agent-mention-chip[data-agent="Codex"],
+.disc-msg-row[data-target-agent="Vibe"] .disc-agent-mention-chip[data-agent="Vibe"],
+.disc-msg-row[data-target-agent="GeminiCli"] .disc-agent-mention-chip[data-agent="GeminiCli"],
+.disc-msg-row[data-target-agent="Kiro"] .disc-agent-mention-chip[data-agent="Kiro"],
+.disc-msg-row[data-target-agent="CopilotCli"] .disc-agent-mention-chip[data-agent="CopilotCli"],
+.disc-msg-row[data-target-agent="Ollama"] .disc-agent-mention-chip[data-agent="Ollama"] {
+  opacity: 1;
+  box-shadow: inset 0 0 0 2px currentColor;
+}
+
 
 /* Emoji variant of the autocomplete popover: taller list (20 items) + a
    wider glyph column so multi-codepoint emoji render at a readable size. */
@@ -3004,6 +3661,28 @@
   border-radius: var(--kr-r-lg);
   font-size: var(--kr-fs-sm);
   color: var(--kr-error-soft);
+}
+
+/* Same shape as the worktree banner, warning tone: recovery is transient, not an
+   error, and the message is safe. */
+.disc-partial-pending {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  padding: 8px 12px;
+  margin: 4px 8px 0;
+  background: rgba(var(--kr-warning-rgb), 0.1);
+  border: 1px solid rgba(var(--kr-warning-rgb), 0.3);
+  border-radius: var(--kr-r-lg);
+  font-size: var(--kr-fs-sm);
+  color: var(--kr-warning-soft);
+}
+
+.disc-partial-pending .disc-worktree-retry-btn,
+.disc-partial-pending .disc-worktree-dismiss-btn {
+  background: rgba(var(--kr-warning-rgb), 0.15);
+  border-color: rgba(var(--kr-warning-rgb), 0.3);
+  color: var(--kr-warning-soft);
 }
 
 .disc-worktree-retry-btn {
@@ -3187,29 +3866,120 @@
   align-items: center;
   justify-content: center;
   flex: 1;
+  min-width: 0;
+  padding: var(--kr-sp-8);
 }
 
 .disc-new-card {
-  width: 420px;
-  max-height: calc(100vh - 120px);
-  overflow-y: auto;
-  padding: var(--kr-sp-10);
+  display: flex;
+  width: min(880px, calc(100vw - 96px));
+  max-height: calc(100vh - 104px);
+  overflow: hidden;
+  flex-direction: column;
   border-radius: var(--kr-r-2xl);
   background: var(--kr-bg-surface);
   border: 1px solid var(--kr-border-medium);
+  box-shadow: var(--kr-shadow-lg);
 }
 
 .disc-new-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 20px;
+  flex: 0 0 auto;
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--kr-border-light);
+}
+
+.disc-new-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-4);
+  min-width: 0;
+}
+
+.disc-new-heading-icon,
+.disc-new-section-icon {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border: 1px solid rgba(var(--kr-accent-rgb), 0.22);
+  background: rgba(var(--kr-accent-rgb), 0.09);
+  color: var(--kr-accent);
+}
+
+.disc-new-heading-icon {
+  width: 34px;
+  height: 34px;
+  border-radius: var(--kr-r-lg);
 }
 
 .disc-new-title {
+  display: block;
   font-weight: 700;
   font-size: 15px;
   color: var(--kr-text-primary);
+}
+
+.disc-new-subtitle {
+  display: block;
+  margin-top: 2px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-new-layout {
+  display: grid;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 22px;
+  grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.85fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.disc-new-section {
+  min-width: 0;
+  padding: 16px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-xl);
+  background: var(--kr-bg-subtle);
+}
+
+.disc-new-brief {
+  background:
+    linear-gradient(145deg, rgba(var(--kr-accent-rgb), 0.035), transparent 48%),
+    var(--kr-bg-subtle);
+}
+
+.disc-new-section-heading {
+  display: flex;
+  align-items: center;
+  gap: var(--kr-sp-3);
+  margin-bottom: 12px;
+}
+
+.disc-new-section-icon {
+  width: 28px;
+  height: 28px;
+  border-radius: var(--kr-r-md);
+}
+
+.disc-new-section-heading strong,
+.disc-new-section-heading small {
+  display: block;
+}
+
+.disc-new-section-heading strong {
+  color: var(--kr-text-primary);
+  font-size: var(--kr-fs-md);
+}
+
+.disc-new-section-heading small {
+  margin-top: 1px;
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-2xs);
+  line-height: 1.35;
 }
 
 .disc-new-grid {
@@ -3217,6 +3987,28 @@
   grid-template-columns: 1fr 1fr;
   gap: 12px;
   margin-bottom: 12px;
+}
+
+.disc-new-configuration .disc-new-grid {
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.disc-new-configuration .disc-new-grid > div {
+  min-width: 0;
+}
+
+.disc-launch-control {
+  margin-top: 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-input);
+  cursor: pointer;
+}
+
+.disc-launch-control:hover {
+  border-color: rgba(var(--kr-accent-rgb), 0.28);
 }
 
 .disc-form-label {
@@ -3285,9 +4077,122 @@
   line-height: 1.5;
 }
 
+.disc-new-brief .disc-textarea-styled {
+  min-height: 164px;
+}
+
+.disc-new-prompt-wrap {
+  position: relative;
+}
+
+.disc-new-prompt-wrap .disc-textarea-styled {
+  padding-right: 42px;
+}
+
+.disc-new-emoji-control {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  z-index: 3;
+}
+
+.disc-new-emoji-toggle {
+  width: 28px;
+  height: 28px;
+  border: 1px solid transparent;
+  border-radius: var(--kr-r-md);
+  background: transparent;
+  color: var(--kr-text-muted);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.disc-new-emoji-toggle:hover,
+.disc-new-emoji-toggle[aria-expanded="true"] {
+  color: var(--kr-accent);
+  border-color: var(--kr-accent-border);
+  background: var(--kr-accent-bg);
+}
+
+.disc-new-emoji-picker {
+  position: absolute;
+  right: 0;
+  bottom: 34px;
+  width: 174px;
+  padding: 6px;
+  border: 1px solid var(--kr-border-strong);
+  border-radius: var(--kr-r-lg);
+  background: var(--kr-bg-elevated);
+  box-shadow: var(--kr-shadow-lg);
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 2px;
+}
+
+.disc-new-emoji-picker button {
+  width: 25px;
+  height: 25px;
+  border: 0;
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.disc-new-emoji-picker button:hover,
+.disc-new-emoji-picker button:focus-visible {
+  background: var(--kr-bg-hover-strong);
+  outline: none;
+}
+
 .disc-textarea-styled[data-locked="true"] {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.disc-prompt-agent-summary {
+  margin: -2px 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-md);
+  background: var(--kr-bg-hover);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.disc-prompt-agent-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.disc-prompt-agent-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent-ink, var(--kr-accent));
+  font-size: var(--kr-fs-xs);
+  font-weight: 700;
+}
+
+.disc-prompt-agent-chip[data-available="false"] {
+  border-color: rgba(var(--kr-error-rgb), 0.35);
+  background: rgba(var(--kr-error-rgb), 0.08);
+  color: var(--kr-error-soft);
+  text-decoration: line-through;
+}
+
+.disc-form-error {
+  color: var(--kr-error-soft);
+  font-size: var(--kr-fs-xs);
+  line-height: 1.35;
 }
 
 /* ── Restricted agent warning ─────────────────────────── */
@@ -3566,8 +4471,7 @@
 
 /* ── Create button ────────────────────────────────────── */
 .disc-create-btn {
-  margin-top: 16px;
-  width: 100%;
+  width: min(100%, 340px);
   padding: 11px 16px;
   border-radius: var(--kr-r-lg);
   border: none;
@@ -3580,6 +4484,22 @@
   justify-content: center;
   gap: var(--kr-sp-4);
   transition: all 0.15s;
+}
+
+.disc-new-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex: 0 0 auto;
+  padding: 14px 22px;
+  border-top: 1px solid var(--kr-border-light);
+  background: var(--kr-bg-surface);
+}
+
+.disc-new-footer-hint {
+  color: var(--kr-text-muted);
+  font-size: var(--kr-fs-xs);
 }
 
 .disc-create-btn[data-ready="true"] {
@@ -3596,6 +4516,44 @@
   font-size: var(--kr-fs-xs);
   opacity: 0.6;
   margin-left: 4px;
+}
+
+@media (max-width: 820px) {
+  .disc-new-overlay {
+    align-items: stretch;
+    height: calc(100dvh - 52px);
+    max-height: calc(100dvh - 52px);
+    overflow: hidden;
+    padding: 0;
+  }
+
+  .disc-new-card {
+    width: 100%;
+    height: 100%;
+    max-height: calc(100dvh - 52px);
+    border: 0;
+    border-radius: 0;
+  }
+
+  .disc-new-layout {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 14px;
+  }
+
+  .disc-new-footer {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+
+  .disc-new-footer-hint {
+    text-align: center;
+  }
+
+  .disc-create-btn {
+    width: 100%;
+  }
 }
 
 /* ── No-discussion placeholder ────────────────────────── */
@@ -4682,4 +5640,156 @@
 .disc-injected-context-body {
   padding: 0 var(--kr-sp-3, 10px) var(--kr-sp-2, 8px);
   border-top: 1px solid var(--kr-border-light, rgba(127,127,127,0.15));
+}
+
+/* ── KT-65/70 — unified sidebar search, advanced message mode ──────────────
+   Shares the tool-panel grammar of the plugin / planning drawers: fixed
+   header, scrollable body, one surface. It replaces (and reuses the value of)
+   the quick title/id field rather than displaying a competing second search
+   control. Results are server-paged, so the list only ever holds what the user
+   asked for. */
+.disc-global-search {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: var(--kr-sp-4);
+  padding: var(--kr-sp-5);
+  border-bottom: 1px solid var(--kr-border);
+  background: var(--kr-bg-surface);
+}
+
+.disc-global-search-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.disc-global-search-header h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  font-size: var(--kr-fs-sm);
+  font-weight: 650;
+}
+
+.disc-global-search-close {
+  background: none;
+  border: 0;
+  color: var(--kr-text-tertiary);
+  cursor: pointer;
+  padding: 2px;
+}
+
+.disc-global-search-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-3);
+}
+
+.disc-global-search-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--kr-sp-2);
+}
+
+.disc-global-search-filters select,
+.disc-global-search-filters input {
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--kr-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-bg-elevated);
+  color: inherit;
+  font-size: var(--kr-fs-xs);
+}
+
+.disc-global-search-submit {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--kr-accent-border);
+  border-radius: var(--kr-r-sm);
+  background: var(--kr-accent-bg);
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+.disc-global-search-submit:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.disc-global-search-results {
+  display: flex;
+  flex-direction: column;
+  gap: var(--kr-sp-2);
+  min-height: 0;
+  max-height: 45vh;
+  overflow-y: auto;
+}
+
+.disc-global-search-hit {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: var(--kr-sp-3);
+  border: 1px solid var(--kr-border-light);
+  border-radius: var(--kr-r-sm);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.disc-global-search-hit:hover {
+  border-color: var(--kr-accent-border);
+  background: var(--kr-bg-hover);
+}
+
+.disc-global-search-hit-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: var(--kr-fs-2xs);
+  color: var(--kr-text-muted);
+}
+
+.disc-global-search-hit-snippet {
+  font-size: var(--kr-fs-xs);
+  line-height: 1.4;
+  color: var(--kr-text-secondary);
+}
+
+.disc-global-search-empty,
+.disc-global-search-error {
+  margin: 0;
+  font-size: var(--kr-fs-xs);
+  color: var(--kr-text-muted);
+}
+
+.disc-global-search-error {
+  color: var(--kr-error);
+}
+
+.disc-global-search-more {
+  align-self: center;
+  background: none;
+  border: 0;
+  color: var(--kr-accent);
+  font-size: var(--kr-fs-xs);
+  cursor: pointer;
+}
+
+/* The matched term inside a result excerpt. `mark` carries the meaning for
+   assistive tech; the styling only has to stay readable in both themes. */
+.disc-global-search-hit-snippet mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: rgba(var(--kr-accent-rgb), 0.22);
+  color: inherit;
+  font-weight: 700;
 }

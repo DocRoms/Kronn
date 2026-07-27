@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 
 interface PositionResult {
   spotlight: React.CSSProperties | null;
+  secondarySpotlights: React.CSSProperties[];
   tooltip: React.CSSProperties;
   position: 'top' | 'bottom' | 'left' | 'right' | 'center';
 }
@@ -9,6 +10,7 @@ interface PositionResult {
 const PADDING = 8;       // gap around the target for the spotlight
 const TOOLTIP_GAP = 12;  // gap between spotlight and tooltip
 const VIEWPORT_MARGIN = 12;
+const EMPTY_SECONDARY_SELECTORS: string[] = [];
 
 /**
  * Tracks a target element's position and computes tooltip placement.
@@ -24,9 +26,16 @@ export function useTourPositioning(
    *  target. Lets the spotlight pin on a tiny inner control while the
    *  tooltip sits outside the surrounding container. */
   tooltipAnchor?: string,
+  /** Identifies the current step. Two consecutive steps can share a selector —
+   *  the form card, for instance — and without this the effect never re-runs, so
+   *  a longer description keeps the previous card's measured height and the clamp
+   *  lets it hang past the bottom edge. */
+  stepKey?: string,
+  secondarySelectors: string[] = EMPTY_SECONDARY_SELECTORS,
 ): PositionResult {
   const [result, setResult] = useState<PositionResult>({
     spotlight: null,
+    secondarySpotlights: [],
     tooltip: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' },
     position: 'center',
   });
@@ -40,11 +49,16 @@ export function useTourPositioning(
   }, []);
 
   const measure = useCallback(() => {
+    // The step identity intentionally invalidates this measurement even when
+    // consecutive steps share the same selector: their tooltip size can differ.
+    void stepKey;
+
     if (!selector) {
       // Centered (welcome / finale step) — clean up any previous target first
       cleanupPrev();
       setResult({
         spotlight: null,
+        secondarySpotlights: [],
         tooltip: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' },
         position: 'center',
       });
@@ -57,6 +71,7 @@ export function useTourPositioning(
       cleanupPrev();
       setResult({
         spotlight: null,
+        secondarySpotlights: [],
         tooltip: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' },
         position: 'center',
       });
@@ -73,11 +88,33 @@ export function useTourPositioning(
     prevTargetRef.current = el;
 
     // Scroll into view if needed
-    const rect = el.getBoundingClientRect();
-    if (rect.top < 0 || rect.bottom > window.innerHeight) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      // Re-measure after scroll settles
-      requestAnimationFrame(() => requestAnimationFrame(() => measure()));
+    let rect = el.getBoundingClientRect();
+    const targetFitsViewport = rect.height <= window.innerHeight;
+    const isOutsideViewport = rect.bottom <= 0 || rect.top >= window.innerHeight;
+    const isPartlyClipped = targetFitsViewport
+      && (rect.top < 0 || rect.bottom > window.innerHeight);
+    if (isOutsideViewport || isPartlyClipped) {
+      // An instant scroll gives the spotlight and target one authoritative
+      // rectangle. Smooth scrolling left the highlight hundreds of pixels
+      // behind the Agents accordion on short windows. Tall page containers are
+      // allowed to intersect the viewport without an impossible attempt to fit
+      // their entire height.
+      el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      rect = el.getBoundingClientRect();
+    }
+
+    // A target can exist and still have no box — `display: contents` is the
+    // common case. Highlighting it produced a padding-sized square in the corner
+    // instead of a highlight, so treat it like a missing target: no spotlight,
+    // centered card, and the backdrop dims itself.
+    if (rect.width === 0 || rect.height === 0) {
+      cleanupPrev();
+      setResult({
+        spotlight: null,
+        secondarySpotlights: [],
+        tooltip: { top: '50%', left: '50%', transform: 'translate(-50%, -50%)' },
+        position: 'center',
+      });
       return;
     }
 
@@ -88,10 +125,27 @@ export function useTourPositioning(
       width: rect.width + PADDING * 2,
       height: rect.height + PADDING * 2,
     };
+    const secondarySpotlights = secondarySelectors.flatMap((secondarySelector) => {
+      const secondary = document.querySelector<HTMLElement>(secondarySelector);
+      if (!secondary) return [];
+      const secondaryRect = secondary.getBoundingClientRect();
+      if (
+        secondaryRect.width === 0
+        || secondaryRect.height === 0
+        || secondaryRect.bottom < 0
+        || secondaryRect.top > window.innerHeight
+      ) return [];
+      return [{
+        top: secondaryRect.top - PADDING,
+        left: secondaryRect.left - PADDING,
+        width: secondaryRect.width + PADDING * 2,
+        height: secondaryRect.height + PADDING * 2,
+      } satisfies React.CSSProperties];
+    });
 
     // Tooltip placement
     if (isMobile) {
-      setResult({ spotlight, tooltip: {}, position: 'bottom' });
+      setResult({ spotlight, secondarySpotlights, tooltip: {}, position: 'bottom' });
       return;
     }
 
@@ -107,8 +161,13 @@ export function useTourPositioning(
 
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const tooltipW = 340;
-    const tooltipH = 200; // estimated
+    // Measure the card already on screen rather than trusting an estimate: a
+    // long description makes it much taller than 200 px, and clamping against a
+    // wrong height is how it ends up half off-screen. Falls back to the estimate
+    // on the very first paint, then self-corrects on the next measure.
+    const card = document.querySelector<HTMLElement>('.tour-tooltip');
+    const tooltipW = card?.offsetWidth || 340;
+    const tooltipH = card?.offsetHeight || 200;
 
     const spaceTop = anchorRect.top;
     const spaceBottom = vh - anchorRect.bottom;
@@ -150,19 +209,39 @@ export function useTourPositioning(
         break;
     }
 
-    setResult({ spotlight, tooltip, position: pos });
-  }, [selector, preferredPosition, isMobile, pulse, cleanupPrev, tooltipAnchor]);
+    // Clamp BOTH axes. The loop above only breaks when a side has room, so a
+    // target as tall as the viewport — a page container, for instance — left
+    // `pos` at its default 'bottom' and pushed the card below the fold: the tour
+    // became unfinishable because its only buttons were off-screen. Only the
+    // horizontal axis was clamped, which is why this went unnoticed.
+    const clamp = (value: number, size: number, viewport: number) =>
+      Math.max(VIEWPORT_MARGIN, Math.min(value, viewport - size - VIEWPORT_MARGIN));
+    tooltip.top = clamp(Number(tooltip.top ?? VIEWPORT_MARGIN), tooltipH, vh);
+    tooltip.left = clamp(Number(tooltip.left ?? VIEWPORT_MARGIN), tooltipW, vw);
+
+    setResult({ spotlight, secondarySpotlights, tooltip, position: pos });
+  }, [
+    selector,
+    preferredPosition,
+    isMobile,
+    pulse,
+    cleanupPrev,
+    tooltipAnchor,
+    stepKey,
+    secondarySelectors,
+  ]);
 
   useEffect(() => {
-    measure();
+    const initialMeasureFrame = requestAnimationFrame(measure);
     window.addEventListener('resize', measure);
     window.addEventListener('scroll', measure, true);
     return () => {
+      cancelAnimationFrame(initialMeasureFrame);
       window.removeEventListener('resize', measure);
       window.removeEventListener('scroll', measure, true);
       cleanupPrev();
     };
-  }, [measure]);
+  }, [cleanupPrev, measure]);
 
   return result;
 }

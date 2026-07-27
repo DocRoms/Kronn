@@ -101,6 +101,62 @@ pub struct GitBlameQuery {
     pub path: String,
 }
 
+/// KT-67 — what an annotated line is actually about. `git blame` gives a hash
+/// and an author; this is the story behind it.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitCommitDetail {
+    pub sha: String,
+    pub short_sha: String,
+    pub author_name: String,
+    pub author_email: String,
+    /// Unix seconds — the frontend already formats blame dates this way.
+    pub author_time: i64,
+    pub committer_name: String,
+    pub commit_time: i64,
+    pub subject: String,
+    /// Body without the subject. Empty when the commit has a one-line message.
+    pub body: String,
+    /// Branches containing this commit, bounded — a commit near the root of a
+    /// busy repo is contained by hundreds, and nobody reads that list.
+    pub branches: Vec<String>,
+    /// True when `branches` was cut, so the UI can say "and N more" honestly
+    /// instead of implying the list is complete.
+    pub branches_truncated: bool,
+    /// Files touched, for scale. The diff itself stays out: this is a tooltip,
+    /// not a review surface, and a merge commit would dwarf the response.
+    pub files_changed: u32,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct GitCommitQuery {
+    /// Commit-ish as reported by blame. Validated before reaching git.
+    pub sha: String,
+}
+
+/// KT-75 — the commit's own patch, parent → commit. Not a comparison against
+/// the current branch: the point is to read the change as it was made, whatever
+/// happened to the file since.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitCommitPatch {
+    pub sha: String,
+    pub short_sha: String,
+    pub subject: String,
+    /// Unified diff for every file in the commit. Empty for a commit that
+    /// touched nothing (an empty commit is legal).
+    pub patch: String,
+    /// True when the patch hit the byte cap. A merge or a vendored-tree import
+    /// runs to megabytes, and a viewer that silently stops mid-hunk reads as a
+    /// complete diff.
+    pub truncated: bool,
+    pub files_changed: u32,
+    /// A root commit has no parent, so its patch is the whole file set added.
+    /// Worth saying out loud rather than letting the reader wonder.
+    pub is_root: bool,
+}
+
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
 pub struct GitDiffQuery {
@@ -122,6 +178,54 @@ pub struct GitBranchRequest {
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 pub struct GitBranchResponse {
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct GitBranchSummary {
+    /// Short ref name (`main`, `feature/foo` or `origin/main`).
+    pub name: String,
+    /// Full ref name, retained so the backend never has to reconstruct it.
+    pub ref_name: String,
+    pub commit: String,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+    pub is_current: bool,
+    pub is_remote: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream: Option<String>,
+    pub ahead: u32,
+    pub behind: u32,
+}
+
+#[derive(Debug, Clone, Serialize, TS, PartialEq, Eq)]
+#[ts(export)]
+pub struct GitGraphCommit {
+    pub hash: String,
+    pub short_hash: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+    pub subject: String,
+    pub author: String,
+    pub committed_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct GitBranchesResponse {
+    pub current_branch: String,
+    pub default_branch: String,
+    pub branches: Vec<GitBranchSummary>,
+    pub commits: Vec<GitGraphCommit>,
+    /// True when more commits exist than the bounded graph returned here.
+    pub truncated: bool,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct GitSwitchBranchRequest {
     pub branch: String,
 }
 

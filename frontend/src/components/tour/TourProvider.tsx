@@ -1,31 +1,15 @@
 import { createContext, useContext, useState, useCallback, useEffect, useRef } from 'react';
-import { TOUR_STEPS, type Page, type TourStep } from './tourSteps';
+import {
+  TOUR_STEPS,
+  archiveDemoDiscussion,
+  type Page,
+  type TourStep,
+} from './tourSteps';
 import { waitForElement } from './useTourPositioning';
+import { loadTourProgress, saveTourProgress } from './tourProgress';
 
-const STORAGE_KEY = 'kronn:tour-completed';
-/** Step index where the user left off, persisted so an accidental
- *  refresh / tab close mid-tour picks up exactly where they stopped.
- *  Cleared on `complete()` so a full replay always starts at step 0. */
-const STORAGE_KEY_STEP = 'kronn:tour-step';
 const AUTO_START_DELAY = 800;
-
-function loadResumeStep(): number {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY_STEP);
-    if (!raw) return 0;
-    const n = parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 0 || n >= TOUR_STEPS.length) return 0;
-    return n;
-  } catch { return 0; }
-}
-
-function saveResumeStep(stepIndex: number) {
-  try { localStorage.setItem(STORAGE_KEY_STEP, String(stepIndex)); } catch { /* noop */ }
-}
-
-function clearResumeStep() {
-  try { localStorage.removeItem(STORAGE_KEY_STEP); } catch { /* noop */ }
-}
+const TOUR_STEP_IDS = TOUR_STEPS.map(step => step.id);
 
 interface TourContextValue {
   isActive: boolean;
@@ -37,6 +21,7 @@ interface TourContextValue {
   next: () => void;
   prev: () => void;
   skip: () => void;
+  finish: () => void;
 }
 
 const TourContext = createContext<TourContextValue | null>(null);
@@ -56,6 +41,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
   const [active, setActive] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
   const [waitingForClick, setWaitingForClick] = useState(false);
+  const [progress, setProgress] = useState(() => loadTourProgress(TOUR_STEP_IDS));
   const navigatingRef = useRef(false);
   const clickListenerRef = useRef<(() => void) | null>(null);
   // Pending setTimeout id from a waitForClick advance — must be cleared
@@ -66,7 +52,15 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
   const pendingAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Use a ref to always have fresh stepIndex in async callbacks
   const stepIndexRef = useRef(stepIndex);
-  stepIndexRef.current = stepIndex;
+  const progressRef = useRef(progress);
+
+  useEffect(() => {
+    stepIndexRef.current = stepIndex;
+  }, [stepIndex]);
+
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
 
   const currentStep = active ? TOUR_STEPS[stepIndex] ?? null : null;
 
@@ -82,19 +76,65 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     setWaitingForClick(false);
   }, []);
 
-  const complete = useCallback(() => {
+  const persistProgress = useCallback((
+    completedStepIds: string[],
+    currentStepId: string | null,
+    hasStarted = true,
+    skippedStepIds = progressRef.current.skippedStepIds,
+  ) => {
+    const nextProgress = saveTourProgress(
+      TOUR_STEP_IDS,
+      completedStepIds,
+      currentStepId,
+      hasStarted,
+      skippedStepIds,
+    );
+    progressRef.current = nextProgress;
+    setProgress(nextProgress);
+    return nextProgress;
+  }, []);
+
+  const abandon = useCallback(() => {
+    if (!active) return;
+    cleanupClickListener();
+    const step = TOUR_STEPS[stepIndexRef.current];
+    if (active && step?.afterStep) step.afterStep();
+    setActive(false);
+    persistProgress(
+      progressRef.current.completedStepIds,
+      step?.id ?? progressRef.current.currentStepId,
+      true,
+      progressRef.current.skippedStepIds,
+    );
+  }, [active, cleanupClickListener, persistProgress]);
+
+  const finish = useCallback(() => {
     cleanupClickListener();
     const step = TOUR_STEPS[stepIndexRef.current];
     if (active && step?.afterStep) step.afterStep();
     setActive(false);
     setStepIndex(0);
-    localStorage.setItem(STORAGE_KEY, 'true');
-    // Mid-tour progress no longer needed — next launch starts fresh.
-    clearResumeStep();
-  }, [active, cleanupClickListener]);
+    const completedStepIds = step
+      ? [...new Set([...progressRef.current.completedStepIds, step.id])]
+      : progressRef.current.completedStepIds;
+    const completed = new Set(completedStepIds);
+    const firstIncompleteStepId = TOUR_STEP_IDS.find(id => !completed.has(id)) ?? null;
+    persistProgress(
+      completedStepIds,
+      firstIncompleteStepId,
+      true,
+      progressRef.current.skippedStepIds,
+    );
+    void archiveDemoDiscussion();
+  }, [active, cleanupClickListener, persistProgress]);
 
   // Core navigation — called for every step transition
-  const navigateToStep = useCallback(async (targetIndex: number) => {
+  /** `direction` is the way the user is travelling; a skipped step continues
+   *  that way instead of always jumping forward. */
+  const navigateToStep = useCallback(async function navigateToStepImpl(
+    targetIndex: number,
+    direction: 1 | -1 = 1,
+  ): Promise<void> {
     if (targetIndex < 0 || targetIndex >= TOUR_STEPS.length) return;
     if (navigatingRef.current) return;
     navigatingRef.current = true;
@@ -102,9 +142,14 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
 
     const fromStep = TOUR_STEPS[stepIndexRef.current];
     const toStep = TOUR_STEPS[targetIndex];
+    let completedStepIds = progressRef.current.completedStepIds;
+    let skippedStepIds = progressRef.current.skippedStepIds;
 
     // Cleanup previous step
     if (fromStep?.afterStep) fromStep.afterStep();
+    if (direction > 0 && targetIndex > stepIndexRef.current && fromStep) {
+      completedStepIds = [...new Set([...completedStepIds, fromStep.id])];
+    }
 
     // Page navigation
     if (toStep.page !== fromStep?.page) {
@@ -114,7 +159,7 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
 
     // Pre-step action
     if (toStep.beforeStep) {
-      toStep.beforeStep();
+      await toStep.beforeStep();
       await new Promise(r => setTimeout(r, 200));
     }
 
@@ -122,10 +167,48 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     if (toStep.selector) {
       const el = await waitForElement(toStep.selector, 2000);
 
+      // A step whose target never appears has nothing to show. Skip it and keep
+      // going in the direction the user was heading, rather than parking on a
+      // card that points at nothing — an outdated step should go quiet, not
+      // break the tour. The skip happens only AFTER `waitForElement`'s bounded
+      // MutationObserver wait, so a target that mounts late on a slow machine is
+      // still caught; skipping on the first miss would trade a visible freeze
+      // for steps randomly dropped under load.
+      if (!el) {
+        skippedStepIds = [...new Set([...skippedStepIds, toStep.id])];
+        if (direction > 0 && toStep.optionalWhenMissing) {
+          completedStepIds = [...new Set([...completedStepIds, toStep.id])];
+        }
+        if (import.meta.env.DEV) {
+          console.warn(
+            `[tour] step "${toStep.id}" skipped: no element matches ${toStep.selector}`,
+          );
+        }
+        const skipTo = targetIndex + direction;
+        persistProgress(
+          completedStepIds,
+          TOUR_STEPS[skipTo]?.id ?? null,
+          true,
+          skippedStepIds,
+        );
+        navigatingRef.current = false;
+        if (skipTo >= 0 && skipTo < TOUR_STEPS.length) {
+          await navigateToStepImpl(skipTo, direction);
+        } else if (direction > 0) {
+          finish();
+        } else {
+          setStepIndex(targetIndex);
+          persistProgress(completedStepIds, toStep.id, true, skippedStepIds);
+        }
+        return;
+      }
+      skippedStepIds = skippedStepIds.filter(id => id !== toStep.id);
+
       // Setup waitForClick listener
       if (toStep.waitForClick && el) {
         setWaitingForClick(true);
         setStepIndex(targetIndex);
+        persistProgress(completedStepIds, toStep.id, true, skippedStepIds);
         navigatingRef.current = false;
 
         const onUserClick = () => {
@@ -143,9 +226,9 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
             pendingAdvanceRef.current = null;
             const nextIdx = targetIndex + 1;
             if (nextIdx < TOUR_STEPS.length) {
-              navigateToStep(nextIdx);
+              void navigateToStepImpl(nextIdx);
             } else {
-              complete();
+              finish();
             }
           }, 150);
         };
@@ -162,9 +245,9 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     }
 
     setStepIndex(targetIndex);
-    saveResumeStep(targetIndex);
+    persistProgress(completedStepIds, toStep.id, true, skippedStepIds);
     navigatingRef.current = false;
-  }, [setPage, cleanupClickListener, complete]);
+  }, [setPage, cleanupClickListener, finish, persistProgress]);
 
   // Pre-fix: `next` and `prev` bailed out when `waitingForClick === true`,
   // and the TourOverlay also hid the buttons in that state. Effect: on
@@ -178,31 +261,37 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     cleanupClickListener();
     const nextIdx = stepIndexRef.current + 1;
     if (nextIdx >= TOUR_STEPS.length) {
-      complete();
+      finish();
     } else {
       navigateToStep(nextIdx);
     }
-  }, [navigateToStep, complete, cleanupClickListener]);
+  }, [navigateToStep, finish, cleanupClickListener]);
 
   const prev = useCallback(() => {
     cleanupClickListener();
     const prevIdx = stepIndexRef.current - 1;
-    if (prevIdx >= 0) navigateToStep(prevIdx);
+    if (prevIdx >= 0) navigateToStep(prevIdx, -1);
   }, [navigateToStep, cleanupClickListener]);
 
   const start = useCallback((force = false) => {
-    if (!force && localStorage.getItem(STORAGE_KEY)) return;
+    const latestProgress = loadTourProgress(TOUR_STEP_IDS);
+    if (!force && latestProgress.isComplete) return;
     cleanupClickListener();
     navigatingRef.current = false;
     // A manual replay (force=true, e.g. the "?" help button) always
     // restarts at step 0 — the user asked for a fresh run. An auto-
     // resume after a refresh picks up where the user left off.
-    const resumeStep = force ? 0 : loadResumeStep();
+    const resumeStep = force ? 0 : latestProgress.resumeStepIndex;
     // Initialize at the resume step directly. Pre-fix this set
     // `stepIndex(0)` first and bumped to the resume step 50 ms later,
     // which produced a visible flash of step 1 before jumping ahead.
     setStepIndex(resumeStep);
-    saveResumeStep(resumeStep);
+    persistProgress(
+      latestProgress.completedStepIds,
+      TOUR_STEPS[resumeStep]?.id ?? null,
+      true,
+      latestProgress.skippedStepIds,
+    );
     setActive(true);
     setPage(TOUR_STEPS[resumeStep]?.page ?? TOUR_STEPS[0].page);
     // If resuming mid-tour, drive the full navigation pipeline so the
@@ -212,12 +301,26 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     if (resumeStep > 0) {
       setTimeout(() => { navigateToStep(resumeStep); }, 50);
     }
-  }, [setPage, cleanupClickListener, navigateToStep]);
+  }, [setPage, cleanupClickListener, navigateToStep, persistProgress]);
 
-  // Auto-launch on first visit, OR resume a tour the user abandoned
-  // before completing it (saved step > 0 and no completion flag).
+  // The launcher is the real form, but its launch action is intercepted during
+  // the demo: click or Ctrl/Cmd+Enter advances to the local seeded conversation
+  // instead of creating another discussion or starting an agent.
   useEffect(() => {
-    if (localStorage.getItem(STORAGE_KEY)) return;
+    if (!active) return;
+    const handleDemoLaunch = () => {
+      if (TOUR_STEPS[stepIndexRef.current]?.id === 'disc-form') next();
+    };
+    window.addEventListener('kronn:tour-demo-launch', handleDemoLaunch);
+    return () => window.removeEventListener('kronn:tour-demo-launch', handleDemoLaunch);
+  }, [active, next]);
+
+  // Auto-launch only for a genuinely new user. Once a tour has started, an
+  // interruption or deliberate close is resumed from the CTA in Configuration
+  // instead of unexpectedly taking over the application after every reload.
+  useEffect(() => {
+    const latestProgress = loadTourProgress(TOUR_STEP_IDS);
+    if (latestProgress.hasStarted || latestProgress.isComplete) return;
     const timer = setTimeout(() => start(), AUTO_START_DELAY);
     return () => clearTimeout(timer);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -229,15 +332,42 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
   useEffect(() => {
     if (!active) return;
     const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') { complete(); e.preventDefault(); }
-      if (e.key === 'ArrowRight') { next(); e.preventDefault(); }
-      if (e.key === 'ArrowLeft') { prev(); e.preventDefault(); }
+      if (e.key === 'Escape') { abandon(); e.preventDefault(); }
+      const target = e.target instanceof HTMLElement ? e.target : null;
+      const isEditing = target?.matches('input, textarea, select, [contenteditable="true"]')
+        || Boolean(target?.closest('[contenteditable="true"]'));
+      if (!isEditing && e.key === 'ArrowRight') { next(); e.preventDefault(); }
+      if (!isEditing && e.key === 'ArrowLeft') { prev(); e.preventDefault(); }
     };
     document.addEventListener('keydown', handler);
     return () => document.removeEventListener('keydown', handler);
-  }, [active, next, prev, complete]);
+  }, [active, next, prev, abandon]);
 
-  useEffect(() => cleanupClickListener, [cleanupClickListener]);
+  // Interactive coachmarks let the spotlighted control receive the click, but
+  // the rest of the application must stay inert: otherwise a stray click on
+  // navigation can move the page while the tour still describes the old step.
+  useEffect(() => {
+    if (!active || !waitingForClick || !currentStep?.selector) return;
+    const target = document.querySelector<HTMLElement>(currentStep.selector);
+    if (!target) return;
+    const tooltipContains = (clicked: Node) => (
+      document.querySelector('.tour-tooltip')?.contains(clicked) ?? false
+    );
+    const blockOutsideClick = (event: MouseEvent) => {
+      const clicked = event.target instanceof Node ? event.target : null;
+      if (clicked && (target.contains(clicked) || tooltipContains(clicked))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+    };
+    document.addEventListener('click', blockOutsideClick, true);
+    return () => document.removeEventListener('click', blockOutsideClick, true);
+  }, [active, waitingForClick, currentStep?.id, currentStep?.selector]);
+
+  useEffect(() => () => {
+    cleanupClickListener();
+    TOUR_STEPS[stepIndexRef.current]?.afterStep?.();
+  }, [cleanupClickListener]);
 
   const value: TourContextValue = {
     isActive: active,
@@ -248,7 +378,8 @@ export function TourProvider({ setPage, children }: TourProviderProps) {
     start,
     next,
     prev,
-    skip: complete,
+    skip: abandon,
+    finish,
   };
 
   return (

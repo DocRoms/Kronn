@@ -23,7 +23,7 @@ export function computeGotoEdges(steps: WorkflowStep[]): GotoEdge[] {
     for (const rule of step.on_result ?? []) {
       if (rule.action?.type !== 'Goto') continue;
       const toName = rule.action.step_name;
-      const toIndex = indexByName.has(toName) ? indexByName.get(toName)! : -1;
+      const toIndex = indexByName.get(toName) ?? -1;
       edges.push({
         fromIndex,
         fromName: step.name,

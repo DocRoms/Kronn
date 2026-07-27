@@ -32,6 +32,7 @@ Kronn/
 │       │   ├── contacts.rs     # Contacts CRUD + invite codes + network info + ping
 │       │   ├── ws.rs           # WebSocket handler — peer-to-peer presence + auto-add unknown peers + PartialResponseRecovered / BatchRunProgress / BatchRunFinished broadcasts
 │       │   ├── mcps.rs         # MCP 3-tier API: overview, configs CRUD, registry, refresh, secrets
+│       │   ├── plugin_portability.rs # Versioned multi-plugin bundle preview/export/import; encrypted values, trust/scope checks, idempotence and audit
 │       │   ├── workflows.rs    # Workflow CRUD + trigger + runs + cancel_run (cascades via parent_run_id) + test_step + test_batch_step (dry-run preview: eligible_items + sample_rendered_prompts + warnings)
 │       │   ├── quick_prompts.rs # Quick Prompts CRUD + render + launch (0.3.4)
 │       │   ├── ollama.rs      # Ollama local LLM (0.4.0) — health check (contextual hints per env) + model listing via HTTP API. ollama_base_url_pub() reused by runner
@@ -158,8 +159,9 @@ Kronn/
 │       │   ├── ChatHeader.tsx    # Discussion chat header (502L) — title editing, agent badges, MCP/settings popovers, git toggle
 │       │   ├── ChatInput.tsx     # Chat input composer (695L) — textarea, @mentions, voice STT, debate popover, send/stop
 │       │   ├── DiscussionSidebar.tsx # Sidebar (346L) — discussion list, contacts, search, archives
-│       │   ├── NewDiscussionForm.tsx  # New discussion form (447L) — project/agent/skills/profiles/directives selection
+│       │   ├── NewDiscussionForm.tsx  # New discussion form (710L) — brief-first responsive layout + launch/workspace/agent configuration
 │       │   ├── MessageBubble.tsx # Message bubble (329L) — user/agent/system, markdown, TTS, edit, copy, retry. MarkdownContent intercepts `kronn-doc-preview` (→ DocPreview) and `kronn-doc-data` (→ DocDataExport) fences; malformed JSON falls back to <pre>.
+│       │   ├── PluginPortabilityModal.tsx # Safe-by-default plugin bundle export/import; explicit encrypted-value danger zone
 │       │   ├── DocPreview.tsx    # HTML doc preview + export (0.5.1) — sandboxed iframe (empty `sandbox=""`) renders the agent-authored HTML, two buttons export PDF / DOCX via /api/docs/{pdf,docx}. Per-format state (idle/loading/ready/error).
 │       │   ├── DocDataExport.tsx # Structured-data export (0.5.1) — JSON payload card for CSV / XLSX / PPTX (no iframe). Header shows format + summary (row/sheet/slide count), single "Export" button per card.
 │       │   ├── SwipeableDiscItem.tsx  # Swipeable sidebar item (110L) — swipe-to-archive/delete

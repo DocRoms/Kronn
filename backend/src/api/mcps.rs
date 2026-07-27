@@ -6,6 +6,10 @@ use axum::{
 };
 use rusqlite::{params, Connection};
 use serde::Deserialize;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    time::{timeout, Duration},
+};
 use uuid::Uuid;
 
 use crate::core::{mcp_scanner, registry};
@@ -69,6 +73,413 @@ pub async fn overview(State(state): State<AppState>) -> Json<ApiResponse<McpOver
     }
 }
 
+/// POST /api/mcps/configs/{id}/probe — prove that a configured plugin can
+/// actually authenticate and speak its declared protocol.
+pub async fn probe_config(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<ApiResponse<McpProbeResponse>> {
+    let secret = match state.config.read().await.encryption_secret.clone() {
+        Some(secret) => secret,
+        None => return Json(ApiResponse::err("No encryption secret configured")),
+    };
+    let target = state
+        .db
+        .with_conn(move |conn| {
+            let config = db::mcps::get_config(conn, &id)?
+                .ok_or_else(|| anyhow::anyhow!("Config not found"))?;
+            let server = db::mcps::list_servers(conn)?
+                .into_iter()
+                .find(|server| server.id == config.server_id)
+                .ok_or_else(|| anyhow::anyhow!("Plugin server not found"))?;
+            let env = db::mcps::decrypt_env(&config.env_encrypted, &secret)
+                .map_err(|error| anyhow::anyhow!("Cannot decrypt plugin configuration: {error}"))?;
+            let preference = db::mcps::get_config_preference(conn, &id)?;
+            Ok((server, config, env, preference))
+        })
+        .await;
+
+    let (server, config, env, preference) = match target {
+        Ok(target) => target,
+        Err(error) => return Json(ApiResponse::err(error.to_string())),
+    };
+
+    let result = probe_plugin(&state, &server, &config, &env, preference).await;
+    Json(ApiResponse::ok(result))
+}
+
+async fn probe_plugin(
+    state: &AppState,
+    server: &McpServer,
+    config: &McpConfig,
+    env: &std::collections::HashMap<String, String>,
+    preference: PluginInterface,
+) -> McpProbeResponse {
+    let available = registry::available_plugin_interfaces(server);
+    let only_interface = available.len() == 1;
+    let mut checks = Vec::with_capacity(3);
+
+    if server.api_spec.is_some() {
+        checks.push(
+            probe_api(
+                state,
+                server,
+                config,
+                env,
+                preference == PluginInterface::Api || only_interface,
+            )
+            .await,
+        );
+    }
+    if !matches!(server.transport, McpTransport::ApiOnly) {
+        checks.push(
+            probe_mcp(
+                server,
+                config,
+                env,
+                preference == PluginInterface::Mcp || only_interface,
+            )
+            .await,
+        );
+    }
+    if available.contains(&PluginInterface::Cli) {
+        checks.push(probe_cli(server, preference == PluginInterface::Cli || only_interface).await);
+    }
+
+    build_probe_response(&server.id, checks)
+}
+
+async fn probe_api(
+    state: &AppState,
+    server: &McpServer,
+    config: &McpConfig,
+    env: &std::collections::HashMap<String, String>,
+    required: bool,
+) -> McpProbeCheck {
+    probe_api_with_policy(
+        state,
+        server,
+        config,
+        env,
+        required,
+        crate::workflows::api_call_executor::SecurityPolicy::production(),
+    )
+    .await
+}
+
+async fn probe_api_with_policy(
+    state: &AppState,
+    server: &McpServer,
+    config: &McpConfig,
+    env: &std::collections::HashMap<String, String>,
+    required: bool,
+    policy: crate::workflows::api_call_executor::SecurityPolicy,
+) -> McpProbeCheck {
+    let Some(definition) = registry::api_readiness_probe(&server.id) else {
+        return failed_probe(
+            "api",
+            "Authenticated API",
+            required,
+            "No side-effect-free authentication probe is declared for this plugin",
+        );
+    };
+    let mut query = std::collections::HashMap::new();
+    for (parameter, env_key) in definition.query_from_config {
+        let Some(value) = env.get(*env_key).filter(|value| !value.trim().is_empty()) else {
+            return failed_probe(
+                "api",
+                "Authenticated API",
+                required,
+                &format!("Missing required probe parameter `{env_key}`"),
+            );
+        };
+        query.insert((*parameter).to_string(), value.clone());
+    }
+
+    let step = WorkflowStep {
+        name: "plugin-readiness-probe".into(),
+        step_type: StepType::ApiCall,
+        api_plugin_slug: Some(server.id.clone()),
+        api_config_id: Some(config.id.clone()),
+        api_endpoint_path: Some(definition.path.into()),
+        api_method: Some("GET".into()),
+        api_query: (!query.is_empty()).then_some(query),
+        ..WorkflowStep::default()
+    };
+    let context = crate::workflows::template::TemplateContext::new();
+    let execution = crate::workflows::api_call_executor::execute_api_call_probe(
+        &step, server, &config.id, env, state, &context, policy,
+    );
+    match timeout(Duration::from_secs(15), execution).await {
+        Ok(outcome) if outcome.result.status == RunStatus::Success => McpProbeCheck {
+            id: "api".into(),
+            label: "Authenticated API".into(),
+            ok: true,
+            required,
+            detail: format!("GET {} authenticated successfully", definition.path),
+        },
+        Ok(_) => failed_probe(
+            "api",
+            "Authenticated API",
+            required,
+            "The safe authentication request failed; check credentials and plugin scope",
+        ),
+        Err(_) => failed_probe(
+            "api",
+            "Authenticated API",
+            required,
+            "The safe authentication request timed out after 15 seconds",
+        ),
+    }
+}
+
+async fn probe_mcp(
+    server: &McpServer,
+    config: &McpConfig,
+    env: &std::collections::HashMap<String, String>,
+    required: bool,
+) -> McpProbeCheck {
+    let result = match &server.transport {
+        McpTransport::Stdio { command, args } => {
+            let effective_args = config.args_override.as_ref().unwrap_or(args);
+            probe_mcp_stdio(command, effective_args, env).await
+        }
+        McpTransport::Sse { url } => probe_mcp_sse(url).await,
+        McpTransport::Streamable { url } => probe_mcp_streamable(url).await,
+        McpTransport::ApiOnly => {
+            return failed_probe(
+                "mcp",
+                "MCP handshake",
+                required,
+                "This plugin has no MCP transport",
+            )
+        }
+    };
+    match result {
+        Ok(()) => McpProbeCheck {
+            id: "mcp".into(),
+            label: "MCP handshake".into(),
+            ok: true,
+            required,
+            detail: "MCP initialize handshake succeeded".into(),
+        },
+        Err(detail) => failed_probe("mcp", "MCP handshake", required, &detail),
+    }
+}
+
+async fn probe_cli(server: &McpServer, required: bool) -> McpProbeCheck {
+    let result = match server.id.as_str() {
+        "mcp-fastly" => run_probe_command("fastly", &["auth", "token"])
+            .await
+            .map(|_| ()),
+        "mcp-gitlab" => run_probe_command("glab", &["auth", "status"])
+            .await
+            .map(|_| ()),
+        _ => Err("No authenticated CLI probe is declared for this plugin".into()),
+    };
+    match result {
+        Ok(()) => McpProbeCheck {
+            id: "cli".into(),
+            label: "Authenticated CLI".into(),
+            ok: true,
+            required,
+            detail: "Local CLI authentication succeeded".into(),
+        },
+        Err(detail) => failed_probe("cli", "Authenticated CLI", required, &detail),
+    }
+}
+
+fn failed_probe(id: &str, label: &str, required: bool, detail: &str) -> McpProbeCheck {
+    McpProbeCheck {
+        id: id.into(),
+        label: label.into(),
+        ok: false,
+        required,
+        detail: detail.into(),
+    }
+}
+
+fn build_probe_response(server_id: &str, checks: Vec<McpProbeCheck>) -> McpProbeResponse {
+    McpProbeResponse {
+        server_id: server_id.into(),
+        ready: !checks.is_empty()
+            && checks
+                .iter()
+                .filter(|check| check.required)
+                .all(|check| check.ok),
+        checks,
+    }
+}
+
+async fn probe_mcp_stdio(
+    command: &str,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    probe_mcp_stdio_with_timeout(command, args, env, Duration::from_secs(15)).await
+}
+
+async fn probe_mcp_stdio_with_timeout(
+    command: &str,
+    args: &[String],
+    env: &std::collections::HashMap<String, String>,
+    deadline: Duration,
+) -> Result<(), String> {
+    let operation = async {
+        let mut process = crate::core::cmd::async_cmd(command);
+        process
+            .args(args)
+            .envs(env)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = process
+            .spawn()
+            .map_err(|_| format!("`{command}` is unavailable"))?;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "MCP process did not expose stdin".to_string())?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "MCP process did not expose stdout".to_string())?;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "kronn-readiness-probe",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        });
+        stdin
+            .write_all(format!("{request}\n").as_bytes())
+            .await
+            .map_err(|_| "Could not write the MCP initialize request".to_string())?;
+        stdin
+            .flush()
+            .await
+            .map_err(|_| "Could not flush the MCP initialize request".to_string())?;
+
+        let mut lines = BufReader::new(stdout).lines();
+        for _ in 0..64 {
+            let Some(line) = lines
+                .next_line()
+                .await
+                .map_err(|_| "Could not read the MCP initialize response".to_string())?
+            else {
+                break;
+            };
+            let Ok(message) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if message.get("id").and_then(serde_json::Value::as_i64) != Some(1) {
+                continue;
+            }
+            let accepted = message.get("result").is_some() && message.get("error").is_none();
+            let _ = child.kill().await;
+            return if accepted {
+                Ok(())
+            } else {
+                Err("MCP server rejected the initialize handshake".into())
+            };
+        }
+        let _ = child.kill().await;
+        Err("MCP server closed without an initialize response".into())
+    };
+
+    timeout(deadline, operation)
+        .await
+        .map_err(|_| "MCP initialize handshake timed out".to_string())?
+}
+
+async fn probe_mcp_sse(url: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "Could not initialize the MCP probe client".to_string())?;
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "text/event-stream")
+        .send()
+        .await
+        .map_err(|_| "Could not connect to the remote MCP SSE endpoint".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Remote MCP SSE endpoint rejected the connection (HTTP {})",
+            response.status().as_u16()
+        ));
+    }
+    let is_event_stream = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    if !is_event_stream {
+        return Err("Remote endpoint did not negotiate an MCP event stream".into());
+    }
+    Ok(())
+}
+
+async fn probe_mcp_streamable(url: &str) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|_| "Could not initialize the MCP probe client".to_string())?;
+    let response = client
+        .post(url)
+        .header(
+            reqwest::header::ACCEPT,
+            "application/json, text/event-stream",
+        )
+        .json(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "kronn-readiness-probe",
+                    "version": env!("CARGO_PKG_VERSION")
+                }
+            }
+        }))
+        .send()
+        .await
+        .map_err(|_| "Could not connect to the remote MCP endpoint".to_string())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "Remote MCP initialize was rejected (HTTP {})",
+            response.status().as_u16()
+        ));
+    }
+    Ok(())
+}
+
+async fn run_probe_command(command: &str, args: &[&str]) -> Result<Vec<u8>, String> {
+    let mut process = crate::core::cmd::async_cmd(command);
+    process.args(args);
+    process.kill_on_drop(true);
+    let output = tokio::time::timeout(std::time::Duration::from_secs(8), process.output())
+        .await
+        .map_err(|_| format!("`{command}` timed out after 8 seconds"))?
+        .map_err(|_| format!("`{command}` is unavailable"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "`{command}` failed (exit {})",
+            output.status.code().unwrap_or(-1)
+        ));
+    }
+    Ok(output.stdout)
+}
+
 /// POST /api/mcps/configs — create a new MCP config
 /// server_id can be an existing DB server ID or a registry ID (auto-creates server)
 pub async fn create_config(
@@ -104,6 +515,9 @@ pub async fn create_config(
         }
         if payload.base_url.trim().is_empty() {
             return Json(ApiResponse::err("Custom API requires a base URL"));
+        }
+        if let Err(error) = validate_custom_auth(&payload.auth) {
+            return Json(ApiResponse::err(error));
         }
         let server = materialize_custom_server(&payload);
         // Merge derived env (from form fields) on top of any existing env
@@ -323,6 +737,15 @@ pub(crate) fn materialize_custom_server(payload: &CustomApiPayload) -> McpServer
     }
 }
 
+/// CLI-backed credential providers execute a registry-declared local command
+/// and are therefore never accepted from user-authored/imported plugin JSON.
+fn validate_custom_auth(auth: &ApiAuthKind) -> Result<(), String> {
+    if matches!(auth, ApiAuthKind::CliToken { .. }) {
+        return Err("CLI token authentication is reserved for trusted built-in plugins".into());
+    }
+    Ok(())
+}
+
 /// Lower-snake-case slug for server-id construction. Mirrors the env-key
 /// slugifier but keeps lowercase: "Salesforce Sales API" → "salesforce-sales-api".
 fn name_slug(name: &str) -> String {
@@ -470,6 +893,9 @@ pub async fn update_custom_spec(
     if payload.base_url.trim().is_empty() {
         return Json(ApiResponse::err("Custom API requires a base URL"));
     }
+    if let Err(error) = validate_custom_auth(&payload.auth) {
+        return Json(ApiResponse::err(error));
+    }
 
     let result = state
         .db
@@ -587,6 +1013,7 @@ pub async fn cleanup_orphan_env(
                     None,
                     None,
                     None,
+                    None,
                 )?;
                 total_keys_removed += removed_here.len();
                 configs_updated += 1;
@@ -645,6 +1072,19 @@ pub async fn update_config(
             // Get config before update to know old state
             let old_config = db::mcps::get_config(conn, &config_id)?
                 .ok_or_else(|| anyhow::anyhow!("Config not found"))?;
+            if let Some(preferred_interface) = req.preferred_interface {
+                let server = db::mcps::list_servers(conn)?
+                    .into_iter()
+                    .find(|server| server.id == old_config.server_id)
+                    .ok_or_else(|| anyhow::anyhow!("Server not found"))?;
+                let available = registry::available_plugin_interfaces(&server);
+                if !available.contains(&preferred_interface) {
+                    return Err(anyhow::anyhow!(
+                        "Interface '{}' is unavailable for this plugin",
+                        db::mcps::plugin_interface_to_str(preferred_interface)
+                    ));
+                }
+            }
 
             let (env_encrypted, env_keys, new_hash) = if let Some(ref env) = req.env {
                 let encrypted = db::mcps::encrypt_env(env, &secret)
@@ -681,6 +1121,7 @@ pub async fn update_config(
                 new_hash.as_deref(),
                 req.include_general,
                 req.host_sync.clone(),
+                req.preferred_interface,
             )?;
 
             // Sync .mcp.json to disk — always sync all when secrets change
@@ -2018,6 +2459,7 @@ pub fn sanitize_imported_payload(
     if payload.base_url.trim().is_empty() {
         return Err("Imported plugin: `base_url` is required".into());
     }
+    validate_custom_auth(&payload.auth)?;
     // Defensive: an imported file MIGHT carry credentials if someone
     // hand-crafted it. Always strip — the user fills env via the
     // "Edit secrets" drawer afterwards.
@@ -2186,6 +2628,297 @@ pub async fn import_custom_plugin_file(
 mod tests {
     use super::*;
     use crate::core::mcp_scanner::McpServerEntry;
+
+    #[test]
+    fn probe_response_is_ready_when_every_required_check_passes() {
+        let ready = build_probe_response(
+            "mcp-fastly",
+            vec![
+                McpProbeCheck {
+                    id: "cli".into(),
+                    label: "CLI".into(),
+                    ok: true,
+                    required: true,
+                    detail: "ok".into(),
+                },
+                McpProbeCheck {
+                    id: "api".into(),
+                    label: "API".into(),
+                    ok: true,
+                    required: true,
+                    detail: "ok".into(),
+                },
+                McpProbeCheck {
+                    id: "mcp".into(),
+                    label: "MCP".into(),
+                    ok: false,
+                    required: false,
+                    detail: "optional capability missing".into(),
+                },
+            ],
+        );
+        assert!(ready.ready);
+
+        let unavailable = build_probe_response(
+            "mcp-fastly",
+            vec![McpProbeCheck {
+                id: "mcp".into(),
+                label: "MCP".into(),
+                ok: false,
+                required: true,
+                detail: "missing".into(),
+            }],
+        );
+        assert!(!unavailable.ready);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_probe_requires_a_real_initialize_response() {
+        let args = vec![
+            "-c".into(),
+            "IFS= read -r request; printf '%s\\n' '{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"serverInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}'".into(),
+        ];
+        probe_mcp_stdio("sh", &args, &std::collections::HashMap::new())
+            .await
+            .expect("valid MCP initialize response");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_probe_never_surfaces_server_output_or_secrets() {
+        let secret = "never-return-this-secret";
+        let args = vec![
+            "-c".into(),
+            format!(
+                "IFS= read -r request; printf '%s\\n' '{{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{{\"message\":\"{secret}\"}}}}'"
+            ),
+        ];
+        let error = probe_mcp_stdio("sh", &args, &std::collections::HashMap::new())
+            .await
+            .expect_err("server rejected initialize");
+        assert!(!error.contains(secret));
+        assert_eq!(error, "MCP server rejected the initialize handshake");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stdio_probe_is_bounded_by_a_timeout() {
+        let args = vec!["-c".into(), "sleep 2".into()];
+        let error = probe_mcp_stdio_with_timeout(
+            "sh",
+            &args,
+            &std::collections::HashMap::new(),
+            Duration::from_millis(25),
+        )
+        .await
+        .expect_err("silent process must time out");
+        assert_eq!(error, "MCP initialize handshake timed out");
+    }
+
+    #[tokio::test]
+    async fn remote_mcp_probes_negotiate_the_real_transports() {
+        use wiremock::{
+            matchers::{body_partial_json, header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sse"))
+            .and(header("accept", "text/event-stream"))
+            .respond_with(
+                ResponseTemplate::new(200).insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .and(body_partial_json(serde_json::json!({
+                "method": "initialize",
+                "id": 1
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        probe_mcp_sse(&format!("{}/sse", server.uri()))
+            .await
+            .expect("SSE negotiation");
+        probe_mcp_streamable(&format!("{}/mcp", server.uri()))
+            .await
+            .expect("Streamable HTTP initialize");
+    }
+
+    #[tokio::test]
+    async fn remote_mcp_auth_failure_is_not_ready() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+        let error = probe_mcp_streamable(&server.uri())
+            .await
+            .expect_err("401 must fail readiness");
+        assert!(error.contains("HTTP 401"));
+    }
+
+    async fn api_probe_fixture(
+        base_url: &str,
+        token: &str,
+    ) -> (
+        AppState,
+        McpServer,
+        McpConfig,
+        std::collections::HashMap<String, String>,
+    ) {
+        let database =
+            std::sync::Arc::new(crate::db::Database::open_in_memory().expect("test database"));
+        let secret = crate::core::crypto::generate_secret();
+        let mut app_config = crate::core::config::default_config();
+        app_config.encryption_secret = Some(secret.clone());
+        let state = AppState::new_defaults(
+            std::sync::Arc::new(tokio::sync::RwLock::new(app_config)),
+            database.clone(),
+            crate::DEFAULT_MAX_CONCURRENT_AGENTS,
+        );
+        let server = McpServer {
+            id: "mcp-github".into(),
+            name: "GitHub probe fixture".into(),
+            description: String::new(),
+            transport: McpTransport::ApiOnly,
+            source: McpSource::Registry,
+            api_spec: Some(ApiSpec {
+                base_url: base_url.into(),
+                auth: ApiAuthKind::Bearer {
+                    env_key: "TOKEN".into(),
+                },
+                endpoints: vec![ApiEndpoint {
+                    path: "/user".into(),
+                    method: "GET".into(),
+                    description: "Safe authenticated identity".into(),
+                }],
+                docs_url: None,
+                config_keys: vec![],
+            }),
+        };
+        let env = std::collections::HashMap::from([("TOKEN".into(), token.into())]);
+        let config = McpConfig {
+            id: format!("cfg-{token}"),
+            server_id: server.id.clone(),
+            label: "Probe fixture".into(),
+            env_keys: vec!["TOKEN".into()],
+            env_encrypted: crate::db::mcps::encrypt_env(&env, &secret).expect("encrypt env"),
+            args_override: None,
+            is_global: true,
+            include_general: false,
+            config_hash: format!("hash-{token}"),
+            project_ids: vec![],
+            host_sync: HostSyncMode::None,
+        };
+        let server_for_db = server.clone();
+        let config_for_db = config.clone();
+        database
+            .with_conn(move |connection| {
+                crate::db::mcps::upsert_server(connection, &server_for_db)?;
+                crate::db::mcps::insert_config(connection, &config_for_db)
+            })
+            .await
+            .expect("seed probe config");
+        (state, server, config, env)
+    }
+
+    #[tokio::test]
+    async fn api_probe_performs_authenticated_safe_get_without_returning_body() {
+        use wiremock::{
+            matchers::{header, method, path},
+            Mock, MockServer, ResponseTemplate,
+        };
+
+        let remote = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/user"))
+            .and(header("authorization", "Bearer good-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "private_account_data": "must stay in memory"
+            })))
+            .mount(&remote)
+            .await;
+        let (state, server, config, env) = api_probe_fixture(&remote.uri(), "good-token").await;
+        let check = probe_api_with_policy(
+            &state,
+            &server,
+            &config,
+            &env,
+            true,
+            crate::workflows::api_call_executor::SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert!(check.ok, "{check:?}");
+        assert!(!check.detail.contains("private_account_data"));
+    }
+
+    #[tokio::test]
+    async fn api_probe_marks_invalid_auth_as_not_ready_without_leaking_token() {
+        use wiremock::{matchers::method, Mock, MockServer, ResponseTemplate};
+
+        let remote = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("bad secret-token"))
+            .mount(&remote)
+            .await;
+        let (state, server, config, env) = api_probe_fixture(&remote.uri(), "secret-token").await;
+        let check = probe_api_with_policy(
+            &state,
+            &server,
+            &config,
+            &env,
+            true,
+            crate::workflows::api_call_executor::SecurityPolicy::allow_loopback_for_tests(),
+        )
+        .await;
+        assert!(!check.ok);
+        assert!(!check.detail.contains("secret-token"));
+        assert!(check.detail.contains("credentials"));
+    }
+
+    #[tokio::test]
+    async fn api_probe_without_an_explicit_safe_endpoint_never_claims_ready() {
+        let (state, mut server, config, env) =
+            api_probe_fixture("https://example.test", "token").await;
+        server.id = "custom-no-probe".into();
+        let check = probe_api_with_policy(
+            &state,
+            &server,
+            &config,
+            &env,
+            true,
+            crate::workflows::api_call_executor::SecurityPolicy::production(),
+        )
+        .await;
+        assert!(!check.ok);
+        assert!(check.detail.contains("No side-effect-free"));
+    }
+
+    #[test]
+    fn probe_without_any_executable_interface_is_not_ready() {
+        let response = build_probe_response("invalid-empty-plugin", vec![]);
+        assert!(!response.ready);
+        assert!(response.checks.is_empty());
+    }
+
+    #[test]
+    fn custom_plugins_cannot_declare_cli_token_commands() {
+        let auth = ApiAuthKind::CliToken {
+            command: "arbitrary-command".into(),
+            args: vec!["--dangerous".into()],
+            inject: TokenInjection::BearerHeader,
+        };
+        let error = validate_custom_auth(&auth).unwrap_err();
+        assert!(error.contains("trusted built-in"));
+    }
 
     fn make_entry(cmd: &str, args: &[&str]) -> McpServerEntry {
         McpServerEntry {
@@ -2771,6 +3504,7 @@ mod tests {
             project_names: vec![],
             secrets_broken: false,
             host_sync: HostSyncMode::None,
+            preferred_interface: PluginInterface::Mcp,
         }
     }
 
